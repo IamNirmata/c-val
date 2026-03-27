@@ -1,0 +1,15 @@
+[global]
+ioengine=libaio
+direct=1
+gtod_reduce=1
+bs=1M
+iodepth=128
+size=1G
+numjobs=1
+time_based
+runtime=30
+group_reporting
+
+[iodepth_write]
+rw=write
+filename=iodepth_write.dat

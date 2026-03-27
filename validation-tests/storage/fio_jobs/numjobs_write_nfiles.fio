@@ -1,0 +1,15 @@
+[global]
+ioengine=libaio
+direct=1
+gtod_reduce=1
+bs=1M
+iodepth=16
+size=1G
+numjobs=8
+time_based
+runtime=30
+group_reporting
+
+[numjobs_write]
+rw=write
+filename_format=numjobs_write.$jobnum.dat

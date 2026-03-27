@@ -1,0 +1,15 @@
+[global]
+ioengine=libaio
+direct=1
+gtod_reduce=1
+bs=4k
+iodepth=64
+size=1G
+numjobs=1
+time_based
+runtime=30
+group_reporting
+
+[randread]
+rw=randread
+filename=randread.dat
