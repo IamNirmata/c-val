@@ -1,0 +1,100 @@
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: hari-gcr-ceval-slc01-cl02-hgx-0354-1768328856
+  namespace: gcr-admin
+spec:
+  queue: gcr-admin
+  minAvailable: 1
+  plugins:
+    ssh: []
+    svc: []
+    env: []
+  tasks:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            app: hari-gcr-bonete-test
+            role: server
+        spec:
+          schedulerName: volcano
+          nodeSelector:
+            # kubernetes.io/hostname: "slc01-cl02-hgx-0354"
+            kubernetes.io/hostname: "slc01-cl02-hgx-0354"
+          restartPolicy: Never
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Gi
+            - name: sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: data
+              persistentVolumeClaim:
+                claimName: pvc-vast-gcr-admin
+          tolerations:
+            - key: "rdma"
+              operator: "Exists"
+              effect: "NoSchedule"
+            - key: "nvidia.com/gpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app: hari-gcr-bonete-test
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: server
+              image: nvcr.io/nvidia/pytorch:25.11-py3
+              env:
+                - name: GCRNODE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: GCRTIME
+                  value: "1768328856"
+                - name: GCRRESULT1
+                  value: fail
+                - name: GCRRESULT2
+                  value: fail
+                - name: GCRRESULT3
+                  value: fail
+              volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: sys
+                  mountPath: /sys
+                  readOnly: true
+                - name: data
+                  mountPath: /data
+              ports:
+                - name: rdma
+                  containerPort: 18515
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  echo "test started."
+                  git clone https://github.com/IamNirmata/c-val.git /workspace/c-val
+                  cd /workspace/c-val/validation-tests/
+                  chmod +x run-test.sh
+                  ./run-test.sh
+                  bash db-update.sh
+                  echo "Completed."
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  cpu: "100"
+                  memory: "1500Gi"
+                  rdma/rdma_shared_device_a: "1"
+                limits:
+                  nvidia.com/gpu: "8"
+                  cpu: "100"
+                  memory: "1500Gi"
+                  rdma/rdma_shared_device_a: "1"
