@@ -1,0 +1,7 @@
+inventory:
+- source: DirectOwners
+  items:
+  - id: v-srsreenath@microsoft.com
+  - id: erdman@microsoft.com
+  - id: cesarmart@microsoft.com
+  isProduction: false
