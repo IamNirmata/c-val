@@ -1,3 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
 # main db update
 echo "Updating main db with all test results"
 STORAGE_OUTPUT_DIR="/data/continuous_validation/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
@@ -5,25 +8,65 @@ echo "Storage Output dir: $STORAGE_OUTPUT_DIR"
 NCCL_OUTPUT_DIR="/data/continuous_validation/nccl/$GCRNODE/nccl-$GCRNODE-$GCRTIME"
 echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
 
+GCRRESULT1=${GCRRESULT1:-fail}
+GCRRESULT2=${GCRRESULT2:-fail}
+GCRRESULT3=${GCRRESULT3:-fail}
+
+if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
+    echo "Loading structured test result state from $CVAL_RESULT_JSON_FILE"
+    while IFS='=' read -r key value; do
+        case "$key" in
+            GCRRESULT1) GCRRESULT1="$value" ;;
+            GCRRESULT2) GCRRESULT2="$value" ;;
+            GCRRESULT3) GCRRESULT3="$value" ;;
+            overall_result) overall_result="$value" ;;
+        esac
+    done < <(PYTHONPATH=/workspace/c-val python3 -m cval.cli result-env --result-json "$CVAL_RESULT_JSON_FILE"
+    )
+elif [ -n "${CVAL_RESULT_ENV_FILE:-}" ] && [ -f "$CVAL_RESULT_ENV_FILE" ]; then
+    echo "Loading test result state from $CVAL_RESULT_ENV_FILE"
+    source "$CVAL_RESULT_ENV_FILE"
+else
+    echo "Warning: c-val result state file not found; using fail defaults."
+fi
+
+overall_result=${overall_result:-pass}
+if [ "$GCRRESULT1" != "pass" ] || [ "$GCRRESULT2" != "pass" ] || [ "$GCRRESULT3" != "pass" ]; then
+    overall_result=fail
+fi
+
+add_main_result() {
+    local test_name="$1"
+    local result="$2"
+    python3 /workspace/c-val/utils/functions.py add-result \
+        "$GCRNODE" \
+        "$test_name" \
+        "$result" \
+        "$GCRTIME" \
+        --db-path /data/continuous_validation/metadata/validation.db
+}
+
 #main DB update
 echo "Updating main db with test results"
-python /workspace/c-val/utils/functions.py add-result \
-    "$GCRNODE" \
-    "all" \
-    "pass" \
-    "$GCRTIME" \
-    --db-path /data/continuous_validation/metadata/validation.db
+add_main_result "storage" "$GCRRESULT1"
+add_main_result "nccl" "$GCRRESULT2"
+add_main_result "dltest" "$GCRRESULT3"
+add_main_result "all" "$overall_result"
 echo "Main DB update completed."
 
 
 #storage DB update
-echo "Updating storage db with test results"
-python3 /workspace/c-val/utils/functions.py add-storage-result \
-    "$GCRNODE" \
-    "$GCRTIME" \
-    "$STORAGE_OUTPUT_DIR" \
-    --db-path /data/continuous_validation/metadata/test-storage.db
-echo "Storage DB update completed."
+if [ "$GCRRESULT1" = "pass" ]; then
+    echo "Updating storage db with test results"
+    python3 /workspace/c-val/utils/functions.py add-storage-result \
+        "$GCRNODE" \
+        "$GCRTIME" \
+        "$STORAGE_OUTPUT_DIR" \
+        --db-path /data/continuous_validation/metadata/test-storage.db
+    echo "Storage DB update completed."
+else
+    echo "Skipping storage metrics DB update because storage result is $GCRRESULT1."
+fi
 
 
 #nccl DB update
@@ -33,7 +76,7 @@ NCCL_LOG_FILE="$NCCL_OUTPUT_DIR/nccl-$GCRNODE-$GCRTIME.log"
 echo "NCCL Log file: $NCCL_LOG_FILE"
 
 
-if [ -f "$NCCL_SUMMARY_FILE" ]; then
+if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
     # Use python to parse the JSON (available on all systems, unlike 'jq')
     export GCR_LATENCY=$(python3 -c "import json; print(json.load(open('$NCCL_SUMMARY_FILE'))['GCR_LATENCY'])")
     export GCR_ALGBW=$(python3 -c "import json; print(json.load(open('$NCCL_SUMMARY_FILE'))['GCR_ALGBW'])")
@@ -44,16 +87,15 @@ if [ -f "$NCCL_SUMMARY_FILE" ]; then
     echo "GCR_ALGBW:   $GCR_ALGBW"
     echo "GCR_LATENCY: $GCR_LATENCY"
     echo "--------------------------------"
+
+    python3 /workspace/c-val/utils/functions.py add-nccl-result \
+        "$GCRNODE" \
+        "$GCRTIME" \
+        "$GCR_BUSBW" \
+        "$GCR_LATENCY" \
+        --db-path /data/continuous_validation/metadata/test-nccl.db
+
+    echo "NCCl DB update completed."
 else
-    echo "Error: Result file $NCCL_SUMMARY_FILE was not created."
-    exit 1
+    echo "Skipping NCCL metrics DB update because result is $GCRRESULT2 or summary is missing."
 fi
-
-python3 /workspace/c-val/utils/functions.py add-nccl-result \
-    "$GCRNODE" \
-    "$GCRTIME" \
-    "$GCR_BUSBW" \
-    "$GCR_LATENCY" \
-    --db-path /data/continuous_validation/metadata/test-nccl.db
-
-echo "NCCl DB update completed."

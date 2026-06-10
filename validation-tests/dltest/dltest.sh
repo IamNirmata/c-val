@@ -20,3 +20,5 @@ else
   echo "DL Test completed successfully. Log file: $DLTEST_LOG_FILE"
   export GCRRESULT3=pass
 fi
+
+exit "$rc"

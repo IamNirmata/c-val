@@ -1,0 +1,472 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+from cval.jobs.renderer import default_template_path, render_validation_job_from_file
+from cval.jobs.manager import submission_result_to_dict, submit_workflow_plan
+from cval.jobs.monitor import get_job_phases, monitored_jobs_to_dict, monitor_jobs_until_terminal
+from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
+from cval.orchestrator.workflow import build_workflow_plan, workflow_plan_to_dict
+from cval.policy import ExecutionPolicy, PolicyViolation
+from cval.scheduler.priority import build_priority_queue
+from cval.storage.status import (
+    DEFAULT_DB_PATH,
+    DEFAULT_NAMESPACE,
+    DEFAULT_PVC_ACCESS_POD,
+    get_latest_status_rows,
+    latest_status_rows_to_node_map,
+    latest_status_rows_to_tsv,
+    parse_latest_status_tsv,
+)
+from cval.validation.results import load_validation_result, validation_result_to_env_lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.handler(args)
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        except OSError:
+            pass
+        return 0
+    except PolicyViolation as exc:
+        print(f"Policy violation: {exc}", file=sys.stderr)
+        return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="cval", description="c-val orchestration CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    discover = subparsers.add_parser("discover-free-nodes", help="List GPU nodes and free capacity")
+    discover.add_argument("--node-filter", default="hgx", help="Substring filter for GPU nodes")
+    discover.add_argument("--output", choices=["table", "json"], default="table")
+    discover.set_defaults(handler=handle_discover_free_nodes)
+
+    status = subparsers.add_parser(
+        "status",
+        help="Read latest validation status from the PVC access pod",
+    )
+    status.add_argument("--pod", default=DEFAULT_PVC_ACCESS_POD)
+    status.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
+    status.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
+    status.set_defaults(handler=handle_status)
+
+    prioritize = subparsers.add_parser("prioritize", help="Build a stale-node priority queue")
+    prioritize.add_argument("--free-nodes", required=True, help="Comma-separated free node names")
+    prioritize.add_argument(
+        "--db-status-json",
+        type=Path,
+        help="JSON object mapping node to timestamp",
+    )
+    prioritize.add_argument(
+        "--db-status-tsv",
+        type=Path,
+        help="TSV output from existing latest-status command",
+    )
+    prioritize.add_argument("--threshold-days", type=float, default=7)
+    prioritize.add_argument("--output", choices=["table", "json"], default="table")
+    prioritize.set_defaults(handler=handle_prioritize)
+
+    render = subparsers.add_parser("render-job", help="Render one validation job manifest")
+    render.add_argument("--node", required=True)
+    render.add_argument("--timestamp", type=int)
+    render.add_argument("--template", type=Path, default=default_template_path())
+    render.add_argument("--job-prefix", default="hari-gcr-ceval")
+    render.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
+    render.add_argument("--git-ref", default="main")
+    render.add_argument("--output", type=Path, help="Write rendered YAML to this path")
+    render.set_defaults(handler=handle_render_job)
+
+    run_batch = subparsers.add_parser("run-batch", help="Render a dry-run validation batch")
+    run_batch.add_argument("--nodes", required=True, help="Comma-separated target nodes")
+    run_batch.add_argument("--batch-size", type=int, default=5)
+    run_batch.add_argument("--timestamp", type=int)
+    run_batch.add_argument("--template", type=Path, default=default_template_path())
+    run_batch.add_argument("--job-prefix", default="hari-gcr-ceval")
+    run_batch.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
+    run_batch.add_argument("--git-ref", default="main")
+    run_batch.add_argument("--output", choices=["table", "json"], default="table")
+    run_batch.set_defaults(handler=handle_run_batch)
+
+    plan = subparsers.add_parser("plan", help="Build a dry-run validation workflow plan")
+    plan.add_argument(
+        "--free-nodes",
+        help="Comma-separated free node names; discovers live nodes if omitted",
+    )
+    plan.add_argument("--db-status-json", type=Path, help="JSON object mapping node to timestamp")
+    plan.add_argument(
+        "--db-status-tsv",
+        type=Path,
+        help="TSV output from existing latest-status command",
+    )
+    plan.add_argument(
+        "--live-status",
+        action="store_true",
+        help="Read latest status from the PVC access pod in read-only mode",
+    )
+    plan.add_argument("--status-pod", default=DEFAULT_PVC_ACCESS_POD)
+    plan.add_argument("--status-namespace", default=DEFAULT_NAMESPACE)
+    plan.add_argument("--status-db-path", default=DEFAULT_DB_PATH)
+    plan.add_argument("--threshold-days", type=float, default=7)
+    plan.add_argument("--batch-size", type=int, default=5)
+    plan.add_argument("--timestamp", type=int)
+    plan.add_argument("--template", type=Path, default=default_template_path())
+    plan.add_argument("--job-prefix", default="hari-gcr-ceval")
+    plan.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
+    plan.add_argument("--git-ref", default="main")
+    plan.add_argument("--node-filter", default="hgx", help="Live discovery substring filter")
+    plan.add_argument(
+        "--include-yaml",
+        action="store_true",
+        help="Include rendered YAML in JSON output",
+    )
+    plan.add_argument("--output", choices=["table", "json"], default="table")
+    plan.set_defaults(handler=handle_plan)
+
+    submit_plan = subparsers.add_parser(
+        "submit-plan",
+        help="Dry-run or explicitly submit a planned validation batch",
+    )
+    _add_plan_inputs(submit_plan)
+    submit_plan.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
+    submit_plan.add_argument("--allowed-namespace", action="append")
+    submit_plan.add_argument("--max-batch-size", type=int, default=5)
+    submit_plan.add_argument("--submit", action="store_true")
+    submit_plan.add_argument("--confirm")
+    submit_plan.add_argument("--output", choices=["table", "json"], default="table")
+    submit_plan.set_defaults(handler=handle_submit_plan)
+
+    job_status = subparsers.add_parser("job-status", help="Read Volcano job phases")
+    job_status.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
+    job_status.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
+    job_status.add_argument("--output", choices=["table", "json"], default="table")
+    job_status.set_defaults(handler=handle_job_status)
+
+    monitor_jobs = subparsers.add_parser(
+        "monitor-jobs",
+        help="Poll Volcano job phases until terminal or timeout",
+    )
+    monitor_jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
+    monitor_jobs.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
+    monitor_jobs.add_argument("--timeout-seconds", type=float, default=180)
+    monitor_jobs.add_argument("--poll-interval-seconds", type=float, default=60)
+    monitor_jobs.add_argument("--output", choices=["table", "json"], default="table")
+    monitor_jobs.set_defaults(handler=handle_monitor_jobs)
+
+    result_env = subparsers.add_parser(
+        "result-env",
+        help="Print env-style statuses from a c-val structured result JSON file",
+    )
+    result_env.add_argument("--result-json", type=Path, required=True)
+    result_env.set_defaults(handler=handle_result_env)
+
+    return parser
+
+
+def handle_discover_free_nodes(args: argparse.Namespace) -> int:
+    nodes, totals = discover_free_nodes(node_name_filter=args.node_filter)
+    if args.output == "json":
+        print(
+            json.dumps(
+                {"nodes": [asdict(node) | {"free": node.free} for node in nodes], "totals": totals},
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"{'NODE':<32} {'CAP':>4} {'ALLOC':>5} {'USED':>5} {'FREE':>5}")
+    for node in nodes:
+        marker = "*" if node.is_fully_free else " "
+        print(
+            f"{marker} {node.name:<30} {node.capacity:>4} {node.allocatable:>5} "
+            f"{node.used:>5} {node.free:>5}"
+        )
+    print(
+        f"{'TOTAL':<32} {totals['capacity']:>4} {totals['allocatable']:>5} "
+        f"{totals['used']:>5} {totals['free']:>5}"
+    )
+    print(f"Fully free nodes: {len(fully_free_node_names(nodes))}")
+    return 0
+
+
+def handle_status(args: argparse.Namespace) -> int:
+    rows = get_latest_status_rows(
+        pod=args.pod,
+        namespace=args.namespace,
+        db_path=args.db_path,
+    )
+    if args.output == "json":
+        print(json.dumps([asdict(row) for row in rows], indent=2))
+        return 0
+    if args.output == "tsv":
+        print(latest_status_rows_to_tsv(rows))
+        return 0
+
+    node_map = latest_status_rows_to_node_map(rows)
+    print(f"Latest validation status rows: {len(rows)} | nodes: {len(node_map)}")
+    print(f"{'NODE':<32} {'TEST':<18} {'TIMESTAMP':>12} RESULT")
+    for row in rows:
+        timestamp = "" if row.latest_timestamp is None else str(row.latest_timestamp)
+        print(f"{row.node:<32} {row.test:<18} {timestamp:>12} {row.result}")
+    return 0
+
+
+def handle_prioritize(args: argparse.Namespace) -> int:
+    db_status = _load_db_status(args.db_status_json, args.db_status_tsv)
+    queue = build_priority_queue(
+        _parse_csv(args.free_nodes),
+        db_status,
+        days_threshold=args.threshold_days,
+    )
+    if args.output == "json":
+        print(json.dumps([asdict(candidate) for candidate in queue], indent=2))
+        return 0
+
+    print(f"{'PRI':>3} {'NODE':<32} {'LAST_TS':>12} {'AGE_DAYS':>9} REASON")
+    for candidate in queue:
+        age = "" if candidate.age_days is None else f"{candidate.age_days:.2f}"
+        print(
+            f"{candidate.priority:>3} {candidate.node:<32} "
+            f"{candidate.last_tested_timestamp:>12} {age:>9} {candidate.reason}"
+        )
+    return 0
+
+
+def handle_render_job(args: argparse.Namespace) -> int:
+    rendered = render_validation_job_from_file(
+        args.template,
+        node_name=args.node,
+        timestamp=args.timestamp,
+        job_prefix=args.job_prefix,
+        git_repo=args.git_repo,
+        git_ref=args.git_ref,
+    )
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered.yaml_text, encoding="utf-8")
+        print(str(args.output))
+    else:
+        print(rendered.yaml_text)
+    return 0
+
+
+def handle_run_batch(args: argparse.Namespace) -> int:
+    nodes = _parse_csv(args.nodes)[: args.batch_size]
+    rendered_jobs = [
+        render_validation_job_from_file(
+            args.template,
+            node_name=node,
+            timestamp=args.timestamp,
+            job_prefix=args.job_prefix,
+            git_repo=args.git_repo,
+            git_ref=args.git_ref,
+        )
+        for node in nodes
+    ]
+    if args.output == "json":
+        print(json.dumps([asdict(job) | {"dry_run": True} for job in rendered_jobs], indent=2))
+        return 0
+
+    print(f"Dry run: {len(rendered_jobs)} job(s) would be submitted")
+    for job in rendered_jobs:
+        print(f"  {job.node_name} -> {job.job_name}")
+    return 0
+
+
+def handle_plan(args: argparse.Namespace) -> int:
+    plan = _build_plan_from_args(args)
+
+    if args.output == "json":
+        print(
+            json.dumps(
+                workflow_plan_to_dict(plan, include_yaml=args.include_yaml),
+                indent=2,
+            )
+        )
+        return 0
+
+    _print_plan_table(plan)
+    return 0
+
+
+def handle_submit_plan(args: argparse.Namespace) -> int:
+    plan = _build_plan_from_args(args)
+    policy = ExecutionPolicy(
+        namespace_allowlist=tuple(args.allowed_namespace or [DEFAULT_NAMESPACE]),
+        max_batch_size=args.max_batch_size,
+    )
+    result = submit_workflow_plan(
+        plan,
+        namespace=args.namespace,
+        policy=policy,
+        submit=args.submit,
+        confirmation=args.confirm,
+    )
+
+    if args.output == "json":
+        print(json.dumps(submission_result_to_dict(result), indent=2))
+        return 0
+
+    mode = "submitted" if args.submit else "dry-run"
+    print(f"Validation job submission plan ({mode})")
+    print(f"Namespace: {result.namespace} | Jobs: {len(result.records)}")
+    for record in result.records:
+        print(f"  {record.node} -> {record.job_name} [{record.action}]")
+    return 0
+
+
+def handle_job_status(args: argparse.Namespace) -> int:
+    phases = get_job_phases(_parse_csv(args.jobs), namespace=args.namespace)
+    if args.output == "json":
+        print(json.dumps([asdict(phase) for phase in phases], indent=2))
+        return 0
+
+    print(f"{'JOB':<64} PHASE")
+    for phase in phases:
+        print(f"{phase.job_name:<64} {phase.phase}")
+    return 0
+
+
+def handle_monitor_jobs(args: argparse.Namespace) -> int:
+    jobs = monitor_jobs_until_terminal(
+        _parse_csv(args.jobs),
+        namespace=args.namespace,
+        timeout_seconds=args.timeout_seconds,
+        poll_interval_seconds=args.poll_interval_seconds,
+    )
+    if args.output == "json":
+        print(json.dumps(monitored_jobs_to_dict(jobs), indent=2))
+        return 0
+
+    print(f"{'JOB':<64} {'PHASE':<12} TERMINAL TIMED_OUT ELAPSED")
+    for job in jobs:
+        print(
+            f"{job.job_name:<64} {job.phase:<12} "
+            f"{str(job.terminal):<8} {str(job.timed_out):<9} {job.elapsed_seconds:.1f}s"
+        )
+    return 0
+
+
+def handle_result_env(args: argparse.Namespace) -> int:
+    result = load_validation_result(args.result_json)
+    for line in validation_result_to_env_lines(result):
+        print(line)
+    return 0
+
+
+def _build_plan_from_args(args: argparse.Namespace):
+    db_status = _load_db_status(
+        args.db_status_json,
+        args.db_status_tsv,
+        live_status=args.live_status,
+        status_pod=args.status_pod,
+        status_namespace=args.status_namespace,
+        status_db_path=args.status_db_path,
+    )
+    if args.free_nodes:
+        free_nodes = _parse_csv(args.free_nodes)
+    else:
+        nodes, _ = discover_free_nodes(node_name_filter=args.node_filter)
+        free_nodes = fully_free_node_names(nodes)
+
+    return build_workflow_plan(
+        free_nodes,
+        db_status,
+        days_threshold=args.threshold_days,
+        batch_size=args.batch_size,
+        template_path=args.template,
+        timestamp=args.timestamp,
+        job_prefix=args.job_prefix,
+        git_repo=args.git_repo,
+        git_ref=args.git_ref,
+    )
+
+
+def _print_plan_table(plan) -> None:
+    print("Dry-run workflow plan")
+    print(
+        f"Free nodes: {len(plan.free_nodes)} | Queue: {len(plan.queue)} | "
+        f"Batch: {len(plan.planned_jobs)}"
+    )
+    print(f"Threshold days: {plan.days_threshold} | Batch size: {plan.batch_size}")
+    print(f"{'PRI':>3} {'NODE':<32} {'REASON':<13} JOB")
+    for planned in plan.planned_jobs:
+        print(
+            f"{planned.candidate.priority:>3} {planned.candidate.node:<32} "
+            f"{planned.candidate.reason:<13} {planned.rendered_job.job_name}"
+        )
+
+
+def _add_plan_inputs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--free-nodes",
+        help="Comma-separated free node names; discovers live nodes if omitted",
+    )
+    parser.add_argument("--db-status-json", type=Path, help="JSON object mapping node to timestamp")
+    parser.add_argument(
+        "--db-status-tsv",
+        type=Path,
+        help="TSV output from existing latest-status command",
+    )
+    parser.add_argument(
+        "--live-status",
+        action="store_true",
+        help="Read latest status from the PVC access pod in read-only mode",
+    )
+    parser.add_argument("--status-pod", default=DEFAULT_PVC_ACCESS_POD)
+    parser.add_argument("--status-namespace", default=DEFAULT_NAMESPACE)
+    parser.add_argument("--status-db-path", default=DEFAULT_DB_PATH)
+    parser.add_argument("--threshold-days", type=float, default=7)
+    parser.add_argument("--batch-size", type=int, default=5)
+    parser.add_argument("--timestamp", type=int)
+    parser.add_argument("--template", type=Path, default=default_template_path())
+    parser.add_argument("--job-prefix", default="hari-gcr-ceval")
+    parser.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
+    parser.add_argument("--git-ref", default="main")
+    parser.add_argument("--node-filter", default="hgx", help="Live discovery substring filter")
+
+
+def _parse_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _load_db_status(
+    json_path: Path | None,
+    tsv_path: Path | None = None,
+    live_status: bool = False,
+    status_pod: str = DEFAULT_PVC_ACCESS_POD,
+    status_namespace: str = DEFAULT_NAMESPACE,
+    status_db_path: str = DEFAULT_DB_PATH,
+) -> dict[str, int]:
+    selected_sources = sum(1 for selected in (json_path, tsv_path, live_status) if selected)
+    if selected_sources > 1:
+        raise ValueError("Use only one of --db-status-json, --db-status-tsv, or --live-status")
+    if live_status:
+        return latest_status_rows_to_node_map(
+            get_latest_status_rows(
+                pod=status_pod,
+                namespace=status_namespace,
+                db_path=status_db_path,
+            )
+        )
+    if tsv_path:
+        return parse_latest_status_tsv(tsv_path.read_text(encoding="utf-8"))
+    if json_path is None:
+        return {}
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("DB status JSON must be an object mapping node names to timestamps")
+    return {str(node): int(timestamp) for node, timestamp in data.items()}
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

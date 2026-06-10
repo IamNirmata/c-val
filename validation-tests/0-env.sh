@@ -4,10 +4,14 @@
 export STORAGE_OUTPUT_DIR="/data/continuous_validation/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
 export NCCL_OUTPUT_DIR="/data/continuous_validation/nccl/$GCRNODE/nccl-$GCRNODE-$GCRTIME"
 export DLTEST_OUTPUT_DIR="/data/continuous_validation/dltest/$GCRNODE/dltest-$GCRNODE-$GCRTIME"
+export CVAL_RESULT_DIR="/data/continuous_validation/results/$GCRNODE"
+export CVAL_RESULT_ENV_FILE="$CVAL_RESULT_DIR/cval-results-$GCRNODE-$GCRTIME.env"
+export CVAL_RESULT_JSON_FILE="$CVAL_RESULT_DIR/cval-results-$GCRNODE-$GCRTIME.json"
 
 mkdir -p "$STORAGE_OUTPUT_DIR"
 mkdir -p "$NCCL_OUTPUT_DIR"
 mkdir -p "$DLTEST_OUTPUT_DIR"
+mkdir -p "$CVAL_RESULT_DIR"
 
 #log files
 export STORAGE_LOG_FILE="$STORAGE_OUTPUT_DIR/storage-$GCRNODE-$GCRTIME.log"

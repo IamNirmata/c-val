@@ -66,6 +66,10 @@ spec:
                   value: fail
                 - name: GCRRESULT3
                   value: fail
+                - name: CVAL_GIT_REPO
+                  value: "git-repo-placeholder"
+                - name: CVAL_GIT_REF
+                  value: "git-ref-placeholder"
               volumeMounts:
                 - name: dshm
                   mountPath: /dev/shm
@@ -81,7 +85,10 @@ spec:
               args:
                 - |
                   echo "test started."
-                  git clone https://github.com/IamNirmata/c-val.git /workspace/c-val
+                  git clone "$CVAL_GIT_REPO" /workspace/c-val
+                  cd /workspace/c-val
+                  git fetch --all --tags
+                  git checkout "$CVAL_GIT_REF"
                   cd /workspace/c-val/validation-tests/
                   source 0-env.sh
                   bash run-test.sh

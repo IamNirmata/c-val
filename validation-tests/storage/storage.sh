@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # --- CONFIGURATION ---
 # Ensure global variables are set; default to safe values if missing
