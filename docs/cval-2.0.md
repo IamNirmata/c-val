@@ -10,9 +10,12 @@ Implemented package modules:
 - `cval.scheduler.priority`: stale-node priority queue construction.
 - `cval.jobs.renderer`: validation job manifest rendering from the existing Volcano YAML template.
 - `cval.orchestrator.workflow`: dry-run workflow planning from free nodes, validation history, and job template rendering.
+- `cval.storage.ingest`: in-pod SQLite write helpers for result and metric ingestion.
 - `cval.cli`: dry-run-first command surface.
 
-`job-runner.ipynb` now acts as a thin, dry-run-oriented notebook over the package APIs. `utils/functions.py` remains in place for legacy compatibility while DB writes and helper commands are migrated.
+The old notebook-first and `utils/functions.py` helper paths have been removed
+from the active repository. Operators and Hermes should use `python -m cval.cli`
+for orchestration and package-native DB ingestion.
 
 Validation job scripts now persist per-test results through `CVAL_RESULT_JSON_FILE` with schema version `cval.results.v1`. `run-test.sh` writes storage, NCCL, and DL statuses after each phase, and `db-update.sh` records `storage`, `nccl`, `dltest`, and aggregate `all` rows based on those actual results instead of writing unconditional `all/pass`. `CVAL_RESULT_ENV_FILE` remains as a compatibility fallback.
 
@@ -145,6 +148,14 @@ Inspect a structured validation result in shell-friendly form:
 cval result-env --result-json /data/continuous_validation/results/<node>/cval-results-<node>-<timestamp>.json
 ```
 
+In-pod DB ingestion commands used by `validation-tests/db-update.sh`:
+
+```bash
+cval db-add-result <node> <test> <pass|fail|incomplete> <timestamp> --db-path <validation.db>
+cval db-add-storage-result <node> <timestamp> <storage-result-dir> --db-path <test-storage.db>
+cval db-add-nccl-result <node> <timestamp> <busbw> <latency> --db-path <test-nccl.db>
+```
+
 ## Safety Boundary
 
 The new CLI slice does not delete Kubernetes resources. `discover-free-nodes`, `job-status`, and `monitor-jobs` perform read-only `kubectl get` calls. `status` performs a read-only SQLite query through the PVC access pod using `mode=ro`. `render-job`, `prioritize`, `run-batch`, and `plan --free-nodes ...` operate locally unless `--live-status` is passed. `plan` also talks to Kubernetes when `--free-nodes` is omitted for live discovery. `submit-plan` is dry-run by default; real submission requires `--submit --confirm submit` and namespace/batch policy checks.
@@ -153,6 +164,6 @@ Submit/cleanup commands should be added only after policy gates exist for namesp
 
 ## Next Refactor Slice
 
-1. Add a controlled end-to-end one-node submit/monitor/ingest validation run after explicit approval.
-2. Package or symlink `skills/c-val-hpc-engineer` into the Hermes skill directory.
-3. Replace runtime Git checkout with a prebuilt image once the validation image pipeline exists.
+1. Package or symlink `skills/c-val-hpc-engineer` into the Hermes skill directory.
+2. Replace runtime Git checkout with a prebuilt image once the validation image pipeline exists.
+3. Add richer peer/baseline outlier classification for storage and NCCL metrics.

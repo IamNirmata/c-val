@@ -9,9 +9,18 @@ c-val 2.0 is the safe orchestration layer around the existing c-val GPU cluster 
 - [CLI Reference](cli-reference.md): operator commands and expected outputs.
 - [Operations Runbook](operations-runbook.md): safe daily operation and one-node validation flow.
 - [Result Schema](result-schema.md): structured result JSON and DB ingestion model.
+- [DL Test](dl-test.md): how the deep learning unit test fits into c-val and how to read its output.
+- [Hermes Integration](hermes-integration.md): safe Hermes operating model for c-val.
 - [Design Decisions](design-decisions.md): why the implementation is shaped this way.
 - [Troubleshooting](troubleshooting.md): common failure modes and read-only triage.
 - [c-val 2.0 Implementation Notes](cval-2.0.md): current implementation status.
+
+## Repository Shape
+
+The repository is named `c-val`, while the Python package is named `cval`.
+That is intentional: Python imports cannot contain hyphens. Runtime jobs clone
+the repository into `/workspace/c-val`, then execute `python -m cval.cli` and
+scripts from that checkout.
 
 ## Mental Model
 

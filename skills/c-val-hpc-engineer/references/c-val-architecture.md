@@ -11,6 +11,7 @@
 - `cval.jobs.manager`: dry-run by default, policy-gated submission.
 - `cval.jobs.monitor`: read-only Volcano job phase polling and timeout classification.
 - `cval.validation.results`: structured result schema parsing.
+- `cval.storage.ingest`: package-native SQLite writes from validation pods.
 
 ## Flow
 
@@ -22,8 +23,8 @@
 6. In-pod scripts write structured JSON result artifacts.
 7. `db-update.sh` ingests per-test results and metrics.
 
-## Compatibility Notes
+## Repository Notes
 
-- `utils/functions.py` remains available for legacy DB updates and helper commands.
-- `job-runner.ipynb` remains available but should migrate toward package calls.
+- The repository checkout is `c-val`; the importable Python package is `cval` because Python imports cannot contain hyphens.
+- Legacy notebook and `utils/functions.py` helper paths are removed from the active tree.
 - Existing Volcano YAML remains under `ymls/specific-node-job.yml`.

@@ -42,6 +42,7 @@ flowchart TB
 | `cval.jobs.manager` | Dry-run by default; explicitly submit approved plans. |
 | `cval.jobs.monitor` | Read-only job phase polling and timeout classification. |
 | `cval.validation.results` | Parse and validate structured result JSON. |
+| `cval.storage.ingest` | Write result and metrics rows from inside validation pods. |
 
 ## Runtime Artifacts
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -175,6 +177,31 @@ class CliTests(unittest.TestCase):
         self.assertIn("GCRRESULT1=pass", output.getvalue())
         self.assertIn("GCRRESULT2=fail", output.getvalue())
         self.assertIn("overall_result=fail", output.getvalue())
+
+    def test_db_add_result_command_writes_sqlite_row(self) -> None:
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "validation.db"
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "db-add-result",
+                        "slc01-cl02-hgx-0001",
+                        "all",
+                        "pass",
+                        "12345",
+                        "--db-path",
+                        str(db_path),
+                    ]
+                )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                row = connection.execute("SELECT node, test, timestamp, result FROM runs").fetchone()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(row, ("slc01-cl02-hgx-0001", "all", 12345, "pass"))
+        self.assertIn("Added validation result", output.getvalue())
 
 
 if __name__ == "__main__":

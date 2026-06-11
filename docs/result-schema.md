@@ -48,6 +48,7 @@ cval.results.v1
 - Valid statuses: `pass`, `fail`, `incomplete`.
 - `overall` is `pass` only when all test statuses are `pass`.
 - `db-update.sh` prefers JSON and falls back to the legacy env file if JSON is missing.
+- DB writes use package-native `cval db-add-*` commands inside the validation pod.
 - `cval.validation.results` validates schema version, required tests, valid statuses, and aggregate consistency.
 
 ## DB Rows

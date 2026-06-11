@@ -45,7 +45,7 @@ add_main_result() {
     # Keep the main DB as one row per test plus one aggregate `all` row.
     local test_name="$1"
     local result="$2"
-    python3 /workspace/c-val/utils/functions.py add-result \
+    PYTHONPATH=/workspace/c-val python3 -m cval.cli db-add-result \
         "$GCRNODE" \
         "$test_name" \
         "$result" \
@@ -65,7 +65,7 @@ echo "Main DB update completed."
 # Storage metrics are valid only when the storage phase itself passed.
 if [ "$GCRRESULT1" = "pass" ]; then
     echo "Updating storage db with test results"
-    python3 /workspace/c-val/utils/functions.py add-storage-result \
+    PYTHONPATH=/workspace/c-val python3 -m cval.cli db-add-storage-result \
         "$GCRNODE" \
         "$GCRTIME" \
         "$STORAGE_OUTPUT_DIR" \
@@ -95,7 +95,7 @@ if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
     echo "GCR_LATENCY: $GCR_LATENCY"
     echo "--------------------------------"
 
-    python3 /workspace/c-val/utils/functions.py add-nccl-result \
+    PYTHONPATH=/workspace/c-val python3 -m cval.cli db-add-nccl-result \
         "$GCRNODE" \
         "$GCRTIME" \
         "$GCR_BUSBW" \

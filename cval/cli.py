@@ -30,6 +30,13 @@ from cval.storage.status import (
     latest_status_rows_to_tsv,
     parse_latest_status_tsv,
 )
+from cval.storage.ingest import (
+    DEFAULT_NCCL_DB_PATH,
+    DEFAULT_STORAGE_DB_PATH,
+    add_nccl_result,
+    add_storage_result,
+    add_validation_result,
+)
 from cval.validation.results import load_validation_result, validation_result_to_env_lines
 
 
@@ -182,6 +189,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     result_env.add_argument("--result-json", type=Path, required=True)
     result_env.set_defaults(handler=handle_result_env)
+
+    db_add_result = subparsers.add_parser(
+        "db-add-result",
+        help="Append one validation result row to SQLite",
+    )
+    db_add_result.add_argument("node")
+    db_add_result.add_argument("test")
+    db_add_result.add_argument("result", choices=["pass", "fail", "incomplete"])
+    db_add_result.add_argument("timestamp")
+    db_add_result.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    db_add_result.set_defaults(handler=handle_db_add_result)
+
+    db_add_storage = subparsers.add_parser(
+        "db-add-storage-result",
+        help="Parse fio artifacts and upsert one storage metrics row",
+    )
+    db_add_storage.add_argument("node")
+    db_add_storage.add_argument("timestamp")
+    db_add_storage.add_argument("results_dir", type=Path)
+    db_add_storage.add_argument("--db-path", default=DEFAULT_STORAGE_DB_PATH)
+    db_add_storage.set_defaults(handler=handle_db_add_storage_result)
+
+    db_add_nccl = subparsers.add_parser(
+        "db-add-nccl-result",
+        help="Upsert one NCCL metrics row",
+    )
+    db_add_nccl.add_argument("node")
+    db_add_nccl.add_argument("timestamp")
+    db_add_nccl.add_argument("busbw")
+    db_add_nccl.add_argument("latency")
+    db_add_nccl.add_argument("--db-path", default=DEFAULT_NCCL_DB_PATH)
+    db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
 
     return parser
 
@@ -398,6 +437,47 @@ def handle_result_env(args: argparse.Namespace) -> int:
     result = load_validation_result(args.result_json)
     for line in validation_result_to_env_lines(result):
         print(line)
+    return 0
+
+
+def handle_db_add_result(args: argparse.Namespace) -> int:
+    """Append one validation result row to the main SQLite DB."""
+
+    timestamp = add_validation_result(
+        args.node,
+        args.test,
+        args.result,
+        args.timestamp,
+        db_path=args.db_path,
+    )
+    print(f"Added validation result: {args.node} {args.test} {args.result} {timestamp}")
+    return 0
+
+
+def handle_db_add_storage_result(args: argparse.Namespace) -> int:
+    """Parse storage artifacts and write one storage metrics row."""
+
+    timestamp = add_storage_result(
+        args.node,
+        args.timestamp,
+        args.results_dir,
+        db_path=args.db_path,
+    )
+    print(f"Added storage result: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
+    """Write one NCCL metric row."""
+
+    timestamp = add_nccl_result(
+        args.node,
+        args.timestamp,
+        args.busbw,
+        args.latency,
+        db_path=args.db_path,
+    )
+    print(f"Added NCCL result: {args.node} {timestamp}")
     return 0
 
 

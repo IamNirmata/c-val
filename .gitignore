@@ -1,5 +1,8 @@
-/home/hari/b200/validation/cluster_doctor/gitignored
-/home/hari/b200/validation/cluster_doctor/ymls
+# Generated local artifacts and rendered manifests.
+/gitignored/
+/artifacts/
+/reports/
+*.log
 
 __pycache__/
 *.py[cod]

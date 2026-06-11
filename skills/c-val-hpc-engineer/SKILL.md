@@ -119,7 +119,7 @@ python -m compileall -q cval tests
 
 ## Known Pitfalls
 
-- `job-runner.ipynb` still contains legacy orchestration logic; prefer `cval.cli` and `cval.orchestrator.workflow`.
+- The repository is named `c-val`, but the importable package is `cval`; do not treat this as a duplicate checkout.
 - Runtime jobs still clone c-val from GitHub; pinning image/code version remains future work.
 - `submit-plan` dry-run does not submit resources. Real submission requires both `--submit` and `--confirm submit`.
 - `monitor-jobs` is read-only and does not cancel timed-out jobs.

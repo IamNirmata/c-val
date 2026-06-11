@@ -106,3 +106,15 @@ GCRRESULT2=pass
 GCRRESULT3=pass
 overall_result=pass
 ```
+
+## In-Pod DB Ingestion Commands
+
+These commands are called by `validation-tests/db-update.sh` inside validation
+pods. They are package-native replacements for the removed legacy
+`utils/functions.py` DB write commands.
+
+```bash
+python -m cval.cli db-add-result <node> <test> <pass|fail|incomplete> <timestamp> --db-path <validation.db>
+python -m cval.cli db-add-storage-result <node> <timestamp> <storage-result-dir> --db-path <test-storage.db>
+python -m cval.cli db-add-nccl-result <node> <timestamp> <busbw> <latency> --db-path <test-nccl.db>
+```
