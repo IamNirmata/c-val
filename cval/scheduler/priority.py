@@ -1,3 +1,9 @@
+"""Priority queue construction for c-val validation candidates.
+
+The scheduler module is pure business logic: it receives free nodes and latest
+validation timestamps, then returns a deterministic queue of nodes needing work.
+"""
+
 from __future__ import annotations
 
 import random
@@ -18,6 +24,8 @@ def build_priority_queue(
     shuffle: bool = False,
     rng: random.Random | None = None,
 ) -> list[QueueCandidate]:
+    """Return never-tested and expired nodes ordered by validation priority."""
+
     current_time = now or datetime.now(timezone.utc)
     current_timestamp = current_time.timestamp()
     threshold_seconds = days_threshold * SECONDS_PER_DAY
@@ -25,12 +33,14 @@ def build_priority_queue(
 
     for node in free_nodes:
         last_tested = int(latest_status_by_node.get(node, 0) or 0)
+        # Never-tested nodes are highest value because c-val has no health signal yet.
         if last_tested <= 0:
             candidates.append((node, 0, None, "never-tested"))
             continue
 
         age_seconds = current_timestamp - last_tested
         age_days = age_seconds / SECONDS_PER_DAY
+        # Fresh nodes are intentionally skipped to avoid wasting scarce GPU time.
         if age_seconds > threshold_seconds:
             candidates.append((node, last_tested, age_days, "expired"))
 
@@ -38,6 +48,7 @@ def build_priority_queue(
         randomizer = rng or random.Random()
         randomizer.shuffle(candidates)
     else:
+        # Oldest timestamp first; node name tie-breaker keeps output stable.
         candidates.sort(key=lambda candidate: (candidate[1], candidate[0]))
 
     return [

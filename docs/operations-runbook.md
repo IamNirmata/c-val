@@ -1,0 +1,79 @@
+# Operations Runbook
+
+## Safe Preflight
+
+```bash
+python -m cval.cli status --output table
+python -m cval.cli discover-free-nodes --output table
+python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 1 --output json
+```
+
+Confirm the dry-run output before submitting. Look for:
+
+- `dry_run: true`
+- `submitted_count: 0`
+- selected node is not cordoned
+- selected node is expected by the operator
+
+## One-Node Validation
+
+1. Push code and capture the commit SHA.
+2. Build a pinned dry-run plan:
+
+   ```bash
+   python -m cval.cli submit-plan \
+     --live-status \
+     --threshold-days 4 \
+     --batch-size 1 \
+     --git-ref <commit-sha> \
+     --output json
+   ```
+
+3. Ask for operator approval.
+4. Submit exactly one job:
+
+   ```bash
+   python -m cval.cli submit-plan \
+     --free-nodes <node> \
+     --live-status \
+     --threshold-days 4 \
+     --batch-size 1 \
+     --git-ref <commit-sha> \
+     --timestamp <timestamp> \
+     --submit \
+     --confirm submit \
+     --output json
+   ```
+
+5. Monitor read-only:
+
+   ```bash
+   python -m cval.cli monitor-jobs \
+     --jobs <job-name> \
+     --timeout-seconds 1200 \
+     --poll-interval-seconds 30 \
+     --output json
+   ```
+
+6. Verify result JSON and DB rows:
+
+   ```bash
+   python -m cval.cli status --output json
+   python -m cval.cli result-env --result-json <result-json>
+   ```
+
+## Validated Example
+
+Pinned run:
+
+```text
+commit: c9a762a65bf9ae2989d71a01395d86dbc5c96af5
+node: slc01-cl02-hgx-0204
+job: hari-gcr-ceval-slc01-cl02-hgx-0204-1781134840
+phase: Completed
+result: storage=pass, nccl=pass, dltest=pass, overall=pass
+```
+
+## Cleanup
+
+c-val 2.0 does not delete jobs automatically. If cleanup is required, ask for explicit approval and run the exact delete command only for the intended validation job.

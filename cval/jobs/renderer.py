@@ -1,3 +1,10 @@
+"""Volcano validation job rendering.
+
+This module turns the checked-in YAML template into a concrete one-node
+validation job. It does not submit anything; it only replaces placeholders and
+returns the rendered manifest for inspection or policy-gated submission.
+"""
+
 from __future__ import annotations
 
 import re
@@ -11,10 +18,14 @@ NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def default_template_path() -> Path:
+    """Return the repository default Volcano job template path."""
+
     return Path(__file__).resolve().parents[2] / "ymls" / "specific-node-job.yml"
 
 
 def make_job_name(node_name: str, timestamp: int, job_prefix: str = "hari-gcr-ceval") -> str:
+    """Build a deterministic Kubernetes-compatible validation job name."""
+
     validate_kubernetes_name(node_name, "node_name")
     validate_kubernetes_name(job_prefix, "job_prefix")
     return f"{job_prefix}-{node_name}-{timestamp}"
@@ -28,6 +39,8 @@ def render_validation_job(
     git_repo: str = "https://github.com/IamNirmata/c-val.git",
     git_ref: str = "main",
 ) -> RenderedJob:
+    """Render one validation job manifest for one target node."""
+
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)
     job_name = make_job_name(node_name, rendered_timestamp, job_prefix=job_prefix)
 
@@ -36,6 +49,7 @@ def render_validation_job(
         "time-placeholder",
         "jobname-placeholder",
     ]
+    # These placeholders are required by the legacy template and core scheduler logic.
     missing = [
         placeholder
         for placeholder in required_placeholders
@@ -51,6 +65,7 @@ def render_validation_job(
     yaml_text = yaml_text.replace("git-repo-placeholder", git_repo)
     yaml_text = yaml_text.replace("git-ref-placeholder", git_ref)
 
+    # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
     remaining = [placeholder for placeholder in required_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
@@ -71,6 +86,8 @@ def render_validation_job_from_file(
     git_repo: str = "https://github.com/IamNirmata/c-val.git",
     git_ref: str = "main",
 ) -> RenderedJob:
+    """Read a template file and render a validation job from it."""
+
     return render_validation_job(
         template_path.read_text(encoding="utf-8"),
         node_name=node_name,
@@ -82,5 +99,7 @@ def render_validation_job_from_file(
 
 
 def validate_kubernetes_name(value: str, field_name: str) -> None:
+    """Validate the subset of DNS-label syntax used by node/job names."""
+
     if not NODE_NAME_PATTERN.match(value):
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")

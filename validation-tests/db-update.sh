@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Ingest one validation run into metadata databases.
+# The structured result JSON is authoritative when available; env files are a
+# compatibility fallback for older runtime artifacts.
+
 # main db update
 echo "Updating main db with all test results"
 STORAGE_OUTPUT_DIR="/data/continuous_validation/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
@@ -24,6 +28,7 @@ if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
     done < <(PYTHONPATH=/workspace/c-val python3 -m cval.cli result-env --result-json "$CVAL_RESULT_JSON_FILE"
     )
 elif [ -n "${CVAL_RESULT_ENV_FILE:-}" ] && [ -f "$CVAL_RESULT_ENV_FILE" ]; then
+    # Legacy fallback: only use this when the v1 JSON artifact is missing.
     echo "Loading test result state from $CVAL_RESULT_ENV_FILE"
     source "$CVAL_RESULT_ENV_FILE"
 else
@@ -31,11 +36,13 @@ else
 fi
 
 overall_result=${overall_result:-pass}
+# Recompute aggregate status defensively before writing the `all` row.
 if [ "$GCRRESULT1" != "pass" ] || [ "$GCRRESULT2" != "pass" ] || [ "$GCRRESULT3" != "pass" ]; then
     overall_result=fail
 fi
 
 add_main_result() {
+    # Keep the main DB as one row per test plus one aggregate `all` row.
     local test_name="$1"
     local result="$2"
     python3 /workspace/c-val/utils/functions.py add-result \
@@ -55,7 +62,7 @@ add_main_result "all" "$overall_result"
 echo "Main DB update completed."
 
 
-#storage DB update
+# Storage metrics are valid only when the storage phase itself passed.
 if [ "$GCRRESULT1" = "pass" ]; then
     echo "Updating storage db with test results"
     python3 /workspace/c-val/utils/functions.py add-storage-result \
@@ -69,7 +76,7 @@ else
 fi
 
 
-#nccl DB update
+# NCCL metric ingestion depends on the all-reduce summary JSON.
 
 echo "Updating nccl db with test results"
 NCCL_LOG_FILE="$NCCL_OUTPUT_DIR/nccl-$GCRNODE-$GCRTIME.log"

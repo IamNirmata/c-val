@@ -1,6 +1,10 @@
 #!/bin/bash
 set -uo pipefail
 
+# Execute all in-pod validation phases and continuously persist result state.
+# The script does not use `set -e` because each phase should run and record its
+# own pass/fail status before the aggregate result is written.
+
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
@@ -8,6 +12,8 @@ CVAL_RESULT_ENV_FILE=${CVAL_RESULT_ENV_FILE:-"/tmp/cval-results-${GCRNODE:-unkno
 CVAL_RESULT_JSON_FILE=${CVAL_RESULT_JSON_FILE:-"/tmp/cval-results-${GCRNODE:-unknown}-${GCRTIME:-unknown}.json"}
 
 write_result_state() {
+	# Persist both the legacy env file and the structured JSON schema after each
+	# phase, so an interrupted run still leaves the best available status.
 	mkdir -p "$(dirname "$CVAL_RESULT_ENV_FILE")"
 	mkdir -p "$(dirname "$CVAL_RESULT_JSON_FILE")"
 	{
@@ -64,7 +70,7 @@ PY
 
 write_result_state
 
-#prep
+# Install fio inside the validation image before storage testing.
 apt-get update > /dev/null 2>&1 && apt-get install -y fio > /dev/null 2>&1
 
 
@@ -86,7 +92,7 @@ echo "CVAL_RESULT_ENV_FILE: $CVAL_RESULT_ENV_FILE"
 echo "CVAL_RESULT_JSON_FILE: $CVAL_RESULT_JSON_FILE"
 echo "#########################################################################"
 
-#storage test
+# Phase 1: PVC/NFS storage performance and correctness smoke test.
 if bash /workspace/c-val/validation-tests/storage/storage.sh | tee "$STORAGE_LOG_FILE"; then
 	echo "Storage test is complete. Log file: $STORAGE_LOG_FILE Summary file: $STORAGE_SUMMARY_FILE"
 	GCRRESULT1=pass
@@ -97,7 +103,7 @@ fi
 write_result_state
 
 
-#nccl test
+# Phase 2: single-node NCCL all-reduce over the requested GPU set.
 NCCL_SCRIPT="/workspace/c-val/validation-tests/nccl/single-node-allreduce.py"
 NCCL_ARGS="--result-file $NCCL_SUMMARY_FILE"
 
@@ -112,7 +118,7 @@ else
 fi
 write_result_state
 
-#dltest
+# Phase 3: deep learning unit test workload and numerical checks.
 echo "Running DL Test..."
 if bash /workspace/c-val/validation-tests/dltest/dltest.sh 8; then
 	GCRRESULT3=pass

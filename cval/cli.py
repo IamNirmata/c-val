@@ -1,3 +1,11 @@
+"""Command-line interface for c-val 2.0.
+
+This file is the main human/Hermes entry point. It exposes read-only status and
+discovery commands, dry-run planning, approval-gated submission, read-only
+monitoring, and structured result inspection. Handlers are intentionally thin:
+they parse arguments, call package modules, and format output.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -26,22 +34,28 @@ from cval.validation.results import load_validation_result, validation_result_to
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI arguments, dispatch to a handler, and return a process code."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
     except BrokenPipeError:
+        # Make `cval ... | head` behave like a normal Unix CLI instead of tracing.
         try:
             sys.stdout.close()
         except OSError:
             pass
         return 0
     except PolicyViolation as exc:
+        # Policy violations are expected operator errors, not Python stack traces.
         print(f"Policy violation: {exc}", file=sys.stderr)
         return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level parser and subcommands."""
+
     parser = argparse.ArgumentParser(prog="cval", description="c-val orchestration CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -173,8 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def handle_discover_free_nodes(args: argparse.Namespace) -> int:
+    """Run read-only GPU node discovery and print table or JSON output."""
+
     nodes, totals = discover_free_nodes(node_name_filter=args.node_filter)
     if args.output == "json":
+        # JSON output is meant for Hermes, scripts, and tests.
         print(
             json.dumps(
                 {"nodes": [asdict(node) | {"free": node.free} for node in nodes], "totals": totals},
@@ -183,6 +200,7 @@ def handle_discover_free_nodes(args: argparse.Namespace) -> int:
         )
         return 0
 
+    # Table output is optimized for quick operator scanning.
     print(f"{'NODE':<32} {'CAP':>4} {'ALLOC':>5} {'USED':>5} {'FREE':>5}")
     for node in nodes:
         marker = "*" if node.is_fully_free else " "
@@ -199,6 +217,8 @@ def handle_discover_free_nodes(args: argparse.Namespace) -> int:
 
 
 def handle_status(args: argparse.Namespace) -> int:
+    """Read latest validation status without mutating SQLite metadata."""
+
     rows = get_latest_status_rows(
         pod=args.pod,
         namespace=args.namespace,
@@ -208,6 +228,7 @@ def handle_status(args: argparse.Namespace) -> int:
         print(json.dumps([asdict(row) for row in rows], indent=2))
         return 0
     if args.output == "tsv":
+        # TSV keeps compatibility with older status/parsing workflows.
         print(latest_status_rows_to_tsv(rows))
         return 0
 
@@ -221,6 +242,8 @@ def handle_status(args: argparse.Namespace) -> int:
 
 
 def handle_prioritize(args: argparse.Namespace) -> int:
+    """Build a priority queue from explicit free nodes and status history."""
+
     db_status = _load_db_status(args.db_status_json, args.db_status_tsv)
     queue = build_priority_queue(
         _parse_csv(args.free_nodes),
@@ -242,6 +265,8 @@ def handle_prioritize(args: argparse.Namespace) -> int:
 
 
 def handle_render_job(args: argparse.Namespace) -> int:
+    """Render one job manifest locally without submitting it."""
+
     rendered = render_validation_job_from_file(
         args.template,
         node_name=args.node,
@@ -251,6 +276,7 @@ def handle_render_job(args: argparse.Namespace) -> int:
         git_ref=args.git_ref,
     )
     if args.output:
+        # Local file output is useful for manual inspection or `kubectl diff` workflows.
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered.yaml_text, encoding="utf-8")
         print(str(args.output))
@@ -260,6 +286,8 @@ def handle_render_job(args: argparse.Namespace) -> int:
 
 
 def handle_run_batch(args: argparse.Namespace) -> int:
+    """Render a local dry-run batch from explicit node names."""
+
     nodes = _parse_csv(args.nodes)[: args.batch_size]
     rendered_jobs = [
         render_validation_job_from_file(
@@ -283,6 +311,8 @@ def handle_run_batch(args: argparse.Namespace) -> int:
 
 
 def handle_plan(args: argparse.Namespace) -> int:
+    """Build and print a dry-run workflow plan."""
+
     plan = _build_plan_from_args(args)
 
     if args.output == "json":
@@ -299,6 +329,8 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 
 def handle_submit_plan(args: argparse.Namespace) -> int:
+    """Dry-run or explicitly submit a planned validation batch."""
+
     plan = _build_plan_from_args(args)
     policy = ExecutionPolicy(
         namespace_allowlist=tuple(args.allowed_namespace or [DEFAULT_NAMESPACE]),
@@ -325,6 +357,8 @@ def handle_submit_plan(args: argparse.Namespace) -> int:
 
 
 def handle_job_status(args: argparse.Namespace) -> int:
+    """Read Volcano job phases once."""
+
     phases = get_job_phases(_parse_csv(args.jobs), namespace=args.namespace)
     if args.output == "json":
         print(json.dumps([asdict(phase) for phase in phases], indent=2))
@@ -337,6 +371,8 @@ def handle_job_status(args: argparse.Namespace) -> int:
 
 
 def handle_monitor_jobs(args: argparse.Namespace) -> int:
+    """Poll Volcano job phases until terminal or timeout."""
+
     jobs = monitor_jobs_until_terminal(
         _parse_csv(args.jobs),
         namespace=args.namespace,
@@ -357,6 +393,8 @@ def handle_monitor_jobs(args: argparse.Namespace) -> int:
 
 
 def handle_result_env(args: argparse.Namespace) -> int:
+    """Print legacy env-style status variables from structured result JSON."""
+
     result = load_validation_result(args.result_json)
     for line in validation_result_to_env_lines(result):
         print(line)
@@ -364,6 +402,8 @@ def handle_result_env(args: argparse.Namespace) -> int:
 
 
 def _build_plan_from_args(args: argparse.Namespace):
+    """Resolve status inputs, discover nodes if needed, and build a workflow plan."""
+
     db_status = _load_db_status(
         args.db_status_json,
         args.db_status_tsv,
@@ -373,8 +413,10 @@ def _build_plan_from_args(args: argparse.Namespace):
         status_db_path=args.status_db_path,
     )
     if args.free_nodes:
+        # Explicit node lists are useful for controlled one-node submissions.
         free_nodes = _parse_csv(args.free_nodes)
     else:
+        # No explicit nodes means live read-only discovery is part of the plan.
         nodes, _ = discover_free_nodes(node_name_filter=args.node_filter)
         free_nodes = fully_free_node_names(nodes)
 
@@ -392,6 +434,8 @@ def _build_plan_from_args(args: argparse.Namespace):
 
 
 def _print_plan_table(plan) -> None:
+    """Print a human-readable workflow plan summary."""
+
     print("Dry-run workflow plan")
     print(
         f"Free nodes: {len(plan.free_nodes)} | Queue: {len(plan.queue)} | "
@@ -407,6 +451,8 @@ def _print_plan_table(plan) -> None:
 
 
 def _add_plan_inputs(parser: argparse.ArgumentParser) -> None:
+    """Attach shared plan-building arguments to plan-like commands."""
+
     parser.add_argument(
         "--free-nodes",
         help="Comma-separated free node names; discovers live nodes if omitted",
@@ -436,6 +482,8 @@ def _add_plan_inputs(parser: argparse.ArgumentParser) -> None:
 
 
 def _parse_csv(value: str) -> list[str]:
+    """Parse comma-separated CLI values while ignoring empty items."""
+
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
@@ -447,10 +495,13 @@ def _load_db_status(
     status_namespace: str = DEFAULT_NAMESPACE,
     status_db_path: str = DEFAULT_DB_PATH,
 ) -> dict[str, int]:
+    """Load validation history from JSON, TSV, live status, or empty defaults."""
+
     selected_sources = sum(1 for selected in (json_path, tsv_path, live_status) if selected)
     if selected_sources > 1:
         raise ValueError("Use only one of --db-status-json, --db-status-tsv, or --live-status")
     if live_status:
+        # Live status is read-only, but still reaches the cluster through the PVC access pod.
         return latest_status_rows_to_node_map(
             get_latest_status_rows(
                 pod=status_pod,
@@ -461,6 +512,7 @@ def _load_db_status(
     if tsv_path:
         return parse_latest_status_tsv(tsv_path.read_text(encoding="utf-8"))
     if json_path is None:
+        # Missing history makes every free node appear never-tested.
         return {}
     data = json.loads(json_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):

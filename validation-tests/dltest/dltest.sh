@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Run the deep learning validation workload and map torchrun's exit code to
+# the c-val DL result variable. Detailed evidence is written to DLTEST_LOG_FILE.
+
 echo "Running DL Test on node: $GCRNODE at time: $GCRTIME"
 DLTEST_COMMAND="/data/continuous_validation/deeplearning_unit_test/main.py"
 
@@ -17,6 +20,7 @@ if [ $rc -ne 0 ]; then
   echo "Check log file: $DLTEST_LOG_FILE"
   export GCRRESULT3=fail
 else
+  # A zero exit from the DL harness is the contract for DL phase success.
   echo "DL Test completed successfully. Log file: $DLTEST_LOG_FILE"
   export GCRRESULT3=pass
 fi

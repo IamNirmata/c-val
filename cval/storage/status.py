@@ -1,3 +1,9 @@
+"""Read and format c-val latest validation status.
+
+Status reads are intentionally opened through SQLite `mode=ro` so operators and
+agents can inspect validation history without mutating DB tables or views.
+"""
+
 from __future__ import annotations
 
 import datetime
@@ -13,6 +19,8 @@ DEFAULT_DB_PATH = "/data/continuous_validation/metadata/validation.db"
 
 
 def parse_latest_status_tsv(output: str) -> dict[str, int]:
+    """Parse legacy TSV latest-status output into node -> newest timestamp."""
+
     latest_by_node: dict[str, int] = {}
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -29,6 +37,8 @@ def parse_latest_status_tsv(output: str) -> dict[str, int]:
 
 
 def parse_latest_status_rows_json(output: str) -> list[LatestStatusRow]:
+    """Parse JSON rows emitted by the read-only status helper."""
+
     data = json.loads(output or "[]")
     if not isinstance(data, list):
         raise ValueError("latest status JSON must be a list")
@@ -49,6 +59,8 @@ def parse_latest_status_rows_json(output: str) -> list[LatestStatusRow]:
 
 
 def latest_status_rows_to_node_map(rows: list[LatestStatusRow]) -> dict[str, int]:
+    """Collapse per-test rows into node -> newest timestamp for scheduling."""
+
     latest_by_node: dict[str, int] = {}
     for row in rows:
         timestamp = row.latest_timestamp or 0
@@ -57,6 +69,8 @@ def latest_status_rows_to_node_map(rows: list[LatestStatusRow]) -> dict[str, int
 
 
 def latest_status_rows_to_tsv(rows: list[LatestStatusRow]) -> str:
+    """Format latest-status rows as the TSV shape used by older scripts."""
+
     lines = ["node\ttest\tlatest_timestamp_num\tlatest_timestamp\tresult"]
     for row in rows:
         timestamp = row.latest_timestamp
@@ -72,6 +86,8 @@ def get_latest_status_rows(
     namespace: str = DEFAULT_NAMESPACE,
     db_path: str = DEFAULT_DB_PATH,
 ) -> list[LatestStatusRow]:
+    """Read latest status rows from the PVC access pod using SQLite read-only mode."""
+
     kubectl = client or KubectlClient()
     code = r'''
 import json
@@ -106,6 +122,8 @@ print(json.dumps(rows_out))
 
 
 def _timestamp_to_iso(timestamp: int) -> str:
+    """Render an epoch timestamp as UTC ISO-8601 with `Z` suffix."""
+
     return (
         datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
         .replace(microsecond=0)

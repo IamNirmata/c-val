@@ -1,6 +1,7 @@
 apiVersion: batch.volcano.sh/v1alpha1
 kind: Job
 metadata:
+  # Renderer replaces this placeholder with a deterministic job name.
   generateName: jobname-placeholder
   namespace: gcr-admin
 spec:
@@ -21,12 +22,13 @@ spec:
         spec:
           schedulerName: volcano
           nodeSelector:
-            # kubernetes.io/hostname: "nodename-placeholder"
+            # c-val deliberately pins one job to one discovered free node.
             kubernetes.io/hostname: "nodename-placeholder"
           restartPolicy: Never
           volumes:
             - name: dshm
               emptyDir:
+                # Large /dev/shm is required by NCCL and DL workloads.
                 medium: Memory
                 sizeLimit: 256Gi
             - name: sys
@@ -37,6 +39,7 @@ spec:
               persistentVolumeClaim:
                 claimName: pvc-vast-gcr-admin
           tolerations:
+            # Discovery filters non-tolerated NoSchedule taints before rendering.
             - key: "rdma"
               operator: "Exists"
               effect: "NoSchedule"
@@ -69,6 +72,7 @@ spec:
                 - name: CVAL_GIT_REPO
                   value: "git-repo-placeholder"
                 - name: CVAL_GIT_REF
+                  # Pin the runtime checkout to a commit/tag instead of moving main.
                   value: "git-ref-placeholder"
               volumeMounts:
                 - name: dshm
@@ -85,6 +89,8 @@ spec:
               args:
                 - |
                   echo "test started."
+                  # The job clones c-val inside the container so the runtime code
+                  # matches the explicitly supplied CVAL_GIT_REF.
                   git clone "$CVAL_GIT_REPO" /workspace/c-val
                   cd /workspace/c-val
                   git fetch --all --tags

@@ -1,20 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
+# Run the storage validation suite against the shared validation PVC.
+# Each fio job writes raw JSON; the summary file extracts IOPS and bandwidth
+# into a compact table for operators and later metric ingestion.
+
 # --- CONFIGURATION ---
 # Ensure global variables are set; default to safe values if missing
-if [ -z "$GCRNODE" ]; then
+if [ -z "${GCRNODE:-}" ]; then
     echo "WARNING: GCRNODE is not set. Using 'unknown_node'"
     GCRNODE="unknown_node"
 fi
 
-if [ -z "$GCRTIME" ]; then
+if [ -z "${GCRTIME:-}" ]; then
     # Generate timestamp if not provided (California Time)
     GCRTIME=$(date +%Y%m%d_%H%M%S -d 'TZ="America/Los_Angeles" now')
     echo "WARNING: GCRTIME is not set. Generated timestamp: $GCRTIME"
 fi
 
-# Define paths
+# Define paths used by fio job definitions and report generation.
 JOB_DIR="/workspace/c-val/validation-tests/storage/fio_jobs"
 OUTPUT_DIR="/data/continuous_validation/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
 SUMMARY_FILE="$OUTPUT_DIR/summary.txt"
@@ -29,6 +33,7 @@ echo "==========================================================================
 
 # --- CHECKS ---
 if [ ! -d "$JOB_DIR" ]; then
+    # Missing fio profiles means the image or checkout is incomplete.
     echo "CRITICAL ERROR: FIO jobs directory not found at $JOB_DIR"
     exit 1
 fi
@@ -40,25 +45,25 @@ echo "Directory created."
 # --- EXECUTION ---
 echo "Starting storage tests..."
 
-# 1. Random Write
+# 1. Random write: small-block write behavior.
 echo "Running random write test... (1/6)"
 fio "$JOB_DIR/randwrite.fio" --output-format=json --output="$STORAGE_OUTPUT_DIR/randwrite.json"
 
-# 2. Random Read
+# 2. Random read: small-block read behavior.
 echo "Running random read test... (2/6)"
 fio "$JOB_DIR/randread.fio" --output-format=json --output="$STORAGE_OUTPUT_DIR/randread.json"
-# 3. Sequential Write (QD128)
+# 3. Sequential write at high queue depth.
 echo "Running iodepth write test... (3/6)"
 fio "$JOB_DIR/iodepth_write_1file.fio" --output-format=json --output="$STORAGE_OUTPUT_DIR/iodepth_write_1file.json"
 
-# 4. Sequential Read (QD128)
+# 4. Sequential read at high queue depth.
 echo "Running iodepth read test... (4/6)"
 fio "$JOB_DIR/iodepth_read_1file.fio" --output-format=json --output="$STORAGE_OUTPUT_DIR/iodepth_read_1file.json"
-# 5. Aggregate Write (Numjobs)
+# 5. Aggregate write across multiple jobs/files.
 echo "Running numjobs write test... (5/6)"
 fio "$JOB_DIR/numjobs_write_nfiles.fio" --output-format=json --output="$STORAGE_OUTPUT_DIR/numjobs_write_nfiles.json"
 
-# 6. Aggregate Read (Numjobs)
+# 6. Aggregate read across multiple jobs/files.
 echo "Running numjobs read test... (6/6)"
 fio "$JOB_DIR/numjobs_read_nfiles.fio" --output-format=json --output="$STORAGE_OUTPUT_DIR/numjobs_read_nfiles.json"
 echo "Storage tests completed."
@@ -67,7 +72,7 @@ echo "Results saved in $STORAGE_OUTPUT_DIR"
 # --- SUMMARY REPORTING ---
 echo "Generating summary report..."
 
-# Check if jq is installed before trying to generate the file
+# jq is optional for the validation result; raw fio JSON remains available.
 if ! command -v jq &> /dev/null; then
     echo "Error: 'jq' is not installed. Cannot generate summary table."
     echo "Raw JSON files are available in $STORAGE_OUTPUT_DIR"
@@ -84,13 +89,13 @@ fi
     printf "%-35s | %-15s | %-15s\n" "Test Filename" "IOPS" "Bandwidth (GB/s)"
     echo "--------------------------------------------------------------------------------"
 
-    # Parse all JSON files in the output directory
+    # Parse all fio JSON files in the output directory.
     for file in "$STORAGE_OUTPUT_DIR"/*.json; do
         [ -e "$file" ] || continue
         
         filename=$(basename "$file")
         
-        # Extract IOPS and Bandwidth (KB/s) sum for read+write
+        # Extract IOPS and bandwidth (KB/s) summed across read and write fields.
         vals=$(jq -r '.jobs[0] | "\(.read.iops + .write.iops) \(.read.bw + .write.bw)"' "$file")
         
         read -r iops bw_kb <<< "$vals"
