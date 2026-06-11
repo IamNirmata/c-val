@@ -8,22 +8,22 @@ c-val 2.0 separates orchestration from validation execution. The Python package 
 
 ```mermaid
 flowchart TB
-    Operator[Operator or Hermes] --> CLI[cval.cli]
-    CLI --> Discovery[cval.k8s.discovery]
-    CLI --> Status[cval.storage.status]
-    CLI --> Workflow[cval.orchestrator.workflow]
-    Workflow --> Priority[cval.scheduler.priority]
-    Workflow --> Renderer[cval.jobs.renderer]
-    CLI --> Manager[cval.jobs.manager]
-    CLI --> Monitor[cval.jobs.monitor]
-    Manager --> Kube[Kubernetes / Volcano]
+    Operator["Operator or Hermes"] --> CLI["cval.cli"]
+    CLI --> Discovery["cval.k8s.discovery"]
+    CLI --> Status["cval.storage.status"]
+    CLI --> Workflow["cval.orchestrator.workflow"]
+    Workflow --> Priority["cval.scheduler.priority"]
+    Workflow --> Renderer["cval.jobs.renderer"]
+    CLI --> Manager["cval.jobs.manager"]
+    CLI --> Monitor["cval.jobs.monitor"]
+    Manager --> Kube["Kubernetes / Volcano"]
     Monitor --> Kube
     Discovery --> Kube
-    Status --> PVC[PVC access pod + SQLite]
-    Kube --> ValidationPod[Validation pod]
-    ValidationPod --> Scripts[validation-tests]
-    Scripts --> Artifacts[/data/continuous_validation]
-    Scripts --> ResultJson[cval.results.v1 JSON]
+    Status --> PVC["PVC access pod + SQLite"]
+    Kube --> ValidationPod["Validation pod"]
+    ValidationPod --> Scripts["validation-tests"]
+    Scripts --> Artifacts["/data/continuous_validation"]
+    Scripts --> ResultJson["cval.results.v1 JSON"]
     Scripts --> DB[(SQLite metadata DB)]
 ```
 
