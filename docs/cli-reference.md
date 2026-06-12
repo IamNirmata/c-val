@@ -5,20 +5,35 @@ Run commands from the c-val repository root.
 Use `--config /path/to/cval.toml` before the subcommand to load a non-default
 configuration file.
 
-## Configuration
+## Public Commands
 
-Print the effective configuration:
+The public operator/Hermes CLI is intentionally small:
+
+```text
+cval config
+cval status
+cval nodes
+cval run
+cval jobs
+cval result
+```
+
+Older command names remain available for compatibility, but are hidden from
+`--help` and should not be used in new docs or automation.
+
+## `config`
+
+Print the effective TOML configuration:
 
 ```bash
 python -m cval.cli config
 python -m cval.cli --config /path/to/cval.toml config
 ```
 
-## Read-Only Commands
+## `status`
 
-### `status`
-
-Reads latest validation status from SQLite through the PVC access pod using `mode=ro`.
+Read latest validation status from SQLite through the PVC access pod using
+`mode=ro`:
 
 ```bash
 python -m cval.cli status --output table
@@ -26,55 +41,21 @@ python -m cval.cli status --output json
 python -m cval.cli status --output tsv
 ```
 
-### `discover-free-nodes`
+## `nodes`
 
-Reads pods and nodes, calculates GPU usage, and excludes unschedulable nodes.
+Read pods and nodes, calculate GPU usage, and show schedulable free GPU nodes:
 
 ```bash
-python -m cval.cli discover-free-nodes --output table
+python -m cval.cli nodes --output table
+python -m cval.cli nodes --output json
 ```
 
-### `job-status`
+## `run`
 
-Reads Volcano job phase once.
-
-```bash
-python -m cval.cli job-status --jobs <job-name> --output json
-```
-
-### `monitor-jobs`
-
-Polls job phases until terminal or timeout. It does not delete or cancel jobs.
+Plan a validation batch. This is dry-run by default:
 
 ```bash
-python -m cval.cli monitor-jobs \
-  --jobs <job-name> \
-  --timeout-seconds 1200 \
-  --poll-interval-seconds 30 \
-  --output json
-```
-
-## Dry-Run Commands
-
-### `plan`
-
-Builds a dry-run workflow plan.
-
-```bash
-python -m cval.cli plan \
-  --live-status \
-  --threshold-days 4 \
-  --batch-size 3 \
-  --git-ref <branch-tag-or-commit> \
-  --output json
-```
-
-### `submit-plan`
-
-Without `--submit`, this is only a preview.
-
-```bash
-python -m cval.cli submit-plan \
+python -m cval.cli run \
   --live-status \
   --threshold-days 4 \
   --batch-size 1 \
@@ -82,12 +63,10 @@ python -m cval.cli submit-plan \
   --output json
 ```
 
-## Mutating Command
-
 Real submission requires explicit confirmation:
 
 ```bash
-python -m cval.cli submit-plan \
+python -m cval.cli run \
   --free-nodes <node> \
   --live-status \
   --threshold-days 4 \
@@ -104,10 +83,33 @@ Policy gates:
 - planned job count must not exceed max batch size
 - confirmation must match `submit`
 
-## Result Inspection
+## `jobs`
+
+Read Volcano job phase once:
 
 ```bash
-python -m cval.cli result-env --result-json <result.json>
+python -m cval.cli jobs --jobs <job-name> --output json
+```
+
+Watch until terminal or timeout:
+
+```bash
+python -m cval.cli jobs \
+  --jobs <job-name> \
+  --watch \
+  --timeout-seconds 1200 \
+  --poll-interval-seconds 30 \
+  --output json
+```
+
+`jobs --watch` is read-only; it does not delete or cancel timed-out jobs.
+
+## `result`
+
+Inspect structured result JSON in env-line form:
+
+```bash
+python -m cval.cli result --result-json <result.json>
 ```
 
 Expected output:
@@ -119,14 +121,28 @@ GCRRESULT3=pass
 overall_result=pass
 ```
 
-## In-Pod DB Ingestion Commands
-
-These commands are called by `validation-tests/db-update.sh` inside validation
-pods. They are package-native replacements for the removed legacy
-`utils/functions.py` DB write commands.
+Or emit JSON:
 
 ```bash
-python -m cval.cli db-add-result <node> <test> <pass|fail|incomplete> <timestamp> --db-path <validation.db>
-python -m cval.cli db-add-storage-result <node> <timestamp> <storage-result-dir> --db-path <test-storage.db>
-python -m cval.cli db-add-nccl-result <node> <timestamp> <busbw> <latency> --db-path <test-nccl.db>
+python -m cval.cli result --result-json <result.json> --output json
+```
+
+## Internal Compatibility Commands
+
+These names are hidden from `--help` but still parse for existing scripts and
+old notes:
+
+```text
+discover-free-nodes
+plan
+submit-plan
+job-status
+monitor-jobs
+result-env
+prioritize
+render-job
+run-batch
+db-add-result
+db-add-storage-result
+db-add-nccl-result
 ```

@@ -15,6 +15,20 @@ from cval.models import LatestStatusRow
 
 
 class CliTests(unittest.TestCase):
+    def test_help_lists_only_preferred_commands(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exc:
+                main(["--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        help_text = output.getvalue()
+        self.assertIn("{config,status,nodes,run,jobs,result}", help_text)
+        self.assertNotIn("submit-plan", help_text)
+        self.assertNotIn("run-batch", help_text)
+        self.assertNotIn("db-add-result", help_text)
+
     def test_prioritize_json_command(self) -> None:
         output = io.StringIO()
 
@@ -39,7 +53,31 @@ class CliTests(unittest.TestCase):
         )
         self.assertTrue(all(candidate["reason"] == "never-tested" for candidate in queue))
 
-    def test_run_batch_is_dry_run(self) -> None:
+    def test_run_command_defaults_to_dry_run(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "run",
+                    "--free-nodes",
+                    "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
+                    "--batch-size",
+                    "1",
+                    "--timestamp",
+                    "12345",
+                    "--output",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["submitted_count"], 0)
+        self.assertEqual(result["jobs"][0]["job_name"], "hari-gcr-cval-slc01-cl02-hgx-0001-12345")
+
+    def test_legacy_run_batch_command_still_works(self) -> None:
         output = io.StringIO()
 
         with redirect_stdout(output):
@@ -47,7 +85,7 @@ class CliTests(unittest.TestCase):
                 [
                     "run-batch",
                     "--nodes",
-                    "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
+                    "slc01-cl02-hgx-0001",
                     "--batch-size",
                     "1",
                     "--timestamp",
@@ -57,7 +95,6 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Dry run: 1 job(s) would be submitted", output.getvalue())
-        self.assertIn("hari-gcr-cval-slc01-cl02-hgx-0001-12345", output.getvalue())
 
     def test_config_command_prints_effective_config(self) -> None:
         output = io.StringIO()
@@ -90,17 +127,20 @@ job_prefix = "custom-cval"
                     [
                         "--config",
                         str(config_path),
-                        "run-batch",
-                        "--nodes",
+                        "run",
+                        "--free-nodes",
                         "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
                         "--timestamp",
                         "12345",
+                        "--output",
+                        "json",
                     ]
                 )
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("Dry run: 1 job(s) would be submitted", output.getvalue())
-        self.assertIn("custom-cval-slc01-cl02-hgx-0001-12345", output.getvalue())
+        result = json.loads(output.getvalue())
+        self.assertEqual(len(result["jobs"]), 1)
+        self.assertEqual(result["jobs"][0]["job_name"], "custom-cval-slc01-cl02-hgx-0001-12345")
 
     def test_plan_command_uses_provided_free_nodes(self) -> None:
         output = io.StringIO()
@@ -162,7 +202,7 @@ job_prefix = "custom-cval"
         with redirect_stdout(output):
             exit_code = main(
                 [
-                    "submit-plan",
+                    "run",
                     "--free-nodes",
                     "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
                     "--batch-size",
@@ -186,7 +226,7 @@ job_prefix = "custom-cval"
         with redirect_stderr(stderr):
             exit_code = main(
                 [
-                    "submit-plan",
+                    "run",
                     "--free-nodes",
                     "slc01-cl02-hgx-0001",
                     "--submit",
@@ -196,7 +236,7 @@ job_prefix = "custom-cval"
         self.assertEqual(exit_code, 2)
         self.assertIn("Policy violation", stderr.getvalue())
 
-    def test_result_env_command_prints_status_assignments(self) -> None:
+    def test_result_command_prints_status_assignments(self) -> None:
         payload = {
             "schema_version": "cval.results.v1",
             "node": "slc01-cl02-hgx-0001",
@@ -214,7 +254,7 @@ job_prefix = "custom-cval"
             result_path = Path(tmpdir) / "result.json"
             result_path.write_text(json.dumps(payload), encoding="utf-8")
             with redirect_stdout(output):
-                exit_code = main(["result-env", "--result-json", str(result_path)])
+                exit_code = main(["result", "--result-json", str(result_path)])
 
         self.assertEqual(exit_code, 0)
         self.assertIn("GCRRESULT1=pass", output.getvalue())

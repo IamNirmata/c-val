@@ -8,9 +8,8 @@ and scripts.
 
 Use this progression:
 
-1. Read state with `status`, `discover-free-nodes`, `job-status`, and
-   `monitor-jobs`.
-2. Build plans with `plan` or `submit-plan` in dry-run mode.
+1. Read state with `status`, `nodes`, and `jobs`.
+2. Build plans with `run` in dry-run mode.
 3. Review the target namespace, nodes, batch size, and `CVAL_GIT_REF`.
 4. Submit only with explicit operator approval using `--submit --confirm submit`.
 5. Summarize structured result JSON and DB rows after jobs finish.
@@ -19,10 +18,10 @@ Use this progression:
 
 ```bash
 python -m cval.cli status --output json
-python -m cval.cli discover-free-nodes --output json
-python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 1 --output json
-python -m cval.cli monitor-jobs --jobs <job-name> --output json
-python -m cval.cli result-env --result-json <result-json>
+python -m cval.cli nodes --output json
+python -m cval.cli run --live-status --threshold-days 4 --batch-size 1 --output json
+python -m cval.cli jobs --jobs <job-name> --output json
+python -m cval.cli result --result-json <result-json>
 ```
 
 ## Guardrails

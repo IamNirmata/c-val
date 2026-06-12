@@ -38,5 +38,5 @@ Valid statuses:
 The aggregate `overall` is `pass` only when all tests pass. Use this helper to inspect result JSON:
 
 ```bash
-python -m cval.cli result-env --result-json <result.json>
+python -m cval.cli result --result-json <result.json>
 ```

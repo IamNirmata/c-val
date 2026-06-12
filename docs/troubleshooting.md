@@ -5,7 +5,7 @@
 Check phase and events:
 
 ```bash
-python -m cval.cli job-status --jobs <job-name> --output json
+python -m cval.cli jobs --jobs <job-name> --output json
 kubectl describe vcjob -n gcr-admin <job-name>
 kubectl describe pod -n gcr-admin <job-name>-server-0
 ```
@@ -63,7 +63,7 @@ Important fields:
 Check result JSON first:
 
 ```bash
-python -m cval.cli result-env --result-json <result-json>
+python -m cval.cli result --result-json <result-json>
 ```
 
 Then check latest status:

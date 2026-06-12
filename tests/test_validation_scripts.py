@@ -37,7 +37,7 @@ class ValidationScriptTests(unittest.TestCase):
         script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(encoding="utf-8")
 
         self.assertIn('Loading structured test result state from $CVAL_RESULT_JSON_FILE', script)
-        self.assertIn('python3 -m cval.cli result-env', script)
+        self.assertIn('python3 -m cval.cli result', script)
         self.assertIn('PYTHONPATH="$CVAL_REPO_DIR"', script)
         self.assertIn('source "$CVAL_RESULT_ENV_FILE"', script)
         self.assertIn('--db-path "$CVAL_VALIDATION_DB_PATH"', script)

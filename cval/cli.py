@@ -76,20 +76,33 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         type=Path,
         help="Path to c-val TOML config; defaults to config/cval.toml or CVAL_CONFIG",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{config,status,nodes,run,jobs,result}",
+    )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
     show_config.add_argument("--output", choices=["json"], default="json")
     show_config.set_defaults(handler=handle_config)
 
-    discover = subparsers.add_parser("discover-free-nodes", help="List GPU nodes and free capacity")
+    nodes = subparsers.add_parser("nodes", help="List schedulable GPU nodes and free capacity")
+    nodes.add_argument(
+        "--node-filter",
+        default=active_config.cluster.node_filter,
+        help="Substring filter for GPU nodes",
+    )
+    nodes.add_argument("--output", choices=["table", "json"], default="table")
+    nodes.set_defaults(handler=handle_nodes)
+
+    discover = subparsers.add_parser("discover-free-nodes", help=argparse.SUPPRESS)
     discover.add_argument(
         "--node-filter",
         default=active_config.cluster.node_filter,
         help="Substring filter for GPU nodes",
     )
     discover.add_argument("--output", choices=["table", "json"], default="table")
-    discover.set_defaults(handler=handle_discover_free_nodes)
+    discover.set_defaults(handler=handle_nodes)
 
     status = subparsers.add_parser(
         "status",
@@ -101,7 +114,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
 
-    prioritize = subparsers.add_parser("prioritize", help="Build a stale-node priority queue")
+    prioritize = subparsers.add_parser("prioritize", help=argparse.SUPPRESS)
     prioritize.add_argument("--free-nodes", required=True, help="Comma-separated free node names")
     prioritize.add_argument(
         "--db-status-json",
@@ -117,7 +130,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     prioritize.add_argument("--output", choices=["table", "json"], default="table")
     prioritize.set_defaults(handler=handle_prioritize)
 
-    render = subparsers.add_parser("render-job", help="Render one validation job manifest")
+    render = subparsers.add_parser("render-job", help=argparse.SUPPRESS)
     render.add_argument("--node", required=True)
     render.add_argument("--timestamp", type=int)
     render.add_argument("--template", type=Path, default=active_config.job.template_path)
@@ -127,7 +140,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     render.add_argument("--output", type=Path, help="Write rendered YAML to this path")
     render.set_defaults(handler=handle_render_job)
 
-    run_batch = subparsers.add_parser("run-batch", help="Render a dry-run validation batch")
+    run_batch = subparsers.add_parser("run-batch", help=argparse.SUPPRESS)
     run_batch.add_argument("--nodes", required=True, help="Comma-separated target nodes")
     run_batch.add_argument("--batch-size", type=int, default=active_config.scheduling.batch_size)
     run_batch.add_argument("--timestamp", type=int)
@@ -138,7 +151,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     run_batch.add_argument("--output", choices=["table", "json"], default="table")
     run_batch.set_defaults(handler=handle_run_batch)
 
-    plan = subparsers.add_parser("plan", help="Build a dry-run validation workflow plan")
+    plan = subparsers.add_parser("plan", help=argparse.SUPPRESS)
     plan.add_argument(
         "--free-nodes",
         help="Comma-separated free node names; discovers live nodes if omitted",
@@ -177,10 +190,20 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     plan.add_argument("--output", choices=["table", "json"], default="table")
     plan.set_defaults(handler=handle_plan)
 
-    submit_plan = subparsers.add_parser(
-        "submit-plan",
-        help="Dry-run or explicitly submit a planned validation batch",
+    run = subparsers.add_parser(
+        "run",
+        help="Plan a validation batch and optionally submit it",
     )
+    _add_plan_inputs(run, active_config)
+    run.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    run.add_argument("--allowed-namespace", action="append")
+    run.add_argument("--max-batch-size", type=int, default=active_config.policy.max_batch_size)
+    run.add_argument("--submit", action="store_true")
+    run.add_argument("--confirm")
+    run.add_argument("--output", choices=["table", "json"], default="table")
+    run.set_defaults(handler=handle_run)
+
+    submit_plan = subparsers.add_parser("submit-plan", help=argparse.SUPPRESS)
     _add_plan_inputs(submit_plan, active_config)
     submit_plan.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     submit_plan.add_argument("--allowed-namespace", action="append")
@@ -188,18 +211,32 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     submit_plan.add_argument("--submit", action="store_true")
     submit_plan.add_argument("--confirm")
     submit_plan.add_argument("--output", choices=["table", "json"], default="table")
-    submit_plan.set_defaults(handler=handle_submit_plan)
+    submit_plan.set_defaults(handler=handle_run)
 
-    job_status = subparsers.add_parser("job-status", help="Read Volcano job phases")
+    jobs = subparsers.add_parser("jobs", help="Read or watch Volcano job phases")
+    jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
+    jobs.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    jobs.add_argument("--watch", action="store_true", help="Poll until terminal or timeout")
+    jobs.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=active_config.monitoring.timeout_seconds,
+    )
+    jobs.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=active_config.monitoring.poll_interval_seconds,
+    )
+    jobs.add_argument("--output", choices=["table", "json"], default="table")
+    jobs.set_defaults(handler=handle_jobs)
+
+    job_status = subparsers.add_parser("job-status", help=argparse.SUPPRESS)
     job_status.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
     job_status.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     job_status.add_argument("--output", choices=["table", "json"], default="table")
-    job_status.set_defaults(handler=handle_job_status)
+    job_status.set_defaults(handler=handle_jobs, watch=False)
 
-    monitor_jobs = subparsers.add_parser(
-        "monitor-jobs",
-        help="Poll Volcano job phases until terminal or timeout",
-    )
+    monitor_jobs = subparsers.add_parser("monitor-jobs", help=argparse.SUPPRESS)
     monitor_jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
     monitor_jobs.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     monitor_jobs.add_argument(
@@ -213,18 +250,23 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         default=active_config.monitoring.poll_interval_seconds,
     )
     monitor_jobs.add_argument("--output", choices=["table", "json"], default="table")
-    monitor_jobs.set_defaults(handler=handle_monitor_jobs)
+    monitor_jobs.set_defaults(handler=handle_jobs, watch=True)
+
+    result = subparsers.add_parser("result", help="Inspect a structured validation result")
+    result.add_argument("--result-json", type=Path, required=True)
+    result.add_argument("--output", choices=["env", "json"], default="env")
+    result.set_defaults(handler=handle_result)
 
     result_env = subparsers.add_parser(
         "result-env",
-        help="Print env-style statuses from a c-val structured result JSON file",
+        help=argparse.SUPPRESS,
     )
     result_env.add_argument("--result-json", type=Path, required=True)
-    result_env.set_defaults(handler=handle_result_env)
+    result_env.set_defaults(handler=handle_result, output="env")
 
     db_add_result = subparsers.add_parser(
         "db-add-result",
-        help="Append one validation result row to SQLite",
+        help=argparse.SUPPRESS,
     )
     db_add_result.add_argument("node")
     db_add_result.add_argument("test")
@@ -235,7 +277,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     db_add_storage = subparsers.add_parser(
         "db-add-storage-result",
-        help="Parse fio artifacts and upsert one storage metrics row",
+        help=argparse.SUPPRESS,
     )
     db_add_storage.add_argument("node")
     db_add_storage.add_argument("timestamp")
@@ -245,7 +287,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     db_add_nccl = subparsers.add_parser(
         "db-add-nccl-result",
-        help="Upsert one NCCL metrics row",
+        help=argparse.SUPPRESS,
     )
     db_add_nccl.add_argument("node")
     db_add_nccl.add_argument("timestamp")
@@ -254,10 +296,35 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
 
+    _hide_subcommands(
+        subparsers,
+        {
+            "discover-free-nodes",
+            "prioritize",
+            "render-job",
+            "run-batch",
+            "plan",
+            "submit-plan",
+            "job-status",
+            "monitor-jobs",
+            "result-env",
+            "db-add-result",
+            "db-add-storage-result",
+            "db-add-nccl-result",
+        },
+    )
     return parser
 
 
-def handle_discover_free_nodes(args: argparse.Namespace) -> int:
+def _hide_subcommands(subparsers: argparse._SubParsersAction, names: set[str]) -> None:
+    """Hide compatibility/internal commands from help without disabling them."""
+
+    subparsers._choices_actions = [
+        action for action in subparsers._choices_actions if action.dest not in names
+    ]
+
+
+def handle_nodes(args: argparse.Namespace) -> int:
     """Run read-only GPU node discovery and print table or JSON output."""
 
     nodes, totals = discover_free_nodes(node_name_filter=args.node_filter)
@@ -285,6 +352,12 @@ def handle_discover_free_nodes(args: argparse.Namespace) -> int:
     )
     print(f"Fully free nodes: {len(fully_free_node_names(nodes))}")
     return 0
+
+
+def handle_discover_free_nodes(args: argparse.Namespace) -> int:
+    """Compatibility wrapper for the old `discover-free-nodes` command."""
+
+    return handle_nodes(args)
 
 
 def handle_config(args: argparse.Namespace) -> int:
@@ -408,7 +481,7 @@ def handle_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_submit_plan(args: argparse.Namespace) -> int:
+def handle_run(args: argparse.Namespace) -> int:
     """Dry-run or explicitly submit a planned validation batch."""
 
     plan = _build_plan_from_args(args)
@@ -438,8 +511,33 @@ def handle_submit_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_job_status(args: argparse.Namespace) -> int:
-    """Read Volcano job phases once."""
+def handle_submit_plan(args: argparse.Namespace) -> int:
+    """Compatibility wrapper for the old `submit-plan` command."""
+
+    return handle_run(args)
+
+
+def handle_jobs(args: argparse.Namespace) -> int:
+    """Read Volcano job phases once, or watch until terminal/timeout."""
+
+    if args.watch:
+        jobs = monitor_jobs_until_terminal(
+            _parse_csv(args.jobs),
+            namespace=args.namespace,
+            timeout_seconds=args.timeout_seconds,
+            poll_interval_seconds=args.poll_interval_seconds,
+        )
+        if args.output == "json":
+            print(json.dumps(monitored_jobs_to_dict(jobs), indent=2))
+            return 0
+
+        print(f"{'JOB':<64} {'PHASE':<12} TERMINAL TIMED_OUT ELAPSED")
+        for job in jobs:
+            print(
+                f"{job.job_name:<64} {job.phase:<12} "
+                f"{str(job.terminal):<8} {str(job.timed_out):<9} {job.elapsed_seconds:.1f}s"
+            )
+        return 0
 
     phases = get_job_phases(_parse_csv(args.jobs), namespace=args.namespace)
     if args.output == "json":
@@ -452,35 +550,38 @@ def handle_job_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_monitor_jobs(args: argparse.Namespace) -> int:
-    """Poll Volcano job phases until terminal or timeout."""
+def handle_job_status(args: argparse.Namespace) -> int:
+    """Compatibility wrapper for the old `job-status` command."""
 
-    jobs = monitor_jobs_until_terminal(
-        _parse_csv(args.jobs),
-        namespace=args.namespace,
-        timeout_seconds=args.timeout_seconds,
-        poll_interval_seconds=args.poll_interval_seconds,
-    )
+    args.watch = False
+    return handle_jobs(args)
+
+
+def handle_monitor_jobs(args: argparse.Namespace) -> int:
+    """Compatibility wrapper for the old `monitor-jobs` command."""
+
+    args.watch = True
+    return handle_jobs(args)
+
+
+def handle_result(args: argparse.Namespace) -> int:
+    """Inspect a structured validation result JSON file."""
+
+    result = load_validation_result(args.result_json)
     if args.output == "json":
-        print(json.dumps(monitored_jobs_to_dict(jobs), indent=2))
+        print(json.dumps(asdict(result), indent=2))
         return 0
 
-    print(f"{'JOB':<64} {'PHASE':<12} TERMINAL TIMED_OUT ELAPSED")
-    for job in jobs:
-        print(
-            f"{job.job_name:<64} {job.phase:<12} "
-            f"{str(job.terminal):<8} {str(job.timed_out):<9} {job.elapsed_seconds:.1f}s"
-        )
+    for line in validation_result_to_env_lines(result):
+        print(line)
     return 0
 
 
 def handle_result_env(args: argparse.Namespace) -> int:
-    """Print legacy env-style status variables from structured result JSON."""
+    """Compatibility wrapper for the old `result-env` command."""
 
-    result = load_validation_result(args.result_json)
-    for line in validation_result_to_env_lines(result):
-        print(line)
-    return 0
+    args.output = "env"
+    return handle_result(args)
 
 
 def handle_db_add_result(args: argparse.Namespace) -> int:

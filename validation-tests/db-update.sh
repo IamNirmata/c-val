@@ -31,7 +31,7 @@ if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
             GCRRESULT3) GCRRESULT3="$value" ;;
             overall_result) overall_result="$value" ;;
         esac
-    done < <(PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli result-env --result-json "$CVAL_RESULT_JSON_FILE"
+    done < <(PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli result --result-json "$CVAL_RESULT_JSON_FILE"
     )
 elif [ -n "${CVAL_RESULT_ENV_FILE:-}" ] && [ -f "$CVAL_RESULT_ENV_FILE" ]; then
     # Legacy fallback: only use this when the v1 JSON artifact is missing.

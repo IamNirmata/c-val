@@ -31,14 +31,14 @@ Use the CLI module directly from the repo checkout:
 ```bash
 python -m cval.cli --help
 python -m cval.cli config
-python -m cval.cli discover-free-nodes --output table
+python -m cval.cli nodes --output table
 python -m cval.cli status --output table
 ```
 
 Build a dry-run plan:
 
 ```bash
-python -m cval.cli submit-plan \
+python -m cval.cli run \
   --live-status \
   --threshold-days 4 \
   --batch-size 1 \
@@ -49,7 +49,7 @@ python -m cval.cli submit-plan \
 Real submission is explicit and policy-gated:
 
 ```bash
-python -m cval.cli submit-plan \
+python -m cval.cli run \
   --live-status \
   --threshold-days 4 \
   --batch-size 1 \

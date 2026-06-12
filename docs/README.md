@@ -31,7 +31,7 @@ The new c-val control plane follows a dry-run-first loop:
 flowchart LR
     Status[Read latest validation status] --> Discover[Discover schedulable free GPU nodes]
     Discover --> Plan[Build dry-run workflow plan]
-    Plan --> Preview[Preview submit-plan]
+    Plan --> Preview[Preview run]
     Preview --> Approval{Operator approval?}
     Approval -- No --> Stop[Stop, no cluster mutation]
     Approval -- Yes --> Submit[Submit one small batch]

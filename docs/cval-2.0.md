@@ -21,11 +21,22 @@ Validation job scripts now persist per-test results through `CVAL_RESULT_JSON_FI
 
 ## Commands
 
-Read-only discovery:
+Public operator commands are intentionally lean:
+
+```text
+cval config
+cval status
+cval nodes
+cval run
+cval jobs
+cval result
+```
+
+Read-only node discovery:
 
 ```bash
-cval discover-free-nodes --output table
-cval discover-free-nodes --output json
+cval nodes --output table
+cval nodes --output json
 ```
 
 Read latest validation status without creating or mutating DB tables:
@@ -36,49 +47,11 @@ cval status --output json
 cval status --output tsv
 ```
 
-Priority queue from known free nodes and optional DB status JSON:
+Build a dry-run workflow plan from known free nodes:
 
 ```bash
-cval prioritize \
+cval run \
   --free-nodes slc01-cl02-hgx-0001,slc01-cl02-hgx-0002 \
-  --db-status-json latest-status.json \
-  --threshold-days 4
-```
-
-The same command can consume the tab-separated output shape produced by the existing DB status path:
-
-```bash
-cval prioritize \
-  --free-nodes slc01-cl02-hgx-0001,slc01-cl02-hgx-0002 \
-  --db-status-tsv latest-status.tsv \
-  --threshold-days 4
-```
-
-Render one job manifest without submitting it:
-
-```bash
-cval render-job \
-  --node slc01-cl02-hgx-0001 \
-  --timestamp 12345 \
-  --template ymls/specific-node-job.yml \
-  --git-ref main
-```
-
-Render a dry-run batch without submitting any Kubernetes jobs:
-
-```bash
-cval run-batch \
-  --nodes slc01-cl02-hgx-0001,slc01-cl02-hgx-0002 \
-  --batch-size 2 \
-  --timestamp 12345
-```
-
-Build a full dry-run workflow plan from known free nodes:
-
-```bash
-cval plan \
-  --free-nodes slc01-cl02-hgx-0001,slc01-cl02-hgx-0002 \
-  --db-status-tsv latest-status.tsv \
   --threshold-days 4 \
   --batch-size 2 \
   --timestamp 12345 \
@@ -88,25 +61,19 @@ cval plan \
 Or read validation history directly from the PVC access pod in read-only mode:
 
 ```bash
-cval plan \
+cval run \
   --live-status \
   --threshold-days 4 \
   --batch-size 3 \
   --output json
 ```
 
-To use an explicit TSV file, create it first:
+If `--free-nodes` is omitted, `cval run` performs read-only live discovery and plans against fully free nodes.
+
+Dry-run is the default. This does not submit Kubernetes resources:
 
 ```bash
-cval status --output tsv > latest-status.tsv
-```
-
-If `--free-nodes` is omitted, `cval plan` performs read-only live discovery and plans against fully free nodes.
-
-Dry-run a submit plan. This does not submit Kubernetes resources:
-
-```bash
-cval submit-plan \
+cval run \
   --live-status \
   --threshold-days 4 \
   --batch-size 3 \
@@ -117,7 +84,7 @@ cval submit-plan \
 Real submission is policy-gated and requires an explicit confirmation phrase:
 
 ```bash
-cval submit-plan \
+cval run \
   --live-status \
   --threshold-days 4 \
   --batch-size 3 \
@@ -129,14 +96,15 @@ cval submit-plan \
 Read Volcano job phases without mutating resources:
 
 ```bash
-cval job-status --jobs hari-gcr-ceval-slc01-cl02-hgx-0064-12345
+cval jobs --jobs hari-gcr-cval-slc01-cl02-hgx-0064-12345
 ```
 
 Poll Volcano job phases until terminal or timeout without deleting or cancelling jobs:
 
 ```bash
-cval monitor-jobs \
-  --jobs hari-gcr-ceval-slc01-cl02-hgx-0064-12345 \
+cval jobs \
+  --jobs hari-gcr-cval-slc01-cl02-hgx-0064-12345 \
+  --watch \
   --timeout-seconds 180 \
   --poll-interval-seconds 30 \
   --output json
@@ -145,7 +113,7 @@ cval monitor-jobs \
 Inspect a structured validation result in shell-friendly form:
 
 ```bash
-cval result-env --result-json /data/continuous_validation/results/<node>/cval-results-<node>-<timestamp>.json
+cval result --result-json /data/continuous_validation/results/<node>/cval-results-<node>-<timestamp>.json
 ```
 
 In-pod DB ingestion commands used by `validation-tests/db-update.sh`:
@@ -156,9 +124,11 @@ cval db-add-storage-result <node> <timestamp> <storage-result-dir> --db-path <te
 cval db-add-nccl-result <node> <timestamp> <busbw> <latency> --db-path <test-nccl.db>
 ```
 
+The DB ingestion commands remain hidden compatibility commands for in-pod scripts.
+
 ## Safety Boundary
 
-The new CLI slice does not delete Kubernetes resources. `discover-free-nodes`, `job-status`, and `monitor-jobs` perform read-only `kubectl get` calls. `status` performs a read-only SQLite query through the PVC access pod using `mode=ro`. `render-job`, `prioritize`, `run-batch`, and `plan --free-nodes ...` operate locally unless `--live-status` is passed. `plan` also talks to Kubernetes when `--free-nodes` is omitted for live discovery. `submit-plan` is dry-run by default; real submission requires `--submit --confirm submit` and namespace/batch policy checks.
+The new CLI slice does not delete Kubernetes resources. `nodes` and `jobs` perform read-only `kubectl get` calls. `status` performs a read-only SQLite query through the PVC access pod using `mode=ro`. `run --free-nodes ...` operates locally unless `--live-status` is passed. `run` also talks to Kubernetes when `--free-nodes` is omitted for live discovery. `run` is dry-run by default; real submission requires `--submit --confirm submit` and namespace/batch policy checks.
 
 Submit/cleanup commands should be added only after policy gates exist for namespace allowlists, max batch size, node allow/deny lists, and explicit `--submit --confirm` operation mode.
 

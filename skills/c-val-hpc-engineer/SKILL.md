@@ -18,15 +18,14 @@ Start with read-only commands:
 
 ```bash
 python -m cval.cli status --output table
-python -m cval.cli discover-free-nodes --output table
-python -m cval.cli plan --live-status --threshold-days 4 --batch-size 3 --output json
-python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 3 --output json
+python -m cval.cli nodes --output table
+python -m cval.cli run --live-status --threshold-days 4 --batch-size 3 --output json
 ```
 
 Do not run real submission unless the operator explicitly approves it. Real submission requires:
 
 ```bash
-python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 1 --submit --confirm submit
+python -m cval.cli run --live-status --threshold-days 4 --batch-size 1 --submit --confirm submit
 ```
 
 Never run destructive cluster commands without explicit approval. This includes `kubectl delete`, `kubectl drain`, `kubectl cordon`, `kubectl taint`, `kubectl patch node`, `kubectl scale`, PVC/log/database deletion, driver restarts, kubelet/containerd restarts, and cluster-wide RBAC changes.
@@ -37,7 +36,7 @@ Run these from the c-val repo root:
 
 ```bash
 python -m cval.cli status --output table
-python -m cval.cli discover-free-nodes --output table
+python -m cval.cli nodes --output table
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
@@ -54,19 +53,19 @@ If `kubectl` authentication fails, stop and ask the operator to refresh credenti
 2. Discover fully free GPU nodes:
 
    ```bash
-   python -m cval.cli discover-free-nodes --output table
+   python -m cval.cli nodes --output table
    ```
 
 3. Build a dry-run plan:
 
    ```bash
-   python -m cval.cli plan --live-status --threshold-days 4 --batch-size 3 --output json
+   python -m cval.cli run --live-status --threshold-days 4 --batch-size 3 --output json
    ```
 
 4. Preview submit actions without creating Kubernetes resources:
 
    ```bash
-   python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 3 --output json
+   python -m cval.cli run --live-status --threshold-days 4 --batch-size 3 --output json
    ```
 
 ## Batch Execution Workflow
@@ -78,24 +77,24 @@ Use only after explicit operator approval.
 3. Submit with the confirmation phrase:
 
    ```bash
-   python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 1 --submit --confirm submit
+   python -m cval.cli run --live-status --threshold-days 4 --batch-size 1 --submit --confirm submit
    ```
 
 4. Monitor job phases with read-only polling:
 
    ```bash
-   python -m cval.cli monitor-jobs --jobs <job-name> --timeout-seconds 180 --poll-interval-seconds 30 --output json
+   python -m cval.cli jobs --jobs <job-name> --watch --timeout-seconds 180 --poll-interval-seconds 30 --output json
    ```
 
 ## Log Collection Workflow
 
 - Prefer c-val result artifacts under `/data/continuous_validation/results/<node>/`.
-- Use `python -m cval.cli result-env --result-json <result.json>` to inspect structured result status.
+- Use `python -m cval.cli result --result-json <result.json>` to inspect structured result status.
 - Use the test-specific artifact paths from result JSON for logs and summaries.
 
 ## Failure Triage Workflow
 
-1. Check job phase with `job-status` or `monitor-jobs`.
+1. Check job phase with `jobs` or `jobs --watch`.
 2. If the job completed, inspect structured result JSON first.
 3. If a test failed, inspect that test's log and summary path from JSON.
 4. Do not assume Kubernetes `Ready` means workload health is good.
@@ -121,6 +120,6 @@ python -m compileall -q cval tests
 
 - The repository is named `c-val`, but the importable package is `cval`; do not treat this as a duplicate checkout.
 - Runtime jobs still clone c-val from GitHub; pinning image/code version remains future work.
-- `submit-plan` dry-run does not submit resources. Real submission requires both `--submit` and `--confirm submit`.
-- `monitor-jobs` is read-only and does not cancel timed-out jobs.
+- `run` dry-run does not submit resources. Real submission requires both `--submit` and `--confirm submit`.
+- `jobs --watch` is read-only and does not cancel timed-out jobs.
 - Result JSON uses schema `cval.results.v1`; keep `CVAL_RESULT_ENV_FILE` fallback until all in-pod code uses JSON directly.

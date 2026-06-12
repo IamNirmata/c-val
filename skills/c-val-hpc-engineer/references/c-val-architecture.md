@@ -16,10 +16,10 @@
 ## Flow
 
 1. `status` reads latest validation history.
-2. `discover-free-nodes` reads live GPU availability.
-3. `plan` builds the priority queue and renders planned jobs.
-4. `submit-plan` previews or explicitly submits the plan.
-5. `monitor-jobs` reads phases until terminal or timeout.
+2. `nodes` reads live GPU availability.
+3. `run` builds the priority queue and renders planned jobs.
+4. `run --submit --confirm submit` explicitly submits the plan.
+5. `jobs --watch` reads phases until terminal or timeout.
 6. In-pod scripts write structured JSON result artifacts.
 7. `db-update.sh` ingests per-test results and metrics.
 

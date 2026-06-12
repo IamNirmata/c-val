@@ -2,7 +2,7 @@
 
 ## Dry-Run First
 
-c-val operates GPU clusters. The safest default is to render intent without creating resources. `submit-plan` therefore defaults to dry-run and reports `submitted=false` until `--submit --confirm submit` is provided.
+c-val operates GPU clusters. The safest default is to render intent without creating resources. `run` therefore defaults to dry-run and reports `submitted=false` until `--submit --confirm submit` is provided.
 
 ## Keep Deterministic Validation in Jobs
 
@@ -34,4 +34,4 @@ Validation jobs accept `CVAL_GIT_REF` so operators can pin a commit or tag. This
 
 ## No Automatic Deletion
 
-`monitor-jobs` reports timeout but does not delete or cancel jobs. Cleanup needs explicit operator approval.
+`jobs --watch` reports timeout but does not delete or cancel jobs. Cleanup needs explicit operator approval.

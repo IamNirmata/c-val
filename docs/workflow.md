@@ -14,20 +14,20 @@ sequenceDiagram
     User->>CLI: cval status --output table
     CLI->>DB: read latest_status in mode=ro
     DB-->>CLI: latest node/test rows
-    User->>CLI: cval discover-free-nodes
+    User->>CLI: cval nodes
     CLI->>K8s: kubectl get pods/nodes
     K8s-->>CLI: pod usage + node resources
-    User->>CLI: cval plan --live-status
+    User->>CLI: cval run --live-status
     CLI->>CLI: prioritize stale/never-tested nodes
     CLI->>CLI: render job specs
-    User->>CLI: cval submit-plan dry-run
+    User->>CLI: cval run dry-run
     CLI-->>User: submitted=false preview
-    User->>CLI: cval submit-plan --submit --confirm submit
+    User->>CLI: cval run --submit --confirm submit
     CLI->>K8s: kubectl create -f -
     K8s->>Pod: schedule Volcano job
     Pod->>PVC: write logs, summaries, result JSON
     Pod->>DB: write per-test + aggregate rows
-    User->>CLI: cval monitor-jobs
+    User->>CLI: cval jobs --watch
     CLI->>K8s: read job phase until terminal/timeout
 ```
 
@@ -53,7 +53,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[submit-plan] --> B{--submit?}
+    A[run] --> B{--submit?}
     B -- No --> C[Return dry-run records]
     B -- Yes --> D{--confirm submit?}
     D -- No --> E[Policy violation]

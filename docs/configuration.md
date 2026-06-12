@@ -119,11 +119,12 @@ Show the effective config:
 python -m cval.cli config
 ```
 
-Render a job to confirm template values:
+Dry-run a job to confirm configured defaults:
 
 ```bash
-python -m cval.cli render-job \
-  --node slc01-cl02-hgx-0001 \
+python -m cval.cli run \
+  --free-nodes slc01-cl02-hgx-0001 \
   --timestamp 12345 \
-  --git-ref <commit-or-tag>
+  --git-ref <commit-or-tag> \
+  --output json
 ```

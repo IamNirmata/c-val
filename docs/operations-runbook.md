@@ -4,8 +4,8 @@
 
 ```bash
 python -m cval.cli status --output table
-python -m cval.cli discover-free-nodes --output table
-python -m cval.cli submit-plan --live-status --threshold-days 4 --batch-size 1 --output json
+python -m cval.cli nodes --output table
+python -m cval.cli run --live-status --threshold-days 4 --batch-size 1 --output json
 ```
 
 Confirm the dry-run output before submitting. Look for:
@@ -21,7 +21,7 @@ Confirm the dry-run output before submitting. Look for:
 2. Build a pinned dry-run plan:
 
    ```bash
-   python -m cval.cli submit-plan \
+   python -m cval.cli run \
      --live-status \
      --threshold-days 4 \
      --batch-size 1 \
@@ -33,7 +33,7 @@ Confirm the dry-run output before submitting. Look for:
 4. Submit exactly one job:
 
    ```bash
-   python -m cval.cli submit-plan \
+   python -m cval.cli run \
      --free-nodes <node> \
      --live-status \
      --threshold-days 4 \
@@ -48,8 +48,9 @@ Confirm the dry-run output before submitting. Look for:
 5. Monitor read-only:
 
    ```bash
-   python -m cval.cli monitor-jobs \
+    python -m cval.cli jobs \
      --jobs <job-name> \
+       --watch \
      --timeout-seconds 1200 \
      --poll-interval-seconds 30 \
      --output json
@@ -59,7 +60,7 @@ Confirm the dry-run output before submitting. Look for:
 
    ```bash
    python -m cval.cli status --output json
-   python -m cval.cli result-env --result-json <result-json>
+   python -m cval.cli result --result-json <result-json>
    ```
 
 ## Validated Example
@@ -69,7 +70,7 @@ Pinned run:
 ```text
 commit: c9a762a65bf9ae2989d71a01395d86dbc5c96af5
 node: slc01-cl02-hgx-0204
-job: hari-gcr-ceval-slc01-cl02-hgx-0204-1781134840
+job: hari-gcr-cval-slc01-cl02-hgx-0204-1781134840
 phase: Completed
 result: storage=pass, nccl=pass, dltest=pass, overall=pass
 ```
