@@ -7,9 +7,15 @@ set -euo pipefail
 
 # main db update
 echo "Updating main db with all test results"
-STORAGE_OUTPUT_DIR="/data/continuous_validation/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
+CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
+CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
+CVAL_VALIDATION_DB_PATH=${CVAL_VALIDATION_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/validation.db}
+CVAL_STORAGE_DB_PATH=${CVAL_STORAGE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-storage.db}
+CVAL_NCCL_DB_PATH=${CVAL_NCCL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-nccl.db}
+
+STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME}
 echo "Storage Output dir: $STORAGE_OUTPUT_DIR"
-NCCL_OUTPUT_DIR="/data/continuous_validation/nccl/$GCRNODE/nccl-$GCRNODE-$GCRTIME"
+NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/nccl/$GCRNODE/nccl-$GCRNODE-$GCRTIME}
 echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
 
 GCRRESULT1=${GCRRESULT1:-fail}
@@ -25,7 +31,7 @@ if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
             GCRRESULT3) GCRRESULT3="$value" ;;
             overall_result) overall_result="$value" ;;
         esac
-    done < <(PYTHONPATH=/workspace/c-val python3 -m cval.cli result-env --result-json "$CVAL_RESULT_JSON_FILE"
+    done < <(PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli result-env --result-json "$CVAL_RESULT_JSON_FILE"
     )
 elif [ -n "${CVAL_RESULT_ENV_FILE:-}" ] && [ -f "$CVAL_RESULT_ENV_FILE" ]; then
     # Legacy fallback: only use this when the v1 JSON artifact is missing.
@@ -45,12 +51,12 @@ add_main_result() {
     # Keep the main DB as one row per test plus one aggregate `all` row.
     local test_name="$1"
     local result="$2"
-    PYTHONPATH=/workspace/c-val python3 -m cval.cli db-add-result \
+    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-result \
         "$GCRNODE" \
         "$test_name" \
         "$result" \
         "$GCRTIME" \
-        --db-path /data/continuous_validation/metadata/validation.db
+        --db-path "$CVAL_VALIDATION_DB_PATH"
 }
 
 #main DB update
@@ -65,11 +71,11 @@ echo "Main DB update completed."
 # Storage metrics are valid only when the storage phase itself passed.
 if [ "$GCRRESULT1" = "pass" ]; then
     echo "Updating storage db with test results"
-    PYTHONPATH=/workspace/c-val python3 -m cval.cli db-add-storage-result \
+    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-storage-result \
         "$GCRNODE" \
         "$GCRTIME" \
         "$STORAGE_OUTPUT_DIR" \
-        --db-path /data/continuous_validation/metadata/test-storage.db
+        --db-path "$CVAL_STORAGE_DB_PATH"
     echo "Storage DB update completed."
 else
     echo "Skipping storage metrics DB update because storage result is $GCRRESULT1."
@@ -79,7 +85,7 @@ fi
 # NCCL metric ingestion depends on the all-reduce summary JSON.
 
 echo "Updating nccl db with test results"
-NCCL_LOG_FILE="$NCCL_OUTPUT_DIR/nccl-$GCRNODE-$GCRTIME.log"
+NCCL_LOG_FILE=${NCCL_LOG_FILE:-$NCCL_OUTPUT_DIR/nccl-$GCRNODE-$GCRTIME.log}
 echo "NCCL Log file: $NCCL_LOG_FILE"
 
 
@@ -95,12 +101,12 @@ if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
     echo "GCR_LATENCY: $GCR_LATENCY"
     echo "--------------------------------"
 
-    PYTHONPATH=/workspace/c-val python3 -m cval.cli db-add-nccl-result \
+    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-nccl-result \
         "$GCRNODE" \
         "$GCRTIME" \
         "$GCR_BUSBW" \
         "$GCR_LATENCY" \
-        --db-path /data/continuous_validation/metadata/test-nccl.db
+        --db-path "$CVAL_NCCL_DB_PATH"
 
     echo "NCCl DB update completed."
 else

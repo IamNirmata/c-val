@@ -64,6 +64,7 @@ def build_workflow_plan(
                 git_repo=resolved_git_repo,
                 git_ref=resolved_git_ref,
                 job_template_config=active_config.job_template,
+                cval_config=active_config,
             ),
         )
         for candidate in queue[:resolved_batch_size]

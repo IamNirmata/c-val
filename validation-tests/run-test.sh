@@ -8,6 +8,11 @@ set -uo pipefail
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
+CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
+CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
+CVAL_GPU_COUNT=${CVAL_GPU_COUNT:-8}
+CVAL_NCCL_ITERATIONS=${CVAL_NCCL_ITERATIONS:-20}
+CVAL_NCCL_DATA_SIZE_GB=${CVAL_NCCL_DATA_SIZE_GB:-8}
 CVAL_RESULT_ENV_FILE=${CVAL_RESULT_ENV_FILE:-"/tmp/cval-results-${GCRNODE:-unknown}-${GCRTIME:-unknown}.env"}
 CVAL_RESULT_JSON_FILE=${CVAL_RESULT_JSON_FILE:-"/tmp/cval-results-${GCRNODE:-unknown}-${GCRTIME:-unknown}.json"}
 
@@ -93,7 +98,7 @@ echo "CVAL_RESULT_JSON_FILE: $CVAL_RESULT_JSON_FILE"
 echo "#########################################################################"
 
 # Phase 1: PVC/NFS storage performance and correctness smoke test.
-if bash /workspace/c-val/validation-tests/storage/storage.sh | tee "$STORAGE_LOG_FILE"; then
+if bash "$CVAL_VALIDATION_TESTS_DIR/storage/storage.sh" | tee "$STORAGE_LOG_FILE"; then
 	echo "Storage test is complete. Log file: $STORAGE_LOG_FILE Summary file: $STORAGE_SUMMARY_FILE"
 	GCRRESULT1=pass
 else
@@ -104,12 +109,12 @@ write_result_state
 
 
 # Phase 2: single-node NCCL all-reduce over the requested GPU set.
-NCCL_SCRIPT="/workspace/c-val/validation-tests/nccl/single-node-allreduce.py"
-NCCL_ARGS="--result-file $NCCL_SUMMARY_FILE"
+NCCL_SCRIPT="$CVAL_VALIDATION_TESTS_DIR/nccl/single-node-allreduce.py"
+NCCL_ARGS="--result-file $NCCL_SUMMARY_FILE --iterations $CVAL_NCCL_ITERATIONS --data-size-gb $CVAL_NCCL_DATA_SIZE_GB"
 
 echo "Running NCCL Test..."
 if NCCL_NET=IB NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_DEBUG=INFO \
-	torchrun --nproc_per_node=8 "$NCCL_SCRIPT" $NCCL_ARGS | tee "$NCCL_LOG_FILE"; then
+	torchrun --nproc_per_node="$CVAL_GPU_COUNT" "$NCCL_SCRIPT" $NCCL_ARGS | tee "$NCCL_LOG_FILE"; then
 	echo "NCCL test is complete. Log file: $NCCL_LOG_FILE Summary file: $NCCL_SUMMARY_FILE"
 	GCRRESULT2=pass
 else
@@ -120,7 +125,7 @@ write_result_state
 
 # Phase 3: deep learning unit test workload and numerical checks.
 echo "Running DL Test..."
-if bash /workspace/c-val/validation-tests/dltest/dltest.sh 8; then
+if bash "$CVAL_VALIDATION_TESTS_DIR/dltest/dltest.sh" "$CVAL_GPU_COUNT"; then
 	GCRRESULT3=pass
 else
 	GCRRESULT3=fail

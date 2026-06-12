@@ -8,6 +8,18 @@ import json
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser()
 parser.add_argument("--result-file", type=str, help="Path to save the metrics JSON file")
+parser.add_argument(
+    "--iterations",
+    type=int,
+    default=int(os.environ.get("CVAL_NCCL_ITERATIONS", "20")),
+    help="Number of all-reduce iterations to average",
+)
+parser.add_argument(
+    "--data-size-gb",
+    type=int,
+    default=int(os.environ.get("CVAL_NCCL_DATA_SIZE_GB", "8")),
+    help="Base Gi elements used for the BF16 all-reduce tensor",
+)
 args = parser.parse_args()
 
 # --- Environment Variable Setup ---
@@ -20,9 +32,8 @@ dist.init_process_group("nccl", init_method="env://", rank=world_rank, world_siz
 torch.cuda.set_device(local_rank)
 
 # --- Configuration ---
-ITERATIONS = 20
 GB_UNIT = 1024 * 1024 * 1024
-data_size_elements = 8 * GB_UNIT 
+data_size_elements = args.data_size_gb * GB_UNIT
 total_size_bytes = data_size_elements * 2 
 
 # Allocate memory
@@ -34,10 +45,10 @@ torch.cuda.synchronize()
 
 # --- Benchmark ---
 pre = time.perf_counter()
-for _ in range(ITERATIONS):
+for _ in range(args.iterations):
     dist.all_reduce(npair_data)
 torch.cuda.synchronize()
-duration = (time.perf_counter() - pre) / ITERATIONS
+duration = (time.perf_counter() - pre) / args.iterations
 
 # --- Bandwidth Calculation ---
 correction_factor = 2 * (world_size - 1) / world_size

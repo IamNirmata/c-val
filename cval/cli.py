@@ -352,6 +352,7 @@ def handle_render_job(args: argparse.Namespace) -> int:
         job_prefix=args.job_prefix,
         git_repo=args.git_repo,
         git_ref=args.git_ref,
+        cval_config=args.cval_config,
     )
     if args.output:
         # Local file output is useful for manual inspection or `kubectl diff` workflows.
@@ -375,6 +376,7 @@ def handle_run_batch(args: argparse.Namespace) -> int:
             job_prefix=args.job_prefix,
             git_repo=args.git_repo,
             git_ref=args.git_ref,
+            cval_config=args.cval_config,
         )
         for node in nodes
     ]

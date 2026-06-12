@@ -11,7 +11,7 @@ import re
 import time
 from pathlib import Path
 
-from cval.config import JobTemplateConfig, load_config
+from cval.config import CvalConfig, JobTemplateConfig, load_config
 from cval.models import RenderedJob
 
 
@@ -41,10 +41,11 @@ def render_validation_job(
     git_repo: str | None = None,
     git_ref: str | None = None,
     job_template_config: JobTemplateConfig | None = None,
+    cval_config: CvalConfig | None = None,
 ) -> RenderedJob:
     """Render one validation job manifest for one target node."""
 
-    config = load_config()
+    config = cval_config or load_config()
     resolved_job_prefix = job_prefix if job_prefix is not None else config.job.job_prefix
     resolved_git_repo = git_repo if git_repo is not None else config.job.git_repo
     resolved_git_ref = git_ref if git_ref is not None else config.job.git_ref
@@ -73,11 +74,18 @@ def render_validation_job(
     yaml_text = yaml_text.replace("git-repo-placeholder", resolved_git_repo)
     yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
     template_replacements = _job_template_replacements(template_config)
+    runtime_replacements = _runtime_replacements(config)
     for placeholder, value in template_replacements.items():
+        yaml_text = yaml_text.replace(placeholder, value)
+    for placeholder, value in runtime_replacements.items():
         yaml_text = yaml_text.replace(placeholder, value)
 
     # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
-    known_placeholders = [*required_placeholders, *template_replacements.keys()]
+    known_placeholders = [
+        *required_placeholders,
+        *template_replacements.keys(),
+        *runtime_replacements.keys(),
+    ]
     remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
@@ -98,6 +106,7 @@ def render_validation_job_from_file(
     git_repo: str | None = None,
     git_ref: str | None = None,
     job_template_config: JobTemplateConfig | None = None,
+    cval_config: CvalConfig | None = None,
 ) -> RenderedJob:
     """Read a template file and render a validation job from it."""
 
@@ -109,6 +118,7 @@ def render_validation_job_from_file(
         git_repo=git_repo,
         git_ref=git_ref,
         job_template_config=job_template_config,
+        cval_config=cval_config,
     )
 
 
@@ -137,4 +147,24 @@ def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
         "rdma-count-placeholder": config.rdma_count,
         "rdma-toleration-key-placeholder": config.rdma_toleration_key,
         "gpu-toleration-key-placeholder": config.gpu_toleration_key,
+    }
+
+
+def _runtime_replacements(config: CvalConfig) -> dict[str, str]:
+    """Return validation-runtime placeholder replacements from config."""
+
+    return {
+        "runtime-repo-dir-placeholder": config.runtime.repo_dir,
+        "runtime-validation-root-placeholder": config.runtime.validation_root,
+        "runtime-validation-tests-dir-placeholder": config.runtime.validation_tests_dir,
+        "runtime-dl-unit-test-dir-placeholder": config.runtime.dl_unit_test_dir,
+        "storage-validation-db-path-placeholder": config.storage.validation_db_path,
+        "storage-storage-db-path-placeholder": config.storage.storage_db_path,
+        "storage-nccl-db-path-placeholder": config.storage.nccl_db_path,
+        "validation-gpu-count-placeholder": str(config.validation.gpu_count),
+        "validation-nccl-iterations-placeholder": str(config.validation.nccl_iterations),
+        "validation-nccl-data-size-gb-placeholder": str(config.validation.nccl_data_size_gb),
+        "validation-dl-test-plan-placeholder": config.validation.dl_test_plan,
+        "validation-dl-baseline-test-id-placeholder": config.validation.dl_baseline_test_id,
+        "validation-dl-iterations-placeholder": str(config.validation.dl_iterations),
     }

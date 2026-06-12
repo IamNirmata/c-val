@@ -6,6 +6,10 @@ set -euo pipefail
 # into a compact table for operators and later metric ingestion.
 
 # --- CONFIGURATION ---
+CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
+CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
+CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
+
 # Ensure global variables are set; default to safe values if missing
 if [ -z "${GCRNODE:-}" ]; then
     echo "WARNING: GCRNODE is not set. Using 'unknown_node'"
@@ -19,8 +23,8 @@ if [ -z "${GCRTIME:-}" ]; then
 fi
 
 # Define paths used by fio job definitions and report generation.
-JOB_DIR="/workspace/c-val/validation-tests/storage/fio_jobs"
-OUTPUT_DIR="/data/continuous_validation/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
+JOB_DIR="$CVAL_VALIDATION_TESTS_DIR/storage/fio_jobs"
+OUTPUT_DIR="$CVAL_VALIDATION_ROOT/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"
 SUMMARY_FILE="$OUTPUT_DIR/summary.txt"
 
 echo "================================================================================"

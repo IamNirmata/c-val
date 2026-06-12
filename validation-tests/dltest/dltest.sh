@@ -4,14 +4,19 @@
 # the c-val DL result variable. Detailed evidence is written to DLTEST_LOG_FILE.
 
 echo "Running DL Test on node: $GCRNODE at time: $GCRTIME"
-DLTEST_COMMAND="/data/continuous_validation/deeplearning_unit_test/main.py"
+GPU_COUNT=${1:-${CVAL_GPU_COUNT:-8}}
+CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-/data/continuous_validation/deeplearning_unit_test}
+CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:-80gb-b200}
+CVAL_DL_BASELINE_TEST_ID=${CVAL_DL_BASELINE_TEST_ID:-b200-pt2.8.0-cuda12.9}
+CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-20}
+DLTEST_COMMAND="$CVAL_DL_UNIT_TEST_DIR/main.py"
 
 
-cd /data/continuous_validation/deeplearning_unit_test || exit 1
-torchrun --nnodes=1 --nproc-per-node "$1" "$DLTEST_COMMAND" \
-  --test_plan 80gb-b200 \
-  --baseline_test_id b200-pt2.8.0-cuda12.9 \
-  --iterations 20 \
+cd "$CVAL_DL_UNIT_TEST_DIR" || exit 1
+torchrun --nnodes=1 --nproc-per-node "$GPU_COUNT" "$DLTEST_COMMAND" \
+  --test_plan "$CVAL_DL_TEST_PLAN" \
+  --baseline_test_id "$CVAL_DL_BASELINE_TEST_ID" \
+  --iterations "$CVAL_DL_ITERATIONS" \
   >"$DLTEST_LOG_FILE" 2>&1
 rc=$?
 

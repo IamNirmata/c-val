@@ -33,6 +33,20 @@ validation_db_path = "/data/continuous_validation/metadata/validation.db"
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"
 nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
 
+[runtime]
+repo_dir = "/workspace/c-val"
+validation_root = "/data/continuous_validation"
+validation_tests_dir = "/workspace/c-val/validation-tests"
+dl_unit_test_dir = "/data/continuous_validation/deeplearning_unit_test"
+
+[validation]
+gpu_count = 8
+nccl_iterations = 20
+nccl_data_size_gb = 8
+dl_test_plan = "80gb-b200"
+dl_baseline_test_id = "b200-pt2.8.0-cuda12.9"
+dl_iterations = 20
+
 [job_template]
 namespace = "gcr-admin"
 queue = "gcr-admin"

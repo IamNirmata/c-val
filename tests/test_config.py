@@ -13,6 +13,8 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.job.job_prefix, "hari-gcr-cval")
         self.assertEqual(config.cluster.namespace, "gcr-admin")
+        self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
+        self.assertEqual(config.validation.gpu_count, 8)
         self.assertTrue(str(config.job.template_path).endswith("ymls/specific-node-job.yml"))
 
     def test_loads_partial_override_with_defaults(self) -> None:
@@ -25,6 +27,12 @@ namespace = "staging"
 
 [scheduling]
 batch_size = 2
+
+[runtime]
+validation_root = "/tmp/cval"
+
+[validation]
+dl_iterations = 3
 """,
                 encoding="utf-8",
             )
@@ -33,6 +41,8 @@ batch_size = 2
 
         self.assertEqual(config.cluster.namespace, "staging")
         self.assertEqual(config.scheduling.batch_size, 2)
+        self.assertEqual(config.runtime.validation_root, "/tmp/cval")
+        self.assertEqual(config.validation.dl_iterations, 3)
         self.assertEqual(config.job.git_ref, "main")
 
     def test_config_to_dict_is_json_ready(self) -> None:

@@ -38,12 +38,30 @@ class ValidationScriptTests(unittest.TestCase):
 
         self.assertIn('Loading structured test result state from $CVAL_RESULT_JSON_FILE', script)
         self.assertIn('python3 -m cval.cli result-env', script)
+        self.assertIn('PYTHONPATH="$CVAL_REPO_DIR"', script)
         self.assertIn('source "$CVAL_RESULT_ENV_FILE"', script)
+        self.assertIn('--db-path "$CVAL_VALIDATION_DB_PATH"', script)
+        self.assertIn('--db-path "$CVAL_STORAGE_DB_PATH"', script)
+        self.assertIn('--db-path "$CVAL_NCCL_DB_PATH"', script)
         self.assertIn('add_main_result "storage" "$GCRRESULT1"', script)
         self.assertIn('add_main_result "nccl" "$GCRRESULT2"', script)
         self.assertIn('add_main_result "dltest" "$GCRRESULT3"', script)
         self.assertIn('add_main_result "all" "$overall_result"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
+
+    def test_runtime_scripts_use_configured_environment(self) -> None:
+        run_test = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(
+            encoding="utf-8"
+        )
+        dltest = (REPO_ROOT / "validation-tests" / "dltest" / "dltest.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("CVAL_VALIDATION_TESTS_DIR", run_test)
+        self.assertIn("CVAL_NCCL_ITERATIONS", run_test)
+        self.assertIn("--nproc_per_node=\"$CVAL_GPU_COUNT\"", run_test)
+        self.assertIn("CVAL_DL_TEST_PLAN", dltest)
+        self.assertIn("CVAL_DL_ITERATIONS", dltest)
 
     def test_structured_validation_result_schema(self) -> None:
         payload = {

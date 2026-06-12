@@ -74,6 +74,32 @@ spec:
                 - name: CVAL_GIT_REF
                   # Pin the runtime checkout to a commit/tag instead of moving main.
                   value: "git-ref-placeholder"
+                - name: CVAL_REPO_DIR
+                  value: "runtime-repo-dir-placeholder"
+                - name: CVAL_VALIDATION_ROOT
+                  value: "runtime-validation-root-placeholder"
+                - name: CVAL_VALIDATION_TESTS_DIR
+                  value: "runtime-validation-tests-dir-placeholder"
+                - name: CVAL_DL_UNIT_TEST_DIR
+                  value: "runtime-dl-unit-test-dir-placeholder"
+                - name: CVAL_VALIDATION_DB_PATH
+                  value: "storage-validation-db-path-placeholder"
+                - name: CVAL_STORAGE_DB_PATH
+                  value: "storage-storage-db-path-placeholder"
+                - name: CVAL_NCCL_DB_PATH
+                  value: "storage-nccl-db-path-placeholder"
+                - name: CVAL_GPU_COUNT
+                  value: "validation-gpu-count-placeholder"
+                - name: CVAL_NCCL_ITERATIONS
+                  value: "validation-nccl-iterations-placeholder"
+                - name: CVAL_NCCL_DATA_SIZE_GB
+                  value: "validation-nccl-data-size-gb-placeholder"
+                - name: CVAL_DL_TEST_PLAN
+                  value: "validation-dl-test-plan-placeholder"
+                - name: CVAL_DL_BASELINE_TEST_ID
+                  value: "validation-dl-baseline-test-id-placeholder"
+                - name: CVAL_DL_ITERATIONS
+                  value: "validation-dl-iterations-placeholder"
               volumeMounts:
                 - name: dshm
                   mountPath: /dev/shm
@@ -91,11 +117,11 @@ spec:
                   echo "test started."
                   # The job clones c-val inside the container so the runtime code
                   # matches the explicitly supplied CVAL_GIT_REF.
-                  git clone "$CVAL_GIT_REPO" /workspace/c-val
-                  cd /workspace/c-val
+                  git clone "$CVAL_GIT_REPO" "$CVAL_REPO_DIR"
+                  cd "$CVAL_REPO_DIR"
                   git fetch --all --tags
                   git checkout "$CVAL_GIT_REF"
-                  cd /workspace/c-val/validation-tests/
+                  cd "$CVAL_VALIDATION_TESTS_DIR"
                   source 0-env.sh
                   bash run-test.sh
                   bash db-update.sh

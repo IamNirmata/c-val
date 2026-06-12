@@ -74,6 +74,28 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    """In-pod runtime paths used by validation scripts."""
+
+    repo_dir: str = "/workspace/c-val"
+    validation_root: str = "/data/continuous_validation"
+    validation_tests_dir: str = "/workspace/c-val/validation-tests"
+    dl_unit_test_dir: str = "/data/continuous_validation/deeplearning_unit_test"
+
+
+@dataclass(frozen=True)
+class ValidationConfig:
+    """Validation workload defaults used inside pods."""
+
+    gpu_count: int = 8
+    nccl_iterations: int = 20
+    nccl_data_size_gb: int = 8
+    dl_test_plan: str = "80gb-b200"
+    dl_baseline_test_id: str = "b200-pt2.8.0-cuda12.9"
+    dl_iterations: int = 20
+
+
+@dataclass(frozen=True)
 class JobTemplateConfig:
     """Values injected into the Volcano job template."""
 
@@ -103,6 +125,8 @@ class CvalConfig:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
     job_template: JobTemplateConfig = field(default_factory=JobTemplateConfig)
 
 
@@ -152,6 +176,8 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
     policy = _section(data, "policy")
     monitoring = _section(data, "monitoring")
     storage = _section(data, "storage")
+    runtime = _section(data, "runtime")
+    validation = _section(data, "validation")
     job_template = _section(data, "job_template")
 
     return CvalConfig(
@@ -204,6 +230,40 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             validation_db_path=_str(storage, "validation_db_path", defaults.storage.validation_db_path),
             storage_db_path=_str(storage, "storage_db_path", defaults.storage.storage_db_path),
             nccl_db_path=_str(storage, "nccl_db_path", defaults.storage.nccl_db_path),
+        ),
+        runtime=RuntimeConfig(
+            repo_dir=_str(runtime, "repo_dir", defaults.runtime.repo_dir),
+            validation_root=_str(runtime, "validation_root", defaults.runtime.validation_root),
+            validation_tests_dir=_str(
+                runtime,
+                "validation_tests_dir",
+                defaults.runtime.validation_tests_dir,
+            ),
+            dl_unit_test_dir=_str(
+                runtime,
+                "dl_unit_test_dir",
+                defaults.runtime.dl_unit_test_dir,
+            ),
+        ),
+        validation=ValidationConfig(
+            gpu_count=_int(validation, "gpu_count", defaults.validation.gpu_count),
+            nccl_iterations=_int(
+                validation,
+                "nccl_iterations",
+                defaults.validation.nccl_iterations,
+            ),
+            nccl_data_size_gb=_int(
+                validation,
+                "nccl_data_size_gb",
+                defaults.validation.nccl_data_size_gb,
+            ),
+            dl_test_plan=_str(validation, "dl_test_plan", defaults.validation.dl_test_plan),
+            dl_baseline_test_id=_str(
+                validation,
+                "dl_baseline_test_id",
+                defaults.validation.dl_baseline_test_id,
+            ),
+            dl_iterations=_int(validation, "dl_iterations", defaults.validation.dl_iterations),
         ),
         job_template=JobTemplateConfig(
             namespace=_str(job_template, "namespace", defaults.job_template.namespace),
