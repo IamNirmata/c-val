@@ -57,7 +57,50 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Dry run: 1 job(s) would be submitted", output.getvalue())
-        self.assertIn("hari-gcr-ceval-slc01-cl02-hgx-0001-12345", output.getvalue())
+        self.assertIn("hari-gcr-cval-slc01-cl02-hgx-0001-12345", output.getvalue())
+
+    def test_config_command_prints_effective_config(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["config"])
+
+        self.assertEqual(exit_code, 0)
+        config = json.loads(output.getvalue())
+        self.assertEqual(config["job"]["job_prefix"], "hari-gcr-cval")
+        self.assertEqual(config["cluster"]["namespace"], "gcr-admin")
+
+    def test_config_file_overrides_cli_defaults(self) -> None:
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[scheduling]
+batch_size = 1
+
+[job]
+job_prefix = "custom-cval"
+""",
+                encoding="utf-8",
+            )
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "run-batch",
+                        "--nodes",
+                        "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
+                        "--timestamp",
+                        "12345",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dry run: 1 job(s) would be submitted", output.getvalue())
+        self.assertIn("custom-cval-slc01-cl02-hgx-0001-12345", output.getvalue())
 
     def test_plan_command_uses_provided_free_nodes(self) -> None:
         output = io.StringIO()

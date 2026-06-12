@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from cval.config import load_config
 from cval.k8s.client import KubectlClient
 from cval.models import WorkflowPlan
 from cval.policy import ExecutionPolicy, validate_submit_request
@@ -42,7 +43,7 @@ class JobSubmissionResult:
 
 def submit_workflow_plan(
     plan: WorkflowPlan,
-    namespace: str = "gcr-admin",
+    namespace: str | None = None,
     client: KubectlClient | None = None,
     policy: ExecutionPolicy | None = None,
     submit: bool = False,
@@ -50,10 +51,11 @@ def submit_workflow_plan(
 ) -> JobSubmissionResult:
     """Preview or submit a workflow plan after policy validation."""
 
-    active_policy = policy or ExecutionPolicy(namespace_allowlist=(namespace,))
+    resolved_namespace = namespace or load_config().cluster.namespace
+    active_policy = policy or ExecutionPolicy(namespace_allowlist=(resolved_namespace,))
     # Run policy checks before dry-run output too, so bad plans are visible early.
     validate_submit_request(
-        namespace=namespace,
+        namespace=resolved_namespace,
         planned_jobs_count=len(plan.planned_jobs),
         policy=active_policy,
         submit=submit,
@@ -63,7 +65,7 @@ def submit_workflow_plan(
     if not submit:
         # Dry-run is the normal path; it returns intended actions without kubectl create.
         return JobSubmissionResult(
-            namespace=namespace,
+            namespace=resolved_namespace,
             dry_run=True,
             records=[
                 JobSubmissionRecord(
@@ -81,7 +83,7 @@ def submit_workflow_plan(
     for planned in plan.planned_jobs:
         # Manifest is sent through stdin so no temporary YAML file is needed.
         result = kubectl.run(
-            ["create", "-n", namespace, "-f", "-"],
+            ["create", "-n", resolved_namespace, "-f", "-"],
             input_text=planned.rendered_job.yaml_text,
         )
         records.append(
@@ -94,7 +96,7 @@ def submit_workflow_plan(
             )
         )
 
-    return JobSubmissionResult(namespace=namespace, dry_run=False, records=records)
+    return JobSubmissionResult(namespace=resolved_namespace, dry_run=False, records=records)
 
 
 def submission_result_to_dict(result: JobSubmissionResult) -> dict[str, object]:

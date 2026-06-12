@@ -12,6 +12,14 @@ The orchestrator should not infer GPU health from arbitrary logs. It submits det
 
 Hermes and human operators use the same `cval.cli` commands. This avoids a separate hidden agent API and makes every action reproducible from a shell.
 
+## Use TOML for Operator Configuration
+
+c-val defaults live in `config/cval.toml`. TOML gives operators comments,
+typed nested sections, and Git-friendly review without adding dependencies,
+because Python 3.11+ includes `tomllib`. YAML remains reserved for Kubernetes
+manifests, JSON for machine outputs and result artifacts, and env vars for
+last-mile runtime overrides.
+
 ## Read-Only Status Access
 
 `cval status` opens SQLite with `mode=ro` through the PVC access pod. It must not create tables or mutate metadata.

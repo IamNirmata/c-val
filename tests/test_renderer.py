@@ -36,8 +36,8 @@ class RendererTests(unittest.TestCase):
           git_ref="abc123",
         )
 
-        self.assertEqual(rendered.job_name, "hari-gcr-ceval-slc01-cl02-hgx-0001-12345")
-        self.assertIn("name: hari-gcr-ceval-slc01-cl02-hgx-0001-12345", rendered.yaml_text)
+        self.assertEqual(rendered.job_name, "hari-gcr-cval-slc01-cl02-hgx-0001-12345")
+        self.assertIn("name: hari-gcr-cval-slc01-cl02-hgx-0001-12345", rendered.yaml_text)
         self.assertIn('kubernetes.io/hostname: "slc01-cl02-hgx-0001"', rendered.yaml_text)
         self.assertIn('value: "12345"', rendered.yaml_text)
         self.assertIn('value: "abc123"', rendered.yaml_text)

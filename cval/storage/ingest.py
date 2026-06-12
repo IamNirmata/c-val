@@ -14,10 +14,13 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from cval.config import load_config
+
 VALID_STATUSES = {"pass", "fail", "incomplete"}
-DEFAULT_VALIDATION_DB_PATH = "/data/continuous_validation/metadata/validation.db"
-DEFAULT_STORAGE_DB_PATH = "/data/continuous_validation/metadata/test-storage.db"
-DEFAULT_NCCL_DB_PATH = "/data/continuous_validation/metadata/test-nccl.db"
+_CONFIG = load_config()
+DEFAULT_VALIDATION_DB_PATH = _CONFIG.storage.validation_db_path
+DEFAULT_STORAGE_DB_PATH = _CONFIG.storage.storage_db_path
+DEFAULT_NCCL_DB_PATH = _CONFIG.storage.nccl_db_path
 
 STORAGE_FILE_PREFIXES = {
     "iodepth_read_1file.json": "iodepth_read_1file",

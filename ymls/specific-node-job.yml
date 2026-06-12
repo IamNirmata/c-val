@@ -3,9 +3,9 @@ kind: Job
 metadata:
   # Renderer replaces this placeholder with a deterministic job name.
   generateName: jobname-placeholder
-  namespace: gcr-admin
+  namespace: namespace-placeholder
 spec:
-  queue: gcr-admin
+  queue: queue-placeholder
   minAvailable: 1
   plugins:
     ssh: []
@@ -17,7 +17,7 @@ spec:
       template:
         metadata:
           labels:
-            app: hari-gcr-bonete-test
+            app: app-label-placeholder
             role: server
         spec:
           schedulerName: volcano
@@ -30,20 +30,20 @@ spec:
               emptyDir:
                 # Large /dev/shm is required by NCCL and DL workloads.
                 medium: Memory
-                sizeLimit: 256Gi
+                sizeLimit: shared-memory-size-placeholder
             - name: sys
               hostPath:
                 path: /sys
                 type: Directory
             - name: data
               persistentVolumeClaim:
-                claimName: pvc-vast-gcr-admin
+                claimName: pvc-claim-placeholder
           tolerations:
             # Discovery filters non-tolerated NoSchedule taints before rendering.
-            - key: "rdma"
+            - key: "rdma-toleration-key-placeholder"
               operator: "Exists"
               effect: "NoSchedule"
-            - key: "nvidia.com/gpu"
+            - key: "gpu-toleration-key-placeholder"
               operator: "Exists"
               effect: "NoSchedule"
           affinity:
@@ -51,11 +51,11 @@ spec:
               requiredDuringSchedulingIgnoredDuringExecution:
                 - labelSelector:
                     matchLabels:
-                      app: hari-gcr-bonete-test
+                      app: app-label-placeholder
                   topologyKey: kubernetes.io/hostname
           containers:
             - name: server
-              image: nvcr.io/nvidia/pytorch:25.11-py3
+              image: container-image-placeholder
               env:
                 - name: GCRNODE
                   valueFrom:
@@ -102,12 +102,12 @@ spec:
                   echo "Completed."
               resources:
                 requests:
-                  nvidia.com/gpu: "8"
-                  cpu: "100"
-                  memory: "1500Gi"
-                  rdma/rdma_shared_device_a: "1"
+                  gpu-resource-name-placeholder: "gpu-count-placeholder"
+                  cpu: "cpu-placeholder"
+                  memory: "memory-placeholder"
+                  rdma-resource-name-placeholder: "rdma-count-placeholder"
                 limits:
-                  nvidia.com/gpu: "8"
-                  cpu: "100"
-                  memory: "1500Gi"
-                  rdma/rdma_shared_device_a: "1"
+                  gpu-resource-name-placeholder: "gpu-count-placeholder"
+                  cpu: "cpu-placeholder"
+                  memory: "memory-placeholder"
+                  rdma-resource-name-placeholder: "rdma-count-placeholder"

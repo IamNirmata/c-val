@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from cval.config import load_config
 from cval.k8s.client import KubectlClient
 from cval.models import NodeResource
 
@@ -133,7 +134,9 @@ def unschedulable_node_names(
 ) -> set[str]:
     """Return nodes that should not be considered validation candidates."""
 
-    tolerated = tolerated_no_schedule_taints or {"nvidia.com/gpu", "rdma"}
+    tolerated = tolerated_no_schedule_taints or set(
+        load_config().cluster.tolerated_no_schedule_taints
+    )
     excluded: set[str] = set()
     for node in _list(nodes_json.get("items")):
         node_map = _mapping(node)
@@ -163,16 +166,17 @@ def fully_free_node_names(nodes: list[NodeResource]) -> list[str]:
 
 def discover_free_nodes(
     client: KubectlClient | None = None,
-    node_name_filter: str | None = "hgx",
+    node_name_filter: str | None = None,
 ) -> tuple[list[NodeResource], dict[str, int]]:
     """Discover schedulable GPU nodes from live Kubernetes read-only calls."""
 
     kubectl = client or KubectlClient()
+    resolved_node_name_filter = node_name_filter or load_config().cluster.node_filter
     return discover_free_nodes_from_outputs(
         kubectl.get_pods_json(),
         kubectl.get_nodes_capacity_table(),
         nodes_json=kubectl.get_nodes_json(),
-        node_name_filter=node_name_filter,
+        node_name_filter=resolved_node_name_filter,
     )
 
 

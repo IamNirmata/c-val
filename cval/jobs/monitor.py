@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from cval.config import load_config
 from cval.k8s.client import KubectlClient
 
 
@@ -37,18 +38,19 @@ class MonitoredJob:
 
 def get_job_phase(
     job_name: str,
-    namespace: str = "gcr-admin",
+    namespace: str | None = None,
     client: KubectlClient | None = None,
 ) -> JobPhase:
     """Read one Volcano job phase using a non-mutating kubectl get."""
 
     kubectl = client or KubectlClient()
+    resolved_namespace = namespace or load_config().cluster.namespace
     result = kubectl.run(
         [
             "get",
             "vcjob",
             "-n",
-            namespace,
+            resolved_namespace,
             job_name,
             "-o",
             "jsonpath={.status.state.phase}",
@@ -62,26 +64,35 @@ def get_job_phase(
 
 def get_job_phases(
     job_names: Sequence[str],
-    namespace: str = "gcr-admin",
+    namespace: str | None = None,
     client: KubectlClient | None = None,
 ) -> list[JobPhase]:
     """Read phases for multiple jobs with a shared kubectl client."""
 
     kubectl = client or KubectlClient()
-    return [get_job_phase(job_name, namespace=namespace, client=kubectl) for job_name in job_names]
+    resolved_namespace = namespace or load_config().cluster.namespace
+    return [get_job_phase(job_name, namespace=resolved_namespace, client=kubectl) for job_name in job_names]
 
 
 def monitor_jobs_until_terminal(
     job_names: Sequence[str],
-    namespace: str = "gcr-admin",
-    timeout_seconds: float = 180,
-    poll_interval_seconds: float = 60,
+    namespace: str | None = None,
+    timeout_seconds: float | None = None,
+    poll_interval_seconds: float | None = None,
     client: KubectlClient | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> list[MonitoredJob]:
     """Poll jobs until every job is terminal or the timeout expires."""
 
+    config = load_config()
+    resolved_namespace = namespace or config.cluster.namespace
+    resolved_timeout_seconds = (
+        timeout_seconds if timeout_seconds is not None else config.monitoring.timeout_seconds
+    )
+    resolved_poll_interval_seconds = (
+        poll_interval_seconds if poll_interval_seconds is not None else config.monitoring.poll_interval_seconds
+    )
     kubectl = client or KubectlClient()
     start = clock()
     latest: dict[str, JobPhase] = {
@@ -90,10 +101,10 @@ def monitor_jobs_until_terminal(
 
     while True:
         elapsed = max(0.0, clock() - start)
-        phases = get_job_phases(job_names, namespace=namespace, client=kubectl)
+        phases = get_job_phases(job_names, namespace=resolved_namespace, client=kubectl)
         latest = {phase.job_name: phase for phase in phases}
         all_terminal = all(phase.phase in TERMINAL_PHASES for phase in latest.values())
-        timed_out = elapsed >= timeout_seconds
+        timed_out = elapsed >= resolved_timeout_seconds
         if all_terminal or timed_out:
             # Timeout marks only jobs that are still non-terminal at the deadline.
             return [
@@ -109,7 +120,7 @@ def monitor_jobs_until_terminal(
                 )
                 for job_name in job_names
             ]
-        sleeper(max(0.0, poll_interval_seconds))
+        sleeper(max(0.0, resolved_poll_interval_seconds))
 
 
 def monitored_jobs_to_dict(jobs: list[MonitoredJob]) -> list[dict[str, object]]:

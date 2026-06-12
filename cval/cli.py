@@ -14,7 +14,8 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from cval.jobs.renderer import default_template_path, render_validation_job_from_file
+from cval.config import CvalConfig, config_to_dict, load_config
+from cval.jobs.renderer import render_validation_job_from_file
 from cval.jobs.manager import submission_result_to_dict, submit_workflow_plan
 from cval.jobs.monitor import get_job_phases, monitored_jobs_to_dict, monitor_jobs_until_terminal
 from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
@@ -31,8 +32,6 @@ from cval.storage.status import (
     parse_latest_status_tsv,
 )
 from cval.storage.ingest import (
-    DEFAULT_NCCL_DB_PATH,
-    DEFAULT_STORAGE_DB_PATH,
     add_nccl_result,
     add_storage_result,
     add_validation_result,
@@ -43,8 +42,15 @@ from cval.validation.results import load_validation_result, validation_result_to
 def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments, dispatch to a handler, and return a process code."""
 
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = sys.argv[1:] if argv is None else argv
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config", type=Path)
+    config_args, _ = bootstrap.parse_known_args(raw_argv)
+    config = load_config(config_args.config)
+
+    parser = build_parser(config)
+    args = parser.parse_args(raw_argv)
+    args.cval_config = config
     try:
         return args.handler(args)
     except BrokenPipeError:
@@ -60,14 +66,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     """Build the top-level parser and subcommands."""
 
+    active_config = config or load_config()
     parser = argparse.ArgumentParser(prog="cval", description="c-val orchestration CLI")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to c-val TOML config; defaults to config/cval.toml or CVAL_CONFIG",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    show_config = subparsers.add_parser("config", help="Print the effective c-val config")
+    show_config.add_argument("--output", choices=["json"], default="json")
+    show_config.set_defaults(handler=handle_config)
+
     discover = subparsers.add_parser("discover-free-nodes", help="List GPU nodes and free capacity")
-    discover.add_argument("--node-filter", default="hgx", help="Substring filter for GPU nodes")
+    discover.add_argument(
+        "--node-filter",
+        default=active_config.cluster.node_filter,
+        help="Substring filter for GPU nodes",
+    )
     discover.add_argument("--output", choices=["table", "json"], default="table")
     discover.set_defaults(handler=handle_discover_free_nodes)
 
@@ -75,9 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="Read latest validation status from the PVC access pod",
     )
-    status.add_argument("--pod", default=DEFAULT_PVC_ACCESS_POD)
-    status.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
-    status.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    status.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
+    status.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    status.add_argument("--db-path", default=active_config.storage.validation_db_path)
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
 
@@ -93,28 +113,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="TSV output from existing latest-status command",
     )
-    prioritize.add_argument("--threshold-days", type=float, default=7)
+    prioritize.add_argument("--threshold-days", type=float, default=active_config.scheduling.days_threshold)
     prioritize.add_argument("--output", choices=["table", "json"], default="table")
     prioritize.set_defaults(handler=handle_prioritize)
 
     render = subparsers.add_parser("render-job", help="Render one validation job manifest")
     render.add_argument("--node", required=True)
     render.add_argument("--timestamp", type=int)
-    render.add_argument("--template", type=Path, default=default_template_path())
-    render.add_argument("--job-prefix", default="hari-gcr-ceval")
-    render.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
-    render.add_argument("--git-ref", default="main")
+    render.add_argument("--template", type=Path, default=active_config.job.template_path)
+    render.add_argument("--job-prefix", default=active_config.job.job_prefix)
+    render.add_argument("--git-repo", default=active_config.job.git_repo)
+    render.add_argument("--git-ref", default=active_config.job.git_ref)
     render.add_argument("--output", type=Path, help="Write rendered YAML to this path")
     render.set_defaults(handler=handle_render_job)
 
     run_batch = subparsers.add_parser("run-batch", help="Render a dry-run validation batch")
     run_batch.add_argument("--nodes", required=True, help="Comma-separated target nodes")
-    run_batch.add_argument("--batch-size", type=int, default=5)
+    run_batch.add_argument("--batch-size", type=int, default=active_config.scheduling.batch_size)
     run_batch.add_argument("--timestamp", type=int)
-    run_batch.add_argument("--template", type=Path, default=default_template_path())
-    run_batch.add_argument("--job-prefix", default="hari-gcr-ceval")
-    run_batch.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
-    run_batch.add_argument("--git-ref", default="main")
+    run_batch.add_argument("--template", type=Path, default=active_config.job.template_path)
+    run_batch.add_argument("--job-prefix", default=active_config.job.job_prefix)
+    run_batch.add_argument("--git-repo", default=active_config.job.git_repo)
+    run_batch.add_argument("--git-ref", default=active_config.job.git_ref)
     run_batch.add_argument("--output", choices=["table", "json"], default="table")
     run_batch.set_defaults(handler=handle_run_batch)
 
@@ -134,17 +154,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read latest status from the PVC access pod in read-only mode",
     )
-    plan.add_argument("--status-pod", default=DEFAULT_PVC_ACCESS_POD)
-    plan.add_argument("--status-namespace", default=DEFAULT_NAMESPACE)
-    plan.add_argument("--status-db-path", default=DEFAULT_DB_PATH)
-    plan.add_argument("--threshold-days", type=float, default=7)
-    plan.add_argument("--batch-size", type=int, default=5)
+    plan.add_argument("--status-pod", default=active_config.cluster.pvc_access_pod)
+    plan.add_argument("--status-namespace", default=active_config.cluster.namespace)
+    plan.add_argument("--status-db-path", default=active_config.storage.validation_db_path)
+    plan.add_argument("--threshold-days", type=float, default=active_config.scheduling.days_threshold)
+    plan.add_argument("--batch-size", type=int, default=active_config.scheduling.batch_size)
     plan.add_argument("--timestamp", type=int)
-    plan.add_argument("--template", type=Path, default=default_template_path())
-    plan.add_argument("--job-prefix", default="hari-gcr-ceval")
-    plan.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
-    plan.add_argument("--git-ref", default="main")
-    plan.add_argument("--node-filter", default="hgx", help="Live discovery substring filter")
+    plan.add_argument("--template", type=Path, default=active_config.job.template_path)
+    plan.add_argument("--job-prefix", default=active_config.job.job_prefix)
+    plan.add_argument("--git-repo", default=active_config.job.git_repo)
+    plan.add_argument("--git-ref", default=active_config.job.git_ref)
+    plan.add_argument(
+        "--node-filter",
+        default=active_config.cluster.node_filter,
+        help="Live discovery substring filter",
+    )
     plan.add_argument(
         "--include-yaml",
         action="store_true",
@@ -157,10 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
         "submit-plan",
         help="Dry-run or explicitly submit a planned validation batch",
     )
-    _add_plan_inputs(submit_plan)
-    submit_plan.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
+    _add_plan_inputs(submit_plan, active_config)
+    submit_plan.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     submit_plan.add_argument("--allowed-namespace", action="append")
-    submit_plan.add_argument("--max-batch-size", type=int, default=5)
+    submit_plan.add_argument("--max-batch-size", type=int, default=active_config.policy.max_batch_size)
     submit_plan.add_argument("--submit", action="store_true")
     submit_plan.add_argument("--confirm")
     submit_plan.add_argument("--output", choices=["table", "json"], default="table")
@@ -168,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     job_status = subparsers.add_parser("job-status", help="Read Volcano job phases")
     job_status.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
-    job_status.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
+    job_status.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     job_status.add_argument("--output", choices=["table", "json"], default="table")
     job_status.set_defaults(handler=handle_job_status)
 
@@ -177,9 +201,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Poll Volcano job phases until terminal or timeout",
     )
     monitor_jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
-    monitor_jobs.add_argument("--namespace", "-n", default=DEFAULT_NAMESPACE)
-    monitor_jobs.add_argument("--timeout-seconds", type=float, default=180)
-    monitor_jobs.add_argument("--poll-interval-seconds", type=float, default=60)
+    monitor_jobs.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    monitor_jobs.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=active_config.monitoring.timeout_seconds,
+    )
+    monitor_jobs.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=active_config.monitoring.poll_interval_seconds,
+    )
     monitor_jobs.add_argument("--output", choices=["table", "json"], default="table")
     monitor_jobs.set_defaults(handler=handle_monitor_jobs)
 
@@ -198,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_add_result.add_argument("test")
     db_add_result.add_argument("result", choices=["pass", "fail", "incomplete"])
     db_add_result.add_argument("timestamp")
-    db_add_result.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    db_add_result.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_result.set_defaults(handler=handle_db_add_result)
 
     db_add_storage = subparsers.add_parser(
@@ -208,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_add_storage.add_argument("node")
     db_add_storage.add_argument("timestamp")
     db_add_storage.add_argument("results_dir", type=Path)
-    db_add_storage.add_argument("--db-path", default=DEFAULT_STORAGE_DB_PATH)
+    db_add_storage.add_argument("--db-path", default=active_config.storage.storage_db_path)
     db_add_storage.set_defaults(handler=handle_db_add_storage_result)
 
     db_add_nccl = subparsers.add_parser(
@@ -219,7 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_add_nccl.add_argument("timestamp")
     db_add_nccl.add_argument("busbw")
     db_add_nccl.add_argument("latency")
-    db_add_nccl.add_argument("--db-path", default=DEFAULT_NCCL_DB_PATH)
+    db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
 
     return parser
@@ -252,6 +284,13 @@ def handle_discover_free_nodes(args: argparse.Namespace) -> int:
         f"{totals['used']:>5} {totals['free']:>5}"
     )
     print(f"Fully free nodes: {len(fully_free_node_names(nodes))}")
+    return 0
+
+
+def handle_config(args: argparse.Namespace) -> int:
+    """Print effective c-val config for operators and automation."""
+
+    print(json.dumps(config_to_dict(args.cval_config), indent=2))
     return 0
 
 
@@ -371,9 +410,11 @@ def handle_submit_plan(args: argparse.Namespace) -> int:
     """Dry-run or explicitly submit a planned validation batch."""
 
     plan = _build_plan_from_args(args)
+    config: CvalConfig = args.cval_config
     policy = ExecutionPolicy(
-        namespace_allowlist=tuple(args.allowed_namespace or [DEFAULT_NAMESPACE]),
+        namespace_allowlist=tuple(args.allowed_namespace or config.policy.namespace_allowlist),
         max_batch_size=args.max_batch_size,
+        confirmation_phrase=config.policy.confirmation_phrase,
     )
     result = submit_workflow_plan(
         plan,
@@ -530,7 +571,7 @@ def _print_plan_table(plan) -> None:
         )
 
 
-def _add_plan_inputs(parser: argparse.ArgumentParser) -> None:
+def _add_plan_inputs(parser: argparse.ArgumentParser, config: CvalConfig) -> None:
     """Attach shared plan-building arguments to plan-like commands."""
 
     parser.add_argument(
@@ -548,17 +589,17 @@ def _add_plan_inputs(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Read latest status from the PVC access pod in read-only mode",
     )
-    parser.add_argument("--status-pod", default=DEFAULT_PVC_ACCESS_POD)
-    parser.add_argument("--status-namespace", default=DEFAULT_NAMESPACE)
-    parser.add_argument("--status-db-path", default=DEFAULT_DB_PATH)
-    parser.add_argument("--threshold-days", type=float, default=7)
-    parser.add_argument("--batch-size", type=int, default=5)
+    parser.add_argument("--status-pod", default=config.cluster.pvc_access_pod)
+    parser.add_argument("--status-namespace", default=config.cluster.namespace)
+    parser.add_argument("--status-db-path", default=config.storage.validation_db_path)
+    parser.add_argument("--threshold-days", type=float, default=config.scheduling.days_threshold)
+    parser.add_argument("--batch-size", type=int, default=config.scheduling.batch_size)
     parser.add_argument("--timestamp", type=int)
-    parser.add_argument("--template", type=Path, default=default_template_path())
-    parser.add_argument("--job-prefix", default="hari-gcr-ceval")
-    parser.add_argument("--git-repo", default="https://github.com/IamNirmata/c-val.git")
-    parser.add_argument("--git-ref", default="main")
-    parser.add_argument("--node-filter", default="hgx", help="Live discovery substring filter")
+    parser.add_argument("--template", type=Path, default=config.job.template_path)
+    parser.add_argument("--job-prefix", default=config.job.job_prefix)
+    parser.add_argument("--git-repo", default=config.job.git_repo)
+    parser.add_argument("--git-ref", default=config.job.git_ref)
+    parser.add_argument("--node-filter", default=config.cluster.node_filter, help="Live discovery substring filter")
 
 
 def _parse_csv(value: str) -> list[str]:

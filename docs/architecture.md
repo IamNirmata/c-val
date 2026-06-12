@@ -31,6 +31,7 @@ flowchart TB
 
 | Module | Responsibility |
 | --- | --- |
+| `cval.config` | Load typed TOML configuration and expose effective defaults. |
 | `cval.cli` | Human/Hermes command surface. |
 | `cval.k8s.client` | Thin, testable `kubectl` wrapper. |
 | `cval.k8s.discovery` | GPU usage parsing, schedulable-node filtering, free-node discovery. |
@@ -56,6 +57,13 @@ flowchart TB
   metadata/test-storage.db
   metadata/test-nccl.db
 ```
+
+## Configuration Boundary
+
+Operator-owned defaults live in `config/cval.toml`. Kubernetes resource shape
+stays in `ymls/specific-node-job.yml`, but environment-specific values such as
+namespace, queue, PVC, image, and resource requests are injected from TOML when
+the job is rendered.
 
 ## Design Boundary
 

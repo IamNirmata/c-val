@@ -2,6 +2,18 @@
 
 Run commands from the c-val repository root.
 
+Use `--config /path/to/cval.toml` before the subcommand to load a non-default
+configuration file.
+
+## Configuration
+
+Print the effective configuration:
+
+```bash
+python -m cval.cli config
+python -m cval.cli --config /path/to/cval.toml config
+```
+
 ## Read-Only Commands
 
 ### `status`

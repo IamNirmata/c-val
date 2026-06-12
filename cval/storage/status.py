@@ -9,13 +9,15 @@ from __future__ import annotations
 import datetime
 import json
 
+from cval.config import load_config
 from cval.k8s.client import KubectlClient
 from cval.models import LatestStatusRow
 
 
-DEFAULT_NAMESPACE = "gcr-admin"
-DEFAULT_PVC_ACCESS_POD = "gcr-admin-pvc-access"
-DEFAULT_DB_PATH = "/data/continuous_validation/metadata/validation.db"
+_CONFIG = load_config()
+DEFAULT_NAMESPACE = _CONFIG.cluster.namespace
+DEFAULT_PVC_ACCESS_POD = _CONFIG.cluster.pvc_access_pod
+DEFAULT_DB_PATH = _CONFIG.storage.validation_db_path
 
 
 def parse_latest_status_tsv(output: str) -> dict[str, int]:

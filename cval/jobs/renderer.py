@@ -11,6 +11,7 @@ import re
 import time
 from pathlib import Path
 
+from cval.config import JobTemplateConfig, load_config
 from cval.models import RenderedJob
 
 
@@ -20,29 +21,36 @@ NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 def default_template_path() -> Path:
     """Return the repository default Volcano job template path."""
 
-    return Path(__file__).resolve().parents[2] / "ymls" / "specific-node-job.yml"
+    return load_config().job.template_path
 
 
-def make_job_name(node_name: str, timestamp: int, job_prefix: str = "hari-gcr-ceval") -> str:
+def make_job_name(node_name: str, timestamp: int, job_prefix: str | None = None) -> str:
     """Build a deterministic Kubernetes-compatible validation job name."""
 
+    resolved_prefix = job_prefix if job_prefix is not None else load_config().job.job_prefix
     validate_kubernetes_name(node_name, "node_name")
-    validate_kubernetes_name(job_prefix, "job_prefix")
-    return f"{job_prefix}-{node_name}-{timestamp}"
+    validate_kubernetes_name(resolved_prefix, "job_prefix")
+    return f"{resolved_prefix}-{node_name}-{timestamp}"
 
 
 def render_validation_job(
     template_text: str,
     node_name: str,
     timestamp: int | None = None,
-    job_prefix: str = "hari-gcr-ceval",
-    git_repo: str = "https://github.com/IamNirmata/c-val.git",
-    git_ref: str = "main",
+    job_prefix: str | None = None,
+    git_repo: str | None = None,
+    git_ref: str | None = None,
+    job_template_config: JobTemplateConfig | None = None,
 ) -> RenderedJob:
     """Render one validation job manifest for one target node."""
 
+    config = load_config()
+    resolved_job_prefix = job_prefix if job_prefix is not None else config.job.job_prefix
+    resolved_git_repo = git_repo if git_repo is not None else config.job.git_repo
+    resolved_git_ref = git_ref if git_ref is not None else config.job.git_ref
+    template_config = job_template_config or config.job_template
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)
-    job_name = make_job_name(node_name, rendered_timestamp, job_prefix=job_prefix)
+    job_name = make_job_name(node_name, rendered_timestamp, job_prefix=resolved_job_prefix)
 
     required_placeholders = [
         "nodename-placeholder",
@@ -62,11 +70,15 @@ def render_validation_job(
     yaml_text = yaml_text.replace("time-placeholder", str(rendered_timestamp))
     yaml_text = yaml_text.replace("generateName: jobname-placeholder", f"name: {job_name}")
     yaml_text = yaml_text.replace("jobname-placeholder", job_name)
-    yaml_text = yaml_text.replace("git-repo-placeholder", git_repo)
-    yaml_text = yaml_text.replace("git-ref-placeholder", git_ref)
+    yaml_text = yaml_text.replace("git-repo-placeholder", resolved_git_repo)
+    yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
+    template_replacements = _job_template_replacements(template_config)
+    for placeholder, value in template_replacements.items():
+        yaml_text = yaml_text.replace(placeholder, value)
 
     # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
-    remaining = [placeholder for placeholder in required_placeholders if placeholder in yaml_text]
+    known_placeholders = [*required_placeholders, *template_replacements.keys()]
+    remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
 
@@ -82,9 +94,10 @@ def render_validation_job_from_file(
     template_path: Path,
     node_name: str,
     timestamp: int | None = None,
-    job_prefix: str = "hari-gcr-ceval",
-    git_repo: str = "https://github.com/IamNirmata/c-val.git",
-    git_ref: str = "main",
+    job_prefix: str | None = None,
+    git_repo: str | None = None,
+    git_ref: str | None = None,
+    job_template_config: JobTemplateConfig | None = None,
 ) -> RenderedJob:
     """Read a template file and render a validation job from it."""
 
@@ -95,6 +108,7 @@ def render_validation_job_from_file(
         job_prefix=job_prefix,
         git_repo=git_repo,
         git_ref=git_ref,
+        job_template_config=job_template_config,
     )
 
 
@@ -103,3 +117,24 @@ def validate_kubernetes_name(value: str, field_name: str) -> None:
 
     if not NODE_NAME_PATTERN.match(value):
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")
+
+
+def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
+    """Return optional placeholder replacements for environment-specific job values."""
+
+    return {
+        "namespace-placeholder": config.namespace,
+        "queue-placeholder": config.queue,
+        "app-label-placeholder": config.app_label,
+        "pvc-claim-placeholder": config.pvc_claim,
+        "container-image-placeholder": config.container_image,
+        "shared-memory-size-placeholder": config.shared_memory_size,
+        "gpu-resource-name-placeholder": config.gpu_resource_name,
+        "gpu-count-placeholder": config.gpu_count,
+        "cpu-placeholder": config.cpu,
+        "memory-placeholder": config.memory,
+        "rdma-resource-name-placeholder": config.rdma_resource_name,
+        "rdma-count-placeholder": config.rdma_count,
+        "rdma-toleration-key-placeholder": config.rdma_toleration_key,
+        "gpu-toleration-key-placeholder": config.gpu_toleration_key,
+    }

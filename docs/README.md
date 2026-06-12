@@ -5,6 +5,7 @@ c-val 2.0 is the safe orchestration layer around the existing c-val GPU cluster 
 ## Start Here
 
 - [Architecture](architecture.md): components, ownership boundaries, and system design.
+- [Configuration](configuration.md): TOML config model, precedence, and format choices.
 - [Workflow](workflow.md): end-to-end logical and process flow with diagrams.
 - [CLI Reference](cli-reference.md): operator commands and expected outputs.
 - [Operations Runbook](operations-runbook.md): safe daily operation and one-node validation flow.

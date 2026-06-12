@@ -14,6 +14,7 @@ There is not a nested duplicate repository; the repo root contains an importable
 ```text
 cval/                  Python package and CLI orchestration code
 docs/                  Architecture, workflow, operations, and result docs
+config/                TOML defaults for cluster, scheduling, jobs, and policy
 skills/                Hermes skill package for safe c-val operation
 tests/                 Unit tests for planning, rendering, status, and ingestion
 validation-tests/      Scripts and workloads executed inside validation pods
@@ -29,6 +30,7 @@ Use the CLI module directly from the repo checkout:
 
 ```bash
 python -m cval.cli --help
+python -m cval.cli config
 python -m cval.cli discover-free-nodes --output table
 python -m cval.cli status --output table
 ```
@@ -68,6 +70,7 @@ python -m cval.cli submit-plan \
 
 Start with [docs/README.md](docs/README.md), then use:
 
+- [docs/configuration.md](docs/configuration.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/workflow.md](docs/workflow.md)
 - [docs/cli-reference.md](docs/cli-reference.md)
