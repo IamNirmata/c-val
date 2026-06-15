@@ -72,6 +72,15 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)
 
+    def test_ibbw_monitor_reports_gbps(self) -> None:
+        script = (REPO_ROOT / "validation-tests" / "nccl" / "ibbw.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("GB/s", script)
+        self.assertNotIn("MB/s${space}", script)
+        self.assertIn("mlx5_${start_device}", script)
+
     def test_structured_validation_result_schema(self) -> None:
         payload = {
             "schema_version": "cval.results.v1",

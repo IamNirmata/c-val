@@ -52,9 +52,13 @@ do
     for i in $(seq "$start_device" "$end_device"); do
         device="mlx5_${i}"
         # Counter is in 4-byte (32-bit) units
-        # Multiply by 4 to get bytes, then divide by 1048576 (1024^2) to get MB/s
-        bw=$(( (new[${i}] - old[${i}]) * 4 / 1048576 / interval_seconds ))
-        printf "%s: %5d MB/s${space}" "$device" "$bw"
+        # Multiply by 4 to get bytes, then divide by 1024^3 to get GB/s.
+        delta=$((new[${i}] - old[${i}]))
+        if (( delta < 0 )); then
+            delta=0
+        fi
+        bw=$(awk -v delta="$delta" -v interval="$interval_seconds" 'BEGIN { printf "%.3f", (delta * 4) / 1073741824 / interval }')
+        printf "%s: %7s GB/s${space}" "$device" "$bw"
         
         # Store current value for next iteration
         old[${i}]=${new[${i}]}

@@ -10,7 +10,7 @@ import torch.distributed as dist
 
 
 GB_UNIT = 1024 * 1024 * 1024
-IBBW_SAMPLE_PATTERN = re.compile(r"(mlx5_\d+):\s*(\d+)\s+MB/s")
+IBBW_SAMPLE_PATTERN = re.compile(r"(mlx5_\d+):\s*([0-9]+(?:\.[0-9]+)?)\s*([MG]B/s)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,10 +43,11 @@ def summarize_ibbw_log(path: str | None) -> dict[str, dict[str, float | int]]:
     if not log_path.exists():
         return {}
 
-    samples: dict[str, list[int]] = {}
+    samples: dict[str, list[float]] = {}
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        for device, value in IBBW_SAMPLE_PATTERN.findall(line):
-            samples.setdefault(device, []).append(int(value))
+        for device, value, unit in IBBW_SAMPLE_PATTERN.findall(line):
+            gbps = float(value) / 1024 if unit == "MB/s" else float(value)
+            samples.setdefault(device, []).append(gbps)
 
     summary: dict[str, dict[str, float | int]] = {}
     for device in sorted(samples, key=_mlx_sort_key):
@@ -54,9 +55,9 @@ def summarize_ibbw_log(path: str | None) -> dict[str, dict[str, float | int]]:
         if not values:
             continue
         summary[device] = {
-            "avg_mbps": sum(values) / len(values),
-            "max_mbps": max(values),
-            "last_mbps": values[-1],
+            "avg_gbps": sum(values) / len(values),
+            "max_gbps": max(values),
+            "last_gbps": values[-1],
             "samples": len(values),
         }
     return summary
@@ -105,7 +106,7 @@ def main() -> None:
                 "GCR_LATENCY": duration * 1000,
                 "GCR_ALGBW": alg_bw,
                 "GCR_BUSBW": bus_bw,
-                "GCR_IB_PORT_BW_MBPS": summarize_ibbw_log(args.ibbw_log_file),
+                "GCR_IB_PORT_BW_GBPS": summarize_ibbw_log(args.ibbw_log_file),
                 "GCR_IBBW_LOG_FILE": args.ibbw_log_file or "",
             }
 
