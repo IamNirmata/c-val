@@ -52,6 +52,7 @@ WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring ti
 WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
 PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
 NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
+JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix hari-gcr-cval)}
 
 usage() {
     cat <<EOF
@@ -128,6 +129,27 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 jobs = [job["job_name"] for job in data.get("jobs", []) if job.get("submitted")]
+print(",".join(jobs))
+PY
+}
+
+json_submitted_jobs_csv_from_dir() {
+    local cycle_dir="$1"
+    python - "$cycle_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cycle_dir = Path(sys.argv[1])
+jobs = []
+for path in sorted(cycle_dir.glob("submit*.json")):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        continue
+    for job in data.get("jobs", []):
+        if job.get("submitted") and job.get("job_name") not in jobs:
+            jobs.append(job["job_name"])
 print(",".join(jobs))
 PY
 }
@@ -251,6 +273,13 @@ latest_submit_file() {
         | cut -d' ' -f2-
 }
 
+latest_cycle_dir_with_submits() {
+    find "$LOG_DIR" -mindepth 2 -maxdepth 2 \( -name 'submit.json' -o -name 'submit-*.json' \) -printf '%T@ %h\n' 2>/dev/null \
+        | sort -nr \
+        | head -1 \
+        | cut -d' ' -f2-
+}
+
 json_any_nonterminal() {
     python - "$1" <<'PY'
 import json
@@ -267,6 +296,48 @@ delete_job() {
     local job_name="$1"
     log "deleting pending job after timeout: $job_name"
     kubectl delete vcjob -n "$NAMESPACE" "$job_name" --ignore-not-found=true | tee -a "$2"
+}
+
+stale_pending_jobs() {
+    kubectl get vcjob -n "$NAMESPACE" -o json \
+        | python - "$JOB_PREFIX" "$PENDING_START_TIMEOUT_SECONDS" <<'PY'
+import datetime as dt
+import json
+import sys
+import time
+
+prefix = sys.argv[1]
+timeout_seconds = int(float(sys.argv[2]))
+payload = json.load(sys.stdin)
+now = int(time.time())
+
+for item in payload.get("items", []):
+    metadata = item.get("metadata", {})
+    status = item.get("status", {})
+    name = metadata.get("name", "")
+    phase = status.get("state", {}).get("phase", "")
+    created = metadata.get("creationTimestamp", "")
+    if not name.startswith(prefix + "-") or phase != "Pending" or not created:
+        continue
+    created_epoch = int(dt.datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp())
+    if now - created_epoch >= timeout_seconds:
+        print(name)
+PY
+}
+
+prune_stale_pending_jobs() {
+    local cycle_dir="$1"
+    local stale_jobs
+    stale_jobs=$(stale_pending_jobs || true)
+    if [[ -z "$stale_jobs" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r job_name; do
+        [[ -n "$job_name" ]] || continue
+        log "pruning stale pending c-val job: $job_name"
+        delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
+    done <<< "$stale_jobs"
 }
 
 wait_for_jobs_once() {
@@ -347,16 +418,14 @@ watch_existing_jobs_until_clear() {
 }
 
 resume_latest_cycle_if_needed() {
-    local submit_file
-    submit_file=$(latest_submit_file)
-    if [[ -z "$submit_file" ]]; then
+    local cycle_dir
+    cycle_dir=$(latest_cycle_dir_with_submits)
+    if [[ -z "$cycle_dir" ]]; then
         return 1
     fi
 
-    local cycle_dir
-    cycle_dir=$(dirname "$submit_file")
     local jobs_csv
-    jobs_csv=$(json_submitted_jobs_csv "$submit_file")
+    jobs_csv=$(json_submitted_jobs_csv_from_dir "$cycle_dir")
     if [[ -z "$jobs_csv" ]]; then
         return 1
     fi
@@ -409,6 +478,8 @@ run_cycle() {
     local idle_rounds=0
 
     while true; do
+        prune_stale_pending_jobs "$cycle_dir"
+
         local status_file="$cycle_dir/status-$(date -u +%H%M%S).json"
         if [[ -n "$active_jobs" ]]; then
             python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$active_jobs" --output json \
