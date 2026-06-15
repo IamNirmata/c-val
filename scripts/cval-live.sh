@@ -299,8 +299,14 @@ delete_job() {
 }
 
 stale_pending_jobs() {
-    kubectl get vcjob -n "$NAMESPACE" -o json \
-        | python - "$JOB_PREFIX" "$PENDING_START_TIMEOUT_SECONDS" <<'PY'
+    local vcjob_json
+    vcjob_json=$(mktemp)
+    if ! kubectl get vcjob -n "$NAMESPACE" -o json > "$vcjob_json"; then
+        rm -f "$vcjob_json"
+        return 0
+    fi
+    local rc=0
+    python - "$JOB_PREFIX" "$PENDING_START_TIMEOUT_SECONDS" "$vcjob_json" <<'PY' || rc=$?
 import datetime as dt
 import json
 import sys
@@ -308,7 +314,9 @@ import time
 
 prefix = sys.argv[1]
 timeout_seconds = int(float(sys.argv[2]))
-payload = json.load(sys.stdin)
+payload_path = sys.argv[3]
+with open(payload_path, encoding="utf-8") as handle:
+    payload = json.load(handle)
 now = int(time.time())
 
 for item in payload.get("items", []):
@@ -323,6 +331,8 @@ for item in payload.get("items", []):
     if now - created_epoch >= timeout_seconds:
         print(name)
 PY
+    rm -f "$vcjob_json"
+    return "$rc"
 }
 
 prune_stale_pending_jobs() {
