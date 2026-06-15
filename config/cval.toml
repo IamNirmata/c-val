@@ -11,7 +11,7 @@ tolerated_no_schedule_taints = ["nvidia.com/gpu", "rdma"]
 
 [scheduling]
 days_threshold = 7
-batch_size = 5
+batch_size = 2
 
 [job]
 template_path = "ymls/specific-node-job.yml"
@@ -25,8 +25,11 @@ max_batch_size = 5
 confirmation_phrase = "submit"
 
 [monitoring]
-timeout_seconds = 180
+# A full storage + NCCL + DL validation run takes well over 180s; give watch
+# mode an hour by default before declaring a timeout.
+timeout_seconds = 3600
 poll_interval_seconds = 60
+pending_start_timeout_seconds = 480
 
 [storage]
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
