@@ -91,6 +91,7 @@ def get_latest_status_rows(
     """Read latest status rows from the PVC access pod using SQLite read-only mode."""
 
     kubectl = client or KubectlClient()
+    status_pod = resolve_status_pod(kubectl, namespace, pod)
     code = r'''
 import json
 import sqlite3
@@ -119,8 +120,62 @@ except Exception as exc:
 
 print(json.dumps(rows_out))
 '''
-    result = kubectl.run(["exec", "-n", namespace, pod, "--", "python3", "-c", code, db_path])
+    result = kubectl.run(
+        ["exec", "-n", namespace, status_pod, "--", "python3", "-c", code, db_path]
+    )
     return parse_latest_status_rows_json(result.stdout)
+
+
+def resolve_status_pod(kubectl: KubectlClient, namespace: str, pod: str) -> str:
+    """Resolve the configured status pod or the pod created by its access job."""
+
+    direct_candidates = (pod, f"{pod}-server-0")
+    for candidate in direct_candidates:
+        if _pod_is_running(kubectl, namespace, candidate):
+            return candidate
+
+    selectors = (
+        f"volcano.sh/job-name={pod}",
+        f"job-name={pod}",
+        f"app.kubernetes.io/name={pod}",
+    )
+    for selector in selectors:
+        selected = _running_pod_for_selector(kubectl, namespace, selector)
+        if selected:
+            return selected
+
+    raise RuntimeError(
+        f"Could not find a running status pod for {pod!r} in namespace {namespace!r}"
+    )
+
+
+def _pod_is_running(kubectl: KubectlClient, namespace: str, pod: str) -> bool:
+    result = kubectl.run(
+        ["get", "pod", "-n", namespace, pod, "-o", "json"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    payload = json.loads(result.stdout or "{}")
+    return payload.get("status", {}).get("phase") == "Running"
+
+
+def _running_pod_for_selector(
+    kubectl: KubectlClient,
+    namespace: str,
+    selector: str,
+) -> str:
+    result = kubectl.run(
+        ["get", "pods", "-n", namespace, "-l", selector, "-o", "json"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    payload = json.loads(result.stdout or "{}")
+    for item in payload.get("items", []):
+        if item.get("status", {}).get("phase") == "Running":
+            return str(item.get("metadata", {}).get("name", ""))
+    return ""
 
 
 def _timestamp_to_iso(timestamp: int) -> str:
