@@ -36,8 +36,14 @@ class RendererTests(unittest.TestCase):
           git_ref="abc123",
         )
 
-        self.assertEqual(rendered.job_name, "hari-gcr-cval-slc01-cl02-hgx-0001-12345")
-        self.assertIn("name: hari-gcr-cval-slc01-cl02-hgx-0001-12345", rendered.yaml_text)
+        self.assertEqual(
+          rendered.job_name,
+          "gcr-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+        )
+        self.assertIn(
+          "name: gcr-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+          rendered.yaml_text,
+        )
         self.assertIn('kubernetes.io/hostname: "slc01-cl02-hgx-0001"', rendered.yaml_text)
         self.assertIn('value: "12345"', rendered.yaml_text)
         self.assertIn('value: "abc123"', rendered.yaml_text)
@@ -60,6 +66,8 @@ class RendererTests(unittest.TestCase):
       self.assertIn('value: "/workspace/c-val"', rendered.yaml_text)
       self.assertIn('name: CVAL_GPU_COUNT', rendered.yaml_text)
       self.assertIn('name: CVAL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
+      self.assertIn('name: CVAL_IMAGE_NAME', rendered.yaml_text)
+      self.assertIn('value: "pytorch:26.05-py3"', rendered.yaml_text)
       self.assertNotIn("validation-8", rendered.yaml_text)
 
 

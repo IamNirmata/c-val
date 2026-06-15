@@ -21,6 +21,7 @@ echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
+CVAL_IMAGE_NAME=${CVAL_IMAGE_NAME:-}
 
 if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
     echo "Loading structured test result state from $CVAL_RESULT_JSON_FILE"
@@ -30,6 +31,7 @@ if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
             GCRRESULT2) GCRRESULT2="$value" ;;
             GCRRESULT3) GCRRESULT3="$value" ;;
             overall_result) overall_result="$value" ;;
+            image_name) CVAL_IMAGE_NAME="$value" ;;
         esac
     done < <(PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli result --result-json "$CVAL_RESULT_JSON_FILE"
     )
@@ -56,6 +58,7 @@ add_main_result() {
         "$test_name" \
         "$result" \
         "$GCRTIME" \
+        --image-name "$CVAL_IMAGE_NAME" \
         --db-path "$CVAL_VALIDATION_DB_PATH"
 }
 
@@ -75,6 +78,7 @@ if [ "$GCRRESULT1" = "pass" ]; then
         "$GCRNODE" \
         "$GCRTIME" \
         "$STORAGE_OUTPUT_DIR" \
+        --image-name "$CVAL_IMAGE_NAME" \
         --db-path "$CVAL_STORAGE_DB_PATH"
     echo "Storage DB update completed."
 else
@@ -106,6 +110,7 @@ if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
         "$GCRTIME" \
         "$GCR_BUSBW" \
         "$GCR_LATENCY" \
+        --image-name "$CVAL_IMAGE_NAME" \
         --db-path "$CVAL_NCCL_DB_PATH"
 
     echo "NCCl DB update completed."

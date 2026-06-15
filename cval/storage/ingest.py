@@ -73,6 +73,7 @@ def add_validation_result(
     test: str,
     result: str,
     timestamp: object | None,
+    image_name: str = "",
     db_path: str | Path = DEFAULT_VALIDATION_DB_PATH,
 ) -> int:
     """Append one validation result row and return the parsed timestamp."""
@@ -88,16 +89,18 @@ def add_validation_result(
               node TEXT NOT NULL,
               test TEXT NOT NULL,
               timestamp INTEGER NOT NULL,
-              result TEXT NOT NULL CHECK (result IN ('pass','fail','incomplete'))
+              result TEXT NOT NULL CHECK (result IN ('pass','fail','incomplete')),
+              image_name TEXT NOT NULL DEFAULT ''
             )
             """
         )
+        _ensure_column(connection, "runs", "image_name", "TEXT NOT NULL DEFAULT ''")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_node_test_ts ON runs(node, test, timestamp)"
         )
         connection.execute(
-            "INSERT INTO runs(node, test, timestamp, result) VALUES (?,?,?,?)",
-            (node, test, parsed_timestamp, result),
+            "INSERT INTO runs(node, test, timestamp, result, image_name) VALUES (?,?,?,?,?)",
+            (node, test, parsed_timestamp, result, image_name),
         )
         connection.commit()
     return parsed_timestamp
@@ -107,6 +110,7 @@ def add_storage_result(
     node: str,
     timestamp: object,
     results_dir: str | Path,
+    image_name: str = "",
     db_path: str | Path = DEFAULT_STORAGE_DB_PATH,
 ) -> int:
     """Parse fio JSON artifacts and upsert one row into the storage metrics DB."""
@@ -122,6 +126,7 @@ def add_storage_result(
             CREATE TABLE IF NOT EXISTS storage_performance (
                 node TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
+                image_name TEXT NOT NULL DEFAULT '',
                 iodepth_read_1file_iops REAL, iodepth_read_1file_bw REAL,
                 iodepth_write_1file_iops REAL, iodepth_write_1file_bw REAL,
                 numjobs_read_nfiles_iops REAL, numjobs_read_nfiles_bw REAL,
@@ -132,12 +137,23 @@ def add_storage_result(
             )
             """
         )
+        _ensure_column(
+            connection,
+            "storage_performance",
+            "image_name",
+            "TEXT NOT NULL DEFAULT ''",
+        )
         connection.execute(
             f"""
-            INSERT OR REPLACE INTO storage_performance (node, timestamp, {columns})
-            VALUES (?, ?, {placeholders})
+            INSERT OR REPLACE INTO storage_performance (node, timestamp, image_name, {columns})
+            VALUES (?, ?, ?, {placeholders})
             """,
-            (node, parsed_timestamp, *(metrics[column] for column in STORAGE_METRIC_COLUMNS)),
+            (
+                node,
+                parsed_timestamp,
+                image_name,
+                *(metrics[column] for column in STORAGE_METRIC_COLUMNS),
+            ),
         )
         connection.commit()
     return parsed_timestamp
@@ -171,6 +187,7 @@ def add_nccl_result(
     timestamp: object,
     busbw: float | str,
     latency: float | str,
+    image_name: str = "",
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
 ) -> int:
     """Upsert one NCCL metric row and return the parsed timestamp."""
@@ -182,16 +199,23 @@ def add_nccl_result(
             CREATE TABLE IF NOT EXISTS nccl_performance (
                 node TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
+                image_name TEXT NOT NULL DEFAULT '',
                 busbw REAL,
                 latency REAL,
                 PRIMARY KEY (node, timestamp)
             )
             """
         )
+        _ensure_column(
+            connection,
+            "nccl_performance",
+            "image_name",
+            "TEXT NOT NULL DEFAULT ''",
+        )
         connection.execute(
-            "INSERT OR REPLACE INTO nccl_performance (node, timestamp, busbw, latency) "
-            "VALUES (?, ?, ?, ?)",
-            (node, parsed_timestamp, float(busbw), float(latency)),
+            "INSERT OR REPLACE INTO nccl_performance "
+            "(node, timestamp, image_name, busbw, latency) VALUES (?, ?, ?, ?, ?)",
+            (node, parsed_timestamp, image_name, float(busbw), float(latency)),
         )
         connection.commit()
     return parsed_timestamp
@@ -207,3 +231,20 @@ def _connect_writable(db_path: str | Path) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=DELETE")
     connection.execute("PRAGMA synchronous=FULL")
     return connection
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    """Add a column to an existing SQLite table when older DBs lack it."""
+
+    existing_columns = {
+        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+    if column_name not in existing_columns:
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )

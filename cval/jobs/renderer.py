@@ -24,13 +24,23 @@ def default_template_path() -> Path:
     return load_config().job.template_path
 
 
-def make_job_name(node_name: str, timestamp: int, job_prefix: str | None = None) -> str:
+def make_job_name(
+    node_name: str,
+    timestamp: int,
+    job_prefix: str | None = None,
+    image_name: str | None = None,
+) -> str:
     """Build a deterministic Kubernetes-compatible validation job name."""
 
     resolved_prefix = job_prefix if job_prefix is not None else load_config().job.job_prefix
     validate_kubernetes_name(node_name, "node_name")
     validate_kubernetes_name(resolved_prefix, "job_prefix")
-    return f"{resolved_prefix}-{node_name}-{timestamp}"
+    image_label = _image_name_label(image_name) if image_name else ""
+    return (
+        f"{resolved_prefix}-{node_name}-{image_label}-{timestamp}"
+        if image_label
+        else f"{resolved_prefix}-{node_name}-{timestamp}"
+    )
 
 
 def render_validation_job(
@@ -50,8 +60,16 @@ def render_validation_job(
     resolved_git_repo = git_repo if git_repo is not None else config.job.git_repo
     resolved_git_ref = git_ref if git_ref is not None else config.job.git_ref
     template_config = job_template_config or config.job_template
+    resolved_image_name = config.job.image_name or _image_name_from_container(
+        template_config.container_image
+    )
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)
-    job_name = make_job_name(node_name, rendered_timestamp, job_prefix=resolved_job_prefix)
+    job_name = make_job_name(
+        node_name,
+        rendered_timestamp,
+        job_prefix=resolved_job_prefix,
+        image_name=resolved_image_name,
+    )
 
     required_placeholders = [
         "nodename-placeholder",
@@ -75,7 +93,11 @@ def render_validation_job(
     yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
     template_replacements = _job_template_replacements(template_config)
     runtime_replacements = _runtime_replacements(config)
-    replacements = {**template_replacements, **runtime_replacements}
+    replacements = {
+        "image-name-placeholder": resolved_image_name,
+        **template_replacements,
+        **runtime_replacements,
+    }
     for placeholder, value in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
         yaml_text = yaml_text.replace(placeholder, value)
 
@@ -125,6 +147,20 @@ def validate_kubernetes_name(value: str, field_name: str) -> None:
 
     if not NODE_NAME_PATTERN.match(value):
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")
+
+
+def _image_name_from_container(container_image: str) -> str:
+    """Return the human image name from a full container image reference."""
+
+    return container_image.rsplit("/", 1)[-1]
+
+
+def _image_name_label(image_name: str) -> str:
+    """Return a DNS-label-safe image segment for Kubernetes object names."""
+
+    label = re.sub(r"[^a-z0-9]+", "-", image_name.lower()).strip("-")
+    validate_kubernetes_name(label, "image_name")
+    return label
 
 
 def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:

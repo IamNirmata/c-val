@@ -8,6 +8,7 @@ set -uo pipefail
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
+CVAL_IMAGE_NAME=${CVAL_IMAGE_NAME:-}
 CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
 CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
 CVAL_GPU_COUNT=${CVAL_GPU_COUNT:-8}
@@ -59,6 +60,7 @@ overall = "pass" if all(test["status"] == "pass" for test in tests.values()) els
 payload = {
 	"schema_version": "cval.results.v1",
 	"node": env("GCRNODE", "unknown"),
+	"image_name": env("CVAL_IMAGE_NAME", ""),
 	"timestamp": env("GCRTIME", "unknown"),
 	"generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
 	"overall": overall,
@@ -95,6 +97,7 @@ echo "NCCL_SUMMARY_FILE: $NCCL_SUMMARY_FILE"
 echo "DLTEST_SUMMARY_FILE: $DLTEST_SUMMARY_FILE"
 echo "CVAL_RESULT_ENV_FILE: $CVAL_RESULT_ENV_FILE"
 echo "CVAL_RESULT_JSON_FILE: $CVAL_RESULT_JSON_FILE"
+echo "CVAL_IMAGE_NAME: $CVAL_IMAGE_NAME"
 echo "#########################################################################"
 
 # Phase 1: PVC/NFS storage performance and correctness smoke test.

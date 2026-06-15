@@ -52,7 +52,7 @@ WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring ti
 WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
 PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
 NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
-JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix hari-gcr-cval)}
+JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix gcr-cval)}
 
 usage() {
     cat <<EOF

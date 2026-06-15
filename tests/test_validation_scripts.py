@@ -30,6 +30,7 @@ class ValidationScriptTests(unittest.TestCase):
 
         self.assertIn("CVAL_RESULT_ENV_FILE", script)
         self.assertIn("CVAL_RESULT_JSON_FILE", script)
+        self.assertIn('"image_name": env("CVAL_IMAGE_NAME", "")', script)
         self.assertIn("write_result_state", script)
         self.assertIn("set -uo pipefail", script)
 
@@ -47,6 +48,7 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn('add_main_result "nccl" "$GCRRESULT2"', script)
         self.assertIn('add_main_result "dltest" "$GCRRESULT3"', script)
         self.assertIn('add_main_result "all" "$overall_result"', script)
+        self.assertIn('--image-name "$CVAL_IMAGE_NAME"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
 
     def test_runtime_scripts_use_configured_environment(self) -> None:
@@ -68,6 +70,7 @@ class ValidationScriptTests(unittest.TestCase):
             "schema_version": "cval.results.v1",
             "node": "slc01-cl02-hgx-0001",
             "timestamp": "12345",
+            "image_name": "pytorch:26.05-py3",
             "overall": "fail",
             "tests": {
                 "storage": {"status": "pass", "log": "storage.log", "summary": "storage.txt"},
@@ -82,6 +85,7 @@ class ValidationScriptTests(unittest.TestCase):
             result = load_validation_result(result_path)
 
         self.assertEqual(result.overall, "fail")
+        self.assertEqual(result.image_name, "pytorch:26.05-py3")
         self.assertEqual(result.tests["nccl"].status, "fail")
         self.assertEqual(
             validation_result_to_env(result),
@@ -90,6 +94,7 @@ class ValidationScriptTests(unittest.TestCase):
                 "GCRRESULT2": "fail",
                 "GCRRESULT3": "pass",
                 "overall_result": "fail",
+                "image_name": "pytorch:26.05-py3",
             },
         )
 

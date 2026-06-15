@@ -11,11 +11,12 @@ tolerated_no_schedule_taints = ["nvidia.com/gpu", "rdma"]
 
 [scheduling]
 days_threshold = 7
-batch_size = 2
+batch_size = 4
 
 [job]
 template_path = "ymls/specific-node-job.yml"
-job_prefix = "hari-gcr-cval"
+job_prefix = "gcr-cval"
+image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/IamNirmata/c-val.git"
 git_ref = "main"
 
@@ -55,7 +56,7 @@ namespace = "gcr-admin"
 queue = "gcr-admin"
 app_label = "hari-gcr-bonete-test"
 pvc_claim = "pvc-vast-gcr-admin"
-container_image = "nvcr.io/nvidia/pytorch:25.11-py3"
+container_image = "nvcr.io/nvidia/pytorch:26.05-py3"
 shared_memory_size = "256Gi"
 gpu_resource_name = "nvidia.com/gpu"
 gpu_count = "8"

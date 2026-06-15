@@ -12,6 +12,7 @@ Confirm the dry-run output before submitting. Look for:
 
 - `dry_run: true`
 - `submitted_count: 0`
+- job names include the image segment, such as `pytorch-26-05-py3`
 - selected node is not cordoned
 - selected node is expected by the operator
 
@@ -91,7 +92,7 @@ Pinned run:
 ```text
 commit: c9a762a65bf9ae2989d71a01395d86dbc5c96af5
 node: slc01-cl02-hgx-0204
-job: hari-gcr-cval-slc01-cl02-hgx-0204-1781134840
+job: gcr-cval-slc01-cl02-hgx-0204-pytorch-26-05-py3-1781134840
 phase: Completed
 result: storage=pass, nccl=pass, dltest=pass, overall=pass
 ```
