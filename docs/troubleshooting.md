@@ -57,6 +57,8 @@ Important fields:
 - `GCR_LATENCY`
 - `GCR_ALGBW`
 - `GCR_BUSBW`
+- `GCR_IB_PORT_BW_MBPS`, per-`mlx5_*` average, max, last, and sample count from the in-pod IBBW monitor
+- `GCR_IBBW_LOG_FILE`, the raw one-second IBBW monitor log appended to the NCCL log
 
 ## DB Rows Missing
 

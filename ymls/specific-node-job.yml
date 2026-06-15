@@ -96,6 +96,10 @@ spec:
                   value: "validation-nccl-iterations-placeholder"
                 - name: CVAL_NCCL_DATA_SIZE_GB
                   value: "validation-nccl-data-size-gb-placeholder"
+                - name: CVAL_IBBW_START_DEVICE
+                  value: "validation-ibbw-start-device-placeholder"
+                - name: CVAL_IBBW_END_DEVICE
+                  value: "validation-ibbw-end-device-placeholder"
                 - name: CVAL_DL_TEST_PLAN
                   value: "validation-dl-test-plan-placeholder"
                 - name: CVAL_DL_BASELINE_TEST_ID

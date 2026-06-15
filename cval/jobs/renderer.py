@@ -212,6 +212,8 @@ def _runtime_replacements(config: CvalConfig) -> dict[str, str]:
         "validation-gpu-count-placeholder": str(config.validation.gpu_count),
         "validation-nccl-iterations-placeholder": str(config.validation.nccl_iterations),
         "validation-nccl-data-size-gb-placeholder": str(config.validation.nccl_data_size_gb),
+        "validation-ibbw-start-device-placeholder": str(config.validation.ibbw_start_device),
+        "validation-ibbw-end-device-placeholder": str(config.validation.ibbw_end_device),
         "validation-dl-test-plan-placeholder": config.validation.dl_test_plan,
         "validation-dl-baseline-test-id-placeholder": config.validation.dl_baseline_test_id,
         "validation-dl-iterations-placeholder": str(config.validation.dl_iterations),

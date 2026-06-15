@@ -20,6 +20,7 @@ class ValidationScriptTests(unittest.TestCase):
             REPO_ROOT / "validation-tests" / "run-test.sh",
             REPO_ROOT / "validation-tests" / "db-update.sh",
             REPO_ROOT / "validation-tests" / "dltest" / "dltest.sh",
+            REPO_ROOT / "validation-tests" / "nccl" / "ibbw.sh",
             REPO_ROOT / "validation-tests" / "storage" / "storage.sh",
         ]
 
@@ -31,6 +32,10 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn("CVAL_RESULT_ENV_FILE", script)
         self.assertIn("CVAL_RESULT_JSON_FILE", script)
         self.assertIn('"image_name": env("CVAL_IMAGE_NAME", "")', script)
+        self.assertIn("NCCL_IBBW_LOG_FILE", script)
+        self.assertIn("start_ibbw_monitor", script)
+        self.assertIn("append_ibbw_log_to_nccl_log", script)
+        self.assertIn("--ibbw-log-file $NCCL_IBBW_LOG_FILE", script)
         self.assertIn("write_result_state", script)
         self.assertIn("set -uo pipefail", script)
 
@@ -61,6 +66,8 @@ class ValidationScriptTests(unittest.TestCase):
 
         self.assertIn("CVAL_VALIDATION_TESTS_DIR", run_test)
         self.assertIn("CVAL_NCCL_ITERATIONS", run_test)
+        self.assertIn("CVAL_IBBW_START_DEVICE", run_test)
+        self.assertIn("CVAL_IBBW_END_DEVICE", run_test)
         self.assertIn("--nproc_per_node=\"$CVAL_GPU_COUNT\"", run_test)
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)

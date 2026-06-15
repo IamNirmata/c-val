@@ -77,6 +77,10 @@ class RendererTests(unittest.TestCase):
       self.assertIn('name: CVAL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
       self.assertIn('name: CVAL_IMAGE_NAME', rendered.yaml_text)
       self.assertIn('value: "pytorch:26.05-py3"', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_START_DEVICE', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_START_DEVICE\n                  value: "0"', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_END_DEVICE', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_END_DEVICE\n                  value: "12"', rendered.yaml_text)
       self.assertNotIn("validation-8", rendered.yaml_text)
 
 

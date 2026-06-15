@@ -33,6 +33,7 @@ mkdir -p "$CVAL_RESULT_DIR"
 # Log files capture raw command output for each validation phase.
 export STORAGE_LOG_FILE="$STORAGE_OUTPUT_DIR/storage-$GCRNODE-$GCRTIME.log"
 export NCCL_LOG_FILE="$NCCL_OUTPUT_DIR/nccl-$GCRNODE-$GCRTIME.log"
+export NCCL_IBBW_LOG_FILE="$NCCL_OUTPUT_DIR/ibbw-$GCRNODE-$GCRTIME.log"
 export DLTEST_LOG_FILE="$DLTEST_OUTPUT_DIR/dltest-$GCRNODE-$GCRTIME.log"
 
 # Summary files contain compact machine- or human-readable phase results.

@@ -91,6 +91,8 @@ class ValidationConfig:
     gpu_count: int = 8
     nccl_iterations: int = 20
     nccl_data_size_gb: int = 8
+    ibbw_start_device: int = 0
+    ibbw_end_device: int = 12
     dl_test_plan: str = "80gb-b200"
     dl_baseline_test_id: str = "b200-pt2.8.0-cuda12.9"
     dl_iterations: int = 20
@@ -257,6 +259,16 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 validation,
                 "nccl_data_size_gb",
                 defaults.validation.nccl_data_size_gb,
+            ),
+            ibbw_start_device=_int(
+                validation,
+                "ibbw_start_device",
+                defaults.validation.ibbw_start_device,
+            ),
+            ibbw_end_device=_int(
+                validation,
+                "ibbw_end_device",
+                defaults.validation.ibbw_end_device,
             ),
             dl_test_plan=_str(validation, "dl_test_plan", defaults.validation.dl_test_plan),
             dl_baseline_test_id=_str(
