@@ -59,7 +59,8 @@ class RendererTests(unittest.TestCase):
       self.assertIn('name: CVAL_REPO_DIR', rendered.yaml_text)
       self.assertIn('value: "/workspace/c-val"', rendered.yaml_text)
       self.assertIn('name: CVAL_GPU_COUNT', rendered.yaml_text)
-      self.assertIn('value: "8"', rendered.yaml_text)
+      self.assertIn('name: CVAL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
+      self.assertNotIn("validation-8", rendered.yaml_text)
 
 
 if __name__ == "__main__":

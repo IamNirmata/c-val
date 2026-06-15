@@ -75,16 +75,14 @@ def render_validation_job(
     yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
     template_replacements = _job_template_replacements(template_config)
     runtime_replacements = _runtime_replacements(config)
-    for placeholder, value in template_replacements.items():
-        yaml_text = yaml_text.replace(placeholder, value)
-    for placeholder, value in runtime_replacements.items():
+    replacements = {**template_replacements, **runtime_replacements}
+    for placeholder, value in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
         yaml_text = yaml_text.replace(placeholder, value)
 
     # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
     known_placeholders = [
         *required_placeholders,
-        *template_replacements.keys(),
-        *runtime_replacements.keys(),
+        *replacements.keys(),
     ]
     remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
