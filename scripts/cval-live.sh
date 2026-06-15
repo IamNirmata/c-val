@@ -25,7 +25,7 @@ LOG_DIR=${CVAL_LIVE_LOG_DIR:-$SOURCE_REPO/run-logs/cval-live}
 RUNNER_WORKTREE=${CVAL_RUNNER_WORKTREE:-/tmp/cval-live-worktree}
 LOOP_SLEEP_SECONDS=${CVAL_LOOP_SLEEP_SECONDS:-300}
 CONFIRM_PHRASE=${CVAL_CONFIRM_PHRASE:-submit}
-PLAN_LIMIT=${CVAL_PLAN_LIMIT:-500}
+PLAN_LIMIT=${CVAL_PLAN_LIMIT:-50}
 
 config_value() {
     local section="$1"
@@ -71,6 +71,7 @@ Environment overrides:
   CVAL_DAYS_THRESHOLD=$DAYS_THRESHOLD
     CVAL_PENDING_START_TIMEOUT_SECONDS=$PENDING_START_TIMEOUT_SECONDS
   CVAL_GIT_REF=<commit-or-branch>; default is current origin/main commit each cycle
+    CVAL_PLAN_LIMIT=$PLAN_LIMIT
   CVAL_TMUX_SESSION=$SESSION_NAME
   CVAL_LOOP_SLEEP_SECONDS=$LOOP_SLEEP_SECONDS
 EOF
@@ -255,10 +256,10 @@ json_any_nonterminal() {
 import json
 import sys
 
-terminal = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}
+active = {"Pending", "Running"}
 with open(sys.argv[1], encoding="utf-8") as handle:
     phases = json.load(handle)
-raise SystemExit(0 if any(item.get("phase") not in terminal for item in phases) else 1)
+raise SystemExit(0 if any(item.get("phase") in active for item in phases) else 1)
 PY
 }
 
@@ -453,13 +454,22 @@ run_cycle() {
         while (( slots > 0 )); do
             local plan_file="$cycle_dir/dry-run-$(date -u +%H%M%S)-slot-$slots.json"
             log "rebuilding live ranked list for one open slot ($slots slot(s) available)"
-            python -m cval.cli --config "$CONFIG_PATH" run \
+            if ! python -m cval.cli --config "$CONFIG_PATH" run \
                 --live-status \
                 --threshold-days "$DAYS_THRESHOLD" \
                 --batch-size "$PLAN_LIMIT" \
+                --max-batch-size "$PLAN_LIMIT" \
                 --timestamp "$(date +%s)" \
                 --git-ref "$git_ref" \
-                --output json | tee "$plan_file"
+                --output json | tee "$plan_file"; then
+                log "dry-run planning failed; ending cycle so the loop can retry"
+                break
+            fi
+
+            if [[ ! -s "$plan_file" ]]; then
+                log "dry-run planning produced an empty plan file; ending cycle so the loop can retry"
+                break
+            fi
 
             local exclude_args=()
             IFS=',' read -r -a submitted_array <<< "$submitted_nodes"
