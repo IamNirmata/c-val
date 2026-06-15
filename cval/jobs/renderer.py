@@ -16,6 +16,8 @@ from cval.models import RenderedJob
 
 
 NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+MAX_VOLCANO_NAME_PART_LENGTH = 63
+VOLCANO_TASK_POD_SUFFIX = "-server-0"
 
 
 def default_template_path() -> Path:
@@ -36,11 +38,13 @@ def make_job_name(
     validate_kubernetes_name(node_name, "node_name")
     validate_kubernetes_name(resolved_prefix, "job_prefix")
     image_label = _image_name_label(image_name) if image_name else ""
-    return (
+    job_name = (
         f"{resolved_prefix}-{node_name}-{image_label}-{timestamp}"
         if image_label
         else f"{resolved_prefix}-{node_name}-{timestamp}"
     )
+    _validate_volcano_pod_name(job_name)
+    return job_name
 
 
 def render_validation_job(
@@ -147,6 +151,16 @@ def validate_kubernetes_name(value: str, field_name: str) -> None:
 
     if not NODE_NAME_PATTERN.match(value):
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")
+
+
+def _validate_volcano_pod_name(job_name: str) -> None:
+    pod_name = f"{job_name}{VOLCANO_TASK_POD_SUFFIX}"
+    if len(pod_name) > MAX_VOLCANO_NAME_PART_LENGTH:
+        raise ValueError(
+            "Rendered job name is too long for Volcano pod naming: "
+            f"{pod_name!r} is {len(pod_name)} characters; maximum is "
+            f"{MAX_VOLCANO_NAME_PART_LENGTH}"
+        )
 
 
 def _image_name_from_container(container_image: str) -> str:

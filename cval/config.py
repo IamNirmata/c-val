@@ -42,7 +42,7 @@ class JobConfig:
     template_path: Path = field(
         default_factory=lambda: REPO_ROOT / "ymls" / "specific-node-job.yml"
     )
-    job_prefix: str = "gcr-cval"
+    job_prefix: str = "cval"
     image_name: str = ""
     git_repo: str = "https://github.com/IamNirmata/c-val.git"
     git_ref: str = "main"

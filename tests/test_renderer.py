@@ -38,16 +38,25 @@ class RendererTests(unittest.TestCase):
 
         self.assertEqual(
           rendered.job_name,
-          "gcr-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+          "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
         self.assertIn(
-          "name: gcr-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+          "name: cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
           rendered.yaml_text,
         )
         self.assertIn('kubernetes.io/hostname: "slc01-cl02-hgx-0001"', rendered.yaml_text)
         self.assertIn('value: "12345"', rendered.yaml_text)
         self.assertIn('value: "abc123"', rendered.yaml_text)
         self.assertNotIn("placeholder", rendered.yaml_text)
+
+    def test_rejects_volcano_pod_name_overflow(self) -> None:
+        with self.assertRaisesRegex(ValueError, "too long for Volcano pod naming"):
+            render_validation_job(
+                TEMPLATE,
+                "slc01-cl02-hgx-0001",
+                timestamp=12345,
+                job_prefix="custom-cval",
+            )
 
     def test_rejects_missing_placeholder(self) -> None:
         with self.assertRaisesRegex(ValueError, "time-placeholder"):

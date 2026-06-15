@@ -52,7 +52,7 @@ WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring ti
 WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
 PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
 NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
-JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix gcr-cval)}
+JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
 
 usage() {
     cat <<EOF
@@ -542,10 +542,12 @@ run_cycle() {
                 --max-batch-size "$PLAN_LIMIT" \
                 --timestamp "$(date +%s)" \
                 --git-ref "$git_ref" \
-                --output json | tee "$plan_file"; then
+                --output json > "$plan_file" 2>&1; then
+                cat "$plan_file"
                 log "dry-run planning failed; ending cycle so the loop can retry"
                 break
             fi
+            cat "$plan_file"
 
             if [[ ! -s "$plan_file" ]]; then
                 log "dry-run planning produced an empty plan file; ending cycle so the loop can retry"
@@ -565,7 +567,7 @@ run_cycle() {
                 run_timestamp=$(date +%s)
                 local submit_file="$cycle_dir/submit-$run_timestamp.json"
                 log "submitting node: $nodes_csv timestamp=$run_timestamp"
-                python -m cval.cli --config "$CONFIG_PATH" run \
+                if ! python -m cval.cli --config "$CONFIG_PATH" run \
                     --free-nodes "$nodes_csv" \
                     --threshold-days "$DAYS_THRESHOLD" \
                     --batch-size 1 \
@@ -573,7 +575,13 @@ run_cycle() {
                     --git-ref "$git_ref" \
                     --submit \
                     --confirm "$CONFIRM_PHRASE" \
-                    --output json | tee "$submit_file"
+                    --output json > "$submit_file" 2>&1; then
+                    cat "$submit_file"
+                    log "submission failed for node $nodes_csv; skipping it for this cycle"
+                    skipped_nodes=$(csv_append_unique "$skipped_nodes" "$nodes_csv")
+                    break
+                fi
+                cat "$submit_file"
 
                 local new_jobs
                 new_jobs=$(json_submitted_jobs_csv "$submit_file")

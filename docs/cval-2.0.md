@@ -96,14 +96,14 @@ cval run \
 Read Volcano job phases without mutating resources:
 
 ```bash
-cval jobs --jobs gcr-cval-slc01-cl02-hgx-0064-pytorch-26-05-py3-12345
+cval jobs --jobs cval-slc01-cl02-hgx-0064-pytorch-26-05-py3-12345
 ```
 
 Poll Volcano job phases until terminal or timeout without deleting or cancelling jobs:
 
 ```bash
 cval jobs \
-  --jobs gcr-cval-slc01-cl02-hgx-0064-pytorch-26-05-py3-12345 \
+  --jobs cval-slc01-cl02-hgx-0064-pytorch-26-05-py3-12345 \
   --watch \
   --timeout-seconds 180 \
   --poll-interval-seconds 30 \

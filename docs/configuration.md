@@ -56,7 +56,7 @@ batch_size = 5
 
 [job]
 template_path = "ymls/specific-node-job.yml"
-job_prefix = "gcr-cval"
+job_prefix = "cval"
 image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/IamNirmata/c-val.git"
 git_ref = "main"

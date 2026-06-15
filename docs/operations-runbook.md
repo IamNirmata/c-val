@@ -92,7 +92,7 @@ Pinned run:
 ```text
 commit: c9a762a65bf9ae2989d71a01395d86dbc5c96af5
 node: slc01-cl02-hgx-0204
-job: gcr-cval-slc01-cl02-hgx-0204-pytorch-26-05-py3-1781134840
+job: cval-slc01-cl02-hgx-0204-pytorch-26-05-py3-1781134840
 phase: Completed
 result: storage=pass, nccl=pass, dltest=pass, overall=pass
 ```

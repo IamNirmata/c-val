@@ -48,7 +48,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(plan.planned_jobs[0].candidate.node, "slc01-cl02-hgx-0001")
         self.assertEqual(
             plan.planned_jobs[0].rendered_job.job_name,
-          "gcr-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+          "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
 
     def test_workflow_plan_to_dict_excludes_yaml_by_default(self) -> None:

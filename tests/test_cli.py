@@ -77,7 +77,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["submitted_count"], 0)
         self.assertEqual(
             result["jobs"][0]["job_name"],
-            "gcr-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+            "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
 
     def test_legacy_run_batch_command_still_works(self) -> None:
@@ -107,7 +107,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         config = json.loads(output.getvalue())
-        self.assertEqual(config["job"]["job_prefix"], "gcr-cval")
+        self.assertEqual(config["job"]["job_prefix"], "cval")
         self.assertEqual(config["cluster"]["namespace"], "gcr-admin")
 
     def test_config_file_overrides_cli_defaults(self) -> None:
@@ -121,7 +121,7 @@ class CliTests(unittest.TestCase):
 batch_size = 1
 
 [job]
-job_prefix = "custom-cval"
+job_prefix = "custom"
 """,
                 encoding="utf-8",
             )
@@ -145,7 +145,7 @@ job_prefix = "custom-cval"
         self.assertEqual(len(result["jobs"]), 1)
         self.assertEqual(
             result["jobs"][0]["job_name"],
-            "custom-cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+            "custom-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
 
     def test_plan_command_uses_provided_free_nodes(self) -> None:
