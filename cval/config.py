@@ -93,7 +93,7 @@ class ValidationConfig:
     nccl_data_size_gb: int = 8
     ibbw_start_device: int = 0
     ibbw_end_device: int = 13
-    dl_test_plan: str = "80gb-b200"
+    dl_test_plan: str = "80gb-example"
     dl_baseline_test_id: str = "b200-pt2.8.0-cuda12.9"
     dl_iterations: int = 20
 

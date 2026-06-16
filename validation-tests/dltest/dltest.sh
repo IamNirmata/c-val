@@ -6,7 +6,7 @@ set -u -o pipefail
 echo "Running DL Test on node: $GCRNODE at time: $GCRTIME"
 GPU_COUNT=${1:-${CVAL_GPU_COUNT:-8}}
 CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-/data/continuous_validation/deep-learning-unit-test-main}
-CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:-80gb-b200}
+CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:-80gb-example}
 CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-20}
 DLTEST_WORK_DIR=${DLTEST_WORK_DIR:-$DLTEST_OUTPUT_DIR/workdir}
 DLTEST_RUNS_DIR="$DLTEST_WORK_DIR/test_plans/$CVAL_DL_TEST_PLAN/runs"
@@ -14,13 +14,14 @@ DLTEST_SUMMARY_FILE=${DLTEST_SUMMARY_FILE:-$DLTEST_OUTPUT_DIR/dltest-summary-$GC
 SUMMARY_SCRIPT="$CVAL_VALIDATION_TESTS_DIR/dltest/summarize_results.py"
 
 prepare_workdir() {
-  local source_plan_dir="$CVAL_DL_UNIT_TEST_DIR/test_plans/$CVAL_DL_TEST_PLAN"
+  local source_plan_dir
   local target_plan_dir="$DLTEST_WORK_DIR/test_plans/$CVAL_DL_TEST_PLAN"
 
   if [ ! -d "$CVAL_DL_UNIT_TEST_DIR/src/dl_unit_test" ]; then
     echo "DL unit test package not found under $CVAL_DL_UNIT_TEST_DIR/src/dl_unit_test" >&2
     return 1
   fi
+  source_plan_dir=$(find_source_plan_dir) || return 1
   if [ ! -f "$source_plan_dir/test_plan.json" ]; then
     echo "DL test plan not found: $source_plan_dir/test_plan.json" >&2
     return 1
@@ -32,6 +33,20 @@ prepare_workdir() {
   if [ -d "$source_plan_dir/baseline" ]; then
     cp -a "$source_plan_dir/baseline" "$target_plan_dir/baseline"
   fi
+}
+
+find_source_plan_dir() {
+  local candidate
+  for candidate in \
+    "$CVAL_DL_UNIT_TEST_DIR/test_plans/$CVAL_DL_TEST_PLAN" \
+    "$CVAL_DL_UNIT_TEST_DIR/src/dl_unit_test/test_plans/$CVAL_DL_TEST_PLAN"; do
+    if [ -f "$candidate/test_plan.json" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "DL test plan '$CVAL_DL_TEST_PLAN' not found under $CVAL_DL_UNIT_TEST_DIR" >&2
+  return 1
 }
 
 write_summary() {
