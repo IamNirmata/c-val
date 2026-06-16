@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Real-time InfiniBand Bandwidth Monitoring Script
 # Usage: ./ibbw.sh [start_device] [end_device] [interval_seconds]
-# Example: ./ibbw.sh 5 12    # Monitor mlx5_5 through mlx5_12 (8 GPU devices)
-# Example: ./ibbw.sh 0 12    # Monitor all devices mlx5_0 through mlx5_12
+# Example: ./ibbw.sh 4 13    # Monitor mlx5_4 through mlx5_13 compute devices
+# Example: ./ibbw.sh 0 13    # Monitor mlx5_0 through mlx5_13
 
 space='    '
 start_device=${1:-0}
-end_device=${2:-12}
+end_device=${2:-13}
 interval_seconds=${3:-1}
 
 if ! [[ "$start_device" =~ ^[0-9]+$ && "$end_device" =~ ^[0-9]+$ && "$interval_seconds" =~ ^[1-9][0-9]*$ ]]; then

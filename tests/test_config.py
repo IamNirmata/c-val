@@ -16,7 +16,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
         self.assertEqual(config.validation.gpu_count, 8)
         self.assertEqual(config.validation.ibbw_start_device, 0)
-        self.assertEqual(config.validation.ibbw_end_device, 12)
+        self.assertEqual(config.validation.ibbw_end_device, 13)
         self.assertTrue(str(config.job.template_path).endswith("ymls/specific-node-job.yml"))
 
     def test_loads_partial_override_with_defaults(self) -> None:
