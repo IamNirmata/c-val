@@ -20,11 +20,17 @@ class ValidationScriptTests(unittest.TestCase):
             REPO_ROOT / "validation-tests" / "run-test.sh",
             REPO_ROOT / "validation-tests" / "db-update.sh",
             REPO_ROOT / "validation-tests" / "dltest" / "dltest.sh",
+            REPO_ROOT / "validation-tests" / "dltest" / "summarize_results.py",
             REPO_ROOT / "validation-tests" / "nccl" / "ibbw.sh",
             REPO_ROOT / "validation-tests" / "storage" / "storage.sh",
         ]
 
-        subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
+        bash_scripts = [path for path in scripts if path.suffix == ".sh"]
+        subprocess.run(["bash", "-n", *map(str, bash_scripts)], check=True)
+        subprocess.run(
+            ["python", "-m", "py_compile", str(REPO_ROOT / "validation-tests" / "dltest" / "summarize_results.py")],
+            check=True,
+        )
 
     def test_run_test_persists_results_for_db_update(self) -> None:
         script = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(encoding="utf-8")
@@ -71,6 +77,9 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn("--nproc_per_node=\"$CVAL_GPU_COUNT\"", run_test)
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)
+        self.assertIn("-m dl_unit_test", dltest)
+        self.assertIn("DLTEST_WORK_DIR", dltest)
+        self.assertIn("summarize_results.py", dltest)
 
     def test_ibbw_monitor_reports_gbps(self) -> None:
         script = (REPO_ROOT / "validation-tests" / "nccl" / "ibbw.sh").read_text(
@@ -113,6 +122,54 @@ class ValidationScriptTests(unittest.TestCase):
                 "image_name": "pytorch:26.05-py3",
             },
         )
+
+    def test_dltest_summary_script_summarizes_rank_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runs_dir = root / "test_plans" / "80gb-example" / "runs"
+            runs_dir.mkdir(parents=True)
+            (runs_dir / "20260616151716_node_gpu_cuda_pt_RANK0.json").write_text(
+                json.dumps(
+                    {
+                        "test_plan": "80gb-example",
+                        "runID": "20260616151716_node_gpu_cuda_pt_RANK0",
+                        "nn_tasks": [{"task_name": "linear", "status": "completed"}],
+                        "f_tasks": [],
+                        "coll_tasks": [{"task_name": "allreduce", "status": "completed"}],
+                        "overlap_tasks": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary_path = root / "summary.json"
+
+            subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "validation-tests" / "dltest" / "summarize_results.py"),
+                    "--runs-dir",
+                    str(runs_dir),
+                    "--summary-file",
+                    str(summary_path),
+                    "--status",
+                    "pass",
+                    "--test-plan",
+                    "80gb-example",
+                    "--iterations",
+                    "2",
+                    "--gpu-count",
+                    "1",
+                ],
+                check=True,
+            )
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(summary["status"], "pass")
+        self.assertEqual(summary["rank_result_count"], 1)
+        self.assertEqual(summary["task_counts"]["nn_tasks"], 1)
+        self.assertEqual(summary["status_counts"], {"completed": 2})
+        self.assertEqual(summary["rank_results"][0]["rank"], 0)
 
 
 if __name__ == "__main__":

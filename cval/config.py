@@ -81,7 +81,7 @@ class RuntimeConfig:
     repo_dir: str = "/workspace/c-val"
     validation_root: str = "/data/continuous_validation"
     validation_tests_dir: str = "/workspace/c-val/validation-tests"
-    dl_unit_test_dir: str = "/data/continuous_validation/deeplearning_unit_test"
+    dl_unit_test_dir: str = "/data/continuous_validation/deep-learning-unit-test-main"
 
 
 @dataclass(frozen=True)

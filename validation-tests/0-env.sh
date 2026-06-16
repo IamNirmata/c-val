@@ -5,7 +5,7 @@
 CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
 CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
 CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
-CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-$CVAL_VALIDATION_ROOT/deeplearning_unit_test}
+CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-$CVAL_VALIDATION_ROOT/deep-learning-unit-test-main}
 CVAL_VALIDATION_DB_PATH=${CVAL_VALIDATION_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/validation.db}
 CVAL_STORAGE_DB_PATH=${CVAL_STORAGE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-storage.db}
 CVAL_NCCL_DB_PATH=${CVAL_NCCL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-nccl.db}
@@ -39,7 +39,7 @@ export DLTEST_LOG_FILE="$DLTEST_OUTPUT_DIR/dltest-$GCRNODE-$GCRTIME.log"
 # Summary files contain compact machine- or human-readable phase results.
 export NCCL_SUMMARY_FILE="$NCCL_OUTPUT_DIR/nccl-summary-$GCRNODE-$GCRTIME.json"
 export STORAGE_SUMMARY_FILE="$STORAGE_OUTPUT_DIR/storage-summary-$GCRNODE-$GCRTIME.txt"
-export DLTEST_SUMMARY_FILE="$DLTEST_OUTPUT_DIR/dltest-summary-$GCRNODE-$GCRTIME.txt"
+export DLTEST_SUMMARY_FILE="$DLTEST_OUTPUT_DIR/dltest-summary-$GCRNODE-$GCRTIME.json"
 
 # Default every phase to fail; tests must opt into pass after successful completion.
 export GCRRESULT1=fail

@@ -38,7 +38,7 @@ cval.results.v1
     "dltest": {
       "status": "pass",
       "log": "/data/continuous_validation/dltest/.../dltest.log",
-      "summary": "/data/continuous_validation/dltest/.../dltest-summary.txt"
+      "summary": "/data/continuous_validation/dltest/.../dltest-summary.json"
     }
   }
 }

@@ -41,7 +41,7 @@ nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
 repo_dir = "/workspace/c-val"
 validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
-dl_unit_test_dir = "/data/continuous_validation/deeplearning_unit_test"
+dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
 
 [validation]
 gpu_count = 8
