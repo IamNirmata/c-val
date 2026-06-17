@@ -3,17 +3,13 @@
 c-val uses TOML for repository configuration because Python 3.11 can parse it
 with stdlib `tomllib`, while operators still get comments, typed values, and
 clear nested sections.
-
-Code defaults are deliberately neutral; environment-specific values (cluster
-names, git repo, job prefixes) belong in `config/cval.toml`.
 """
 
 from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import asdict, dataclass, field, fields
-from functools import lru_cache
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +21,9 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "cval.toml"
 class ClusterConfig:
     """Cluster-facing defaults used by discovery, status, and submission."""
 
-    namespace: str = "default"
-    pvc_access_pod: str = "cval-pvc-access"
-    node_filter: str = ""
+    namespace: str = "gcr-admin"
+    pvc_access_pod: str = "gcr-admin-pvc-access"
+    node_filter: str = "hgx"
     tolerated_no_schedule_taints: tuple[str, ...] = ("nvidia.com/gpu", "rdma")
 
 
@@ -56,7 +52,7 @@ class JobConfig:
 class PolicyConfig:
     """Safety policy defaults for real Kubernetes job creation."""
 
-    namespace_allowlist: tuple[str, ...] = ("default",)
+    namespace_allowlist: tuple[str, ...] = ("gcr-admin",)
     max_batch_size: int = 5
     confirmation_phrase: str = "submit"
 
@@ -65,7 +61,7 @@ class PolicyConfig:
 class MonitoringConfig:
     """Polling defaults for read-only job monitoring."""
 
-    timeout_seconds: float = 3600
+    timeout_seconds: float = 180
     poll_interval_seconds: float = 60
 
 
@@ -106,10 +102,10 @@ class ValidationConfig:
 class JobTemplateConfig:
     """Values injected into the Volcano job template."""
 
-    namespace: str = "default"
-    queue: str = "default"
-    app_label: str = "cval-validation"
-    pvc_claim: str = "cval-data"
+    namespace: str = "gcr-admin"
+    queue: str = "gcr-admin"
+    app_label: str = "hari-gcr-bonete-test"
+    pvc_claim: str = "pvc-vast-gcr-admin"
     container_image: str = "nvcr.io/nvidia/pytorch:25.11-py3"
     shared_memory_size: str = "256Gi"
     gpu_resource_name: str = "nvidia.com/gpu"
@@ -157,23 +153,17 @@ def default_config() -> CvalConfig:
 
 
 def load_config(path: Path | str | None = None) -> CvalConfig:
-    """Load c-val config from TOML, falling back to built-in defaults.
+    """Load c-val config from TOML, falling back to built-in defaults."""
 
-    Results are cached per resolved path, so repeated calls are free and the
-    whole process sees one consistent config.
-    """
-
-    return _load_config_cached(_config_path(path))
-
-
-@lru_cache(maxsize=None)
-def _load_config_cached(config_path: Path) -> CvalConfig:
+    config_path = _config_path(path)
     if not config_path.exists():
-        if config_path != DEFAULT_CONFIG_PATH:
+        if path is not None or os.environ.get("CVAL_CONFIG"):
             raise FileNotFoundError(f"c-val config file not found: {config_path}")
         return default_config()
 
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("c-val config must be a TOML table")
     return _build_config(data)
 
 
@@ -195,18 +185,17 @@ def _config_path(path: Path | str | None) -> Path:
 
 
 def _build_config(data: dict[str, Any]) -> CvalConfig:
-    """Build the config tree generically from dataclass field definitions."""
+    defaults = default_config()
+    cluster = _section(data, "cluster")
+    scheduling = _section(data, "scheduling")
+    job = _section(data, "job")
+    policy = _section(data, "policy")
+    monitoring = _section(data, "monitoring")
+    storage = _section(data, "storage")
+    runtime = _section(data, "runtime")
+    validation = _section(data, "validation")
+    job_template = _section(data, "job_template")
 
-<<<<<<< HEAD
-    sections: dict[str, Any] = {}
-    for section in fields(CvalConfig):
-        section_data = data.get(section.name, {})
-        if not isinstance(section_data, dict):
-            raise ValueError(f"Config section [{section.name}] must be a table")
-        # Each CvalConfig field's default_factory is its section dataclass.
-        sections[section.name] = _build_section(section.default_factory, section_data)
-    return CvalConfig(**sections)
-=======
     return CvalConfig(
         cluster=ClusterConfig(
             namespace=_str(cluster, "namespace", defaults.cluster.namespace),
@@ -343,32 +332,39 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             ),
         ),
     )
->>>>>>> origin/main
 
 
-def _build_section(section_cls: type, data: dict[str, Any]) -> Any:
-    kwargs = {
-        spec.name: _coerce(spec.type, spec.name, data[spec.name])
-        for spec in fields(section_cls)
-        if spec.name in data
-    }
-    return section_cls(**kwargs)
+def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
+    value = data.get(name, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"Config section [{name}] must be a table")
+    return value
 
 
-def _coerce(annotation: str, key: str, value: Any) -> Any:
-    """Coerce a TOML value to the annotated field type."""
+def _str(section: dict[str, Any], key: str, default: str) -> str:
+    return str(section.get(key, default))
 
-    if annotation == "Path":
-        path = Path(str(value)).expanduser()
-        return path if path.is_absolute() else REPO_ROOT / path
-    if annotation == "tuple[str, ...]":
-        if isinstance(value, str):
-            return (value,)
-        if isinstance(value, list | tuple):
-            return tuple(str(item) for item in value)
-        raise ValueError(f"Config value {key!r} must be a string or list of strings")
-    if annotation == "float":
-        return float(value)
-    if annotation == "int":
-        return int(value)
-    return str(value)
+
+def _int(section: dict[str, Any], key: str, default: int) -> int:
+    return int(section.get(key, default))
+
+
+def _float(section: dict[str, Any], key: str, default: float) -> float:
+    return float(section.get(key, default))
+
+
+def _str_tuple(section: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = section.get(key, default)
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value)
+    raise ValueError(f"Config value {key!r} must be a string or list of strings")
+
+
+def _repo_path(section: dict[str, Any], key: str, default: Path) -> Path:
+    value = section.get(key)
+    if value is None:
+        return default
+    path = Path(str(value)).expanduser()
+    return path if path.is_absolute() else REPO_ROOT / path
