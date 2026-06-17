@@ -47,8 +47,8 @@ class JobConfig:
         default_factory=lambda: REPO_ROOT / "ymls" / "specific-node-job.yml"
     )
     job_prefix: str = "cval"
-    # No code default: the runtime clone URL must come from config/cval.toml.
-    git_repo: str = ""
+    image_name: str = ""
+    git_repo: str = "https://github.com/IamNirmata/c-val.git"
     git_ref: str = "main"
 
 
@@ -197,6 +197,7 @@ def _config_path(path: Path | str | None) -> Path:
 def _build_config(data: dict[str, Any]) -> CvalConfig:
     """Build the config tree generically from dataclass field definitions."""
 
+<<<<<<< HEAD
     sections: dict[str, Any] = {}
     for section in fields(CvalConfig):
         section_data = data.get(section.name, {})
@@ -205,6 +206,144 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
         # Each CvalConfig field's default_factory is its section dataclass.
         sections[section.name] = _build_section(section.default_factory, section_data)
     return CvalConfig(**sections)
+=======
+    return CvalConfig(
+        cluster=ClusterConfig(
+            namespace=_str(cluster, "namespace", defaults.cluster.namespace),
+            pvc_access_pod=_str(cluster, "pvc_access_pod", defaults.cluster.pvc_access_pod),
+            node_filter=_str(cluster, "node_filter", defaults.cluster.node_filter),
+            tolerated_no_schedule_taints=_str_tuple(
+                cluster,
+                "tolerated_no_schedule_taints",
+                defaults.cluster.tolerated_no_schedule_taints,
+            ),
+        ),
+        scheduling=SchedulingConfig(
+            days_threshold=_float(scheduling, "days_threshold", defaults.scheduling.days_threshold),
+            batch_size=_int(scheduling, "batch_size", defaults.scheduling.batch_size),
+        ),
+        job=JobConfig(
+            template_path=_repo_path(job, "template_path", defaults.job.template_path),
+            job_prefix=_str(job, "job_prefix", defaults.job.job_prefix),
+            git_repo=_str(job, "git_repo", defaults.job.git_repo),
+            git_ref=_str(job, "git_ref", defaults.job.git_ref),
+        ),
+        policy=PolicyConfig(
+            namespace_allowlist=_str_tuple(
+                policy,
+                "namespace_allowlist",
+                defaults.policy.namespace_allowlist,
+            ),
+            max_batch_size=_int(policy, "max_batch_size", defaults.policy.max_batch_size),
+            confirmation_phrase=_str(
+                policy,
+                "confirmation_phrase",
+                defaults.policy.confirmation_phrase,
+            ),
+        ),
+        monitoring=MonitoringConfig(
+            timeout_seconds=_float(
+                monitoring,
+                "timeout_seconds",
+                defaults.monitoring.timeout_seconds,
+            ),
+            poll_interval_seconds=_float(
+                monitoring,
+                "poll_interval_seconds",
+                defaults.monitoring.poll_interval_seconds,
+            ),
+        ),
+        storage=StorageConfig(
+            validation_db_path=_str(storage, "validation_db_path", defaults.storage.validation_db_path),
+            storage_db_path=_str(storage, "storage_db_path", defaults.storage.storage_db_path),
+            nccl_db_path=_str(storage, "nccl_db_path", defaults.storage.nccl_db_path),
+        ),
+        runtime=RuntimeConfig(
+            repo_dir=_str(runtime, "repo_dir", defaults.runtime.repo_dir),
+            validation_root=_str(runtime, "validation_root", defaults.runtime.validation_root),
+            validation_tests_dir=_str(
+                runtime,
+                "validation_tests_dir",
+                defaults.runtime.validation_tests_dir,
+            ),
+            dl_unit_test_dir=_str(
+                runtime,
+                "dl_unit_test_dir",
+                defaults.runtime.dl_unit_test_dir,
+            ),
+        ),
+        validation=ValidationConfig(
+            gpu_count=_int(validation, "gpu_count", defaults.validation.gpu_count),
+            nccl_iterations=_int(
+                validation,
+                "nccl_iterations",
+                defaults.validation.nccl_iterations,
+            ),
+            nccl_data_size_gb=_int(
+                validation,
+                "nccl_data_size_gb",
+                defaults.validation.nccl_data_size_gb,
+            ),
+            ibbw_start_device=_int(
+                validation,
+                "ibbw_start_device",
+                defaults.validation.ibbw_start_device,
+            ),
+            ibbw_end_device=_int(
+                validation,
+                "ibbw_end_device",
+                defaults.validation.ibbw_end_device,
+            ),
+            dl_test_plan=_str(validation, "dl_test_plan", defaults.validation.dl_test_plan),
+            dl_baseline_test_id=_str(
+                validation,
+                "dl_baseline_test_id",
+                defaults.validation.dl_baseline_test_id,
+            ),
+            dl_iterations=_int(validation, "dl_iterations", defaults.validation.dl_iterations),
+        ),
+        job_template=JobTemplateConfig(
+            namespace=_str(job_template, "namespace", defaults.job_template.namespace),
+            queue=_str(job_template, "queue", defaults.job_template.queue),
+            app_label=_str(job_template, "app_label", defaults.job_template.app_label),
+            pvc_claim=_str(job_template, "pvc_claim", defaults.job_template.pvc_claim),
+            container_image=_str(
+                job_template,
+                "container_image",
+                defaults.job_template.container_image,
+            ),
+            shared_memory_size=_str(
+                job_template,
+                "shared_memory_size",
+                defaults.job_template.shared_memory_size,
+            ),
+            gpu_resource_name=_str(
+                job_template,
+                "gpu_resource_name",
+                defaults.job_template.gpu_resource_name,
+            ),
+            gpu_count=_str(job_template, "gpu_count", defaults.job_template.gpu_count),
+            cpu=_str(job_template, "cpu", defaults.job_template.cpu),
+            memory=_str(job_template, "memory", defaults.job_template.memory),
+            rdma_resource_name=_str(
+                job_template,
+                "rdma_resource_name",
+                defaults.job_template.rdma_resource_name,
+            ),
+            rdma_count=_str(job_template, "rdma_count", defaults.job_template.rdma_count),
+            rdma_toleration_key=_str(
+                job_template,
+                "rdma_toleration_key",
+                defaults.job_template.rdma_toleration_key,
+            ),
+            gpu_toleration_key=_str(
+                job_template,
+                "gpu_toleration_key",
+                defaults.job_template.gpu_toleration_key,
+            ),
+        ),
+    )
+>>>>>>> origin/main
 
 
 def _build_section(section_cls: type, data: dict[str, Any]) -> Any:

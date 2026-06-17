@@ -75,7 +75,10 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["submitted_count"], 0)
-        self.assertEqual(result["jobs"][0]["job_name"], "hari-gcr-cval-slc01-cl02-hgx-0001-12345")
+        self.assertEqual(
+            result["jobs"][0]["job_name"],
+            "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+        )
 
     def test_legacy_run_batch_command_still_works(self) -> None:
         output = io.StringIO()
@@ -104,7 +107,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         config = json.loads(output.getvalue())
-        self.assertEqual(config["job"]["job_prefix"], "hari-gcr-cval")
+        self.assertEqual(config["job"]["job_prefix"], "cval")
         self.assertEqual(config["cluster"]["namespace"], "gcr-admin")
 
     def test_config_file_overrides_cli_defaults(self) -> None:
@@ -118,7 +121,7 @@ class CliTests(unittest.TestCase):
 batch_size = 1
 
 [job]
-job_prefix = "custom-cval"
+job_prefix = "custom"
 """,
                 encoding="utf-8",
             )
@@ -140,7 +143,10 @@ job_prefix = "custom-cval"
         self.assertEqual(exit_code, 0)
         result = json.loads(output.getvalue())
         self.assertEqual(len(result["jobs"]), 1)
-        self.assertEqual(result["jobs"][0]["job_name"], "custom-cval-slc01-cl02-hgx-0001-12345")
+        self.assertEqual(
+            result["jobs"][0]["job_name"],
+            "custom-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+        )
 
     def test_plan_command_uses_provided_free_nodes(self) -> None:
         output = io.StringIO()
@@ -241,6 +247,7 @@ job_prefix = "custom-cval"
             "schema_version": "cval.results.v1",
             "node": "slc01-cl02-hgx-0001",
             "timestamp": "12345",
+            "image_name": "pytorch:26.05-py3",
             "overall": "fail",
             "tests": {
                 "storage": {"status": "pass"},
@@ -260,6 +267,7 @@ job_prefix = "custom-cval"
         self.assertIn("GCRRESULT1=pass", output.getvalue())
         self.assertIn("GCRRESULT2=fail", output.getvalue())
         self.assertIn("overall_result=fail", output.getvalue())
+        self.assertIn("image_name=pytorch:26.05-py3", output.getvalue())
 
     def test_db_add_result_command_writes_sqlite_row(self) -> None:
         output = io.StringIO()
@@ -274,16 +282,23 @@ job_prefix = "custom-cval"
                         "all",
                         "pass",
                         "12345",
+                        "--image-name",
+                        "pytorch:26.05-py3",
                         "--db-path",
                         str(db_path),
                     ]
                 )
 
             with closing(sqlite3.connect(db_path)) as connection:
-                row = connection.execute("SELECT node, test, timestamp, result FROM runs").fetchone()
+                row = connection.execute(
+                    "SELECT node, test, timestamp, result, image_name FROM runs"
+                ).fetchone()
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(row, ("slc01-cl02-hgx-0001", "all", 12345, "pass"))
+        self.assertEqual(
+            row,
+            ("slc01-cl02-hgx-0001", "all", 12345, "pass", "pytorch:26.05-py3"),
+        )
         self.assertIn("Added validation result", output.getvalue())
 
 

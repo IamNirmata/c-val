@@ -36,12 +36,27 @@ class RendererTests(unittest.TestCase):
           git_ref="abc123",
         )
 
-        self.assertEqual(rendered.job_name, "hari-gcr-cval-slc01-cl02-hgx-0001-12345")
-        self.assertIn("name: hari-gcr-cval-slc01-cl02-hgx-0001-12345", rendered.yaml_text)
+        self.assertEqual(
+          rendered.job_name,
+          "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+        )
+        self.assertIn(
+          "name: cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
+          rendered.yaml_text,
+        )
         self.assertIn('kubernetes.io/hostname: "slc01-cl02-hgx-0001"', rendered.yaml_text)
         self.assertIn('value: "12345"', rendered.yaml_text)
         self.assertIn('value: "abc123"', rendered.yaml_text)
         self.assertNotIn("placeholder", rendered.yaml_text)
+
+    def test_rejects_volcano_pod_name_overflow(self) -> None:
+        with self.assertRaisesRegex(ValueError, "too long for Volcano pod naming"):
+            render_validation_job(
+                TEMPLATE,
+                "slc01-cl02-hgx-0001",
+                timestamp=12345,
+                job_prefix="custom-cval",
+            )
 
     def test_rejects_missing_placeholder(self) -> None:
         with self.assertRaisesRegex(ValueError, "time-placeholder"):
@@ -83,7 +98,14 @@ class RendererTests(unittest.TestCase):
       self.assertIn('name: CVAL_REPO_DIR', rendered.yaml_text)
       self.assertIn('value: "/workspace/c-val"', rendered.yaml_text)
       self.assertIn('name: CVAL_GPU_COUNT', rendered.yaml_text)
-      self.assertIn('value: "8"', rendered.yaml_text)
+      self.assertIn('name: CVAL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
+      self.assertIn('name: CVAL_IMAGE_NAME', rendered.yaml_text)
+      self.assertIn('value: "pytorch:26.05-py3"', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_START_DEVICE', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_START_DEVICE\n                  value: "0"', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_END_DEVICE', rendered.yaml_text)
+      self.assertIn('name: CVAL_IBBW_END_DEVICE\n                  value: "13"', rendered.yaml_text)
+      self.assertNotIn("validation-8", rendered.yaml_text)
 
 
 if __name__ == "__main__":

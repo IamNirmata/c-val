@@ -7,7 +7,23 @@ from cval.storage.status import (
     latest_status_rows_to_tsv,
     parse_latest_status_rows_json,
     parse_latest_status_tsv,
+    resolve_status_pod,
 )
+from cval.k8s.client import CommandResult
+
+
+class FakeKubectlClient:
+    def __init__(self, responses: dict[tuple[str, ...], CommandResult]) -> None:
+        self.responses = responses
+
+    def run(self, args, check=True, input_text=None):
+        result = self.responses.get(
+            tuple(args),
+            CommandResult(args=("kubectl", *args), stdout="", stderr="not found", returncode=1),
+        )
+        if check and result.returncode != 0:
+            raise RuntimeError(result.stderr)
+        return result
 
 
 class StatusParsingTests(unittest.TestCase):
@@ -48,6 +64,60 @@ class StatusParsingTests(unittest.TestCase):
 
         self.assertEqual(latest_status_rows_to_node_map(rows), {"slc01-cl02-hgx-0001": 200})
         self.assertIn("1970-01-01T00:03:20Z", latest_status_rows_to_tsv(rows))
+
+    def test_resolve_status_pod_uses_volcano_access_pod(self) -> None:
+        client = FakeKubectlClient(
+            {
+                (
+                    "get",
+                    "pod",
+                    "-n",
+                    "gcr-admin",
+                    "gcr-admin-pvc-access-server-0",
+                    "-o",
+                    "json",
+                ): CommandResult(
+                    args=(),
+                    stdout='{"status":{"phase":"Running"}}',
+                    stderr="",
+                    returncode=0,
+                )
+            }
+        )
+
+        self.assertEqual(
+            resolve_status_pod(client, "gcr-admin", "gcr-admin-pvc-access"),
+            "gcr-admin-pvc-access-server-0",
+        )
+
+    def test_resolve_status_pod_uses_label_selector(self) -> None:
+        client = FakeKubectlClient(
+            {
+                (
+                    "get",
+                    "pods",
+                    "-n",
+                    "gcr-admin",
+                    "-l",
+                    "volcano.sh/job-name=gcr-admin-pvc-access",
+                    "-o",
+                    "json",
+                ): CommandResult(
+                    args=(),
+                    stdout=(
+                        '{"items":[{"metadata":{"name":"access-pod"},'
+                        '"status":{"phase":"Running"}}]}'
+                    ),
+                    stderr="",
+                    returncode=0,
+                )
+            }
+        )
+
+        self.assertEqual(
+            resolve_status_pod(client, "gcr-admin", "gcr-admin-pvc-access"),
+            "access-pod",
+        )
 
 
 if __name__ == "__main__":

@@ -56,7 +56,8 @@ batch_size = 5
 
 [job]
 template_path = "ymls/specific-node-job.yml"
-job_prefix = "hari-gcr-cval"
+job_prefix = "cval"
+image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/IamNirmata/c-val.git"
 git_ref = "main"
 
@@ -78,13 +79,15 @@ nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
 repo_dir = "/workspace/c-val"
 validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
-dl_unit_test_dir = "/data/continuous_validation/deeplearning_unit_test"
+dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
 
 [validation]
 gpu_count = 8
 nccl_iterations = 20
 nccl_data_size_gb = 8
-dl_test_plan = "80gb-b200"
+ibbw_start_device = 0
+ibbw_end_device = 13
+dl_test_plan = "80gb-example"
 dl_baseline_test_id = "b200-pt2.8.0-cuda12.9"
 dl_iterations = 20
 
@@ -93,7 +96,7 @@ namespace = "gcr-admin"
 queue = "gcr-admin"
 app_label = "hari-gcr-bonete-test"
 pvc_claim = "pvc-vast-gcr-admin"
-container_image = "nvcr.io/nvidia/pytorch:25.11-py3"
+container_image = "nvcr.io/nvidia/pytorch:26.05-py3"
 shared_memory_size = "256Gi"
 gpu_resource_name = "nvidia.com/gpu"
 gpu_count = "8"
@@ -104,6 +107,11 @@ rdma_count = "1"
 ```
 
 ## Precedence
+
+`job.image_name` is the human-readable image identity written into job names,
+result JSON, and SQLite rows. It should normally match the trailing image and
+tag from `job_template.container_image`; if omitted, c-val derives it from the
+container image reference.
 
 1. CLI flags such as `--batch-size`, `--git-ref`, and `--namespace`.
 2. Config file supplied by `--config`.

@@ -154,6 +154,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_result.add_argument("test")
     db_add_result.add_argument("result", choices=["pass", "fail", "incomplete"])
     db_add_result.add_argument("timestamp")
+    db_add_result.add_argument("--image-name", default="")
     db_add_result.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_result.set_defaults(handler=handle_db_add_result)
 
@@ -161,6 +162,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_storage.add_argument("node")
     db_add_storage.add_argument("timestamp")
     db_add_storage.add_argument("results_dir", type=Path)
+    db_add_storage.add_argument("--image-name", default="")
     db_add_storage.add_argument("--db-path", default=active_config.storage.storage_db_path)
     db_add_storage.set_defaults(handler=handle_db_add_storage_result)
 
@@ -169,6 +171,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl.add_argument("timestamp")
     db_add_nccl.add_argument("busbw")
     db_add_nccl.add_argument("latency")
+    db_add_nccl.add_argument("--image-name", default="")
     db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
 
@@ -380,6 +383,7 @@ def handle_db_add_result(args: argparse.Namespace) -> int:
         args.test,
         args.result,
         args.timestamp,
+        image_name=args.image_name,
         db_path=args.db_path,
     )
     print(f"Added validation result: {args.node} {args.test} {args.result} {timestamp}")
@@ -393,6 +397,7 @@ def handle_db_add_storage_result(args: argparse.Namespace) -> int:
         args.node,
         args.timestamp,
         args.results_dir,
+        image_name=args.image_name,
         db_path=args.db_path,
     )
     print(f"Added storage result: {args.node} {timestamp}")
@@ -407,6 +412,7 @@ def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
         args.timestamp,
         args.busbw,
         args.latency,
+        image_name=args.image_name,
         db_path=args.db_path,
     )
     print(f"Added NCCL result: {args.node} {timestamp}")

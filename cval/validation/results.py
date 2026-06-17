@@ -35,6 +35,7 @@ class ValidationResult:
     timestamp: str
     overall: str
     tests: dict[str, TestResult]
+    image_name: str = ""
 
 
 RESULT_ENV_KEYS = {
@@ -85,6 +86,7 @@ def parse_validation_result(payload: dict[str, Any]) -> ValidationResult:
         schema_version="cval.results.v1",
         node=str(payload.get("node", "")),
         timestamp=str(payload.get("timestamp", "")),
+        image_name=str(payload.get("image_name", "")),
         overall=overall,
         tests=tests,
     )
@@ -98,6 +100,7 @@ def validation_result_to_env(result: ValidationResult) -> dict[str, str]:
         for test_name, env_key in RESULT_ENV_KEYS.items()
     }
     values["overall_result"] = result.overall
+    values["image_name"] = result.image_name
     return values
 
 

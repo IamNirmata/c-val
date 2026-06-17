@@ -20,6 +20,7 @@ cval.results.v1
 {
   "schema_version": "cval.results.v1",
   "node": "slc01-cl02-hgx-0204",
+  "image_name": "pytorch:26.05-py3",
   "timestamp": "1781134840",
   "generated_at": "2026-06-10T23:47:42.103216Z",
   "overall": "pass",
@@ -37,7 +38,7 @@ cval.results.v1
     "dltest": {
       "status": "pass",
       "log": "/data/continuous_validation/dltest/.../dltest.log",
-      "summary": "/data/continuous_validation/dltest/.../dltest-summary.txt"
+      "summary": "/data/continuous_validation/dltest/.../dltest-summary.json"
     }
   }
 }
@@ -46,9 +47,10 @@ cval.results.v1
 ## Rules
 
 - Valid statuses: `pass`, `fail`, `incomplete`.
+- `image_name` records the validation image identity used for the run.
 - `overall` is `pass` only when all test statuses are `pass`.
 - `db-update.sh` prefers JSON and falls back to the legacy env file if JSON is missing.
-- DB writes use package-native `cval db-add-*` commands inside the validation pod.
+- DB writes use package-native `cval db-add-*` commands inside the validation pod and store `image_name` with validation, storage, and NCCL rows.
 - `cval.validation.results` validates schema version, required tests, valid statuses, and aggregate consistency.
 
 ## DB Rows
@@ -56,8 +58,8 @@ cval.results.v1
 Each run should write four latest-status rows:
 
 ```text
-<node> storage <timestamp> <status>
-<node> nccl    <timestamp> <status>
-<node> dltest  <timestamp> <status>
-<node> all     <timestamp> <overall>
+<node> storage <timestamp> <status> <image_name>
+<node> nccl    <timestamp> <status> <image_name>
+<node> dltest  <timestamp> <status> <image_name>
+<node> all     <timestamp> <overall> <image_name>
 ```

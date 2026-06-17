@@ -74,6 +74,8 @@ spec:
                 - name: CVAL_GIT_REF
                   # Pin the runtime checkout to a commit/tag instead of moving main.
                   value: "git-ref-placeholder"
+                - name: CVAL_IMAGE_NAME
+                  value: "image-name-placeholder"
                 - name: CVAL_REPO_DIR
                   value: "runtime-repo-dir-placeholder"
                 - name: CVAL_VALIDATION_ROOT

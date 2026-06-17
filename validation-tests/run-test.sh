@@ -8,6 +8,7 @@ set -uo pipefail
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
+CVAL_IMAGE_NAME=${CVAL_IMAGE_NAME:-}
 CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
 CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
 CVAL_GPU_COUNT=${CVAL_GPU_COUNT:-8}
@@ -61,6 +62,7 @@ overall = "pass" if all(test["status"] == "pass" for test in tests.values()) els
 payload = {
 	"schema_version": "cval.results.v1",
 	"node": env("GCRNODE", "unknown"),
+	"image_name": env("CVAL_IMAGE_NAME", ""),
 	"timestamp": env("GCRTIME", "unknown"),
 	"generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
 	"overall": overall,
@@ -77,14 +79,8 @@ PY
 
 write_result_state
 
-# Install fio inside the validation image before storage testing. Fail loudly:
-# a silent install failure surfaces later as a confusing storage-test error.
-if ! command -v fio > /dev/null 2>&1; then
-	echo "Installing fio for the storage test..."
-	if ! (apt-get update && apt-get install -y fio) > /tmp/cval-fio-install.log 2>&1; then
-		echo "ERROR: fio install failed (see /tmp/cval-fio-install.log); the storage test will fail." >&2
-	fi
-fi
+# Install fio inside the validation image before storage testing.
+apt-get update > /dev/null 2>&1 && apt-get install -y fio > /dev/null 2>&1
 
 
 echo "######################PHASE: Test Execution#############################"
@@ -104,6 +100,7 @@ echo "NCCL_IBBW_LOG_FILE: ${NCCL_IBBW_LOG_FILE:-}"
 echo "DLTEST_SUMMARY_FILE: $DLTEST_SUMMARY_FILE"
 echo "CVAL_RESULT_ENV_FILE: $CVAL_RESULT_ENV_FILE"
 echo "CVAL_RESULT_JSON_FILE: $CVAL_RESULT_JSON_FILE"
+echo "CVAL_IMAGE_NAME: $CVAL_IMAGE_NAME"
 echo "CVAL_IBBW_DEVICE_RANGE: mlx5_$CVAL_IBBW_START_DEVICE..mlx5_$CVAL_IBBW_END_DEVICE"
 echo "#########################################################################"
 

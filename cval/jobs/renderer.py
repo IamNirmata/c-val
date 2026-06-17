@@ -16,8 +16,8 @@ from cval.models import RenderedJob
 
 
 NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
-# Kubernetes object names rendered by c-val must fit a DNS label.
-MAX_JOB_NAME_LENGTH = 63
+MAX_VOLCANO_NAME_PART_LENGTH = 63
+VOLCANO_TASK_POD_SUFFIX = "-server-0"
 
 
 def default_template_path() -> Path:
@@ -26,18 +26,24 @@ def default_template_path() -> Path:
     return load_config().job.template_path
 
 
-def make_job_name(node_name: str, timestamp: int, job_prefix: str | None = None) -> str:
+def make_job_name(
+    node_name: str,
+    timestamp: int,
+    job_prefix: str | None = None,
+    image_name: str | None = None,
+) -> str:
     """Build a deterministic Kubernetes-compatible validation job name."""
 
     resolved_prefix = job_prefix if job_prefix is not None else load_config().job.job_prefix
     validate_kubernetes_name(node_name, "node_name")
     validate_kubernetes_name(resolved_prefix, "job_prefix")
-    job_name = f"{resolved_prefix}-{node_name}-{timestamp}"
-    if len(job_name) > MAX_JOB_NAME_LENGTH:
-        raise ValueError(
-            f"Job name exceeds the {MAX_JOB_NAME_LENGTH}-character Kubernetes limit "
-            f"({len(job_name)}): {job_name!r}; use a shorter job_prefix"
-        )
+    image_label = _image_name_label(image_name) if image_name else ""
+    job_name = (
+        f"{resolved_prefix}-{node_name}-{image_label}-{timestamp}"
+        if image_label
+        else f"{resolved_prefix}-{node_name}-{timestamp}"
+    )
+    _validate_volcano_pod_name(job_name)
     return job_name
 
 
@@ -58,8 +64,16 @@ def render_validation_job(
     resolved_git_repo = git_repo if git_repo is not None else config.job.git_repo
     resolved_git_ref = git_ref if git_ref is not None else config.job.git_ref
     template_config = job_template_config or config.job_template
+    resolved_image_name = config.job.image_name or _image_name_from_container(
+        template_config.container_image
+    )
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)
-    job_name = make_job_name(node_name, rendered_timestamp, job_prefix=resolved_job_prefix)
+    job_name = make_job_name(
+        node_name,
+        rendered_timestamp,
+        job_prefix=resolved_job_prefix,
+        image_name=resolved_image_name,
+    )
 
     required_placeholders = [
         "nodename-placeholder",
@@ -75,26 +89,27 @@ def render_validation_job(
     if missing:
         raise ValueError(f"Template is missing placeholder(s): {', '.join(missing)}")
 
-    replacements = {
-        "git-repo-placeholder": resolved_git_repo,
-        "git-ref-placeholder": resolved_git_ref,
-        **_job_template_replacements(template_config),
-        **_runtime_replacements(config),
-    }
-    # Reject values that would silently corrupt the rendered manifest.
-    for placeholder, value in replacements.items():
-        if placeholder in template_text:
-            _validate_substitution_value(placeholder, value)
-
     yaml_text = template_text.replace("nodename-placeholder", node_name)
     yaml_text = yaml_text.replace("time-placeholder", str(rendered_timestamp))
     yaml_text = yaml_text.replace("generateName: jobname-placeholder", f"name: {job_name}")
     yaml_text = yaml_text.replace("jobname-placeholder", job_name)
-    for placeholder, value in replacements.items():
+    yaml_text = yaml_text.replace("git-repo-placeholder", resolved_git_repo)
+    yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
+    template_replacements = _job_template_replacements(template_config)
+    runtime_replacements = _runtime_replacements(config)
+    replacements = {
+        "image-name-placeholder": resolved_image_name,
+        **template_replacements,
+        **runtime_replacements,
+    }
+    for placeholder, value in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
         yaml_text = yaml_text.replace(placeholder, value)
 
     # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
-    known_placeholders = [*required_placeholders, *replacements]
+    known_placeholders = [
+        *required_placeholders,
+        *replacements.keys(),
+    ]
     remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
@@ -138,14 +153,28 @@ def validate_kubernetes_name(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")
 
 
-def _validate_substitution_value(placeholder: str, value: str) -> None:
-    """Reject empty or multiline values that would corrupt rendered YAML."""
-
-    if not value or value != value.strip() or any(ch in value for ch in "\n\r\t"):
+def _validate_volcano_pod_name(job_name: str) -> None:
+    pod_name = f"{job_name}{VOLCANO_TASK_POD_SUFFIX}"
+    if len(pod_name) > MAX_VOLCANO_NAME_PART_LENGTH:
         raise ValueError(
-            f"Template value for {placeholder!r} must be a non-empty single-line "
-            f"string without surrounding whitespace: {value!r}"
+            "Rendered job name is too long for Volcano pod naming: "
+            f"{pod_name!r} is {len(pod_name)} characters; maximum is "
+            f"{MAX_VOLCANO_NAME_PART_LENGTH}"
         )
+
+
+def _image_name_from_container(container_image: str) -> str:
+    """Return the human image name from a full container image reference."""
+
+    return container_image.rsplit("/", 1)[-1]
+
+
+def _image_name_label(image_name: str) -> str:
+    """Return a DNS-label-safe image segment for Kubernetes object names."""
+
+    label = re.sub(r"[^a-z0-9]+", "-", image_name.lower()).strip("-")
+    validate_kubernetes_name(label, "image_name")
+    return label
 
 
 def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
