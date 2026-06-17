@@ -35,3 +35,14 @@ Validation jobs accept `CVAL_GIT_REF` so operators can pin a commit or tag. This
 ## No Automatic Deletion
 
 `jobs --watch` reports timeout but does not delete or cancel jobs. Cleanup needs explicit operator approval.
+
+## Rebuild Live Candidates Per Slot
+
+The continuous runner rebuilds the ranked candidate list before filling each
+open batch slot. GPU free/schedulable state can change within seconds as other
+cluster users submit work, so a long-lived precomputed queue is unsafe. The
+runner only carries short-cycle memory for nodes already submitted or deleted
+for pending timeout in the current cycle.
+
+This is a per-slot rebuild policy: when one slot opens, c-val re-reads live
+Kubernetes state and validation DB state before selecting exactly one next node.

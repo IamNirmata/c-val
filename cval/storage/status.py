@@ -14,12 +14,6 @@ from cval.k8s.client import KubectlClient
 from cval.models import LatestStatusRow
 
 
-_CONFIG = load_config()
-DEFAULT_NAMESPACE = _CONFIG.cluster.namespace
-DEFAULT_PVC_ACCESS_POD = _CONFIG.cluster.pvc_access_pod
-DEFAULT_DB_PATH = _CONFIG.storage.validation_db_path
-
-
 def parse_latest_status_tsv(output: str) -> dict[str, int]:
     """Parse legacy TSV latest-status output into node -> newest timestamp."""
 
@@ -84,13 +78,18 @@ def latest_status_rows_to_tsv(rows: list[LatestStatusRow]) -> str:
 
 def get_latest_status_rows(
     client: KubectlClient | None = None,
-    pod: str = DEFAULT_PVC_ACCESS_POD,
-    namespace: str = DEFAULT_NAMESPACE,
-    db_path: str = DEFAULT_DB_PATH,
+    pod: str | None = None,
+    namespace: str | None = None,
+    db_path: str | None = None,
 ) -> list[LatestStatusRow]:
     """Read latest status rows from the PVC access pod using SQLite read-only mode."""
 
+    config = load_config()
+    pod = pod or config.cluster.pvc_access_pod
+    namespace = namespace or config.cluster.namespace
+    db_path = db_path or config.storage.validation_db_path
     kubectl = client or KubectlClient()
+    status_pod = resolve_status_pod(kubectl, namespace, pod)
     code = r'''
 import json
 import sqlite3
@@ -119,8 +118,62 @@ except Exception as exc:
 
 print(json.dumps(rows_out))
 '''
-    result = kubectl.run(["exec", "-n", namespace, pod, "--", "python3", "-c", code, db_path])
+    result = kubectl.run(
+        ["exec", "-n", namespace, status_pod, "--", "python3", "-c", code, db_path]
+    )
     return parse_latest_status_rows_json(result.stdout)
+
+
+def resolve_status_pod(kubectl: KubectlClient, namespace: str, pod: str) -> str:
+    """Resolve the configured status pod or the pod created by its access job."""
+
+    direct_candidates = (pod, f"{pod}-server-0")
+    for candidate in direct_candidates:
+        if _pod_is_running(kubectl, namespace, candidate):
+            return candidate
+
+    selectors = (
+        f"volcano.sh/job-name={pod}",
+        f"job-name={pod}",
+        f"app.kubernetes.io/name={pod}",
+    )
+    for selector in selectors:
+        selected = _running_pod_for_selector(kubectl, namespace, selector)
+        if selected:
+            return selected
+
+    raise RuntimeError(
+        f"Could not find a running status pod for {pod!r} in namespace {namespace!r}"
+    )
+
+
+def _pod_is_running(kubectl: KubectlClient, namespace: str, pod: str) -> bool:
+    result = kubectl.run(
+        ["get", "pod", "-n", namespace, pod, "-o", "json"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    payload = json.loads(result.stdout or "{}")
+    return payload.get("status", {}).get("phase") == "Running"
+
+
+def _running_pod_for_selector(
+    kubectl: KubectlClient,
+    namespace: str,
+    selector: str,
+) -> str:
+    result = kubectl.run(
+        ["get", "pods", "-n", namespace, "-l", selector, "-o", "json"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    payload = json.loads(result.stdout or "{}")
+    for item in payload.get("items", []):
+        if item.get("status", {}).get("phase") == "Running":
+            return str(item.get("metadata", {}).get("name", ""))
+    return ""
 
 
 def _timestamp_to_iso(timestamp: int) -> str:

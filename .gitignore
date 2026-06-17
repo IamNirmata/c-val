@@ -2,6 +2,7 @@
 /gitignored/
 /artifacts/
 /reports/
+/run-logs/
 *.log
 
 __pycache__/

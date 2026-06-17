@@ -47,6 +47,30 @@ class RendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "time-placeholder"):
             render_validation_job(TEMPLATE.replace("time-placeholder", ""), "slc01-cl02-hgx-0001")
 
+    def test_rejects_job_name_over_kubernetes_limit(self) -> None:
+        long_node = "slc01-cl02-hgx-" + "0" * 40
+
+        with self.assertRaisesRegex(ValueError, "63-character"):
+            render_validation_job(TEMPLATE, long_node, timestamp=12345)
+
+    def test_rejects_multiline_substitution_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "git-ref-placeholder"):
+            render_validation_job(
+                TEMPLATE,
+                "slc01-cl02-hgx-0001",
+                timestamp=12345,
+                git_ref="main\nbad: yaml",
+            )
+
+    def test_rejects_empty_substitution_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "git-repo-placeholder"):
+            render_validation_job(
+                TEMPLATE,
+                "slc01-cl02-hgx-0001",
+                timestamp=12345,
+                git_repo="",
+            )
+
     def test_repository_template_renders_configured_runtime_env(self) -> None:
       rendered = render_validation_job_from_file(
         default_template_path(),

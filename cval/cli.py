@@ -4,6 +4,9 @@ This file is the main human/Hermes entry point. It exposes read-only status and
 discovery commands, dry-run planning, approval-gated submission, read-only
 monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
+
+Public commands: config, status, nodes, plan, run, jobs, result.
+The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
 from __future__ import annotations
@@ -15,17 +18,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from cval.config import CvalConfig, config_to_dict, load_config
-from cval.jobs.renderer import render_validation_job_from_file
 from cval.jobs.manager import submission_result_to_dict, submit_workflow_plan
 from cval.jobs.monitor import get_job_phases, monitored_jobs_to_dict, monitor_jobs_until_terminal
 from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
 from cval.orchestrator.workflow import build_workflow_plan, workflow_plan_to_dict
 from cval.policy import ExecutionPolicy, PolicyViolation
-from cval.scheduler.priority import build_priority_queue
 from cval.storage.status import (
-    DEFAULT_DB_PATH,
-    DEFAULT_NAMESPACE,
-    DEFAULT_PVC_ACCESS_POD,
     get_latest_status_rows,
     latest_status_rows_to_node_map,
     latest_status_rows_to_tsv,
@@ -79,7 +77,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,status,nodes,run,jobs,result}",
+        metavar="{config,status,nodes,plan,run,jobs,result}",
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
@@ -95,15 +93,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     nodes.add_argument("--output", choices=["table", "json"], default="table")
     nodes.set_defaults(handler=handle_nodes)
 
-    discover = subparsers.add_parser("discover-free-nodes", help=argparse.SUPPRESS)
-    discover.add_argument(
-        "--node-filter",
-        default=active_config.cluster.node_filter,
-        help="Substring filter for GPU nodes",
-    )
-    discover.add_argument("--output", choices=["table", "json"], default="table")
-    discover.set_defaults(handler=handle_nodes)
-
     status = subparsers.add_parser(
         "status",
         help="Read latest validation status from the PVC access pod",
@@ -114,74 +103,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
 
-    prioritize = subparsers.add_parser("prioritize", help=argparse.SUPPRESS)
-    prioritize.add_argument("--free-nodes", required=True, help="Comma-separated free node names")
-    prioritize.add_argument(
-        "--db-status-json",
-        type=Path,
-        help="JSON object mapping node to timestamp",
-    )
-    prioritize.add_argument(
-        "--db-status-tsv",
-        type=Path,
-        help="TSV output from existing latest-status command",
-    )
-    prioritize.add_argument("--threshold-days", type=float, default=active_config.scheduling.days_threshold)
-    prioritize.add_argument("--output", choices=["table", "json"], default="table")
-    prioritize.set_defaults(handler=handle_prioritize)
-
-    render = subparsers.add_parser("render-job", help=argparse.SUPPRESS)
-    render.add_argument("--node", required=True)
-    render.add_argument("--timestamp", type=int)
-    render.add_argument("--template", type=Path, default=active_config.job.template_path)
-    render.add_argument("--job-prefix", default=active_config.job.job_prefix)
-    render.add_argument("--git-repo", default=active_config.job.git_repo)
-    render.add_argument("--git-ref", default=active_config.job.git_ref)
-    render.add_argument("--output", type=Path, help="Write rendered YAML to this path")
-    render.set_defaults(handler=handle_render_job)
-
-    run_batch = subparsers.add_parser("run-batch", help=argparse.SUPPRESS)
-    run_batch.add_argument("--nodes", required=True, help="Comma-separated target nodes")
-    run_batch.add_argument("--batch-size", type=int, default=active_config.scheduling.batch_size)
-    run_batch.add_argument("--timestamp", type=int)
-    run_batch.add_argument("--template", type=Path, default=active_config.job.template_path)
-    run_batch.add_argument("--job-prefix", default=active_config.job.job_prefix)
-    run_batch.add_argument("--git-repo", default=active_config.job.git_repo)
-    run_batch.add_argument("--git-ref", default=active_config.job.git_ref)
-    run_batch.add_argument("--output", choices=["table", "json"], default="table")
-    run_batch.set_defaults(handler=handle_run_batch)
-
-    plan = subparsers.add_parser("plan", help=argparse.SUPPRESS)
-    plan.add_argument(
-        "--free-nodes",
-        help="Comma-separated free node names; discovers live nodes if omitted",
-    )
-    plan.add_argument("--db-status-json", type=Path, help="JSON object mapping node to timestamp")
-    plan.add_argument(
-        "--db-status-tsv",
-        type=Path,
-        help="TSV output from existing latest-status command",
-    )
-    plan.add_argument(
-        "--live-status",
-        action="store_true",
-        help="Read latest status from the PVC access pod in read-only mode",
-    )
-    plan.add_argument("--status-pod", default=active_config.cluster.pvc_access_pod)
-    plan.add_argument("--status-namespace", default=active_config.cluster.namespace)
-    plan.add_argument("--status-db-path", default=active_config.storage.validation_db_path)
-    plan.add_argument("--threshold-days", type=float, default=active_config.scheduling.days_threshold)
-    plan.add_argument("--batch-size", type=int, default=active_config.scheduling.batch_size)
-    plan.add_argument("--timestamp", type=int)
-    plan.add_argument("--template", type=Path, default=active_config.job.template_path)
-    plan.add_argument("--job-prefix", default=active_config.job.job_prefix)
-    plan.add_argument("--git-repo", default=active_config.job.git_repo)
-    plan.add_argument("--git-ref", default=active_config.job.git_ref)
-    plan.add_argument(
-        "--node-filter",
-        default=active_config.cluster.node_filter,
-        help="Live discovery substring filter",
-    )
+    plan = subparsers.add_parser("plan", help="Build and print a dry-run validation plan")
+    _add_plan_inputs(plan, active_config)
     plan.add_argument(
         "--include-yaml",
         action="store_true",
@@ -203,16 +126,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     run.add_argument("--output", choices=["table", "json"], default="table")
     run.set_defaults(handler=handle_run)
 
-    submit_plan = subparsers.add_parser("submit-plan", help=argparse.SUPPRESS)
-    _add_plan_inputs(submit_plan, active_config)
-    submit_plan.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    submit_plan.add_argument("--allowed-namespace", action="append")
-    submit_plan.add_argument("--max-batch-size", type=int, default=active_config.policy.max_batch_size)
-    submit_plan.add_argument("--submit", action="store_true")
-    submit_plan.add_argument("--confirm")
-    submit_plan.add_argument("--output", choices=["table", "json"], default="table")
-    submit_plan.set_defaults(handler=handle_run)
-
     jobs = subparsers.add_parser("jobs", help="Read or watch Volcano job phases")
     jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
     jobs.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
@@ -230,44 +143,13 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     jobs.add_argument("--output", choices=["table", "json"], default="table")
     jobs.set_defaults(handler=handle_jobs)
 
-    job_status = subparsers.add_parser("job-status", help=argparse.SUPPRESS)
-    job_status.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
-    job_status.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    job_status.add_argument("--output", choices=["table", "json"], default="table")
-    job_status.set_defaults(handler=handle_jobs, watch=False)
-
-    monitor_jobs = subparsers.add_parser("monitor-jobs", help=argparse.SUPPRESS)
-    monitor_jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
-    monitor_jobs.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    monitor_jobs.add_argument(
-        "--timeout-seconds",
-        type=float,
-        default=active_config.monitoring.timeout_seconds,
-    )
-    monitor_jobs.add_argument(
-        "--poll-interval-seconds",
-        type=float,
-        default=active_config.monitoring.poll_interval_seconds,
-    )
-    monitor_jobs.add_argument("--output", choices=["table", "json"], default="table")
-    monitor_jobs.set_defaults(handler=handle_jobs, watch=True)
-
     result = subparsers.add_parser("result", help="Inspect a structured validation result")
     result.add_argument("--result-json", type=Path, required=True)
     result.add_argument("--output", choices=["env", "json"], default="env")
     result.set_defaults(handler=handle_result)
 
-    result_env = subparsers.add_parser(
-        "result-env",
-        help=argparse.SUPPRESS,
-    )
-    result_env.add_argument("--result-json", type=Path, required=True)
-    result_env.set_defaults(handler=handle_result, output="env")
-
-    db_add_result = subparsers.add_parser(
-        "db-add-result",
-        help=argparse.SUPPRESS,
-    )
+    # In-pod ingestion commands; added without `help` so they stay out of --help.
+    db_add_result = subparsers.add_parser("db-add-result")
     db_add_result.add_argument("node")
     db_add_result.add_argument("test")
     db_add_result.add_argument("result", choices=["pass", "fail", "incomplete"])
@@ -275,20 +157,14 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_result.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_result.set_defaults(handler=handle_db_add_result)
 
-    db_add_storage = subparsers.add_parser(
-        "db-add-storage-result",
-        help=argparse.SUPPRESS,
-    )
+    db_add_storage = subparsers.add_parser("db-add-storage-result")
     db_add_storage.add_argument("node")
     db_add_storage.add_argument("timestamp")
     db_add_storage.add_argument("results_dir", type=Path)
     db_add_storage.add_argument("--db-path", default=active_config.storage.storage_db_path)
     db_add_storage.set_defaults(handler=handle_db_add_storage_result)
 
-    db_add_nccl = subparsers.add_parser(
-        "db-add-nccl-result",
-        help=argparse.SUPPRESS,
-    )
+    db_add_nccl = subparsers.add_parser("db-add-nccl-result")
     db_add_nccl.add_argument("node")
     db_add_nccl.add_argument("timestamp")
     db_add_nccl.add_argument("busbw")
@@ -296,32 +172,37 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
 
-    _hide_subcommands(
-        subparsers,
-        {
-            "discover-free-nodes",
-            "prioritize",
-            "render-job",
-            "run-batch",
-            "plan",
-            "submit-plan",
-            "job-status",
-            "monitor-jobs",
-            "result-env",
-            "db-add-result",
-            "db-add-storage-result",
-            "db-add-nccl-result",
-        },
-    )
+    # Baseline commands (read-only and ingestion)
+    baseline = subparsers.add_parser("baseline", help="Manage baselines and peer comparison")
+    baseline_sub = baseline.add_subparsers(dest="baseline_command", required=True)
+
+    baseline_list = baseline_sub.add_parser("list", help="List stored baselines")
+    baseline_list.add_argument("--test-type", choices=["nccl", "storage", "dltest"])
+    baseline_list.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    baseline_list.add_argument("--output", choices=["table", "json"], default="table")
+    baseline_list.set_defaults(handler=handle_baseline_list)
+
+    baseline_load = baseline_sub.add_parser("load", help="Load baseline summary from directory")
+    baseline_load.add_argument("baseline_dir", type=Path, help="Baseline directory path")
+    baseline_load.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_load.add_argument("--output", choices=["json"], default="json")
+    baseline_load.set_defaults(handler=handle_baseline_load)
+
+    baseline_ingest = baseline_sub.add_parser("ingest", help="Store baseline in DB")
+    baseline_ingest.add_argument("baseline_dir", type=Path, help="Baseline directory path")
+    baseline_ingest.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_ingest.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    baseline_ingest.set_defaults(handler=handle_baseline_ingest)
+
+    baseline_compare = baseline_sub.add_parser("compare", help="Compare result vs. baseline")
+    baseline_compare.add_argument("baseline_id", help="Baseline ID to compare against")
+    baseline_compare.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_compare.add_argument("--result-json", type=Path, help="Result JSON to compare")
+    baseline_compare.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    baseline_compare.add_argument("--output", choices=["json", "table"], default="table")
+    baseline_compare.set_defaults(handler=handle_baseline_compare)
+
     return parser
-
-
-def _hide_subcommands(subparsers: argparse._SubParsersAction, names: set[str]) -> None:
-    """Hide compatibility/internal commands from help without disabling them."""
-
-    subparsers._choices_actions = [
-        action for action in subparsers._choices_actions if action.dest not in names
-    ]
 
 
 def handle_nodes(args: argparse.Namespace) -> int:
@@ -352,12 +233,6 @@ def handle_nodes(args: argparse.Namespace) -> int:
     )
     print(f"Fully free nodes: {len(fully_free_node_names(nodes))}")
     return 0
-
-
-def handle_discover_free_nodes(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for the old `discover-free-nodes` command."""
-
-    return handle_nodes(args)
 
 
 def handle_config(args: argparse.Namespace) -> int:
@@ -392,77 +267,6 @@ def handle_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_prioritize(args: argparse.Namespace) -> int:
-    """Build a priority queue from explicit free nodes and status history."""
-
-    db_status = _load_db_status(args.db_status_json, args.db_status_tsv)
-    queue = build_priority_queue(
-        _parse_csv(args.free_nodes),
-        db_status,
-        days_threshold=args.threshold_days,
-    )
-    if args.output == "json":
-        print(json.dumps([asdict(candidate) for candidate in queue], indent=2))
-        return 0
-
-    print(f"{'PRI':>3} {'NODE':<32} {'LAST_TS':>12} {'AGE_DAYS':>9} REASON")
-    for candidate in queue:
-        age = "" if candidate.age_days is None else f"{candidate.age_days:.2f}"
-        print(
-            f"{candidate.priority:>3} {candidate.node:<32} "
-            f"{candidate.last_tested_timestamp:>12} {age:>9} {candidate.reason}"
-        )
-    return 0
-
-
-def handle_render_job(args: argparse.Namespace) -> int:
-    """Render one job manifest locally without submitting it."""
-
-    rendered = render_validation_job_from_file(
-        args.template,
-        node_name=args.node,
-        timestamp=args.timestamp,
-        job_prefix=args.job_prefix,
-        git_repo=args.git_repo,
-        git_ref=args.git_ref,
-        cval_config=args.cval_config,
-    )
-    if args.output:
-        # Local file output is useful for manual inspection or `kubectl diff` workflows.
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered.yaml_text, encoding="utf-8")
-        print(str(args.output))
-    else:
-        print(rendered.yaml_text)
-    return 0
-
-
-def handle_run_batch(args: argparse.Namespace) -> int:
-    """Render a local dry-run batch from explicit node names."""
-
-    nodes = _parse_csv(args.nodes)[: args.batch_size]
-    rendered_jobs = [
-        render_validation_job_from_file(
-            args.template,
-            node_name=node,
-            timestamp=args.timestamp,
-            job_prefix=args.job_prefix,
-            git_repo=args.git_repo,
-            git_ref=args.git_ref,
-            cval_config=args.cval_config,
-        )
-        for node in nodes
-    ]
-    if args.output == "json":
-        print(json.dumps([asdict(job) | {"dry_run": True} for job in rendered_jobs], indent=2))
-        return 0
-
-    print(f"Dry run: {len(rendered_jobs)} job(s) would be submitted")
-    for job in rendered_jobs:
-        print(f"  {job.node_name} -> {job.job_name}")
-    return 0
-
-
 def handle_plan(args: argparse.Namespace) -> int:
     """Build and print a dry-run workflow plan."""
 
@@ -477,7 +281,18 @@ def handle_plan(args: argparse.Namespace) -> int:
         )
         return 0
 
-    _print_plan_table(plan)
+    print("Dry-run workflow plan")
+    print(
+        f"Free nodes: {len(plan.free_nodes)} | Queue: {len(plan.queue)} | "
+        f"Batch: {len(plan.planned_jobs)}"
+    )
+    print(f"Threshold days: {plan.days_threshold} | Batch size: {plan.batch_size}")
+    print(f"{'PRI':>3} {'NODE':<32} {'REASON':<13} JOB")
+    for planned in plan.planned_jobs:
+        print(
+            f"{planned.candidate.priority:>3} {planned.candidate.node:<32} "
+            f"{planned.candidate.reason:<13} {planned.rendered_job.job_name}"
+        )
     return 0
 
 
@@ -509,12 +324,6 @@ def handle_run(args: argparse.Namespace) -> int:
     for record in result.records:
         print(f"  {record.node} -> {record.job_name} [{record.action}]")
     return 0
-
-
-def handle_submit_plan(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for the old `submit-plan` command."""
-
-    return handle_run(args)
 
 
 def handle_jobs(args: argparse.Namespace) -> int:
@@ -550,20 +359,6 @@ def handle_jobs(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_job_status(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for the old `job-status` command."""
-
-    args.watch = False
-    return handle_jobs(args)
-
-
-def handle_monitor_jobs(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for the old `monitor-jobs` command."""
-
-    args.watch = True
-    return handle_jobs(args)
-
-
 def handle_result(args: argparse.Namespace) -> int:
     """Inspect a structured validation result JSON file."""
 
@@ -575,13 +370,6 @@ def handle_result(args: argparse.Namespace) -> int:
     for line in validation_result_to_env_lines(result):
         print(line)
     return 0
-
-
-def handle_result_env(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for the old `result-env` command."""
-
-    args.output = "env"
-    return handle_result(args)
 
 
 def handle_db_add_result(args: argparse.Namespace) -> int:
@@ -625,17 +413,95 @@ def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_baseline_list(args: argparse.Namespace) -> int:
+    """List stored baselines in the validation DB."""
+    from cval.baselines.storage import list_baselines
+
+    baselines = list_baselines(test_type=args.test_type, db_path=args.db_path)
+    if args.output == "json":
+        print(
+            json.dumps(
+                [{"baseline_id": b[0], "test_type": b[1], "timestamp": b[2]} for b in baselines],
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"Stored baselines: {len(baselines)}")
+    print(f"{'BASELINE_ID':<40} {'TEST_TYPE':<12} TIMESTAMP")
+    for baseline_id, test_type, timestamp in baselines:
+        print(f"{baseline_id:<40} {test_type:<12} {timestamp}")
+    return 0
+
+
+def handle_baseline_load(args: argparse.Namespace) -> int:
+    """Load and display a baseline summary from a directory."""
+    from cval.baselines.ingest import load_baseline_summary
+
+    baseline = load_baseline_summary(args.baseline_dir, args.test_type)
+    if not baseline:
+        print(f"Baseline not found: {args.baseline_dir}")
+        return 1
+
+    print(json.dumps(asdict(baseline), indent=2))
+    return 0
+
+
+def handle_baseline_ingest(args: argparse.Namespace) -> int:
+    """Ingest a baseline from a directory into the validation DB."""
+    from cval.baselines.ingest import load_baseline_summary
+    from cval.baselines.storage import store_baseline
+
+    baseline = load_baseline_summary(args.baseline_dir, args.test_type)
+    if not baseline:
+        print(f"Baseline not found: {args.baseline_dir}")
+        return 1
+
+    store_baseline(baseline, db_path=args.db_path, test_type=args.test_type)
+    print(f"Ingested baseline: {baseline.baseline_id} ({args.test_type}) at {args.baseline_dir}")
+    return 0
+
+
+def handle_baseline_compare(args: argparse.Namespace) -> int:
+    """Compare a result against a baseline and output classification."""
+    from cval.baselines.ingest import classify_result_vs_baseline
+    from cval.baselines.storage import load_baseline_from_db
+
+    baseline = load_baseline_from_db(args.baseline_id, args.test_type, db_path=args.db_path)
+    if not baseline:
+        print(f"Baseline not found: {args.baseline_id} ({args.test_type})")
+        return 1
+
+    result_dict = {}
+    if args.result_json:
+        result = load_validation_result(args.result_json)
+        # Convert result to dict based on test type
+        if args.test_type == "dltest":
+            result_dict = asdict(result) if hasattr(result, "__dataclass_fields__") else result
+        else:
+            result_dict = asdict(result) if hasattr(result, "__dataclass_fields__") else result
+
+    classification = classify_result_vs_baseline(result_dict, baseline)
+
+    if args.output == "json":
+        print(json.dumps(classification, indent=2))
+        return 0
+
+    print(f"Classification: {classification['status'].upper()}")
+    print(f"Test type: {classification['test_type']}")
+    print(f"Violations: {len(classification['violations'])}")
+    for violation in classification['violations']:
+        print(
+            f"  {violation['metric']}: expected={violation['expected']}, "
+            f"actual={violation['actual']}, diff={violation['pct_diff']:.2f}%"
+        )
+    return 0
+
+
 def _build_plan_from_args(args: argparse.Namespace):
     """Resolve status inputs, discover nodes if needed, and build a workflow plan."""
 
-    db_status = _load_db_status(
-        args.db_status_json,
-        args.db_status_tsv,
-        live_status=args.live_status,
-        status_pod=args.status_pod,
-        status_namespace=args.status_namespace,
-        status_db_path=args.status_db_path,
-    )
+    db_status = _load_db_status(args)
     if args.free_nodes:
         # Explicit node lists are useful for controlled one-node submissions.
         free_nodes = _parse_csv(args.free_nodes)
@@ -655,23 +521,6 @@ def _build_plan_from_args(args: argparse.Namespace):
         git_repo=args.git_repo,
         git_ref=args.git_ref,
     )
-
-
-def _print_plan_table(plan) -> None:
-    """Print a human-readable workflow plan summary."""
-
-    print("Dry-run workflow plan")
-    print(
-        f"Free nodes: {len(plan.free_nodes)} | Queue: {len(plan.queue)} | "
-        f"Batch: {len(plan.planned_jobs)}"
-    )
-    print(f"Threshold days: {plan.days_threshold} | Batch size: {plan.batch_size}")
-    print(f"{'PRI':>3} {'NODE':<32} {'REASON':<13} JOB")
-    for planned in plan.planned_jobs:
-        print(
-            f"{planned.candidate.priority:>3} {planned.candidate.node:<32} "
-            f"{planned.candidate.reason:<13} {planned.rendered_job.job_name}"
-        )
 
 
 def _add_plan_inputs(parser: argparse.ArgumentParser, config: CvalConfig) -> None:
@@ -711,34 +560,27 @@ def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _load_db_status(
-    json_path: Path | None,
-    tsv_path: Path | None = None,
-    live_status: bool = False,
-    status_pod: str = DEFAULT_PVC_ACCESS_POD,
-    status_namespace: str = DEFAULT_NAMESPACE,
-    status_db_path: str = DEFAULT_DB_PATH,
-) -> dict[str, int]:
+def _load_db_status(args: argparse.Namespace) -> dict[str, int]:
     """Load validation history from JSON, TSV, live status, or empty defaults."""
 
-    selected_sources = sum(1 for selected in (json_path, tsv_path, live_status) if selected)
-    if selected_sources > 1:
+    selected = sum(1 for source in (args.db_status_json, args.db_status_tsv, args.live_status) if source)
+    if selected > 1:
         raise ValueError("Use only one of --db-status-json, --db-status-tsv, or --live-status")
-    if live_status:
+    if args.live_status:
         # Live status is read-only, but still reaches the cluster through the PVC access pod.
         return latest_status_rows_to_node_map(
             get_latest_status_rows(
-                pod=status_pod,
-                namespace=status_namespace,
-                db_path=status_db_path,
+                pod=args.status_pod,
+                namespace=args.status_namespace,
+                db_path=args.status_db_path,
             )
         )
-    if tsv_path:
-        return parse_latest_status_tsv(tsv_path.read_text(encoding="utf-8"))
-    if json_path is None:
+    if args.db_status_tsv:
+        return parse_latest_status_tsv(args.db_status_tsv.read_text(encoding="utf-8"))
+    if args.db_status_json is None:
         # Missing history makes every free node appear never-tested.
         return {}
-    data = json.loads(json_path.read_text(encoding="utf-8"))
+    data = json.loads(args.db_status_json.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("DB status JSON must be an object mapping node names to timestamps")
     return {str(node): int(timestamp) for node, timestamp in data.items()}

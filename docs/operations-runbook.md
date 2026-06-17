@@ -15,6 +15,27 @@ Confirm the dry-run output before submitting. Look for:
 - selected node is not cordoned
 - selected node is expected by the operator
 
+## Continuous Live Runner
+
+The tmux live runner is intentionally rolling, not static. It keeps at most the
+configured batch size active at any moment, and before filling each open slot it
+rebuilds the ranked candidate list from live Kubernetes state and current DB
+status. This prevents it from submitting to nodes that were free during an older
+scan but have since become occupied or unschedulable.
+
+Start, inspect, attach, and stop:
+
+```bash
+scripts/cval-live.sh start
+scripts/cval-live.sh status
+scripts/cval-live.sh attach
+scripts/cval-live.sh stop
+```
+
+If a job remains `Pending` past `pending_start_timeout_seconds`, the runner
+deletes only that c-val validation job and then rebuilds the live ranked list
+before submitting a replacement.
+
 ## One-Node Validation
 
 1. Push code and capture the commit SHA.

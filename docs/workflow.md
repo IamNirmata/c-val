@@ -49,6 +49,24 @@ flowchart TD
     I --> J[Dry-run plan]
 ```
 
+## Live Runner Per-Slot Rebuild Policy
+
+The live runner treats the ranked node list as a short-lived snapshot. It does
+not build one large queue and walk it blindly.
+
+For every open batch slot, it rebuilds the ranked list from scratch:
+
+1. Rebuilds the free schedulable node list from current Kubernetes state.
+2. Re-reads latest validation status from SQLite.
+3. Filters out nodes with valid `all` results inside the threshold window.
+4. Ranks never-tested nodes first, then nodes with the oldest available results.
+5. Submits exactly one job for the top currently valid node.
+6. Repeats the same rebuild for the next open slot.
+
+If a submitted job remains `Pending` and does not reach `Running` within the
+configured pending-start timeout, the runner deletes that specific validation
+job and opens the slot for a fresh live-ranked candidate.
+
 ## Execution Flow
 
 ```mermaid

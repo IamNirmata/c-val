@@ -17,10 +17,6 @@ from pathlib import Path
 from cval.config import load_config
 
 VALID_STATUSES = {"pass", "fail", "incomplete"}
-_CONFIG = load_config()
-DEFAULT_VALIDATION_DB_PATH = _CONFIG.storage.validation_db_path
-DEFAULT_STORAGE_DB_PATH = _CONFIG.storage.storage_db_path
-DEFAULT_NCCL_DB_PATH = _CONFIG.storage.nccl_db_path
 
 STORAGE_FILE_PREFIXES = {
     "iodepth_read_1file.json": "iodepth_read_1file",
@@ -73,10 +69,11 @@ def add_validation_result(
     test: str,
     result: str,
     timestamp: object | None,
-    db_path: str | Path = DEFAULT_VALIDATION_DB_PATH,
+    db_path: str | Path | None = None,
 ) -> int:
     """Append one validation result row and return the parsed timestamp."""
 
+    db_path = db_path or load_config().storage.validation_db_path
     parsed_timestamp = parse_timestamp(timestamp)
     if result not in VALID_STATUSES:
         raise ValueError(f"result must be one of {sorted(VALID_STATUSES)}")
@@ -107,10 +104,11 @@ def add_storage_result(
     node: str,
     timestamp: object,
     results_dir: str | Path,
-    db_path: str | Path = DEFAULT_STORAGE_DB_PATH,
+    db_path: str | Path | None = None,
 ) -> int:
     """Parse fio JSON artifacts and upsert one row into the storage metrics DB."""
 
+    db_path = db_path or load_config().storage.storage_db_path
     parsed_timestamp = parse_timestamp(timestamp)
     metrics = parse_storage_metrics(results_dir)
     columns = ", ".join(STORAGE_METRIC_COLUMNS)
@@ -171,10 +169,11 @@ def add_nccl_result(
     timestamp: object,
     busbw: float | str,
     latency: float | str,
-    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+    db_path: str | Path | None = None,
 ) -> int:
     """Upsert one NCCL metric row and return the parsed timestamp."""
 
+    db_path = db_path or load_config().storage.nccl_db_path
     parsed_timestamp = parse_timestamp(timestamp)
     with closing(_connect_writable(db_path)) as connection:
         connection.execute(

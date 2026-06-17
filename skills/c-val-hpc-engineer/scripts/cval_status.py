@@ -15,7 +15,7 @@ def main() -> int:
 
     commands = [
         [sys.executable, "-m", "cval.cli", "status", "--output", "table"],
-        [sys.executable, "-m", "cval.cli", "discover-free-nodes", "--output", "table"],
+        [sys.executable, "-m", "cval.cli", "nodes", "--output", "table"],
     ]
     if args.plan:
         commands.append(

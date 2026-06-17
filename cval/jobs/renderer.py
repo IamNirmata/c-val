@@ -16,6 +16,8 @@ from cval.models import RenderedJob
 
 
 NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+# Kubernetes object names rendered by c-val must fit a DNS label.
+MAX_JOB_NAME_LENGTH = 63
 
 
 def default_template_path() -> Path:
@@ -30,7 +32,13 @@ def make_job_name(node_name: str, timestamp: int, job_prefix: str | None = None)
     resolved_prefix = job_prefix if job_prefix is not None else load_config().job.job_prefix
     validate_kubernetes_name(node_name, "node_name")
     validate_kubernetes_name(resolved_prefix, "job_prefix")
-    return f"{resolved_prefix}-{node_name}-{timestamp}"
+    job_name = f"{resolved_prefix}-{node_name}-{timestamp}"
+    if len(job_name) > MAX_JOB_NAME_LENGTH:
+        raise ValueError(
+            f"Job name exceeds the {MAX_JOB_NAME_LENGTH}-character Kubernetes limit "
+            f"({len(job_name)}): {job_name!r}; use a shorter job_prefix"
+        )
+    return job_name
 
 
 def render_validation_job(
@@ -67,25 +75,26 @@ def render_validation_job(
     if missing:
         raise ValueError(f"Template is missing placeholder(s): {', '.join(missing)}")
 
+    replacements = {
+        "git-repo-placeholder": resolved_git_repo,
+        "git-ref-placeholder": resolved_git_ref,
+        **_job_template_replacements(template_config),
+        **_runtime_replacements(config),
+    }
+    # Reject values that would silently corrupt the rendered manifest.
+    for placeholder, value in replacements.items():
+        if placeholder in template_text:
+            _validate_substitution_value(placeholder, value)
+
     yaml_text = template_text.replace("nodename-placeholder", node_name)
     yaml_text = yaml_text.replace("time-placeholder", str(rendered_timestamp))
     yaml_text = yaml_text.replace("generateName: jobname-placeholder", f"name: {job_name}")
     yaml_text = yaml_text.replace("jobname-placeholder", job_name)
-    yaml_text = yaml_text.replace("git-repo-placeholder", resolved_git_repo)
-    yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
-    template_replacements = _job_template_replacements(template_config)
-    runtime_replacements = _runtime_replacements(config)
-    for placeholder, value in template_replacements.items():
-        yaml_text = yaml_text.replace(placeholder, value)
-    for placeholder, value in runtime_replacements.items():
+    for placeholder, value in replacements.items():
         yaml_text = yaml_text.replace(placeholder, value)
 
     # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
-    known_placeholders = [
-        *required_placeholders,
-        *template_replacements.keys(),
-        *runtime_replacements.keys(),
-    ]
+    known_placeholders = [*required_placeholders, *replacements]
     remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
@@ -129,6 +138,16 @@ def validate_kubernetes_name(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")
 
 
+def _validate_substitution_value(placeholder: str, value: str) -> None:
+    """Reject empty or multiline values that would corrupt rendered YAML."""
+
+    if not value or value != value.strip() or any(ch in value for ch in "\n\r\t"):
+        raise ValueError(
+            f"Template value for {placeholder!r} must be a non-empty single-line "
+            f"string without surrounding whitespace: {value!r}"
+        )
+
+
 def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
     """Return optional placeholder replacements for environment-specific job values."""
 
@@ -164,6 +183,8 @@ def _runtime_replacements(config: CvalConfig) -> dict[str, str]:
         "validation-gpu-count-placeholder": str(config.validation.gpu_count),
         "validation-nccl-iterations-placeholder": str(config.validation.nccl_iterations),
         "validation-nccl-data-size-gb-placeholder": str(config.validation.nccl_data_size_gb),
+        "validation-ibbw-start-device-placeholder": str(config.validation.ibbw_start_device),
+        "validation-ibbw-end-device-placeholder": str(config.validation.ibbw_end_device),
         "validation-dl-test-plan-placeholder": config.validation.dl_test_plan,
         "validation-dl-baseline-test-id-placeholder": config.validation.dl_baseline_test_id,
         "validation-dl-iterations-placeholder": str(config.validation.dl_iterations),

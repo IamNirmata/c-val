@@ -65,7 +65,7 @@ def pod_gpu_usage_by_node(pods_json: Mapping[str, object]) -> dict[str, int]:
 def parse_node_resources(
     nodes_output: str,
     usage_by_node: Mapping[str, int] | None = None,
-    node_name_filter: str | None = "hgx",
+    node_name_filter: str | None = None,
     excluded_node_names: set[str] | None = None,
 ) -> list[NodeResource]:
     """Parse the compact node GPU table into schedulable resource records."""
@@ -113,7 +113,7 @@ def discover_free_nodes_from_outputs(
     pods_json: Mapping[str, object],
     nodes_output: str,
     nodes_json: Mapping[str, object] | None = None,
-    node_name_filter: str | None = "hgx",
+    node_name_filter: str | None = None,
 ) -> tuple[list[NodeResource], dict[str, int]]:
     """Build node resources and totals from raw pod/node command outputs."""
 
