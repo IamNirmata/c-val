@@ -84,6 +84,7 @@ repo_dir = "/workspace/c-val"
 validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
+dl_results_root_path = "/data/dltest-results"
 
 [validation]
 gpu_count = 8
@@ -124,9 +125,11 @@ build_interval_seconds = 86400
 classify_interval_seconds = 300
 ```
 
-The `[storage]` `dl_*_db_path` entries point at the four DL metric DBs; the
-`[baseline]` root path, tolerances, `window_days`, and loop intervals control
-dynamic baseline building and node classification (see
+The `[runtime]` `dl_results_root_path` points at remapped DL rank JSON artifacts
+(`dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json`). The
+`[storage]` `dl_*_db_path` entries point at the four DL metric DBs rebuilt from
+those JSON files. The `[baseline]` root path, tolerances, `window_days`, and loop
+intervals control dynamic baseline building and node classification (see
 [Baselines and Node Classification](baselines.md)).
 
 ## Precedence

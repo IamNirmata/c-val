@@ -95,6 +95,21 @@ DL numerical keeps `rank` in the metric key (ranks may legitimately differ and
 must stay near-exact per rank); DL performance metrics pool ranks since the GPUs
 are timing peers.
 
+DL metric DBs are rebuilt from remapped rank JSON artifacts before DL baseline
+build/classification:
+
+```text
+/data/dltest-results/dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json
+```
+
+The maintenance command is:
+
+```bash
+python -m cval.cli db-rebuild-dltest-metrics \
+  --results-root /data/dltest-results \
+  --output-dir /data/continuous_validation/metadata
+```
+
 ---
 
 ## Versioned baseline records

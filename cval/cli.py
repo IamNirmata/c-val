@@ -216,6 +216,22 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
 
+    db_rebuild_dltest = subparsers.add_parser("db-rebuild-dltest-metrics")
+    db_rebuild_dltest.add_argument(
+        "--results-root",
+        type=Path,
+        default=Path(active_config.runtime.dl_results_root_path),
+        help="Root containing dltest-* run directories with rank JSON files",
+    )
+    db_rebuild_dltest.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(active_config.storage.dl_numerical_db_path).parent,
+        help="Directory where the four DL metric DBs are written",
+    )
+    db_rebuild_dltest.add_argument("--output", choices=["table", "json"], default="table")
+    db_rebuild_dltest.set_defaults(handler=handle_db_rebuild_dltest_metrics)
+
     # Baseline commands (read-only and ingestion)
     baseline = subparsers.add_parser("baseline", help="Manage baselines and peer comparison")
     baseline_sub = baseline.add_subparsers(dest="baseline_command", required=True)
@@ -643,6 +659,33 @@ def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
         db_path=args.db_path,
     )
     print(f"Added NCCL result: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
+    """Rebuild the four DL metric DBs from rank JSON artifacts."""
+    from cval.storage.dltest_ingest import ingest_dltest_results
+
+    try:
+        summary = ingest_dltest_results(args.results_root, args.output_dir)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    print(
+        f"Rebuilt DL metric DBs from {summary['rank_files']} rank file(s) "
+        f"across {summary['runs']} run(s)"
+    )
+    print(f"Results root: {summary['results_root']}")
+    print(f"Output dir: {summary['output_dir']}")
+    print(f"numerical_correctness: {summary['numerical_correctness_rows']} rows")
+    print(f"compute_performance: {summary['compute_performance_rows']} rows")
+    print(f"collective_performance: {summary['collective_performance_rows']} rows")
+    print(f"overlap_performance: {summary['overlap_performance_rows']} rows")
     return 0
 
 

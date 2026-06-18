@@ -256,4 +256,5 @@ run-batch
 db-add-result
 db-add-storage-result
 db-add-nccl-result
+db-rebuild-dltest-metrics
 ```

@@ -34,6 +34,8 @@ PY
 BASELINE_ROOT=${CVAL_BASELINE_ROOT:-$(config_value baseline baseline_root_path /data/continuous_validation/baselines)}
 INTERVAL_SECONDS=${CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS:-$(config_value baseline classify_interval_seconds 300)}
 WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)}
+DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/dltest-results)}
+DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
 TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest}
 
@@ -55,6 +57,8 @@ Environment overrides:
   CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=$INTERVAL_SECONDS
   CVAL_BASELINE_WINDOW_DAYS=$WINDOW_DAYS
   CVAL_BASELINE_CLASSIFY_TESTS=$TEST_TYPES
+    CVAL_DL_RESULTS_ROOT=$DL_RESULTS_ROOT
+    CVAL_DL_METRIC_OUTPUT_DIR=$DL_METRIC_OUTPUT_DIR
 EOF
 }
 
@@ -94,6 +98,18 @@ EOF
     fi
 }
 
+refresh_dl_metric_dbs() {
+    log "refreshing DL metric DBs from $DL_RESULTS_ROOT -> $DL_METRIC_OUTPUT_DIR"
+    python -m cval.cli --config "$CONFIG_PATH" db-rebuild-dltest-metrics \
+        --results-root "$DL_RESULTS_ROOT" \
+        --output-dir "$DL_METRIC_OUTPUT_DIR" \
+        --output json | tee "$1/dltest-ingest.json"
+}
+
+tests_include_dltest() {
+    [[ ",$TEST_TYPES," == *",dltest,"* ]]
+}
+
 run_cycle() {
     ensure_baseline_root_writable
     mkdir -p "$LOG_DIR"
@@ -104,6 +120,10 @@ run_cycle() {
 
     pushd "$REPO_DIR" >/dev/null
     log "baseline classification cycle start: root=$BASELINE_ROOT window_days=$WINDOW_DAYS tests=$TEST_TYPES"
+
+    if tests_include_dltest; then
+        refresh_dl_metric_dbs "$cycle_dir"
+    fi
 
     IFS=',' read -r -a tests <<< "$TEST_TYPES"
     for test_type in "${tests[@]}"; do
@@ -147,8 +167,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$0"
+        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q bash %q run-loop' \
+        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$0"
 
     local tmux_body
     printf -v tmux_body \

@@ -94,6 +94,7 @@ class RuntimeConfig:
     validation_root: str = "/data/continuous_validation"
     validation_tests_dir: str = "/workspace/c-val/validation-tests"
     dl_unit_test_dir: str = "/data/continuous_validation/deep-learning-unit-test-main"
+    dl_results_root_path: str = "/data/dltest-results"
 
 
 @dataclass(frozen=True)
@@ -296,6 +297,11 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 runtime,
                 "dl_unit_test_dir",
                 defaults.runtime.dl_unit_test_dir,
+            ),
+            dl_results_root_path=_str(
+                runtime,
+                "dl_results_root_path",
+                defaults.runtime.dl_results_root_path,
             ),
         ),
         validation=ValidationConfig(

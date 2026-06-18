@@ -36,6 +36,8 @@ INTERVAL_SECONDS=${CVAL_BASELINE_BUILD_INTERVAL_SECONDS:-$(config_value baseline
 WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)}
 MIN_SAMPLES=${CVAL_BASELINE_MIN_SAMPLES:-$(config_value baseline min_samples 8)}
 DL_TEST_PLAN=${CVAL_BASELINE_DL_TEST_PLAN:-$(config_value validation dl_test_plan 80gb-example)}
+DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/dltest-results)}
+DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
 LOG_DIR=${CVAL_BASELINE_BUILD_LOG_DIR:-$BASELINE_ROOT/logs/build}
 
 usage() {
@@ -57,6 +59,8 @@ Environment overrides:
   CVAL_BASELINE_WINDOW_DAYS=$WINDOW_DAYS
   CVAL_BASELINE_MIN_SAMPLES=$MIN_SAMPLES
   CVAL_BASELINE_DL_TEST_PLAN=$DL_TEST_PLAN
+    CVAL_DL_RESULTS_ROOT=$DL_RESULTS_ROOT
+    CVAL_DL_METRIC_OUTPUT_DIR=$DL_METRIC_OUTPUT_DIR
 EOF
 }
 
@@ -96,6 +100,14 @@ EOF
     fi
 }
 
+refresh_dl_metric_dbs() {
+    log "refreshing DL metric DBs from $DL_RESULTS_ROOT -> $DL_METRIC_OUTPUT_DIR"
+    python -m cval.cli --config "$CONFIG_PATH" db-rebuild-dltest-metrics \
+        --results-root "$DL_RESULTS_ROOT" \
+        --output-dir "$DL_METRIC_OUTPUT_DIR" \
+        --output json | tee "$1/dltest-ingest.json"
+}
+
 run_cycle() {
     ensure_baseline_root_writable
     mkdir -p "$LOG_DIR"
@@ -120,6 +132,8 @@ run_cycle() {
             --activate \
             --output json | tee "$cycle_dir/${test_type}.json"
     done
+
+    refresh_dl_metric_dbs "$cycle_dir"
 
     log "building dltest baseline_id=dltest-${baseline_id} test_plan=$DL_TEST_PLAN"
     python -m cval.cli --config "$CONFIG_PATH" baseline build \
@@ -159,8 +173,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_BUILD_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_MIN_SAMPLES=%q CVAL_BASELINE_DL_TEST_PLAN=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$MIN_SAMPLES" "$DL_TEST_PLAN" "$0"
+        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_BUILD_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_MIN_SAMPLES=%q CVAL_BASELINE_DL_TEST_PLAN=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q bash %q run-loop' \
+        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$MIN_SAMPLES" "$DL_TEST_PLAN" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$0"
 
     local tmux_body
     printf -v tmux_body \
