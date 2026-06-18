@@ -156,12 +156,12 @@ To start them inside the PVC pod, first exec into the running access pod and run
 the same commands from the c-val checkout. Do not paste credentials into docs or
 commands; use the kubeconfig already present on the operator machine.
 
-For DL tests, the scripts first rebuild the four DL metric DBs from remapped rank
-JSON files under `/data/dltest-results`. To run that rebuild manually:
+For DL tests, the scripts first rebuild the four DL metric DBs from rank JSON
+files under `/data/continuous_validation/dltest`. To run that rebuild manually:
 
 ```bash
 python -m cval.cli db-rebuild-dltest-metrics \
-  --results-root /data/dltest-results \
+  --results-root /data/continuous_validation/dltest \
   --output-dir /data/continuous_validation/metadata
 ```
 

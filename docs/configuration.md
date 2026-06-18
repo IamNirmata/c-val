@@ -84,7 +84,7 @@ repo_dir = "/workspace/c-val"
 validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
-dl_results_root_path = "/data/dltest-results"
+dl_results_root_path = "/data/continuous_validation/dltest"
 
 [validation]
 gpu_count = 8

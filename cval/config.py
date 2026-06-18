@@ -94,7 +94,7 @@ class RuntimeConfig:
     validation_root: str = "/data/continuous_validation"
     validation_tests_dir: str = "/workspace/c-val/validation-tests"
     dl_unit_test_dir: str = "/data/continuous_validation/deep-learning-unit-test-main"
-    dl_results_root_path: str = "/data/dltest-results"
+    dl_results_root_path: str = "/data/continuous_validation/dltest"
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,6 @@
 The DL artifact layout has changed over time. The scanner is intentionally
 recursive and accepts both of these shapes:
 
-  /data/dltest-results/dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json
   /data/continuous_validation/dltest/<node>/dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json
 
 The four output DBs mirror the DL metric categories used by baseline building:
@@ -30,7 +29,7 @@ COLLECTIVE_METRICS = frozenset(("cpu_time", "gpu_time"))
 OVERLAP_METRICS = frozenset(("coll_mean", "coll_stdev", "layer_mean", "layer_stdev"))
 METADATA_FIELDS = frozenset(("task_name", "status", "error_msg", "coll_name", "layer_name"))
 TASK_GROUPS = ("nn_tasks", "f_tasks", "coll_tasks", "overlap_tasks")
-RANK_PATTERN = re.compile(r"(?:^|_)RANK(?P<rank>\d+)$")
+RANK_PATTERN = re.compile(r"(?:^|_)rank(?P<rank>\d+)(?:_|$)", re.IGNORECASE)
 RUN_DIR_PATTERN = re.compile(r"^dltest-(?P<node>.+)-(?P<timestamp>\d+)$")
 
 

@@ -8,7 +8,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from cval.storage.dltest_ingest import find_dl_run_dirs, ingest_dltest_results, load_rank_files
+from cval.storage.dltest_ingest import (
+    find_dl_run_dirs,
+    ingest_dltest_results,
+    load_rank_files,
+    parse_rank,
+)
 
 
 def _write_rank_json(path: Path, rank: int) -> None:
@@ -67,6 +72,10 @@ def _write_rank_json(path: Path, rank: int) -> None:
 
 
 class DltestIngestTests(unittest.TestCase):
+    def test_parse_rank_handles_new_and_old_run_id_shapes(self) -> None:
+        self.assertEqual(parse_rank("20260617_example_RANK7"), 7)
+        self.assertEqual(parse_rank("20260617_rank2_world8_node"), 2)
+
     def test_recursive_scanner_handles_remapped_root(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
