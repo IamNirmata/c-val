@@ -18,6 +18,9 @@ cval jobs
 cval result
 ```
 
+The `baseline` command group (build, classify, activate, show, list) is also a
+public command surface; see [`baseline`](#baseline).
+
 Older command names remain available for compatibility, but are hidden from
 `--help` and should not be used in new docs or automation.
 
@@ -125,6 +128,46 @@ Or emit JSON:
 
 ```bash
 python -m cval.cli result --result-json <result.json> --output json
+```
+
+## `baseline`
+
+Build dynamic baselines from result DBs, manage their lifecycle, and classify
+nodes. See [Baselines and Node Classification](baselines.md) for the method.
+
+Build a baseline. Dry-run prints the computed robust metrics; add `--store` to
+persist as a candidate, and `--activate` to also promote it to active:
+
+```bash
+python -m cval.cli baseline build --test-type nccl --window-days 30 --store
+python -m cval.cli baseline build --test-type storage \
+  --image-name pytorch:26.05-py3 --baseline-id storage-2026Q2 --activate
+python -m cval.cli baseline build --test-type dltest --test-plan 80gb-example --output json
+```
+
+Promote, inspect, and list:
+
+```bash
+python -m cval.cli baseline activate storage-2026Q2 storage
+python -m cval.cli baseline show storage-2026Q2 storage --output json
+python -m cval.cli baseline list --test-type storage --output json
+```
+
+Classify nodes against the active (or a named) baseline. With no `--node`, every
+node seen in the window is classified:
+
+```bash
+python -m cval.cli baseline classify --test-type storage
+python -m cval.cli baseline classify --test-type nccl \
+  --node <node> --baseline-id <id> --output json
+```
+
+Legacy directory-based references remain available:
+
+```bash
+python -m cval.cli baseline load   <baseline-dir> <test-type>
+python -m cval.cli baseline ingest <baseline-dir> <test-type>
+python -m cval.cli baseline compare <baseline-id> <test-type> --result-json <result.json>
 ```
 
 ## Internal Compatibility Commands

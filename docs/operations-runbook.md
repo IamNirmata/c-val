@@ -97,6 +97,33 @@ phase: Completed
 result: storage=pass, nccl=pass, dltest=pass, overall=pass
 ```
 
+## Baselines and Node Classification
+
+Build a baseline from recent results, review it, then promote it to active:
+
+```bash
+# Dry-run: print the robust per-metric baseline (no write)
+python -m cval.cli baseline build --test-type storage --window-days 30
+
+# Store as a candidate and review
+python -m cval.cli baseline build --test-type storage --window-days 30 \
+  --baseline-id storage-2026Q2 --store
+python -m cval.cli baseline show storage-2026Q2 storage
+
+# Promote to active (changes what "normal" means going forward)
+python -m cval.cli baseline activate storage-2026Q2 storage
+```
+
+Classify nodes against the active baseline and act on degraded nodes:
+
+```bash
+python -m cval.cli baseline classify --test-type storage --output table
+python -m cval.cli baseline classify --test-type nccl --node <node> --output json
+```
+
+Classification is read-only. A `degraded` verdict is a signal to investigate, not
+an automated action; c-val does not cordon or drain nodes.
+
 ## Cleanup
 
 c-val 2.0 does not delete jobs automatically. If cleanup is required, ask for explicit approval and run the exact delete command only for the intended validation job.

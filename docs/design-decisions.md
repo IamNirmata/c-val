@@ -46,3 +46,30 @@ for pending timeout in the current cycle.
 
 This is a per-slot rebuild policy: when one slot opens, c-val re-reads live
 Kubernetes state and validation DB state before selecting exactly one next node.
+
+## Robust Statistics for Baselines
+
+Baselines use the median and MAD (scaled by 1.4826), not mean and standard
+deviation. GPU-fleet performance metrics are skewed and contaminated by a few
+degraded nodes; the mean has a breakdown point of 0 and an inflated standard
+deviation widens the band and hides the next anomaly. The median tolerates up to
+50% contamination, which is what fleet validation needs. Extreme outliers are
+trimmed with the modified z-score before the baseline is computed, and the whole
+stack stays stdlib-only (no numpy/scipy).
+
+## Directional Acceptance Bands
+
+Each metric carries a direction. Performance metrics are one-sided
+(`busbw`/IOPS are `low_bad`; latency/time are `high_bad`), so a better-than-median
+result is never a violation. Correctness metrics are `two_sided`. The band
+half-width is `max(z * 1.4826 * MAD, tolerance_pct/100 * |median|)`, so the
+configured engineering tolerance acts as a floor under the data-driven width.
+Deterministic DL numerical metrics (MAD = 0) fall back to the relative tolerance.
+
+## Versioned Baselines: Candidate Then Active
+
+Built baselines are immutable records with a `candidate -> active -> superseded`
+lifecycle. New baselines are candidates by default and must be explicitly
+activated, so a slowly degrading fleet cannot silently re-baseline itself as
+"normal". Activation supersedes only the previous active baseline for the same
+`(test_type, stratum)`.

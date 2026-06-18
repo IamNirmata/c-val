@@ -1,6 +1,6 @@
 # c-val
 
-c-val is a dry-run-first continuous validation framework for GPU clusters. It discovers schedulable free GPU nodes, prioritizes stale or never-tested nodes, renders Volcano validation jobs, gates real submission behind explicit approval, monitors jobs read-only, and ingests deterministic storage, NCCL, and DL test results into SQLite metadata.
+c-val is a dry-run-first continuous validation framework for GPU clusters. It discovers schedulable free GPU nodes, prioritizes stale or never-tested nodes, renders Volcano validation jobs, gates real submission behind explicit approval, monitors jobs read-only, and ingests deterministic storage, NCCL, and DL test results into SQLite metadata. It also builds robust statistical baselines (median/MAD) from result history and classifies nodes as normal, degraded, or improved.
 
 ## Why `c-val` and `cval` Both Exist
 
@@ -76,6 +76,7 @@ Start with [docs/README.md](docs/README.md), then use:
 - [docs/cli-reference.md](docs/cli-reference.md)
 - [docs/operations-runbook.md](docs/operations-runbook.md)
 - [docs/result-schema.md](docs/result-schema.md)
+- [docs/baselines.md](docs/baselines.md)
 - [docs/dl-test.md](docs/dl-test.md)
 - [docs/hermes-integration.md](docs/hermes-integration.md)
 - [docs/troubleshooting.md](docs/troubleshooting.md)

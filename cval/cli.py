@@ -77,7 +77,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,status,nodes,plan,run,jobs,result}",
+        metavar="{config,status,nodes,run,jobs,result}",
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
@@ -103,7 +103,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
 
-    plan = subparsers.add_parser("plan", help="Build and print a dry-run validation plan")
+    plan = subparsers.add_parser("plan")
     _add_plan_inputs(plan, active_config)
     plan.add_argument(
         "--include-yaml",
@@ -112,6 +112,35 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     plan.add_argument("--output", choices=["table", "json"], default="table")
     plan.set_defaults(handler=handle_plan)
+
+    prioritize = subparsers.add_parser("prioritize")
+    prioritize.add_argument(
+        "--free-nodes", required=True, help="Comma-separated free node names"
+    )
+    prioritize.add_argument(
+        "--db-status-json", type=Path, help="JSON object mapping node to timestamp"
+    )
+    prioritize.add_argument(
+        "--db-status-tsv", type=Path, help="TSV output from existing latest-status command"
+    )
+    prioritize.add_argument(
+        "--threshold-days", type=float, default=active_config.scheduling.days_threshold
+    )
+    prioritize.add_argument("--output", choices=["table", "json"], default="table")
+    prioritize.set_defaults(handler=handle_prioritize)
+
+    run_batch = subparsers.add_parser("run-batch")
+    run_batch.add_argument("--nodes", required=True, help="Comma-separated target nodes")
+    run_batch.add_argument(
+        "--batch-size", type=int, default=active_config.scheduling.batch_size
+    )
+    run_batch.add_argument("--timestamp", type=int)
+    run_batch.add_argument("--template", type=Path, default=active_config.job.template_path)
+    run_batch.add_argument("--job-prefix", default=active_config.job.job_prefix)
+    run_batch.add_argument("--git-repo", default=active_config.job.git_repo)
+    run_batch.add_argument("--git-ref", default=active_config.job.git_ref)
+    run_batch.add_argument("--output", choices=["table", "json"], default="table")
+    run_batch.set_defaults(handler=handle_run_batch)
 
     run = subparsers.add_parser(
         "run",
@@ -205,6 +234,83 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_compare.add_argument("--output", choices=["json", "table"], default="table")
     baseline_compare.set_defaults(handler=handle_baseline_compare)
 
+    baseline_build = baseline_sub.add_parser(
+        "build", help="Build a dynamic baseline from result DBs (robust stats)"
+    )
+    baseline_build.add_argument(
+        "--test-type", choices=["nccl", "storage", "dltest"], required=True
+    )
+    baseline_build.add_argument(
+        "--window-days", type=int, default=active_config.baseline.window_days
+    )
+    baseline_build.add_argument(
+        "--min-samples", type=int, default=active_config.baseline.min_samples
+    )
+    baseline_build.add_argument("--image-name", help="Stratify storage/NCCL by image")
+    baseline_build.add_argument("--node", help="Restrict storage/NCCL to one node")
+    baseline_build.add_argument("--test-plan", help="Stratify DL by test plan")
+    baseline_build.add_argument("--source-db", help="Override source DB (storage/NCCL)")
+    baseline_build.add_argument("--baseline-id", help="Explicit baseline id")
+    baseline_build.add_argument(
+        "--db-path",
+        default=active_config.storage.validation_db_path,
+        help="DB to store the baseline in",
+    )
+    baseline_build.add_argument(
+        "--store", action="store_true", help="Persist as a candidate baseline"
+    )
+    baseline_build.add_argument(
+        "--activate", action="store_true", help="Persist and promote to active"
+    )
+    baseline_build.add_argument("--output", choices=["table", "json"], default="table")
+    baseline_build.set_defaults(handler=handle_baseline_build)
+
+    baseline_activate = baseline_sub.add_parser(
+        "activate", help="Promote a stored baseline to active"
+    )
+    baseline_activate.add_argument("baseline_id")
+    baseline_activate.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_activate.add_argument(
+        "--db-path", default=active_config.storage.validation_db_path
+    )
+    baseline_activate.set_defaults(handler=handle_baseline_activate)
+
+    baseline_show = baseline_sub.add_parser("show", help="Show a stored baseline record")
+    baseline_show.add_argument("baseline_id")
+    baseline_show.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_show.add_argument(
+        "--db-path", default=active_config.storage.validation_db_path
+    )
+    baseline_show.add_argument("--output", choices=["table", "json"], default="table")
+    baseline_show.set_defaults(handler=handle_baseline_show)
+
+    baseline_classify = baseline_sub.add_parser(
+        "classify", help="Classify nodes against the active baseline"
+    )
+    baseline_classify.add_argument(
+        "--test-type", choices=["nccl", "storage", "dltest"], required=True
+    )
+    baseline_classify.add_argument(
+        "--node", help="Classify one node; omit to classify all nodes in the window"
+    )
+    baseline_classify.add_argument(
+        "--baseline-id",
+        help="Baseline id to compare against; default is the active baseline",
+    )
+    baseline_classify.add_argument(
+        "--window-days", type=int, default=active_config.baseline.window_days
+    )
+    baseline_classify.add_argument(
+        "--source-db", help="Override source result DB (storage/NCCL)"
+    )
+    baseline_classify.add_argument(
+        "--db-path",
+        default=active_config.storage.validation_db_path,
+        help="DB holding baselines",
+    )
+    baseline_classify.add_argument("--output", choices=["table", "json"], default="table")
+    baseline_classify.set_defaults(handler=handle_baseline_classify)
+
     return parser
 
 
@@ -296,6 +402,71 @@ def handle_plan(args: argparse.Namespace) -> int:
             f"{planned.candidate.priority:>3} {planned.candidate.node:<32} "
             f"{planned.candidate.reason:<13} {planned.rendered_job.job_name}"
         )
+    return 0
+
+
+def handle_prioritize(args: argparse.Namespace) -> int:
+    """Build a priority queue from explicit free nodes and status history."""
+    from cval.scheduler.priority import build_priority_queue
+
+    db_status: dict[str, int] = {}
+    if args.db_status_json is not None:
+        data = json.loads(args.db_status_json.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("DB status JSON must map node names to timestamps")
+        db_status = {str(node): int(timestamp) for node, timestamp in data.items()}
+    elif args.db_status_tsv is not None:
+        db_status = parse_latest_status_tsv(
+            args.db_status_tsv.read_text(encoding="utf-8")
+        )
+
+    queue = build_priority_queue(
+        _parse_csv(args.free_nodes),
+        db_status,
+        days_threshold=args.threshold_days,
+    )
+    if args.output == "json":
+        print(json.dumps([asdict(candidate) for candidate in queue], indent=2))
+        return 0
+
+    print(f"{'PRI':>3} {'NODE':<32} {'LAST_TS':>12} {'AGE_DAYS':>9} REASON")
+    for candidate in queue:
+        age = "" if candidate.age_days is None else f"{candidate.age_days:.2f}"
+        print(
+            f"{candidate.priority:>3} {candidate.node:<32} "
+            f"{candidate.last_tested_timestamp:>12} {age:>9} {candidate.reason}"
+        )
+    return 0
+
+
+def handle_run_batch(args: argparse.Namespace) -> int:
+    """Render a local dry-run batch from explicit node names."""
+    from cval.jobs.renderer import render_validation_job_from_file
+
+    nodes = _parse_csv(args.nodes)[: args.batch_size]
+    rendered_jobs = [
+        render_validation_job_from_file(
+            args.template,
+            node_name=node,
+            timestamp=args.timestamp,
+            job_prefix=args.job_prefix,
+            git_repo=args.git_repo,
+            git_ref=args.git_ref,
+            cval_config=args.cval_config,
+        )
+        for node in nodes
+    ]
+    if args.output == "json":
+        print(
+            json.dumps(
+                [asdict(job) | {"dry_run": True} for job in rendered_jobs], indent=2
+            )
+        )
+        return 0
+
+    print(f"Dry run: {len(rendered_jobs)} job(s) would be submitted")
+    for job in rendered_jobs:
+        print(f"  {job.node_name} -> {job.job_name}")
     return 0
 
 
@@ -501,6 +672,174 @@ def handle_baseline_compare(args: argparse.Namespace) -> int:
             f"  {violation['metric']}: expected={violation['expected']}, "
             f"actual={violation['actual']}, diff={violation['pct_diff']:.2f}%"
         )
+    return 0
+
+
+def handle_baseline_build(args: argparse.Namespace) -> int:
+    """Build a dynamic baseline from result DBs and optionally store/activate it."""
+    from cval.baselines.build import build_baseline
+    from cval.baselines.storage import activate_baseline, store_dynamic_baseline
+
+    config: CvalConfig = args.cval_config
+    kwargs: dict = {
+        "config": config,
+        "window_days": args.window_days,
+        "min_samples": args.min_samples,
+        "baseline_id": args.baseline_id,
+    }
+    if args.test_type in ("storage", "nccl"):
+        kwargs["db_path"] = args.source_db
+        kwargs["image_name"] = args.image_name
+        kwargs["node"] = args.node
+    else:
+        kwargs["test_plan"] = args.test_plan
+
+    try:
+        record = build_baseline(args.test_type, **kwargs)
+    except FileNotFoundError as exc:
+        print(f"Source DB not found: {exc}", file=sys.stderr)
+        return 1
+
+    stored = False
+    if args.store or args.activate:
+        store_dynamic_baseline(record, db_path=args.db_path, status="candidate")
+        stored = True
+        if args.activate:
+            activate_baseline(record["baseline_id"], args.test_type, db_path=args.db_path)
+
+    metrics = record["metrics"]
+    if args.output == "json":
+        payload = dict(record)
+        payload["stored"] = stored
+        payload["activated"] = bool(args.activate)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Built {args.test_type} baseline: {record['baseline_id']}")
+    print(
+        f"Stratum: {record['stratum_key'] or '(all)'} | window: {record['window_days']}d | "
+        f"runs: {record['n_samples']} | metrics: {len(metrics)}"
+    )
+    if stored:
+        state = "active" if args.activate else "candidate"
+        print(f"Stored in {args.db_path} as {state}")
+    if not metrics:
+        print("No metrics met --min-samples; lower it or widen --window-days.")
+        return 0
+    print(f"{'METRIC':<48} {'MEDIAN':>14} {'MAD_SIGMA':>12} {'N':>4} DIR")
+    for key, stat in metrics.items():
+        print(
+            f"{key:<48} {stat['median']:>14.4g} {stat['mad_sigma']:>12.4g} "
+            f"{stat['n']:>4} {stat['direction']}"
+        )
+    return 0
+
+
+def handle_baseline_activate(args: argparse.Namespace) -> int:
+    """Promote a stored baseline to active and supersede the previous one."""
+    from cval.baselines.storage import activate_baseline
+
+    if not activate_baseline(args.baseline_id, args.test_type, db_path=args.db_path):
+        print(
+            f"Baseline not found: {args.baseline_id} ({args.test_type})",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Activated baseline: {args.baseline_id} ({args.test_type})")
+    return 0
+
+
+def handle_baseline_show(args: argparse.Namespace) -> int:
+    """Print a stored baseline record and its per-metric acceptance bands."""
+    from cval.baselines.storage import load_dynamic_baseline
+
+    record = load_dynamic_baseline(args.baseline_id, args.test_type, db_path=args.db_path)
+    if record is None:
+        print(
+            f"Baseline not found: {args.baseline_id} ({args.test_type})",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.output == "json":
+        print(json.dumps(record, indent=2))
+        return 0
+
+    metrics = record.get("metrics", {})
+    print(f"Baseline: {record.get('baseline_id')} ({record.get('test_type')})")
+    print(
+        f"Stratum: {record.get('stratum_key') or '(all)'} | "
+        f"window: {record.get('window_days')}d | runs: {record.get('n_samples')} | "
+        f"metrics: {len(metrics)}"
+    )
+    print(f"{'METRIC':<48} {'MEDIAN':>14} {'LOWER':>14} {'UPPER':>14} DIR")
+    for key, stat in metrics.items():
+        lower = stat.get("lower_bound")
+        upper = stat.get("upper_bound")
+        lower_s = "-inf" if lower is None else f"{lower:.4g}"
+        upper_s = "+inf" if upper is None else f"{upper:.4g}"
+        print(
+            f"{key:<48} {stat['median']:>14.4g} {lower_s:>14} {upper_s:>14} "
+            f"{stat['direction']}"
+        )
+    return 0
+
+
+def handle_baseline_classify(args: argparse.Namespace) -> int:
+    """Classify one or all nodes against the active (or named) baseline."""
+    from cval.baselines.classify import classify_node, classify_nodes
+    from cval.baselines.storage import get_active_baseline, load_dynamic_baseline
+
+    config: CvalConfig = args.cval_config
+    if args.baseline_id:
+        baseline = load_dynamic_baseline(args.baseline_id, args.test_type, db_path=args.db_path)
+    else:
+        baseline = get_active_baseline(args.test_type, db_path=args.db_path)
+    if not baseline:
+        target = args.baseline_id or "active"
+        print(
+            f"No {target} baseline for {args.test_type}; build and activate one first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.node:
+        verdicts = [
+            classify_node(
+                args.test_type,
+                args.node,
+                baseline,
+                config=config,
+                db_path=args.source_db,
+                window_days=args.window_days,
+            )
+        ]
+    else:
+        verdicts = classify_nodes(
+            args.test_type,
+            baseline,
+            config=config,
+            db_path=args.source_db,
+            window_days=args.window_days,
+        )
+
+    if args.output == "json":
+        print(json.dumps(verdicts, indent=2))
+        return 0
+
+    print(f"Classification vs baseline {baseline.get('baseline_id')} ({args.test_type})")
+    if not verdicts:
+        print("No nodes found in the window.")
+        return 0
+    print(f"{'NODE':<32} {'STATUS':<9} {'DEGRADED':>8} {'IMPROVED':>8} {'COMPARED':>8}")
+    for verdict in verdicts:
+        print(
+            f"{verdict['node']:<32} {verdict['status']:<9} {verdict['n_degraded']:>8} "
+            f"{verdict['n_improved']:>8} {verdict['n_compared']:>8}"
+        )
+    degraded = [v["node"] for v in verdicts if v["status"] == "degraded"]
+    if degraded:
+        print(f"Degraded nodes: {', '.join(degraded)}")
     return 0
 
 

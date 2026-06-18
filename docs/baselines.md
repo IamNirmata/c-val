@@ -1,39 +1,272 @@
-# Baseline Management and Peer-Comparison Classification
+# Baselines and Node Classification
 
-c-val 2.0 supports **baselines** and **peer-comparison classification** to identify whether validation results are:
-- **normal**: within tolerance of baseline/peer behavior
-- **degraded**: outside tolerance, warrants investigation
-- **improved**: better than baseline (often acceptable)
+c-val builds **baselines** from historical validation results and uses them to
+**classify nodes** as:
 
-## Baseline Directory Structure
+- **normal**: within the baseline's acceptance band
+- **degraded**: on the failing side of the band; warrants investigation
+- **improved**: better than the good-side tail (informational)
 
-Baselines are stored under:
+There are two layers:
+
+1. **Dynamic baselines (recommended)** — built directly from the result DBs with
+   robust statistics, stored as versioned records in SQLite, and used to
+   classify nodes. This is the primary system.
+2. **Directory baselines (legacy)** — hand-authored `summary.json` references
+   loaded from disk, for fixed golden references.
+
+---
+
+## How dynamic baselines are built (the method)
+
+Performance metrics on a GPU fleet are skewed and routinely contaminated by a few
+bad nodes. Mean and standard deviation break down in exactly that case — one bad
+run shifts the mean and inflates the deviation, hiding the next anomaly — so c-val
+uses **robust statistics** instead.
+
+For each metric, over a rolling window per stratum:
+
+1. **Collect** recent values from the result DB (non-positive performance
+   readings are dropped as failed/missing runs).
+2. **Trim** extreme outliers iteratively using the modified z-score
+   (Iglewicz & Hoaglin), threshold `3.5`.
+3. **Summarize** with the **median** (center) and **MAD** scaled to sigma
+   (`1.4826 × MAD`) for spread, plus IQR, percentiles, skewness, kurtosis, and a
+   bootstrap confidence interval for the median.
+4. **Set a directional acceptance band** (below).
+
+### Directional acceptance bands
+
+The half-width of the band is:
 
 ```text
-/data/continuous_validation/baselines/{test_type}/{baseline_id}/
-  summary.json              (required)
-  rank_metrics.json         (optional, for DL)
+delta = max(z * 1.4826 * MAD,  tolerance_pct/100 * |median|)
 ```
 
-### Example Structure
+with `z = robust_z_threshold` (default 3.5). The relative-tolerance floor means a
+freakishly tight MAD can never make classification more sensitive than the
+configured engineering tolerance.
 
+Directionality decides which side is a failure:
+
+| Direction | Meaning | Metrics |
+| --- | --- | --- |
+| `low_bad` | higher is better; only the low side fails | busbw, all storage IOPS/BW |
+| `high_bad` | lower is better; only the high side fails | NCCL latency, DL time metrics |
+| `two_sided` | any deviation fails | DL numerical correctness, overlap |
+
+### Deterministic metrics (MAD = 0)
+
+DL numerical-correctness outputs should be bit-reproducible for a fixed image and
+seed, so more than half the samples are identical and MAD is `0`. c-val detects
+this, avoids dividing by zero (MeanAD fallback in the z-score), and uses the tight
+relative tolerance (`dl_numerical_tolerance_pct`, default 0.1%) as the band. Any
+real spread is itself a signal.
+
+### Stratification
+
+Baselines are computed per stratum so comparisons stay apples-to-apples. The keys
+differ by test type because the schemas do:
+
+- **storage / NCCL**: stratify by `image_name` (and optionally `node`).
+- **DL**: stratify by `test_plan`.
+
+GPU SKU / topology are not yet recorded per run and are left for future work.
+
+### Sample size
+
+A metric is only baselined when it has at least `min_samples` clean values
+(default 8); median/MAD are unstable below that.
+
+---
+
+## Per-test rules
+
+| Test | Source DB | Metrics | Direction | Tolerance floor |
+| --- | --- | --- | --- | --- |
+| NCCL | `test-nccl.db` (`nccl_performance`) | busbw, latency | busbw `low_bad`, latency `high_bad` | `nccl_peer_tolerance_pct` (5%) |
+| Storage | `test-storage.db` (`storage_performance`) | 12 IOPS/BW columns | `low_bad` | `storage_peer_tolerance_pct` (10%) |
+| DL numerical | `dltest_numerical_correctness.db` | per `task/rank/metric` | `two_sided` | `dl_numerical_tolerance_pct` (0.1%) |
+| DL compute | `dltest_compute_performance.db` | fp/bp cpu/gpu time | `high_bad` | `dl_compute_tolerance_pct` (3%) |
+| DL collective | `dltest_collective_performance.db` | cpu/gpu time | `high_bad` | `dl_compute_tolerance_pct` (3%) |
+| DL overlap | `dltest_overlap_performance.db` | coll/layer mean/stdev | `two_sided` | `dl_overlap_tolerance_pct` (20%) |
+
+DL numerical keeps `rank` in the metric key (ranks may legitimately differ and
+must stay near-exact per rank); DL performance metrics pool ranks since the GPUs
+are timing peers.
+
+---
+
+## Versioned baseline records
+
+Baselines are immutable, versioned records in the `baselines` table of
+`validation.db`, with a lifecycle status:
+
+```text
+candidate  ->  active  ->  superseded
 ```
-baselines/
-  nccl/
-    b200-pt2.8.0-cuda12.9/
-      summary.json
-  storage/
-    b200-pt2.8.0-cuda12.9/
-      summary.json
-  dltest/
-    b200-pt2.8.0-cuda12.9/
-      summary.json
-      rank_metrics.json
+
+`build --store` writes a `candidate`. `activate` promotes it to `active` and
+supersedes the previous active baseline **for the same `(test_type, stratum)`**,
+so different strata keep independent active baselines. New results are always
+classified against the single `active` baseline (or an explicit `--baseline-id`).
+Candidates are the default so a slowly degrading fleet cannot silently
+re-baseline itself.
+
+### Stored record schema (`metrics_json`)
+
+```json
+{
+  "schema_version": "cval.baseline.v2",
+  "baseline_id": "nccl-image=pytorch:26.05-py3-1781000000",
+  "test_type": "nccl",
+  "stratum_key": "image=pytorch:26.05-py3",
+  "window_days": 30,
+  "created_at": 1781000000,
+  "n_samples": 42,
+  "method": "robust_mad",
+  "metrics": {
+    "busbw": {
+      "metric": "busbw",
+      "direction": "low_bad",
+      "n": 40, "n_excluded": 2,
+      "median": 480.0, "mad": 3.0, "mad_sigma": 4.45, "iqr": 5.0,
+      "p01": 470.0, "p05": 473.0, "p25": 478.0, "p50": 480.0,
+      "p75": 483.0, "p95": 487.0, "p99": 490.0,
+      "minimum": 465.0, "maximum": 492.0,
+      "skewness": -0.1, "kurtosis": 0.2,
+      "ci_low": 478.0, "ci_high": 482.0,
+      "deterministic": false,
+      "lower_bound": 456.0, "upper_bound": null,
+      "method": "robust_mad"
+    }
+  }
+}
 ```
 
-## Baseline Summary Schema
+`null` bounds mean "unbounded on that side" (one-sided performance metrics).
 
-### NCCL Baseline (summary.json)
+---
+
+## CLI
+
+### Build a baseline
+
+```bash
+# Build from the NCCL DB over the last 30 days, store as a candidate
+python -m cval.cli baseline build --test-type nccl --window-days 30 --store
+
+# Stratify storage by image, then store and promote to active in one step
+python -m cval.cli baseline build --test-type storage \
+  --image-name pytorch:26.05-py3 --baseline-id storage-2026Q2 --activate
+
+# DL baseline for one test plan, JSON output (no store)
+python -m cval.cli baseline build --test-type dltest --test-plan 80gb-example --output json
+```
+
+Useful flags: `--min-samples`, `--node`, `--source-db`, `--db-path` (where the
+baseline is stored), `--store`, `--activate`.
+
+### Activate / show / list
+
+```bash
+python -m cval.cli baseline activate storage-2026Q2 storage
+python -m cval.cli baseline show storage-2026Q2 storage
+python -m cval.cli baseline list --test-type storage --output json
+```
+
+### Classify nodes
+
+```bash
+# Classify all nodes seen in the window against the active storage baseline
+python -m cval.cli baseline classify --test-type storage
+
+# One node, JSON output, against an explicit baseline id
+python -m cval.cli baseline classify --test-type nccl \
+  --node slc01-cl02-hgx-0009 --baseline-id nccl-2026Q2 --output json
+```
+
+Table output:
+
+```text
+Classification vs baseline storage-2026Q2 (storage)
+NODE                             STATUS    DEGRADED IMPROVED COMPARED
+slc01-cl02-hgx-0001              normal           0        0       12
+slc01-cl02-hgx-0009              degraded        12        0       12
+Degraded nodes: slc01-cl02-hgx-0009
+```
+
+A node's value for each metric is the **median of its recent runs** in the window,
+so a single noisy run does not flip the verdict. A node is `degraded` if any
+metric falls on the failing side of its band, `improved` if some metric beats the
+good-side tail (p95/p05) and none are degraded, else `normal`.
+
+---
+
+## Python API
+
+```python
+from cval.baselines import (
+    build_baseline,
+    store_dynamic_baseline,
+    activate_baseline,
+    get_active_baseline,
+    classify_node,
+    classify_nodes,
+)
+
+# 1. Build a baseline from the result DBs (robust stats).
+record = build_baseline("storage", image_name="pytorch:26.05-py3", window_days=30)
+
+# 2. Persist as a candidate, then promote to active.
+store_dynamic_baseline(record)                       # status = candidate
+activate_baseline(record["baseline_id"], "storage")  # status = active
+
+# 3. Classify nodes against the active baseline.
+baseline = get_active_baseline("storage")
+verdicts = classify_nodes("storage", baseline)
+degraded = [v["node"] for v in verdicts if v["status"] == "degraded"]
+```
+
+Low-level robust statistics live in `cval.baselines.stats` (`summarize_metric`,
+`classify_value`, `median`, `mad`, `modified_zscores`, `tukey_fences`,
+`bootstrap_median_ci`).
+
+---
+
+## Configuration
+
+```toml
+[baseline]
+nccl_peer_tolerance_pct = 5.0       # NCCL relative-tolerance floor
+storage_peer_tolerance_pct = 10.0   # Storage relative-tolerance floor
+dl_compute_tolerance_pct = 3.0      # DL compute/collective time
+dl_numerical_tolerance_pct = 0.1    # DL numerical correctness (near-exact)
+dl_overlap_tolerance_pct = 20.0     # DL overlap (high variance)
+classify_outliers = true            # enable classification
+robust_z_threshold = 3.5            # modified z-score cutoff
+min_samples = 8                     # minimum clean samples per metric
+window_days = 30                    # rolling window for building baselines
+```
+
+These values feed both baseline building (band width, trimming, window) and
+classification.
+
+---
+
+## Directory baselines (legacy)
+
+Hand-authored references are still supported for fixed golden baselines. They live
+under `/data/continuous_validation/baselines/{test_type}/{baseline_id}/` with a
+`summary.json`, and use the `load` / `ingest` / `compare` commands:
+
+```bash
+cval baseline load   /data/continuous_validation/baselines/nccl/<id> nccl
+cval baseline ingest /data/continuous_validation/baselines/nccl/<id> nccl
+cval baseline compare <id> nccl --result-json /path/to/result.json
+```
+
+A `summary.json` holds fixed reference metrics, for example NCCL:
 
 ```json
 {
@@ -45,264 +278,21 @@ baselines/
 }
 ```
 
-### Storage Baseline (summary.json)
+The `load_baseline_summary` / `classify_result_vs_baseline` API in
+`cval.baselines.ingest` remains available for these fixed references.
 
-```json
-{
-  "test_plan": "80gb-example",
-  "timestamp": 1700000000,
-  "node": "slc01-cl02-hgx-0001",
-  "iodepth_read_1file_iops": 50000.0,
-  "iodepth_read_1file_bw": 400.0,
-  "iodepth_write_1file_iops": 45000.0,
-  "iodepth_write_1file_bw": 350.0,
-  "numjobs_read_nfiles_iops": 48000.0,
-  "numjobs_read_nfiles_bw": 380.0,
-  "numjobs_write_nfiles_iops": 44000.0,
-  "numjobs_write_nfiles_bw": 340.0,
-  "randread_iops": 35000.0,
-  "randread_bw": 300.0,
-  "randwrite_iops": 32000.0,
-  "randwrite_bw": 280.0
-}
-```
+---
 
-### DL Test Baseline (summary.json)
+## Integration with Hermes
 
-```json
-{
-  "test_plan": "80gb-example",
-  "timestamp": 1700000000,
-  "node": "slc01-cl02-hgx-0001",
-  "task_counts": {
-    "nn_tasks": 456,
-    "f_tasks": 304,
-    "coll_tasks": 192,
-    "overlap_tasks": 384
-  },
-  "status_counts": {
-    "completed": 1336
-  },
-  "numerical_metrics": {
-    "task_1": {
-      "norm_output": 0.5,
-      "weight": 0.1,
-      "bias": 0.05
-    }
-  },
-  "collective_metrics": {
-    "task_1": {
-      "allreduce_time": 1.5
-    }
-  }
-}
-```
+The Hermes `c-val-hpc-engineer` skill can build baselines, classify nodes, and
+summarize degraded nodes through these commands. See
+[c-val-hpc-engineer/SKILL.md](../skills/c-val-hpc-engineer/SKILL.md).
 
-## Per-Test Comparison Rules
+## Limitations and future work
 
-### NCCL: Peer-Comparison Mode
-
-- **tolerance**: 5% (configurable via `nccl_peer_tolerance_pct`)
-- **method**: Compare current run against peer baseline or recent average
-- **metrics**: `busbw` (bandwidth), `latency`
-
-Example:
-```
-baseline.busbw = 500 GB/s
-result.busbw   = 475 GB/s
-pct_diff       = (475 - 500) / 500 = -5% → within 5% tolerance → NORMAL
-```
-
-### Storage: Peer-Comparison Mode
-
-- **tolerance**: 10% (configurable via `storage_peer_tolerance_pct`)
-- **method**: Compare current run against peer baseline or recent average
-- **metrics**: IOPS and bandwidth for all access patterns (read/write, sequential/random)
-
-Example:
-```
-baseline.iodepth_read_1file_iops = 50000
-result.iodepth_read_1file_iops   = 48000
-pct_diff                          = (48000 - 50000) / 50000 = -4% → within 10% tolerance → NORMAL
-```
-
-### DL Test: Mixed-Mode Baseline
-
-Three different tolerance levels depending on task category:
-
-#### 1. **Compute/Collective Tasks: Tight Baseline (3%)**
-
-Applies to `nn_tasks`, `f_tasks`, `coll_tasks`.
-
-- These tasks should be deterministic or near-deterministic.
-- Any significant change may indicate model, driver, or hardware issues.
-
-Example:
-```
-baseline.nn_tasks     = 456
-result.nn_tasks       = 460
-pct_diff              = (460 - 456) / 456 = 0.88% → within 3% tolerance → NORMAL
-```
-
-#### 2. **Numerical Metrics: Almost-Exact Baseline (0.1%)**
-
-Applies to `norm_output`, `weight`, `bias` in numerical comparison.
-
-- Model numerical outputs should be nearly identical.
-- Tiny variations are acceptable (floating-point rounding).
-- >0.1% drift suggests numerical instability or precision loss.
-
-Example:
-```
-baseline.norm_output = 0.5
-result.norm_output   = 0.5001
-pct_diff             = (0.5001 - 0.5) / 0.5 = 0.02% → within 0.1% tolerance → NORMAL
-
-baseline.norm_output = 0.5
-result.norm_output   = 0.51
-pct_diff             = (0.51 - 0.5) / 0.5 = 2% → outside 0.1% tolerance → DEGRADED
-```
-
-#### 3. **Overlap Tasks: Lenient Baseline (20%)**
-
-Applies to `overlap_tasks` count and overlap variance metrics.
-
-- Overlap varies due to GPU scheduling, memory timing, and network jitter.
-- High variance is expected; lenient tolerance avoids false alarms.
-
-Example:
-```
-baseline.overlap_tasks = 384
-result.overlap_tasks   = 410
-pct_diff               = (410 - 384) / 384 = 6.77% → within 20% tolerance → NORMAL
-```
-
-## Baseline Configuration
-
-Tolerance values are configurable in [config/cval.toml](config/cval.toml):
-
-```toml
-[baseline]
-nccl_peer_tolerance_pct = 5.0          # NCCL peer comparison
-storage_peer_tolerance_pct = 10.0      # Storage peer comparison
-dl_compute_tolerance_pct = 3.0         # DL compute/collective tasks
-dl_numerical_tolerance_pct = 0.1       # DL numerical metrics
-dl_overlap_tolerance_pct = 20.0        # DL overlap tasks
-classify_outliers = true               # Enable classification
-```
-
-## CLI Commands
-
-### List Stored Baselines
-
-```bash
-cval baseline list --test-type nccl
-cval baseline list --output json
-```
-
-### Load Baseline from Directory
-
-```bash
-cval baseline load /data/continuous_validation/baselines/nccl/b200-pt2.8.0-cuda12.9 nccl
-```
-
-### Ingest Baseline into DB
-
-```bash
-cval baseline ingest /data/continuous_validation/baselines/nccl/b200-pt2.8.0-cuda12.9 nccl
-```
-
-### Compare Result vs. Baseline
-
-```bash
-cval baseline compare b200-pt2.8.0-cuda12.9 nccl --result-json /path/to/result.json
-cval baseline compare b200-pt2.8.0-cuda12.9 storage --output json
-```
-
-## Python API
-
-```python
-from cval.baselines import (
-    BaselineMetrics,
-    BaselineConfig,
-    load_baseline_summary,
-    compute_peer_stats,
-    classify_result_vs_baseline,
-)
-from cval.baselines.storage import (
-    store_baseline,
-    load_baseline_from_db,
-    list_baselines,
-)
-
-# Load a baseline from a directory
-baseline = load_baseline_summary(
-    Path("/data/continuous_validation/baselines/nccl/b200-pt2.8.0-cuda12.9"),
-    "nccl"
-)
-
-# Store in DB
-store_baseline(baseline, db_path=Path("validation.db"))
-
-# Compute peer statistics from recent runs
-peer_stats = compute_peer_stats(
-    Path("validation.db"),
-    test_type="nccl",
-    node="slc01-cl02-hgx-0001",
-    window_days=7
-)
-
-# Classify a new result
-config = BaselineConfig(nccl_peer_tolerance_pct=5.0)
-result = {"busbw": 495.0, "latency": 26.0}
-classification = classify_result_vs_baseline(result, baseline, peer_stats, config)
-
-print(classification["status"])      # "normal", "degraded", or "improved"
-print(classification["violations"])  # list of metric violations
-```
-
-## Workflow Integration
-
-### Manual Baseline Ingestion
-
-1. Collect a validated set of reference runs (e.g., on a canonical node)
-2. Create summary.json in `/data/continuous_validation/baselines/{test_type}/{baseline_id}/`
-3. Ingest into DB:
-   ```bash
-   cval baseline ingest /data/continuous_validation/baselines/{test_type}/{baseline_id} {test_type}
-   ```
-
-### Automated Classification in cval-live
-
-When cval-live ingests results, it can classify them:
-
-```python
-from cval.baselines.storage import load_baseline_from_db
-from cval.baselines.ingest import classify_result_vs_baseline
-
-# After result JSON is written
-baseline = load_baseline_from_db("b200-pt2.8.0-cuda12.9", "nccl")
-classification = classify_result_vs_baseline(result_dict, baseline)
-
-if classification["status"] == "degraded":
-    # Alert or escalate
-    log.warning(f"Degraded NCCL result on {node}: {classification['violations']}")
-```
-
-### Integration with Hermes
-
-The Hermes `c-val-hpc-engineer` skill can:
-
-1. **list-baselines**: inspect stored baselines
-2. **ingest-baseline**: onboard new baseline directories
-3. **classify-latest**: compare recent runs against baselines
-4. **summarize-outliers**: identify degraded nodes or trends
-
-See [c-val-hpc-engineer/SKILL.md](../skills/c-val-hpc-engineer/SKILL.md) for details.
-
-## Known Limitations and Future Improvements
-
-- **Baseline versioning**: not yet supported; baselines are singletons per test_type/baseline_id
-- **Trend analysis**: compute rolling baselines (e.g., last 30 days) to detect slow degradation
-- **Multi-dimensional thresholds**: per-node, per-GPU-type, per-test-plan baselines
-- **Automatic baseline promotion**: promote "improved" runs to new baseline if stable over time
+- **GPU SKU / topology strata**: not yet recorded per run; only image/test_plan.
+- **Trend analysis**: rolling baselines over time to catch slow degradation.
+- **Auto-promotion guardrail**: promote an improved baseline only when stable and
+  not drifting too far from the current active one.
+- **Live wiring**: auto-classify each completed validation in `cval-live`.

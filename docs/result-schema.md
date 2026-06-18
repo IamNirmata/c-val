@@ -63,3 +63,9 @@ Each run should write four latest-status rows:
 <node> dltest  <timestamp> <status> <image_name>
 <node> all     <timestamp> <overall> <image_name>
 ```
+
+## Baseline Classification
+
+These latest-status rows and the storage/NCCL/DL metric DBs are the inputs to
+dynamic baseline building and node classification. See
+[Baselines and Node Classification](baselines.md).

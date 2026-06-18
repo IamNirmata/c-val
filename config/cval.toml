@@ -83,3 +83,9 @@ dl_numerical_tolerance_pct = 0.1
 dl_overlap_tolerance_pct = 20.0
 # Enable automatic outlier classification
 classify_outliers = true
+# Robust z-score cutoff for dynamic baselines (Iglewicz & Hoaglin: 3.5)
+robust_z_threshold = 3.5
+# Minimum clean samples before a metric baseline is trusted
+min_samples = 8
+# Rolling window (days) of recent runs used to build a baseline
+window_days = 30

@@ -10,6 +10,7 @@ c-val 2.0 is the safe orchestration layer around the existing c-val GPU cluster 
 - [CLI Reference](cli-reference.md): operator commands and expected outputs.
 - [Operations Runbook](operations-runbook.md): safe daily operation and one-node validation flow.
 - [Result Schema](result-schema.md): structured result JSON and DB ingestion model.
+- [Baselines & Classification](baselines.md): dynamic robust baselines and node classification.
 - [DL Test](dl-test.md): how the deep learning unit test fits into c-val and how to read its output.
 - [Hermes Integration](hermes-integration.md): safe Hermes operating model for c-val.
 - [Design Decisions](design-decisions.md): why the implementation is shaped this way.

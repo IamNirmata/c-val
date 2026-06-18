@@ -74,6 +74,10 @@ poll_interval_seconds = 60
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"
 nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
+dl_numerical_db_path = "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
+dl_compute_db_path = "/data/continuous_validation/metadata/dltest_compute_performance.db"
+dl_collective_db_path = "/data/continuous_validation/metadata/dltest_collective_performance.db"
+dl_overlap_db_path = "/data/continuous_validation/metadata/dltest_overlap_performance.db"
 
 [runtime]
 repo_dir = "/workspace/c-val"
@@ -104,7 +108,22 @@ cpu = "100"
 memory = "1500Gi"
 rdma_resource_name = "rdma/rdma_shared_device_a"
 rdma_count = "1"
+
+[baseline]
+nccl_peer_tolerance_pct = 5.0
+storage_peer_tolerance_pct = 10.0
+dl_compute_tolerance_pct = 3.0
+dl_numerical_tolerance_pct = 0.1
+dl_overlap_tolerance_pct = 20.0
+classify_outliers = true
+robust_z_threshold = 3.5
+min_samples = 8
+window_days = 30
 ```
+
+The `[storage]` `dl_*_db_path` entries point at the four DL metric DBs; the
+`[baseline]` tolerances and `window_days` control dynamic baseline building and
+node classification (see [Baselines and Node Classification](baselines.md)).
 
 ## Precedence
 

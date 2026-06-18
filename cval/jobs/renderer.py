@@ -93,6 +93,8 @@ def render_validation_job(
     yaml_text = yaml_text.replace("time-placeholder", str(rendered_timestamp))
     yaml_text = yaml_text.replace("generateName: jobname-placeholder", f"name: {job_name}")
     yaml_text = yaml_text.replace("jobname-placeholder", job_name)
+    _validate_substitution_value("git-repo-placeholder", resolved_git_repo)
+    _validate_substitution_value("git-ref-placeholder", resolved_git_ref)
     yaml_text = yaml_text.replace("git-repo-placeholder", resolved_git_repo)
     yaml_text = yaml_text.replace("git-ref-placeholder", resolved_git_ref)
     template_replacements = _job_template_replacements(template_config)
@@ -153,13 +155,31 @@ def validate_kubernetes_name(value: str, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a lowercase DNS label-compatible name: {value!r}")
 
 
+def _validate_substitution_value(placeholder: str, value: str) -> None:
+    """Reject empty or multiline values before they are templated into YAML.
+
+    An empty value would leave an empty field; a multiline value could break
+    the manifest structure or inject additional YAML keys, so both are refused
+    before substitution.
+    """
+
+    if not value:
+        raise ValueError(
+            f"Substitution value for {placeholder!r} must not be empty"
+        )
+    if "\n" in value or "\r" in value:
+        raise ValueError(
+            f"Substitution value for {placeholder!r} must be a single line: {value!r}"
+        )
+
+
 def _validate_volcano_pod_name(job_name: str) -> None:
     pod_name = f"{job_name}{VOLCANO_TASK_POD_SUFFIX}"
     if len(pod_name) > MAX_VOLCANO_NAME_PART_LENGTH:
         raise ValueError(
             "Rendered job name is too long for Volcano pod naming: "
-            f"{pod_name!r} is {len(pod_name)} characters; maximum is "
-            f"{MAX_VOLCANO_NAME_PART_LENGTH}"
+            f"{pod_name!r} is {len(pod_name)} characters, over the "
+            f"{MAX_VOLCANO_NAME_PART_LENGTH}-character limit"
         )
 
 

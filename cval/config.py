@@ -72,6 +72,18 @@ class StorageConfig:
     validation_db_path: str = "/data/continuous_validation/metadata/validation.db"
     storage_db_path: str = "/data/continuous_validation/metadata/test-storage.db"
     nccl_db_path: str = "/data/continuous_validation/metadata/test-nccl.db"
+    dl_numerical_db_path: str = (
+        "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
+    )
+    dl_compute_db_path: str = (
+        "/data/continuous_validation/metadata/dltest_compute_performance.db"
+    )
+    dl_collective_db_path: str = (
+        "/data/continuous_validation/metadata/dltest_collective_performance.db"
+    )
+    dl_overlap_db_path: str = (
+        "/data/continuous_validation/metadata/dltest_overlap_performance.db"
+    )
 
 
 @dataclass(frozen=True)
@@ -128,6 +140,13 @@ class BaselineClassificationConfig:
     dl_numerical_tolerance_pct: float = 0.1
     dl_overlap_tolerance_pct: float = 20.0
     classify_outliers: bool = True
+    # Robust z-score cutoff (Iglewicz & Hoaglin recommend 3.5) used when
+    # building dynamic baselines and flagging outliers.
+    robust_z_threshold: float = 3.5
+    # Minimum clean samples before a metric baseline is trustworthy.
+    min_samples: int = 8
+    # Rolling window (days) of recent runs used to build a baseline.
+    window_days: int = 30
 
 
 @dataclass(frozen=True)
@@ -195,6 +214,7 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
     runtime = _section(data, "runtime")
     validation = _section(data, "validation")
     job_template = _section(data, "job_template")
+    baseline = _section(data, "baseline")
 
     return CvalConfig(
         cluster=ClusterConfig(
@@ -246,6 +266,18 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             validation_db_path=_str(storage, "validation_db_path", defaults.storage.validation_db_path),
             storage_db_path=_str(storage, "storage_db_path", defaults.storage.storage_db_path),
             nccl_db_path=_str(storage, "nccl_db_path", defaults.storage.nccl_db_path),
+            dl_numerical_db_path=_str(
+                storage, "dl_numerical_db_path", defaults.storage.dl_numerical_db_path
+            ),
+            dl_compute_db_path=_str(
+                storage, "dl_compute_db_path", defaults.storage.dl_compute_db_path
+            ),
+            dl_collective_db_path=_str(
+                storage, "dl_collective_db_path", defaults.storage.dl_collective_db_path
+            ),
+            dl_overlap_db_path=_str(
+                storage, "dl_overlap_db_path", defaults.storage.dl_overlap_db_path
+            ),
         ),
         runtime=RuntimeConfig(
             repo_dir=_str(runtime, "repo_dir", defaults.runtime.repo_dir),
@@ -331,6 +363,31 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 defaults.job_template.gpu_toleration_key,
             ),
         ),
+        baseline=BaselineClassificationConfig(
+            nccl_peer_tolerance_pct=_float(
+                baseline, "nccl_peer_tolerance_pct", defaults.baseline.nccl_peer_tolerance_pct
+            ),
+            storage_peer_tolerance_pct=_float(
+                baseline, "storage_peer_tolerance_pct", defaults.baseline.storage_peer_tolerance_pct
+            ),
+            dl_compute_tolerance_pct=_float(
+                baseline, "dl_compute_tolerance_pct", defaults.baseline.dl_compute_tolerance_pct
+            ),
+            dl_numerical_tolerance_pct=_float(
+                baseline, "dl_numerical_tolerance_pct", defaults.baseline.dl_numerical_tolerance_pct
+            ),
+            dl_overlap_tolerance_pct=_float(
+                baseline, "dl_overlap_tolerance_pct", defaults.baseline.dl_overlap_tolerance_pct
+            ),
+            classify_outliers=_bool(
+                baseline, "classify_outliers", defaults.baseline.classify_outliers
+            ),
+            robust_z_threshold=_float(
+                baseline, "robust_z_threshold", defaults.baseline.robust_z_threshold
+            ),
+            min_samples=_int(baseline, "min_samples", defaults.baseline.min_samples),
+            window_days=_int(baseline, "window_days", defaults.baseline.window_days),
+        ),
     )
 
 
@@ -351,6 +408,15 @@ def _int(section: dict[str, Any], key: str, default: int) -> int:
 
 def _float(section: dict[str, Any], key: str, default: float) -> float:
     return float(section.get(key, default))
+
+
+def _bool(section: dict[str, Any], key: str, default: bool) -> bool:
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _str_tuple(section: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:

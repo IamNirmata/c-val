@@ -21,6 +21,14 @@ __all__ = [
     "load_baseline_summary",
     "compute_peer_stats",
     "classify_result_vs_baseline",
+    "build_baseline",
+    "store_dynamic_baseline",
+    "activate_baseline",
+    "get_active_baseline",
+    "load_dynamic_baseline",
+    "list_dynamic_baselines",
+    "classify_node",
+    "classify_nodes",
 ]
 
 from cval.baselines.models import (
@@ -31,4 +39,13 @@ from cval.baselines.ingest import (
     load_baseline_summary,
     compute_peer_stats,
     classify_result_vs_baseline,
+)
+from cval.baselines.build import build_baseline
+from cval.baselines.classify import classify_node, classify_nodes
+from cval.baselines.storage import (
+    activate_baseline,
+    get_active_baseline,
+    list_dynamic_baselines,
+    load_dynamic_baseline,
+    store_dynamic_baseline,
 )

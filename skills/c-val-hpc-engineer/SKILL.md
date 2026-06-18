@@ -100,11 +100,30 @@ Use only after explicit operator approval.
 4. Do not assume Kubernetes `Ready` means workload health is good.
 5. Record whether the failure is storage, NCCL, DL correctness, scheduling, image/bootstrap, or DB ingestion.
 
-## Outlier Classification Workflow
+## Baseline and Outlier Classification Workflow
 
 - Start with `status` to identify stale or missing results.
-- Use storage/NCCL metric DBs only after result ingestion succeeds.
-- Prefer peer comparison and historical baseline logic in c-val modules over ad hoc shell parsing.
+- Build a baseline from recent results (dry-run prints the robust metrics;
+  `--store` saves a candidate, `--activate` promotes it):
+
+  ```bash
+  python -m cval.cli baseline build --test-type nccl --window-days 30 --output json
+  python -m cval.cli baseline build --test-type storage --image-name <image> --store
+  ```
+
+- Classify nodes against the active baseline and act on `degraded` nodes:
+
+  ```bash
+  python -m cval.cli baseline classify --test-type nccl --output json
+  python -m cval.cli baseline classify --test-type storage --node <node> --output json
+  ```
+
+- Promote a new baseline to active only with operator awareness; it redefines
+  what "normal" means for future classification.
+- Classification is read-only and never cordons or drains nodes; a `degraded`
+  verdict is a signal to investigate.
+- Prefer the c-val baseline modules (robust median/MAD logic) over ad hoc shell
+  parsing of the metric DBs.
 
 ## Verification Steps
 

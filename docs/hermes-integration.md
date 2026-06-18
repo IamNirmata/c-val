@@ -24,6 +24,24 @@ python -m cval.cli jobs --jobs <job-name> --output json
 python -m cval.cli result --result-json <result-json>
 ```
 
+## Baselines and Node Classification
+
+Hermes can build baselines and classify nodes. Building with `--store` or
+`--activate` writes to `validation.db`; classification is read-only.
+
+```bash
+python -m cval.cli baseline build --test-type nccl --window-days 30 --output json
+python -m cval.cli baseline classify --test-type nccl --output json
+python -m cval.cli baseline list --output json
+```
+
+Promote a baseline to active only with operator awareness, since it changes what
+"normal" means for future classification:
+
+```bash
+python -m cval.cli baseline build --test-type nccl --baseline-id <id> --activate
+```
+
 ## Guardrails
 
 - Do not hard-code kubeconfigs, tokens, cluster names, or private paths.

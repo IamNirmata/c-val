@@ -44,6 +44,10 @@ flowchart TB
 | `cval.jobs.monitor` | Read-only job phase polling and timeout classification. |
 | `cval.validation.results` | Parse and validate structured result JSON. |
 | `cval.storage.ingest` | Write result and metrics rows from inside validation pods. |
+| `cval.baselines.stats` | Robust statistics kernels (median, MAD, percentiles, modified z-score, bootstrap). |
+| `cval.baselines.build` | Build dynamic baselines from result DBs per stratum. |
+| `cval.baselines.storage` | Persist versioned baselines (candidate/active/superseded). |
+| `cval.baselines.classify` | Classify nodes against the active baseline. |
 
 ## Runtime Artifacts
 
@@ -56,7 +60,15 @@ flowchart TB
   metadata/validation.db
   metadata/test-storage.db
   metadata/test-nccl.db
+  metadata/dltest_numerical_correctness.db
+  metadata/dltest_compute_performance.db
+  metadata/dltest_collective_performance.db
+  metadata/dltest_overlap_performance.db
 ```
+
+`validation.db` also holds the `baselines` table (versioned dynamic baselines).
+The four `dltest_*` DBs hold the tall DL metric rows used for DL baselines and
+classification.
 
 ## Configuration Boundary
 
