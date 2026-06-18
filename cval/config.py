@@ -134,6 +134,7 @@ class JobTemplateConfig:
 class BaselineClassificationConfig:
     """Baseline and peer-comparison tolerance rules."""
 
+    baseline_root_path: str = "/data/continuous_validation/baselines"
     nccl_peer_tolerance_pct: float = 5.0
     storage_peer_tolerance_pct: float = 10.0
     dl_compute_tolerance_pct: float = 3.0
@@ -147,6 +148,10 @@ class BaselineClassificationConfig:
     min_samples: int = 8
     # Rolling window (days) of recent runs used to build a baseline.
     window_days: int = 30
+    # How often the background baseline builder should build candidates.
+    build_interval_seconds: int = 86400
+    # How often the background classifier should evaluate nodes.
+    classify_interval_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -364,6 +369,9 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             ),
         ),
         baseline=BaselineClassificationConfig(
+            baseline_root_path=_str(
+                baseline, "baseline_root_path", defaults.baseline.baseline_root_path
+            ),
             nccl_peer_tolerance_pct=_float(
                 baseline, "nccl_peer_tolerance_pct", defaults.baseline.nccl_peer_tolerance_pct
             ),
@@ -387,6 +395,16 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             ),
             min_samples=_int(baseline, "min_samples", defaults.baseline.min_samples),
             window_days=_int(baseline, "window_days", defaults.baseline.window_days),
+            build_interval_seconds=_int(
+                baseline,
+                "build_interval_seconds",
+                defaults.baseline.build_interval_seconds,
+            ),
+            classify_interval_seconds=_int(
+                baseline,
+                "classify_interval_seconds",
+                defaults.baseline.classify_interval_seconds,
+            ),
         ),
     )
 

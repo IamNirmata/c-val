@@ -9,12 +9,15 @@ from tempfile import TemporaryDirectory
 from cval.baselines import build, stats
 from cval.baselines.storage import (
     activate_baseline,
+    default_classification_db_path,
+    default_dynamic_baseline_db_path,
     get_active_baseline,
     list_dynamic_baselines,
     load_dynamic_baseline,
+    store_classification_results,
     store_dynamic_baseline,
 )
-from cval.config import load_config
+from cval.config import BaselineClassificationConfig, CvalConfig, load_config
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
 
 NOW = int(time.time())
@@ -296,6 +299,124 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             store_dynamic_baseline(self._record("nccl-all-1"), db_path=db_path)
             loaded = load_dynamic_baseline("nccl-all-1", "nccl", db_path=db_path)
             self.assertEqual(loaded["metrics"]["busbw"]["median"], 500.0)
+
+
+class TestBaselineRootStorage(unittest.TestCase):
+    def _config(self, root: str) -> CvalConfig:
+        return CvalConfig(baseline=BaselineClassificationConfig(baseline_root_path=root))
+
+    def test_default_baseline_db_paths(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            self.assertEqual(
+                default_dynamic_baseline_db_path("storage", config=config),
+                Path(tmpdir) / "test-storage-baselines.db",
+            )
+            self.assertEqual(
+                default_dynamic_baseline_db_path("nccl", config=config),
+                Path(tmpdir) / "test-nccl-baselines.db",
+            )
+            self.assertEqual(
+                default_dynamic_baseline_db_path(
+                    "dltest", "numerical_correctness", config=config
+                ),
+                Path(tmpdir) / "dltest_numerical_correctness-baselines.db",
+            )
+            self.assertEqual(
+                default_classification_db_path(config),
+                Path(tmpdir) / "classification-results.db",
+            )
+
+    def test_store_dl_baseline_splits_into_four_component_dbs(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            record = {
+                "schema_version": "cval.baseline.v2",
+                "baseline_id": "dl-all-1",
+                "test_type": "dltest",
+                "stratum_key": "test_plan=80gb-example",
+                "window_days": 30,
+                "created_at": NOW,
+                "timestamp": NOW,
+                "n_samples": 10,
+                "method": "robust_mad",
+                "metrics": {
+                    "nn/layer/rank0/norm_output": {
+                        "median": 0.5,
+                        "direction": "two_sided",
+                        "source_table": "numerical_correctness",
+                    },
+                    "nn/layer/fp_gpu_time": {
+                        "median": 10.0,
+                        "direction": "high_bad",
+                        "source_table": "compute_performance",
+                    },
+                    "coll/layer/gpu_time": {
+                        "median": 20.0,
+                        "direction": "high_bad",
+                        "source_table": "collective_performance",
+                    },
+                    "overlap/task/coll_mean": {
+                        "median": 1.2,
+                        "direction": "two_sided",
+                        "source_table": "overlap_performance",
+                    },
+                },
+            }
+
+            store_dynamic_baseline(record, config=config)
+            activate_baseline("dl-all-1", "dltest", config=config)
+            merged = get_active_baseline("dltest", config=config)
+
+            expected_files = {
+                "dltest_numerical_correctness-baselines.db",
+                "dltest_compute_performance-baselines.db",
+                "dltest_collective_performance-baselines.db",
+                "dltest_overlap_performance-baselines.db",
+            }
+            self.assertEqual({path.name for path in Path(tmpdir).glob("*.db")}, expected_files)
+            self.assertEqual(len(merged["metrics"]), 4)
+            self.assertEqual(sorted(merged["components"]), sorted([
+                "numerical_correctness",
+                "compute_performance",
+                "collective_performance",
+                "overlap_performance",
+            ]))
+
+    def test_store_classification_results(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            verdicts = [
+                {
+                    "node": "node-a",
+                    "test_type": "storage",
+                    "baseline_id": "storage-1",
+                    "status": "normal",
+                    "n_compared": 12,
+                    "n_degraded": 0,
+                    "n_improved": 0,
+                    "metrics": [],
+                },
+                {
+                    "node": "node-b",
+                    "test_type": "storage",
+                    "baseline_id": "storage-1",
+                    "status": "degraded",
+                    "n_compared": 12,
+                    "n_degraded": 2,
+                    "n_improved": 0,
+                    "metrics": [{"metric": "x"}],
+                },
+            ]
+
+            count = store_classification_results(verdicts, classified_at=NOW, config=config)
+
+            self.assertEqual(count, 2)
+            with sqlite3.connect(default_classification_db_path(config)) as connection:
+                rows = connection.execute(
+                    "SELECT node, status, passed FROM classification_results ORDER BY node"
+                ).fetchall()
+            self.assertEqual(rows, [("node-a", "normal", 1), ("node-b", "degraded", 0)])
 
 
 if __name__ == "__main__":

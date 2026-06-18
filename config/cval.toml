@@ -71,6 +71,8 @@ gpu_toleration_key = "nvidia.com/gpu"
 
 [baseline]
 # Tolerance values for baseline and peer-comparison classification.
+# Baseline DBs are written here, separate from raw validation metadata.
+baseline_root_path = "/data/continuous_validation/baselines"
 # NCCL: compare against peer baseline with 5% tolerance
 nccl_peer_tolerance_pct = 5.0
 # Storage: compare against peer baseline with 10% tolerance
@@ -89,3 +91,7 @@ robust_z_threshold = 3.5
 min_samples = 8
 # Rolling window (days) of recent runs used to build a baseline
 window_days = 30
+# Background builder loop cadence (daily)
+build_interval_seconds = 86400
+# Background classifier loop cadence
+classify_interval_seconds = 300

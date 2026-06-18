@@ -119,10 +119,42 @@ Classify nodes against the active baseline and act on degraded nodes:
 ```bash
 python -m cval.cli baseline classify --test-type storage --output table
 python -m cval.cli baseline classify --test-type nccl --node <node> --output json
+python -m cval.cli baseline classify --test-type dltest --store-results --output json
 ```
 
-Classification is read-only. A `degraded` verdict is a signal to investigate, not
-an automated action; c-val does not cordon or drain nodes.
+Classification itself is read-only against raw metric DBs. With `--store-results`,
+the derived verdict is written to
+`/data/continuous_validation/baselines/classification-results.db`; raw validation
+`pass/fail/incomplete` rows remain untouched. A `degraded` verdict is a signal to
+investigate, not an automated action; c-val does not cordon or drain nodes.
+
+### Background Baseline Services
+
+Run these where `/data/continuous_validation` is visible. The intended location
+is the `gcr-admin` PVC access pod, in a tmux session:
+
+```bash
+# One-shot dry operational checks before enabling loops
+scripts/cval-baseline-build.sh run-once
+scripts/cval-baseline-classify.sh run-once
+
+# Long-running tmux loops
+scripts/cval-baseline-build.sh start
+scripts/cval-baseline-classify.sh start
+
+# Inspect/attach/stop
+scripts/cval-baseline-build.sh status
+scripts/cval-baseline-build.sh attach
+scripts/cval-baseline-build.sh stop
+
+scripts/cval-baseline-classify.sh status
+scripts/cval-baseline-classify.sh attach
+scripts/cval-baseline-classify.sh stop
+```
+
+To start them inside the PVC pod, first exec into the running access pod and run
+the same commands from the c-val checkout. Do not paste credentials into docs or
+commands; use the kubeconfig already present on the operator machine.
 
 ## Cleanup
 

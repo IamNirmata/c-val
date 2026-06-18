@@ -73,3 +73,12 @@ lifecycle. New baselines are candidates by default and must be explicitly
 activated, so a slowly degrading fleet cannot silently re-baseline itself as
 "normal". Activation supersedes only the previous active baseline for the same
 `(test_type, stratum)`.
+
+## Keep Baseline Decisions Separate From Raw Results
+
+Raw validation `pass/fail/incomplete` rows stay in `metadata/validation.db` and
+raw metric DBs. Dynamic baselines and derived node classifications live under
+`/data/continuous_validation/baselines`. This keeps deterministic test results
+immutable while allowing baseline decisions to evolve as active baselines change.
+`classification-results.db` records whether a node passed the active baseline at
+classification time without rewriting the original validation outcome.

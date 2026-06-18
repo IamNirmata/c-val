@@ -2,6 +2,7 @@
 /gitignored/
 /artifacts/
 /reports/
+/exports/
 /run-logs/
 *.log
 

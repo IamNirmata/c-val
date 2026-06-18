@@ -11,7 +11,7 @@ Implemented package modules:
 - `cval.jobs.renderer`: validation job manifest rendering from the existing Volcano YAML template.
 - `cval.orchestrator.workflow`: dry-run workflow planning from free nodes, validation history, and job template rendering.
 - `cval.storage.ingest`: in-pod SQLite write helpers for result and metric ingestion.
-- `cval.baselines`: dynamic robust baselines (median/MAD), versioned baseline storage (candidate/active/superseded), and node classification.
+- `cval.baselines`: dynamic robust baselines (median/MAD), versioned baseline storage under `/data/continuous_validation/baselines` (candidate/active/superseded), and node classification.
 - `cval.cli`: dry-run-first command surface.
 
 The old notebook-first and `utils/functions.py` helper paths have been removed
@@ -137,4 +137,4 @@ Submit/cleanup commands should be added only after policy gates exist for namesp
 
 1. Package or symlink `skills/c-val-hpc-engineer` into the Hermes skill directory.
 2. Replace runtime Git checkout with a prebuilt image once the validation image pipeline exists.
-3. Wire baseline classification into the live runner so each completed validation is auto-classified and its verdict recorded.
+3. Add event-triggered classification from job completion once the live runner exposes a stable completion hook; periodic classification is already available through `scripts/cval-baseline-classify.sh`.

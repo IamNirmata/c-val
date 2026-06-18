@@ -99,8 +99,8 @@ are timing peers.
 
 ## Versioned baseline records
 
-Baselines are immutable, versioned records in the `baselines` table of
-`validation.db`, with a lifecycle status:
+Baselines are immutable, versioned records in SQLite DBs under
+`/data/continuous_validation/baselines`, with a lifecycle status:
 
 ```text
 candidate  ->  active  ->  superseded
@@ -112,6 +112,27 @@ so different strata keep independent active baselines. New results are always
 classified against the single `active` baseline (or an explicit `--baseline-id`).
 Candidates are the default so a slowly degrading fleet cannot silently
 re-baseline itself.
+
+Default baseline DBs:
+
+```text
+/data/continuous_validation/baselines/
+  test-storage-baselines.db
+  test-nccl-baselines.db
+  dltest_numerical_correctness-baselines.db
+  dltest_compute_performance-baselines.db
+  dltest_collective_performance-baselines.db
+  dltest_overlap_performance-baselines.db
+  classification-results.db
+  logs/
+    build/
+    classify/
+```
+
+Storage and NCCL have one baseline DB each. DL has four baseline DBs mirroring
+the four DL metric DBs. `classification-results.db` stores derived baseline
+decisions (`normal`, `improved`, `degraded`) and a boolean `passed` column. Raw
+validation `pass/fail/incomplete` rows stay untouched in `validation.db`.
 
 ### Stored record schema (`metrics_json`)
 
@@ -184,6 +205,9 @@ python -m cval.cli baseline classify --test-type storage
 # One node, JSON output, against an explicit baseline id
 python -m cval.cli baseline classify --test-type nccl \
   --node slc01-cl02-hgx-0009 --baseline-id nccl-2026Q2 --output json
+
+# Persist derived pass/degraded decisions into classification-results.db
+python -m cval.cli baseline classify --test-type dltest --store-results --output json
 ```
 
 Table output:
@@ -200,6 +224,31 @@ A node's value for each metric is the **median of its recent runs** in the windo
 so a single noisy run does not flip the verdict. A node is `degraded` if any
 metric falls on the failing side of its band, `improved` if some metric beats the
 good-side tail (p95/p05) and none are degraded, else `normal`.
+
+### Background scripts
+
+Two tmux-managed loops are provided for the PVC access pod (or any environment
+where `/data/continuous_validation` is visible):
+
+```bash
+scripts/cval-baseline-build.sh start       # daily baseline build + activate
+scripts/cval-baseline-build.sh status
+scripts/cval-baseline-build.sh attach
+
+scripts/cval-baseline-classify.sh start    # classify every configured interval
+scripts/cval-baseline-classify.sh status
+scripts/cval-baseline-classify.sh attach
+```
+
+For a one-shot run without starting tmux:
+
+```bash
+scripts/cval-baseline-build.sh run-once
+scripts/cval-baseline-classify.sh run-once
+```
+
+The builder cadence defaults to daily (`build_interval_seconds = 86400`). The
+classifier cadence defaults to five minutes (`classify_interval_seconds = 300`).
 
 ---
 

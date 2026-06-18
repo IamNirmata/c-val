@@ -24,10 +24,41 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
-        self.assertIn("{config,status,nodes,run,jobs,result}", help_text)
+        self.assertIn("{config,status,nodes,overview,run,jobs,result,results}", help_text)
         self.assertNotIn("submit-plan", help_text)
         self.assertNotIn("run-batch", help_text)
         self.assertNotIn("db-add-result", help_text)
+
+    def test_results_command_writes_csv(self) -> None:
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "cval.cli.get_latest_status_rows",
+                return_value=[
+                    LatestStatusRow("node-b", "all", 200, "pass"),
+                    LatestStatusRow("node-a", "all", 100, "fail"),
+                    LatestStatusRow("node-a", "storage", 100, "pass"),
+                ],
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "results",
+                            "--test",
+                            "overall",
+                            "--type",
+                            "csv",
+                            "--output-dir",
+                            tmpdir,
+                        ]
+                    )
+
+            files = list(Path(tmpdir).glob("cval_overall_*.csv"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(files), 1)
+        self.assertIn("Wrote 2 overall latest result row(s)", output.getvalue())
 
     def test_prioritize_json_command(self) -> None:
         output = io.StringIO()

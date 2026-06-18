@@ -110,6 +110,7 @@ rdma_resource_name = "rdma/rdma_shared_device_a"
 rdma_count = "1"
 
 [baseline]
+baseline_root_path = "/data/continuous_validation/baselines"
 nccl_peer_tolerance_pct = 5.0
 storage_peer_tolerance_pct = 10.0
 dl_compute_tolerance_pct = 3.0
@@ -119,11 +120,14 @@ classify_outliers = true
 robust_z_threshold = 3.5
 min_samples = 8
 window_days = 30
+build_interval_seconds = 86400
+classify_interval_seconds = 300
 ```
 
 The `[storage]` `dl_*_db_path` entries point at the four DL metric DBs; the
-`[baseline]` tolerances and `window_days` control dynamic baseline building and
-node classification (see [Baselines and Node Classification](baselines.md)).
+`[baseline]` root path, tolerances, `window_days`, and loop intervals control
+dynamic baseline building and node classification (see
+[Baselines and Node Classification](baselines.md)).
 
 ## Precedence
 

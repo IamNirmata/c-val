@@ -111,9 +111,10 @@ def _query_rows(
             f"SELECT {', '.join(value_columns)} FROM {table} "
             f"WHERE {' AND '.join(where)}"
         )
-        return connection.execute(sql, params).fetchall()
+        rows = connection.execute(sql, params).fetchall()
     finally:
         connection.close()
+    return rows
 
 
 def _collect_positive(
@@ -160,13 +161,15 @@ def build_storage_baseline(
     for column in STORAGE_METRIC_COLUMNS:
         values = series[column]
         if len(values) >= min_samples:
-            metrics[column] = stats.summarize_metric(
+            metric_stat = stats.summarize_metric(
                 column,
                 values,
                 direction=stats.DIRECTION_LOW_BAD,
                 tolerance_pct=config.baseline.storage_peer_tolerance_pct,
                 z_threshold=config.baseline.robust_z_threshold,
             ).to_dict()
+            metric_stat["source_table"] = "storage_performance"
+            metrics[column] = metric_stat
 
     return _assemble_record(
         "storage",
@@ -210,13 +213,15 @@ def build_nccl_baseline(
     for column in columns:
         values = series[column]
         if len(values) >= min_samples:
-            metrics[column] = stats.summarize_metric(
+            metric_stat = stats.summarize_metric(
                 column,
                 values,
                 direction=NCCL_DIRECTIONS[column],
                 tolerance_pct=config.baseline.nccl_peer_tolerance_pct,
                 z_threshold=config.baseline.robust_z_threshold,
             ).to_dict()
+            metric_stat["source_table"] = "nccl_performance"
+            metrics[column] = metric_stat
 
     return _assemble_record(
         "nccl",
@@ -293,13 +298,15 @@ def build_dl_baseline(
         tolerance_pct = getattr(config.baseline, tolerance_attr)
         for key, values in series.items():
             if len(values) >= min_samples:
-                metrics[key] = stats.summarize_metric(
+                metric_stat = stats.summarize_metric(
                     key,
                     values,
                     direction=direction,
                     tolerance_pct=tolerance_pct,
                     z_threshold=config.baseline.robust_z_threshold,
                 ).to_dict()
+                metric_stat["source_table"] = table
+                metrics[key] = metric_stat
 
     return _assemble_record(
         "dltest",

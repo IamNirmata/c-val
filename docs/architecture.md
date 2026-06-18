@@ -64,11 +64,19 @@ flowchart TB
   metadata/dltest_compute_performance.db
   metadata/dltest_collective_performance.db
   metadata/dltest_overlap_performance.db
+  baselines/test-storage-baselines.db
+  baselines/test-nccl-baselines.db
+  baselines/dltest_numerical_correctness-baselines.db
+  baselines/dltest_compute_performance-baselines.db
+  baselines/dltest_collective_performance-baselines.db
+  baselines/dltest_overlap_performance-baselines.db
+  baselines/classification-results.db
 ```
 
-`validation.db` also holds the `baselines` table (versioned dynamic baselines).
-The four `dltest_*` DBs hold the tall DL metric rows used for DL baselines and
-classification.
+The four `metadata/dltest_*` DBs hold raw tall DL metric rows. The
+`baselines/*-baselines.db` files hold versioned dynamic baselines. The
+`baselines/classification-results.db` file holds derived baseline decisions; raw
+validation status remains in `metadata/validation.db`.
 
 ## Configuration Boundary
 

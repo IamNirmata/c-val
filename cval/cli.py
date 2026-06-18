@@ -77,7 +77,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,status,nodes,run,jobs,result}",
+        metavar="{config,status,nodes,overview,run,jobs,result,results}",
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
@@ -177,6 +177,18 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     result.add_argument("--output", choices=["env", "json"], default="env")
     result.set_defaults(handler=handle_result)
 
+    results = subparsers.add_parser(
+        "results",
+        help="Export latest per-node results for one test to a local file",
+    )
+    results.add_argument("--test", choices=["overall", "all", "dltest", "storage", "nccl"], required=True)
+    results.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
+    results.add_argument("--output-dir", type=Path, default=Path.cwd())
+    results.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
+    results.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    results.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    results.set_defaults(handler=handle_results)
+
     # In-pod ingestion commands; added without `help` so they stay out of --help.
     db_add_result = subparsers.add_parser("db-add-result")
     db_add_result.add_argument("node")
@@ -210,7 +222,9 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     baseline_list = baseline_sub.add_parser("list", help="List stored baselines")
     baseline_list.add_argument("--test-type", choices=["nccl", "storage", "dltest"])
-    baseline_list.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    baseline_list.add_argument(
+        "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
+    )
     baseline_list.add_argument("--output", choices=["table", "json"], default="table")
     baseline_list.set_defaults(handler=handle_baseline_list)
 
@@ -253,8 +267,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_build.add_argument("--baseline-id", help="Explicit baseline id")
     baseline_build.add_argument(
         "--db-path",
-        default=active_config.storage.validation_db_path,
-        help="DB to store the baseline in",
+        help="Override DB to store the baseline in; defaults to baseline_root_path DBs",
     )
     baseline_build.add_argument(
         "--store", action="store_true", help="Persist as a candidate baseline"
@@ -271,7 +284,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_activate.add_argument("baseline_id")
     baseline_activate.add_argument("test_type", choices=["nccl", "storage", "dltest"])
     baseline_activate.add_argument(
-        "--db-path", default=active_config.storage.validation_db_path
+        "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
     )
     baseline_activate.set_defaults(handler=handle_baseline_activate)
 
@@ -279,7 +292,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_show.add_argument("baseline_id")
     baseline_show.add_argument("test_type", choices=["nccl", "storage", "dltest"])
     baseline_show.add_argument(
-        "--db-path", default=active_config.storage.validation_db_path
+        "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
     )
     baseline_show.add_argument("--output", choices=["table", "json"], default="table")
     baseline_show.set_defaults(handler=handle_baseline_show)
@@ -305,11 +318,36 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     baseline_classify.add_argument(
         "--db-path",
-        default=active_config.storage.validation_db_path,
-        help="DB holding baselines",
+        help="Override baseline DB; defaults to baseline_root_path DBs",
+    )
+    baseline_classify.add_argument(
+        "--store-results",
+        action="store_true",
+        help="Persist classification decisions to classification-results.db",
+    )
+    baseline_classify.add_argument(
+        "--classification-db-path",
+        help="Override classification-results DB path",
     )
     baseline_classify.add_argument("--output", choices=["table", "json"], default="table")
     baseline_classify.set_defaults(handler=handle_baseline_classify)
+
+    overview = subparsers.add_parser(
+        "overview", help="One-screen status: free nodes, freshness, queue, and jobs"
+    )
+    overview.add_argument("--node-filter", default=active_config.cluster.node_filter)
+    overview.add_argument(
+        "--threshold-days", type=float, default=active_config.scheduling.days_threshold
+    )
+    overview.add_argument("--queue-limit", type=int, default=10)
+    overview.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    overview.add_argument("--no-jobs", action="store_true", help="Skip listing Volcano jobs")
+    overview.add_argument("--watch", action="store_true", help="Refresh until interrupted")
+    overview.add_argument(
+        "--interval", type=float, default=15.0, help="Watch refresh seconds"
+    )
+    overview.add_argument("--output", choices=["table", "json"], default="table")
+    overview.set_defaults(handler=handle_overview)
 
     return parser
 
@@ -546,6 +584,24 @@ def handle_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_results(args: argparse.Namespace) -> int:
+    """Export latest per-node results for one selected test to a local CSV."""
+    from cval.storage.results_export import latest_result_rows, write_latest_results_csv
+
+    if args.result_type != "csv":
+        raise ValueError("Only --type csv is currently supported")
+
+    rows = get_latest_status_rows(
+        pod=args.pod,
+        namespace=args.namespace,
+        db_path=args.db_path,
+    )
+    selected = latest_result_rows(rows, args.test)
+    output_path = write_latest_results_csv(rows, args.test, output_dir=args.output_dir)
+    print(f"Wrote {len(selected)} {args.test} latest result row(s) to {output_path}")
+    return 0
+
+
 def handle_db_add_result(args: argparse.Namespace) -> int:
     """Append one validation result row to the main SQLite DB."""
 
@@ -592,22 +648,36 @@ def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
 
 def handle_baseline_list(args: argparse.Namespace) -> int:
     """List stored baselines in the validation DB."""
-    from cval.baselines.storage import list_baselines
+    from cval.baselines.storage import list_dynamic_baselines
 
-    baselines = list_baselines(test_type=args.test_type, db_path=args.db_path)
+    baselines = list_dynamic_baselines(
+        test_type=args.test_type,
+        db_path=args.db_path,
+        config=args.cval_config,
+    )
     if args.output == "json":
         print(
             json.dumps(
-                [{"baseline_id": b[0], "test_type": b[1], "timestamp": b[2]} for b in baselines],
+                [
+                    {
+                        "baseline_id": b[0],
+                        "test_type": b[1],
+                        "status": b[2],
+                        "stratum_key": b[3],
+                        "n_samples": b[4],
+                        "created_at": b[5],
+                    }
+                    for b in baselines
+                ],
                 indent=2,
             )
         )
         return 0
 
     print(f"Stored baselines: {len(baselines)}")
-    print(f"{'BASELINE_ID':<40} {'TEST_TYPE':<12} TIMESTAMP")
-    for baseline_id, test_type, timestamp in baselines:
-        print(f"{baseline_id:<40} {test_type:<12} {timestamp}")
+    print(f"{'BASELINE_ID':<40} {'TEST_TYPE':<10} {'STATUS':<10} {'N':>5} STRATUM")
+    for baseline_id, test_type, status, stratum_key, n_samples, _created_at in baselines:
+        print(f"{baseline_id:<40} {test_type:<10} {status:<10} {n_samples:>5} {stratum_key}")
     return 0
 
 
@@ -678,7 +748,11 @@ def handle_baseline_compare(args: argparse.Namespace) -> int:
 def handle_baseline_build(args: argparse.Namespace) -> int:
     """Build a dynamic baseline from result DBs and optionally store/activate it."""
     from cval.baselines.build import build_baseline
-    from cval.baselines.storage import activate_baseline, store_dynamic_baseline
+    from cval.baselines.storage import (
+        activate_baseline,
+        default_dynamic_baseline_db_paths,
+        store_dynamic_baseline,
+    )
 
     config: CvalConfig = args.cval_config
     kwargs: dict = {
@@ -702,10 +776,10 @@ def handle_baseline_build(args: argparse.Namespace) -> int:
 
     stored = False
     if args.store or args.activate:
-        store_dynamic_baseline(record, db_path=args.db_path, status="candidate")
+        store_dynamic_baseline(record, db_path=args.db_path, status="candidate", config=config)
         stored = True
         if args.activate:
-            activate_baseline(record["baseline_id"], args.test_type, db_path=args.db_path)
+            activate_baseline(record["baseline_id"], args.test_type, db_path=args.db_path, config=config)
 
     metrics = record["metrics"]
     if args.output == "json":
@@ -722,7 +796,11 @@ def handle_baseline_build(args: argparse.Namespace) -> int:
     )
     if stored:
         state = "active" if args.activate else "candidate"
-        print(f"Stored in {args.db_path} as {state}")
+        if args.db_path:
+            print(f"Stored in {args.db_path} as {state}")
+        else:
+            paths = ", ".join(str(path) for path in default_dynamic_baseline_db_paths(args.test_type, config=config))
+            print(f"Stored in default baseline DB(s) as {state}: {paths}")
     if not metrics:
         print("No metrics met --min-samples; lower it or widen --window-days.")
         return 0
@@ -739,7 +817,12 @@ def handle_baseline_activate(args: argparse.Namespace) -> int:
     """Promote a stored baseline to active and supersede the previous one."""
     from cval.baselines.storage import activate_baseline
 
-    if not activate_baseline(args.baseline_id, args.test_type, db_path=args.db_path):
+    if not activate_baseline(
+        args.baseline_id,
+        args.test_type,
+        db_path=args.db_path,
+        config=args.cval_config,
+    ):
         print(
             f"Baseline not found: {args.baseline_id} ({args.test_type})",
             file=sys.stderr,
@@ -753,7 +836,12 @@ def handle_baseline_show(args: argparse.Namespace) -> int:
     """Print a stored baseline record and its per-metric acceptance bands."""
     from cval.baselines.storage import load_dynamic_baseline
 
-    record = load_dynamic_baseline(args.baseline_id, args.test_type, db_path=args.db_path)
+    record = load_dynamic_baseline(
+        args.baseline_id,
+        args.test_type,
+        db_path=args.db_path,
+        config=args.cval_config,
+    )
     if record is None:
         print(
             f"Baseline not found: {args.baseline_id} ({args.test_type})",
@@ -788,13 +876,23 @@ def handle_baseline_show(args: argparse.Namespace) -> int:
 def handle_baseline_classify(args: argparse.Namespace) -> int:
     """Classify one or all nodes against the active (or named) baseline."""
     from cval.baselines.classify import classify_node, classify_nodes
-    from cval.baselines.storage import get_active_baseline, load_dynamic_baseline
+    from cval.baselines.storage import (
+        default_classification_db_path,
+        get_active_baseline,
+        load_dynamic_baseline,
+        store_classification_results,
+    )
 
     config: CvalConfig = args.cval_config
     if args.baseline_id:
-        baseline = load_dynamic_baseline(args.baseline_id, args.test_type, db_path=args.db_path)
+        baseline = load_dynamic_baseline(
+            args.baseline_id,
+            args.test_type,
+            db_path=args.db_path,
+            config=config,
+        )
     else:
-        baseline = get_active_baseline(args.test_type, db_path=args.db_path)
+        baseline = get_active_baseline(args.test_type, db_path=args.db_path, config=config)
     if not baseline:
         target = args.baseline_id or "active"
         print(
@@ -823,11 +921,29 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
             window_days=args.window_days,
         )
 
+    stored_count = 0
+    if args.store_results:
+        stored_count = store_classification_results(
+            verdicts,
+            db_path=args.classification_db_path,
+            config=config,
+        )
+
     if args.output == "json":
-        print(json.dumps(verdicts, indent=2))
+        payload = {
+            "verdicts": verdicts,
+            "stored_count": stored_count,
+            "classification_db_path": str(
+                args.classification_db_path or default_classification_db_path(config)
+            ) if args.store_results else "",
+        }
+        print(json.dumps(payload if args.store_results else verdicts, indent=2))
         return 0
 
     print(f"Classification vs baseline {baseline.get('baseline_id')} ({args.test_type})")
+    if args.store_results:
+        target_db = args.classification_db_path or default_classification_db_path(config)
+        print(f"Stored {stored_count} classification row(s) in {target_db}")
     if not verdicts:
         print("No nodes found in the window.")
         return 0
@@ -841,6 +957,42 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
     if degraded:
         print(f"Degraded nodes: {', '.join(degraded)}")
     return 0
+
+
+def handle_overview(args: argparse.Namespace) -> int:
+    """Print a one-screen operational overview, optionally auto-refreshing."""
+    import time
+
+    from cval.orchestrator.overview import build_overview, render_overview
+
+    def render_once() -> None:
+        overview = build_overview(
+            config=args.cval_config,
+            node_filter=args.node_filter,
+            days_threshold=args.threshold_days,
+            queue_limit=args.queue_limit,
+            namespace=args.namespace,
+            include_jobs=not args.no_jobs,
+        )
+        if args.output == "json":
+            print(json.dumps(overview, indent=2))
+        else:
+            print(render_overview(overview))
+
+    if not args.watch:
+        render_once()
+        return 0
+
+    try:
+        while True:
+            # Clear screen + home cursor, then redraw.
+            print("\033[2J\033[H", end="")
+            render_once()
+            print(f"\n(refreshing every {args.interval:.0f}s - Ctrl-C to stop)")
+            time.sleep(max(1.0, args.interval))
+    except KeyboardInterrupt:
+        print()
+        return 0
 
 
 def _build_plan_from_args(args: argparse.Namespace):

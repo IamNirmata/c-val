@@ -116,12 +116,24 @@ Use only after explicit operator approval.
   ```bash
   python -m cval.cli baseline classify --test-type nccl --output json
   python -m cval.cli baseline classify --test-type storage --node <node> --output json
+   python -m cval.cli baseline classify --test-type dltest --store-results --output json
   ```
+
+- For continuous operation, use the tmux-managed loops in the environment that
+   can see `/data/continuous_validation`:
+
+   ```bash
+   scripts/cval-baseline-build.sh start
+   scripts/cval-baseline-classify.sh start
+   scripts/cval-baseline-build.sh status
+   scripts/cval-baseline-classify.sh status
+   ```
 
 - Promote a new baseline to active only with operator awareness; it redefines
   what "normal" means for future classification.
-- Classification is read-only and never cordons or drains nodes; a `degraded`
-  verdict is a signal to investigate.
+- Classification reads raw metric DBs and never cordons or drains nodes; with
+   `--store-results` it writes derived decisions to
+   `/data/continuous_validation/baselines/classification-results.db`.
 - Prefer the c-val baseline modules (robust median/MAD logic) over ad hoc shell
   parsing of the metric DBs.
 

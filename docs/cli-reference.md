@@ -13,9 +13,11 @@ The public operator/Hermes CLI is intentionally small:
 cval config
 cval status
 cval nodes
+cval overview
 cval run
 cval jobs
 cval result
+cval results
 ```
 
 The `baseline` command group (build, classify, activate, show, list) is also a
@@ -52,6 +54,23 @@ Read pods and nodes, calculate GPU usage, and show schedulable free GPU nodes:
 python -m cval.cli nodes --output table
 python -m cval.cli nodes --output json
 ```
+
+## `overview`
+
+Show one read-only operational dashboard: free nodes, validation freshness,
+priority queue, and active Volcano job phases.
+
+```bash
+python -m cval.cli overview
+python -m cval.cli overview --watch --interval 5
+python -m cval.cli overview --output json
+```
+
+Useful flags:
+
+- `--threshold-days N`: freshness threshold for valid vs outdated results.
+- `--queue-limit N`: number of queued nodes to show.
+- `--no-jobs`: skip Volcano job listing for a faster view.
 
 ## `run`
 
@@ -130,6 +149,32 @@ Or emit JSON:
 python -m cval.cli result --result-json <result.json> --output json
 ```
 
+## `results`
+
+Export the latest per-node result rows for one test into a local CSV. The source
+is the read-only `latest_status` view in `validation.db`. `overall` maps to the
+DB's aggregate `all` row.
+
+```bash
+python -m cval.cli results --test overall --type csv
+python -m cval.cli results --test dltest --type csv
+python -m cval.cli results --test storage --type csv
+python -m cval.cli results --test nccl --type csv
+```
+
+By default, the CSV is written in the current directory with this filename
+shape, using America/Los_Angeles local time:
+
+```text
+cval_<test_name>_<YYYYMMDD_HHMMSS_TZ>.csv
+```
+
+Use `--output-dir <folder>` to write into another local directory. Columns are:
+
+```text
+node,test,db_test,latest_timestamp,latest_time_utc,latest_time_los_angeles,result
+```
+
 ## `baseline`
 
 Build dynamic baselines from result DBs, manage their lifecycle, and classify
@@ -143,6 +188,18 @@ python -m cval.cli baseline build --test-type nccl --window-days 30 --store
 python -m cval.cli baseline build --test-type storage \
   --image-name pytorch:26.05-py3 --baseline-id storage-2026Q2 --activate
 python -m cval.cli baseline build --test-type dltest --test-plan 80gb-example --output json
+```
+
+Without `--db-path`, dynamic baselines are stored under
+`/data/continuous_validation/baselines`:
+
+```text
+test-storage-baselines.db
+test-nccl-baselines.db
+dltest_numerical_correctness-baselines.db
+dltest_compute_performance-baselines.db
+dltest_collective_performance-baselines.db
+dltest_overlap_performance-baselines.db
 ```
 
 Promote, inspect, and list:
@@ -160,6 +217,17 @@ node seen in the window is classified:
 python -m cval.cli baseline classify --test-type storage
 python -m cval.cli baseline classify --test-type nccl \
   --node <node> --baseline-id <id> --output json
+python -m cval.cli baseline classify --test-type dltest --store-results --output json
+```
+
+`--store-results` writes derived decisions to
+`/data/continuous_validation/baselines/classification-results.db`.
+
+Background loops:
+
+```bash
+scripts/cval-baseline-build.sh start
+scripts/cval-baseline-classify.sh start
 ```
 
 Legacy directory-based references remain available:

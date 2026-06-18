@@ -114,22 +114,29 @@ A one-node c-val 2.0 run is considered successful when all are true:
 
 ## Baseline Classification Flow
 
-After results land in the metric DBs, c-val can build a baseline and classify
-nodes against it.
+After results land in the metric DBs, c-val runs two independent background
+loops:
+
+1. A daily builder creates/activates dynamic baselines under
+    `/data/continuous_validation/baselines`.
+2. A periodic classifier evaluates node metrics against the active baselines and
+    writes derived decisions to `classification-results.db`.
 
 ```mermaid
 flowchart TD
-    A[Result DBs: storage / nccl / dltest] --> B[baseline build]
+    A[Result DBs: storage / nccl / dltest] --> B[daily baseline build]
     B --> C[Robust stats: trim, median, MAD, percentiles]
     C --> D[Directional acceptance band per metric]
-    D --> E{Store?}
-    E -- candidate --> F[baselines table: candidate]
-    F --> G[baseline activate]
-    G --> H[baselines table: active]
-    H --> I[baseline classify]
+    D --> F[baseline DBs: candidate]
+    F --> G[activate]
+    G --> H[baseline DBs: active]
+    H --> I[periodic baseline classify]
     A --> I
     I --> J{Node median vs band}
     J -- inside --> K[normal]
     J -- good-side tail --> L[improved]
     J -- failing side --> M[degraded]
+    K --> N[classification-results.db]
+    L --> N
+    M --> N
 ```
