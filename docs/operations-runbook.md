@@ -120,6 +120,9 @@ Classify nodes against the active baseline and act on degraded nodes:
 python -m cval.cli baseline classify --test-type storage --output table
 python -m cval.cli baseline classify --test-type nccl --node <node> --output json
 python -m cval.cli baseline classify --test-type dltest --store-results --output json
+python -m cval.cli baseline classify --test-type dltest-compute --store-results
+python -m cval.cli classifications --test all --type csv
+python -m cval.cli results --test dltest-compute --type csv
 ```
 
 Classification itself is read-only against raw metric DBs. With `--store-results`,
@@ -127,6 +130,11 @@ the derived verdict is written to
 `/data/continuous_validation/baselines/classification-results.db`; raw validation
 `pass/fail/incomplete` rows remain untouched. A `degraded` verdict is a signal to
 investigate, not an automated action; c-val does not cordon or drain nodes.
+
+DL has component-level classifications: `dltest-numerical`, `dltest-compute`,
+`dltest-collective`, and `dltest-overlap`. The periodic classifier stores all of
+them by default. DL verdicts use configurable count/fraction/severity thresholds
+so one noisy metric does not degrade an otherwise healthy node.
 
 ### Background Baseline Services
 

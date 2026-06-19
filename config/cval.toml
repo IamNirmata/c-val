@@ -92,6 +92,11 @@ robust_z_threshold = 3.5
 min_samples = 8
 # Rolling window (days) of recent runs used to build a baseline
 window_days = 30
+# DL verdict aggregation. Individual metrics can be outside their robust band,
+# but a node/component is degraded only when severe misses accumulate.
+dl_degraded_metric_fraction = 0.02
+dl_min_degraded_metrics = 10
+dl_degraded_severity_pct = 10.0
 # Background builder loop cadence (daily)
 build_interval_seconds = 86400
 # Background classifier loop cadence

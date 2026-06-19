@@ -10,6 +10,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+DL_COMPONENT_TEST_TYPES = {
+    "dltest": None,
+    "dltest-numerical": "numerical_correctness",
+    "dltest-compute": "compute_performance",
+    "dltest-collective": "collective_performance",
+    "dltest-overlap": "overlap_performance",
+}
+
+DL_COMPONENT_TO_TEST_TYPE = {
+    component: test_type
+    for test_type, component in DL_COMPONENT_TEST_TYPES.items()
+    if component is not None
+}
+
+
+def normalize_baseline_test_type(test_type: str) -> str:
+    """Map component aliases to the logical baseline test type."""
+
+    return "dltest" if test_type in DL_COMPONENT_TEST_TYPES else test_type
+
+
+def dl_component_for_test_type(test_type: str) -> str | None:
+    """Return the DL metric component selected by a test alias, if any."""
+
+    if test_type not in DL_COMPONENT_TEST_TYPES:
+        return None
+    return DL_COMPONENT_TEST_TYPES[test_type]
+
+
 @dataclass(frozen=True)
 class NodeResource:
     """GPU and accelerator resource snapshot for one Kubernetes node."""
@@ -51,6 +80,24 @@ class LatestStatusRow:
     test: str
     latest_timestamp: int | None
     result: str
+
+
+@dataclass(frozen=True)
+class ClassificationResultRow:
+    """One latest node classification row from classification-results.db."""
+
+    classified_at: int
+    node: str
+    test_type: str
+    baseline_id: str
+    status: str
+    passed: bool
+    n_compared: int
+    n_degraded: int
+    n_improved: int
+    n_band_degraded: int
+    degraded_metric_fraction: float
+    worst_pct_diff: float
 
 
 @dataclass(frozen=True)

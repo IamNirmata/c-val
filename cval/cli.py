@@ -36,6 +36,18 @@ from cval.storage.ingest import (
 )
 from cval.validation.results import load_validation_result, validation_result_to_env_lines
 
+CLASSIFIABLE_TEST_CHOICES = [
+    "nccl",
+    "storage",
+    "dltest",
+    "dltest-numerical",
+    "dltest-compute",
+    "dltest-collective",
+    "dltest-overlap",
+]
+
+RESULT_TEST_CHOICES = ["overall", "all", *CLASSIFIABLE_TEST_CHOICES]
+
 
 def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments, dispatch to a handler, and return a process code."""
@@ -77,7 +89,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,status,nodes,overview,run,jobs,result,results}",
+        metavar="{config,status,nodes,overview,run,jobs,result,results,classifications}",
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
@@ -181,13 +193,38 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "results",
         help="Export latest per-node results for one test to a local file",
     )
-    results.add_argument("--test", choices=["overall", "all", "dltest", "storage", "nccl"], required=True)
+    results.add_argument("--test", choices=RESULT_TEST_CHOICES, required=True)
     results.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
     results.add_argument("--output-dir", type=Path, default=Path.cwd())
     results.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
     results.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     results.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    results.add_argument(
+        "--classification-db-path",
+        help="Override classification-results DB path; defaults to baseline_root_path DB",
+    )
+    results.add_argument(
+        "--no-classification",
+        action="store_true",
+        help="Do not join latest baseline classification columns into the CSV",
+    )
     results.set_defaults(handler=handle_results)
+
+    classifications = subparsers.add_parser(
+        "classifications",
+        help="Export latest baseline classification verdicts to a local CSV",
+    )
+    classifications.add_argument("--test", choices=["all", *CLASSIFIABLE_TEST_CHOICES], default="all")
+    classifications.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
+    classifications.add_argument("--output-dir", type=Path, default=Path.cwd())
+    classifications.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
+    classifications.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    classifications.add_argument(
+        "--db-path",
+        default=None,
+        help="Override classification-results DB path; defaults to baseline_root_path DB",
+    )
+    classifications.set_defaults(handler=handle_classifications)
 
     # In-pod ingestion commands; added without `help` so they stay out of --help.
     db_add_result = subparsers.add_parser("db-add-result")
@@ -317,7 +354,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "classify", help="Classify nodes against the active baseline"
     )
     baseline_classify.add_argument(
-        "--test-type", choices=["nccl", "storage", "dltest"], required=True
+        "--test-type", choices=CLASSIFIABLE_TEST_CHOICES, required=True
     )
     baseline_classify.add_argument(
         "--node", help="Classify one node; omit to classify all nodes in the window"
@@ -603,6 +640,7 @@ def handle_result(args: argparse.Namespace) -> int:
 def handle_results(args: argparse.Namespace) -> int:
     """Export latest per-node results for one selected test to a local CSV."""
     from cval.storage.results_export import latest_result_rows, write_latest_results_csv
+    from cval.storage.classification_status import get_latest_classification_rows
 
     if args.result_type != "csv":
         raise ValueError("Only --type csv is currently supported")
@@ -612,9 +650,45 @@ def handle_results(args: argparse.Namespace) -> int:
         namespace=args.namespace,
         db_path=args.db_path,
     )
+    classifications = []
+    if not args.no_classification:
+        classifications = get_latest_classification_rows(
+            pod=args.pod,
+            namespace=args.namespace,
+            db_path=args.classification_db_path,
+            config=args.cval_config,
+        )
     selected = latest_result_rows(rows, args.test)
-    output_path = write_latest_results_csv(rows, args.test, output_dir=args.output_dir)
+    output_path = write_latest_results_csv(
+        rows,
+        args.test,
+        output_dir=args.output_dir,
+        classifications=classifications,
+    )
     print(f"Wrote {len(selected)} {args.test} latest result row(s) to {output_path}")
+    return 0
+
+
+def handle_classifications(args: argparse.Namespace) -> int:
+    """Export latest baseline classification verdicts to a local CSV."""
+    from cval.storage.classification_status import (
+        filter_classification_rows,
+        get_latest_classification_rows,
+        write_classifications_csv,
+    )
+
+    if args.result_type != "csv":
+        raise ValueError("Only --type csv is currently supported")
+
+    rows = get_latest_classification_rows(
+        pod=args.pod,
+        namespace=args.namespace,
+        db_path=args.db_path,
+        config=args.cval_config,
+    )
+    selected = filter_classification_rows(rows, args.test)
+    output_path = write_classifications_csv(rows, args.test, output_dir=args.output_dir)
+    print(f"Wrote {len(selected)} {args.test} classification row(s) to {output_path}")
     return 0
 
 
@@ -990,11 +1064,16 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
     if not verdicts:
         print("No nodes found in the window.")
         return 0
-    print(f"{'NODE':<32} {'STATUS':<9} {'DEGRADED':>8} {'IMPROVED':>8} {'COMPARED':>8}")
+    print(
+        f"{'NODE':<32} {'STATUS':<9} {'BAD':>8} {'BAND_BAD':>8} "
+        f"{'BAD%':>8} {'WORST%':>8} {'COMPARED':>8}"
+    )
     for verdict in verdicts:
         print(
             f"{verdict['node']:<32} {verdict['status']:<9} {verdict['n_degraded']:>8} "
-            f"{verdict['n_improved']:>8} {verdict['n_compared']:>8}"
+            f"{verdict.get('n_band_degraded', verdict['n_degraded']):>8} "
+            f"{verdict.get('degraded_metric_percent', 0.0):>7.2f}% "
+            f"{verdict.get('worst_pct_diff', 0.0):>7.2f}% {verdict['n_compared']:>8}"
         )
     degraded = [v["node"] for v in verdicts if v["status"] == "degraded"]
     if degraded:

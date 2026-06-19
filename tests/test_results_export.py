@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from cval.models import LatestStatusRow
+from cval.models import ClassificationResultRow, LatestStatusRow
+from cval.storage.classification_status import (
+    classification_rows_to_csv_records,
+    filter_classification_rows,
+    write_classifications_csv,
+)
 from cval.storage.results_export import (
     default_results_filename,
     latest_result_rows,
@@ -52,6 +57,33 @@ class ResultsExportTests(unittest.TestCase):
         self.assertIn("+00:00", records[0]["latest_time_utc"])
         self.assertIn("-07:00", records[0]["latest_time_los_angeles"])
 
+    def test_rows_to_csv_records_join_classification(self) -> None:
+        rows = [LatestStatusRow("node-a", "dltest", 1781748000, "pass")]
+        classifications = [
+            ClassificationResultRow(
+                classified_at=1781749000,
+                node="node-a",
+                test_type="dltest-compute",
+                baseline_id="dl-1",
+                status="degraded",
+                passed=False,
+                n_compared=100,
+                n_degraded=12,
+                n_improved=0,
+                n_band_degraded=20,
+                degraded_metric_fraction=0.12,
+                worst_pct_diff=15.5,
+            )
+        ]
+
+        records = rows_to_csv_records(rows, "dltest-compute", classifications)
+
+        self.assertEqual(records[0]["result"], "pass")
+        self.assertEqual(records[0]["classification_status"], "degraded")
+        self.assertEqual(records[0]["classification_passed"], "false")
+        self.assertEqual(records[0]["n_degraded"], "12")
+        self.assertEqual(records[0]["degraded_metric_percent"], "12.000")
+
     def test_write_latest_results_csv(self) -> None:
         rows = [
             LatestStatusRow("node-a", "all", 1781748000, "pass"),
@@ -67,6 +99,23 @@ class ResultsExportTests(unittest.TestCase):
         self.assertIn("node,test,db_test,latest_timestamp", text)
         self.assertIn("node-a,overall,all,1781748000", text)
         self.assertNotIn("node-b", text)
+
+    def test_classification_csv_helpers(self) -> None:
+        rows = [
+            ClassificationResultRow(100, "node-a", "storage", "s1", "normal", True, 12, 0, 0, 0, 0.0, 0.0),
+            ClassificationResultRow(200, "node-b", "nccl", "n1", "degraded", False, 2, 1, 0, 1, 0.5, 20.0),
+        ]
+
+        selected = filter_classification_rows(rows, "nccl")
+        records = classification_rows_to_csv_records(selected)
+
+        self.assertEqual([row.node for row in selected], ["node-b"])
+        self.assertEqual(records[0]["degraded_metric_percent"], "50.000")
+        with TemporaryDirectory() as tmpdir:
+            path = write_classifications_csv(rows, "nccl", output_dir=tmpdir)
+            text = Path(path).read_text(encoding="utf-8")
+        self.assertIn("node-b,nccl,200", text)
+        self.assertNotIn("node-a", text)
 
 
 if __name__ == "__main__":

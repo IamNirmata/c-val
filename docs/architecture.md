@@ -11,6 +11,7 @@ flowchart TB
     Operator["Operator or Hermes"] --> CLI["cval.cli"]
     CLI --> Discovery["cval.k8s.discovery"]
     CLI --> Status["cval.storage.status"]
+    CLI --> ClassStatus["cval.storage.classification_status"]
     CLI --> Workflow["cval.orchestrator.workflow"]
     Workflow --> Priority["cval.scheduler.priority"]
     Workflow --> Renderer["cval.jobs.renderer"]
@@ -20,6 +21,7 @@ flowchart TB
     Monitor --> Kube
     Discovery --> Kube
     Status --> PVC["PVC access pod + SQLite"]
+    ClassStatus --> PVC
     Kube --> ValidationPod["Validation pod"]
     ValidationPod --> Scripts["validation-tests"]
     Scripts --> Artifacts["/data/continuous_validation"]
@@ -36,6 +38,7 @@ flowchart TB
 | `cval.k8s.client` | Thin, testable `kubectl` wrapper. |
 | `cval.k8s.discovery` | GPU usage parsing, schedulable-node filtering, free-node discovery. |
 | `cval.storage.status` | Read-only latest-status DB access through PVC access pod. |
+| `cval.storage.classification_status` | Read-only latest baseline verdict access and CSV export. |
 | `cval.scheduler.priority` | Queue stale or never-tested free nodes. |
 | `cval.jobs.renderer` | Render Volcano job YAML with node, timestamp, git repo, and git ref. |
 | `cval.orchestrator.workflow` | Build a dry-run plan from discovery + history + template rendering. |
@@ -47,7 +50,7 @@ flowchart TB
 | `cval.baselines.stats` | Robust statistics kernels (median, MAD, percentiles, modified z-score, bootstrap). |
 | `cval.baselines.build` | Build dynamic baselines from result DBs per stratum. |
 | `cval.baselines.storage` | Persist versioned baselines (candidate/active/superseded). |
-| `cval.baselines.classify` | Classify nodes against the active baseline. |
+| `cval.baselines.classify` | Classify nodes against the active baseline, including DL component aggregation. |
 
 ## Runtime Artifacts
 

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from cval.baselines import build
 from cval.baselines.classify import classify_node, classify_nodes
 from cval.baselines.storage import activate_baseline, get_active_baseline, store_dynamic_baseline
-from cval.config import load_config
+from cval.config import BaselineClassificationConfig, CvalConfig, load_config
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
 
 NOW = int(time.time())
@@ -81,6 +81,66 @@ def _make_nccl_two_nodes(path: Path) -> None:
         connection.commit()
 
 
+def _make_dl_compute_db(path: Path, node: str, degraded_metrics: int) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE compute_performance (
+                node TEXT NOT NULL,
+                cval_timestamp INTEGER NOT NULL,
+                test_plan TEXT NOT NULL,
+                task_group TEXT NOT NULL,
+                task_name TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL,
+                run_key TEXT NOT NULL
+            )
+            """
+        )
+        for index in range(100):
+            value = 120.0 if index < degraded_metrics else 100.0
+            connection.execute(
+                """
+                INSERT INTO compute_performance (
+                    node, cval_timestamp, test_plan, task_group, task_name,
+                    rank, metric_name, metric_value, run_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    node,
+                    NOW,
+                    "80gb-example",
+                    "nn_tasks",
+                    f"task-{index}",
+                    0,
+                    "elapsed_ms",
+                    value,
+                    f"{node}-{NOW}",
+                ),
+            )
+        connection.commit()
+
+
+def _dl_compute_baseline() -> dict:
+    metrics = {}
+    for index in range(100):
+        metrics[f"nn_tasks/task-{index}/elapsed_ms"] = {
+            "median": 100.0,
+            "direction": "high_bad",
+            "lower_bound": None,
+            "upper_bound": 103.0,
+            "p05": 98.0,
+            "p95": 102.0,
+            "source_table": "compute_performance",
+        }
+    return {
+        "baseline_id": "dl-compute-1",
+        "test_type": "dltest",
+        "metrics": metrics,
+    }
+
+
 class TestClassifyStorage(unittest.TestCase):
     def test_bad_node_degraded_good_node_normal(self):
         config = load_config()
@@ -138,6 +198,57 @@ class TestClassifyNccl(unittest.TestCase):
             degraded_metrics = {m["metric"] for m in bad["metrics"] if m["status"] == "degraded"}
             self.assertIn("busbw", degraded_metrics)
             self.assertIn("latency", degraded_metrics)
+
+
+class TestClassifyDlAggregation(unittest.TestCase):
+    def _config(self) -> CvalConfig:
+        return CvalConfig(
+            baseline=BaselineClassificationConfig(
+                dl_degraded_metric_fraction=0.10,
+                dl_min_degraded_metrics=10,
+                dl_degraded_severity_pct=10.0,
+                window_days=365,
+            )
+        )
+
+    def test_small_dl_miss_count_stays_normal_but_reports_score(self):
+        with TemporaryDirectory() as tmpdir:
+            compute_db = Path(tmpdir) / "compute.db"
+            _make_dl_compute_db(compute_db, "node-a", degraded_metrics=5)
+
+            verdict = classify_node(
+                "dltest-compute",
+                "node-a",
+                _dl_compute_baseline(),
+                config=self._config(),
+                dl_db_paths={"compute_performance": str(compute_db)},
+                window_days=365,
+            )
+
+        self.assertEqual(verdict["status"], "normal")
+        self.assertEqual(verdict["n_degraded"], 5)
+        self.assertEqual(verdict["n_band_degraded"], 5)
+        self.assertAlmostEqual(verdict["degraded_metric_fraction"], 0.05)
+        self.assertEqual(verdict["dl_component"], "compute_performance")
+
+    def test_meaningful_dl_miss_count_degrades_component(self):
+        with TemporaryDirectory() as tmpdir:
+            compute_db = Path(tmpdir) / "compute.db"
+            _make_dl_compute_db(compute_db, "node-a", degraded_metrics=12)
+
+            verdict = classify_node(
+                "dltest-compute",
+                "node-a",
+                _dl_compute_baseline(),
+                config=self._config(),
+                dl_db_paths={"compute_performance": str(compute_db)},
+                window_days=365,
+            )
+
+        self.assertEqual(verdict["status"], "degraded")
+        self.assertEqual(verdict["n_degraded"], 12)
+        self.assertAlmostEqual(verdict["degraded_metric_percent"], 12.0)
+        self.assertGreaterEqual(verdict["worst_pct_diff"], 20.0)
 
 
 class TestClassifyViaActiveBaseline(unittest.TestCase):

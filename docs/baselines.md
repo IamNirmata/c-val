@@ -110,6 +110,33 @@ python -m cval.cli db-rebuild-dltest-metrics \
   --output-dir /data/continuous_validation/metadata
 ```
 
+### DL verdict aggregation
+
+DL has thousands of metrics per node, so c-val does **not** mark a node degraded
+because one metric barely crosses a robust band. Each metric is still classified
+against its median/MAD band, but the node/component verdict uses two additional
+aggregation variables:
+
+- `n_degraded` / `degraded_metric_fraction`: how many metrics are meaningfully bad.
+- `worst_pct_diff`: how far the worst out-of-band metric is from the baseline.
+
+For DL only, a metric counts toward the node's degraded verdict when it is both
+outside the band and at least `dl_degraded_severity_pct` percent away from the
+baseline median. A DL component becomes `degraded` when those severe misses reach
+either `dl_min_degraded_metrics` or `dl_degraded_metric_fraction`.
+
+The four DL components can be classified as separate tests:
+
+```text
+dltest-numerical
+dltest-compute
+dltest-collective
+dltest-overlap
+```
+
+`dltest` remains the aggregate view and includes per-component summaries in JSON
+output.
+
 ---
 
 ## Versioned baseline records
@@ -146,8 +173,10 @@ Default baseline DBs:
 
 Storage and NCCL have one baseline DB each. DL has four baseline DBs mirroring
 the four DL metric DBs. `classification-results.db` stores derived baseline
-decisions (`normal`, `improved`, `degraded`) and a boolean `passed` column. Raw
-validation `pass/fail/incomplete` rows stay untouched in `validation.db`.
+decisions (`normal`, `improved`, `degraded`), a boolean `passed` column, and
+graded score columns such as `n_compared`, `n_degraded`,
+`degraded_metric_fraction`, and `worst_pct_diff`. Raw validation
+`pass/fail/incomplete` rows stay untouched in `validation.db`.
 
 ### Stored record schema (`metrics_json`)
 
@@ -223,22 +252,39 @@ python -m cval.cli baseline classify --test-type nccl \
 
 # Persist derived pass/degraded decisions into classification-results.db
 python -m cval.cli baseline classify --test-type dltest --store-results --output json
+
+# DL components can be classified separately
+python -m cval.cli baseline classify --test-type dltest-compute --store-results
+python -m cval.cli baseline classify --test-type dltest-numerical --store-results
 ```
 
 Table output:
 
 ```text
 Classification vs baseline storage-2026Q2 (storage)
-NODE                             STATUS    DEGRADED IMPROVED COMPARED
-slc01-cl02-hgx-0001              normal           0        0       12
-slc01-cl02-hgx-0009              degraded        12        0       12
+NODE                             STATUS         BAD BAND_BAD     BAD%   WORST% COMPARED
+slc01-cl02-hgx-0001              normal           0        0    0.00%    0.00%       12
+slc01-cl02-hgx-0009              degraded        12       12  100.00%   35.00%       12
 Degraded nodes: slc01-cl02-hgx-0009
 ```
 
 A node's value for each metric is the **median of its recent runs** in the window,
-so a single noisy run does not flip the verdict. A node is `degraded` if any
-metric falls on the failing side of its band, `improved` if some metric beats the
-good-side tail (p95/p05) and none are degraded, else `normal`.
+so a single noisy run does not flip the verdict. Storage and NCCL still degrade
+when any metric crosses the failing side of its band. DL adds the aggregation
+rules above so tiny numbers of weak misses remain visible in `BAND_BAD` and
+`worst_pct_diff` without flipping the node verdict.
+
+Classification exports:
+
+```bash
+python -m cval.cli classifications --test all --type csv
+python -m cval.cli classifications --test dltest-compute --type csv
+python -m cval.cli results --test dltest-compute --type csv
+```
+
+`results` keeps the raw `result` column from `validation.db` and adds
+`classification_status`, `classification_passed`, `n_degraded`,
+`degraded_metric_fraction`, and `worst_pct_diff` from `classification-results.db`.
 
 ### Background scripts
 
@@ -311,6 +357,9 @@ classify_outliers = true            # enable classification
 robust_z_threshold = 3.5            # modified z-score cutoff
 min_samples = 8                     # minimum clean samples per metric
 window_days = 30                    # rolling window for building baselines
+dl_degraded_metric_fraction = 0.02  # DL bad-metric share required for degraded
+dl_min_degraded_metrics = 10        # DL bad-metric count required for degraded
+dl_degraded_severity_pct = 10.0     # DL miss must be this far off to count
 ```
 
 These values feed both baseline building (band width, trimming, window) and

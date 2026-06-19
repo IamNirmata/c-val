@@ -18,6 +18,7 @@ cval run
 cval jobs
 cval result
 cval results
+cval classifications
 ```
 
 The `baseline` command group (build, classify, activate, show, list) is also a
@@ -151,13 +152,15 @@ python -m cval.cli result --result-json <result.json> --output json
 
 ## `results`
 
-Export the latest per-node result rows for one test into a local CSV. The source
-is the read-only `latest_status` view in `validation.db`. `overall` maps to the
-DB's aggregate `all` row.
+Export the latest per-node result rows for one test into a local CSV. The raw
+pass/fail source is the read-only `latest_status` view in `validation.db`.
+`overall` maps to the DB's aggregate `all` row. Baseline classification columns
+are joined from `classification-results.db` by default.
 
 ```bash
 python -m cval.cli results --test overall --type csv
 python -m cval.cli results --test dltest --type csv
+python -m cval.cli results --test dltest-compute --type csv
 python -m cval.cli results --test storage --type csv
 python -m cval.cli results --test nccl --type csv
 ```
@@ -172,8 +175,27 @@ cval_<test_name>_<YYYYMMDD_HHMMSS_TZ>.csv
 Use `--output-dir <folder>` to write into another local directory. Columns are:
 
 ```text
-node,test,db_test,latest_timestamp,latest_time_utc,latest_time_los_angeles,result
+node,test,db_test,latest_timestamp,latest_time_utc,latest_time_los_angeles,result,
+classification_status,classification_passed,classification_baseline_id,
+classified_timestamp,classified_time_los_angeles,n_compared,n_degraded,
+n_band_degraded,degraded_metric_fraction,degraded_metric_percent,worst_pct_diff
 ```
+
+Use `--no-classification` to export only the raw pass/fail status columns.
+
+## `classifications`
+
+Export the latest baseline classification verdicts directly from
+`classification-results.db`:
+
+```bash
+python -m cval.cli classifications --test all --type csv
+python -m cval.cli classifications --test storage --type csv
+python -m cval.cli classifications --test dltest-compute --type csv
+```
+
+Available tests: `storage`, `nccl`, `dltest`, `dltest-numerical`,
+`dltest-compute`, `dltest-collective`, and `dltest-overlap`.
 
 ## `baseline`
 
@@ -218,6 +240,8 @@ python -m cval.cli baseline classify --test-type storage
 python -m cval.cli baseline classify --test-type nccl \
   --node <node> --baseline-id <id> --output json
 python -m cval.cli baseline classify --test-type dltest --store-results --output json
+python -m cval.cli baseline classify --test-type dltest-compute --store-results
+python -m cval.cli baseline classify --test-type dltest-overlap --store-results
 ```
 
 `--store-results` writes derived decisions to

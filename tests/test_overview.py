@@ -5,8 +5,10 @@ import unittest
 
 from cval.jobs.monitor import JobPhase, list_job_phases
 from cval.k8s.client import CommandResult
+from cval.models import ClassificationResultRow
 from cval.orchestrator.overview import (
     _freshness_counts,
+    _summarize_classifications,
     _summarize_jobs,
     render_overview,
 )
@@ -43,6 +45,19 @@ class TestSummarizeJobs(unittest.TestCase):
             JobPhase("j3", "Completed"),
         ]
         self.assertEqual(_summarize_jobs(jobs), {"Running": 2, "Completed": 1})
+
+
+class TestSummarizeClassifications(unittest.TestCase):
+    def test_counts_by_test_and_status(self):
+        rows = [
+            ClassificationResultRow(100, "n1", "storage", "s1", "normal", True, 1, 0, 0, 0, 0.0, 0.0),
+            ClassificationResultRow(100, "n2", "storage", "s1", "degraded", False, 1, 1, 0, 1, 1.0, 20.0),
+            ClassificationResultRow(100, "n3", "nccl", "n1", "normal", True, 1, 0, 0, 0, 0.0, 0.0),
+        ]
+        self.assertEqual(
+            _summarize_classifications(rows),
+            {"storage": {"normal": 1, "degraded": 1}, "nccl": {"normal": 1}},
+        )
 
 
 class TestListJobPhases(unittest.TestCase):
@@ -99,10 +114,14 @@ class TestRenderOverview(unittest.TestCase):
                 "active": [{"job_name": "cval-n1", "phase": "Running"}],
                 "items": [{"job_name": "cval-n1", "phase": "Running"}],
             },
+            "classifications": {
+                "total": 2,
+                "by_test": {"storage": {"normal": 1, "degraded": 1}},
+            },
             "errors": {},
         }
         text = render_overview(overview)
-        for token in ("NODES", "RESULTS", "QUEUE", "JOBS", "never-tested", "cval-n1"):
+        for token in ("NODES", "RESULTS", "CLASSIFY", "QUEUE", "JOBS", "never-tested", "cval-n1"):
             self.assertIn(token, text)
 
     def test_render_shows_errors(self):

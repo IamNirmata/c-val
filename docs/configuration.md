@@ -121,6 +121,9 @@ classify_outliers = true
 robust_z_threshold = 3.5
 min_samples = 8
 window_days = 30
+dl_degraded_metric_fraction = 0.02
+dl_min_degraded_metrics = 10
+dl_degraded_severity_pct = 10.0
 build_interval_seconds = 86400
 classify_interval_seconds = 300
 ```
@@ -128,9 +131,9 @@ classify_interval_seconds = 300
 The `[runtime]` `dl_results_root_path` points at remapped DL rank JSON artifacts
 (`dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json`). The
 `[storage]` `dl_*_db_path` entries point at the four DL metric DBs rebuilt from
-those JSON files. The `[baseline]` root path, tolerances, `window_days`, and loop
-intervals control dynamic baseline building and node classification (see
-[Baselines and Node Classification](baselines.md)).
+those JSON files. The `[baseline]` root path, tolerances, `window_days`, DL
+aggregation thresholds, and loop intervals control dynamic baseline building and
+node classification (see [Baselines and Node Classification](baselines.md)).
 
 ## Precedence
 

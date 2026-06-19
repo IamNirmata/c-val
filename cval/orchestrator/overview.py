@@ -14,10 +14,12 @@ import time
 from typing import Any
 
 from cval.config import CvalConfig, load_config
+from cval.baselines.storage import default_classification_db_path
 from cval.jobs.monitor import JobPhase, list_job_phases
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
 from cval.scheduler.priority import build_priority_queue
+from cval.storage.classification_status import get_latest_classification_rows
 from cval.storage.status import get_latest_status_rows, latest_status_rows_to_node_map
 
 ACTIVE_PHASES = ("Pending", "Running")
@@ -49,6 +51,16 @@ def _summarize_jobs(jobs: list[JobPhase]) -> dict[str, int]:
     return summary
 
 
+def _summarize_classifications(rows) -> dict[str, dict[str, int]]:
+    """Count latest classification verdicts by test type and status."""
+
+    summary: dict[str, dict[str, int]] = {}
+    for row in rows:
+        by_status = summary.setdefault(row.test_type, {})
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+    return summary
+
+
 def build_overview(
     *,
     config: CvalConfig | None = None,
@@ -74,8 +86,10 @@ def build_overview(
     errors: dict[str, str] = {}
 
     # 1. Free nodes (live discovery).
+    total_nodes = 0
     try:
         nodes, totals = discover_free_nodes(node_name_filter=node_filter)
+        total_nodes = len(nodes)
         fully_free = fully_free_node_names(nodes)
     except Exception as exc:  # noqa: BLE001 - surfaced in the report, not raised
         totals = {"capacity": 0, "allocatable": 0, "used": 0, "free": 0}
@@ -95,6 +109,9 @@ def build_overview(
     except Exception as exc:  # noqa: BLE001
         errors["status"] = str(exc)
     valid, outdated = _freshness_counts(status_map, days_threshold, now)
+    tested_nodes = len(status_map)
+    untested_nodes = max(total_nodes - tested_nodes, 0)
+    coverage_pct = (tested_nodes / total_nodes * 100.0) if total_nodes else 0.0
 
     # 3. Priority queue: fully-free nodes that need validation, with reasons.
     queue = build_priority_queue(fully_free, status_map, days_threshold=days_threshold)
@@ -110,11 +127,25 @@ def build_overview(
             errors["jobs"] = str(exc)
     job_summary = _summarize_jobs(jobs)
 
+    classification_rows = []
+    try:
+        classification_rows = get_latest_classification_rows(
+            client=client,
+            namespace=namespace,
+            pod=config.cluster.pvc_access_pod,
+            db_path=str(default_classification_db_path(config)),
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        errors["classifications"] = str(exc)
+    classification_summary = _summarize_classifications(classification_rows)
+
     return {
         "generated_at": int(now),
         "namespace": namespace,
         "days_threshold": days_threshold,
         "nodes": {
+            "total_nodes": total_nodes,
             "fully_free": len(fully_free),
             "free_gpus": totals.get("free", 0),
             "total_gpus": totals.get("capacity", 0),
@@ -122,6 +153,10 @@ def build_overview(
         },
         "freshness": {
             "nodes_with_results": len(status_map),
+            "tested_nodes": tested_nodes,
+            "total_nodes": total_nodes,
+            "untested_nodes": untested_nodes,
+            "coverage_pct": coverage_pct,
             "valid": valid,
             "outdated": outdated,
         },
@@ -148,6 +183,10 @@ def build_overview(
             ],
             "items": [{"job_name": job.job_name, "phase": job.phase} for job in jobs],
         },
+        "classifications": {
+            "total": len(classification_rows),
+            "by_test": classification_summary,
+        },
         "errors": errors,
     }
 
@@ -170,15 +209,26 @@ def render_overview(overview: dict[str, Any]) -> str:
 
     nodes = overview["nodes"]
     lines.append(
-        f"NODES     fully-free: {nodes['fully_free']:<4}  "
+        f"NODES     total: {nodes.get('total_nodes', 0):<5}  fully-free: {nodes['fully_free']:<4}  "
         f"free GPUs: {nodes['free_gpus']}/{nodes['total_gpus']}"
     )
 
     freshness = overview["freshness"]
     lines.append(
-        f"RESULTS   nodes: {freshness['nodes_with_results']:<5}  "
+        f"RESULTS   tested: {freshness.get('tested_nodes', freshness['nodes_with_results'])}/"
+        f"{freshness.get('total_nodes', 0):<5}  "
+        f"coverage: {freshness.get('coverage_pct', 0.0):>5.1f}%  "
         f"valid(<thr): {freshness['valid']:<5}  outdated: {freshness['outdated']}"
     )
+
+    classifications = overview.get("classifications", {"by_test": {}})
+    if classifications.get("by_test"):
+        lines.append("CLASSIFY  latest baseline verdicts")
+        for test_type, counts in sorted(classifications["by_test"].items()):
+            status_text = ", ".join(
+                f"{status}={count}" for status, count in sorted(counts.items())
+            )
+            lines.append(f"  {test_type:<20} {status_text}")
 
     queue = overview["queue"]
     lines.append(f"QUEUE     needing validation: {queue['needing_validation']}")

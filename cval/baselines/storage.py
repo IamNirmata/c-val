@@ -10,6 +10,7 @@ from pathlib import Path
 
 from cval.baselines.models import BaselineMetrics
 from cval.config import load_config
+from cval.models import dl_component_for_test_type, normalize_baseline_test_type
 from cval.storage.ingest import _connect_writable, _ensure_column
 
 
@@ -43,14 +44,16 @@ def default_dynamic_baseline_db_path(
     """Return the default baseline DB for a test/component."""
 
     root = baseline_root_path(config)
-    if test_type == "dltest":
-        if not source_table:
+    baseline_test_type = normalize_baseline_test_type(test_type)
+    component = source_table or dl_component_for_test_type(test_type)
+    if baseline_test_type == "dltest":
+        if not component:
             return root / "dltest-baselines.db"
-        filename = DL_BASELINE_DB_FILENAMES.get(source_table)
+        filename = DL_BASELINE_DB_FILENAMES.get(component)
         if filename is None:
-            raise ValueError(f"unknown DL baseline component: {source_table!r}")
+            raise ValueError(f"unknown DL baseline component: {component!r}")
         return root / filename
-    filename = BASELINE_DB_FILENAMES.get(test_type)
+    filename = BASELINE_DB_FILENAMES.get(baseline_test_type)
     if filename is None:
         raise ValueError(f"unknown test_type: {test_type!r}")
     return root / filename
@@ -59,12 +62,16 @@ def default_dynamic_baseline_db_path(
 def default_dynamic_baseline_db_paths(test_type: str, config=None) -> list[Path]:
     """Return all default baseline DB paths for a test type."""
 
-    if test_type == "dltest":
+    baseline_test_type = normalize_baseline_test_type(test_type)
+    component = dl_component_for_test_type(test_type)
+    if baseline_test_type == "dltest":
+        if component:
+            return [default_dynamic_baseline_db_path(test_type, config=config)]
         return [
-            default_dynamic_baseline_db_path(test_type, component, config=config)
-            for component in DL_BASELINE_DB_FILENAMES
+            default_dynamic_baseline_db_path(baseline_test_type, table, config=config)
+            for table in DL_BASELINE_DB_FILENAMES
         ]
-    return [default_dynamic_baseline_db_path(test_type, config=config)]
+    return [default_dynamic_baseline_db_path(baseline_test_type, config=config)]
 
 
 def default_classification_db_path(config=None) -> Path:
@@ -400,11 +407,12 @@ def _activate_baseline_in_db(
 ) -> bool:
     """Promote one baseline in one DB."""
 
+    baseline_test_type = normalize_baseline_test_type(test_type)
     with closing(_connect_writable(db_path)) as connection:
         _ensure_baselines_schema(connection)
         row = connection.execute(
             "SELECT stratum_key FROM baselines WHERE baseline_id = ? AND test_type = ?",
-            (baseline_id, test_type),
+            (baseline_id, baseline_test_type),
         ).fetchone()
         if row is None:
             return False
@@ -415,11 +423,11 @@ def _activate_baseline_in_db(
             WHERE test_type = ? AND stratum_key = ? AND status = 'active'
               AND baseline_id != ?
             """,
-            (test_type, stratum_key, baseline_id),
+                        (baseline_test_type, stratum_key, baseline_id),
         )
         connection.execute(
             "UPDATE baselines SET status = 'active' WHERE baseline_id = ? AND test_type = ?",
-            (baseline_id, test_type),
+                        (baseline_id, baseline_test_type),
         )
         connection.commit()
     return True
@@ -454,11 +462,12 @@ def _load_dynamic_baseline_from_db(
 ) -> dict | None:
     """Load a full baseline record from one DB."""
 
+    baseline_test_type = normalize_baseline_test_type(test_type)
     try:
         with closing(sqlite3.connect(db_path)) as connection:
             row = connection.execute(
                 "SELECT metrics_json FROM baselines WHERE baseline_id = ? AND test_type = ?",
-                (baseline_id, test_type),
+                (baseline_id, baseline_test_type),
             ).fetchone()
             if not row or not row[0]:
                 return None
@@ -493,13 +502,14 @@ def _get_active_baseline_from_db(
 ) -> dict | None:
     """Return the active baseline record from one DB."""
 
+    baseline_test_type = normalize_baseline_test_type(test_type)
     try:
         with closing(sqlite3.connect(db_path)) as connection:
             query = (
                 "SELECT metrics_json FROM baselines "
                 "WHERE test_type = ? AND status = 'active'"
             )
-            params: list = [test_type]
+            params: list = [baseline_test_type]
             if stratum_key is not None:
                 query += " AND stratum_key = ?"
                 params.append(stratum_key)
@@ -546,7 +556,7 @@ def _list_dynamic_baselines_from_db(
             if test_type:
                 return connection.execute(
                     base_query + " WHERE test_type = ? ORDER BY created_at DESC",
-                    (test_type,),
+                    (normalize_baseline_test_type(test_type),),
                 ).fetchall()
             return connection.execute(
                 base_query + " ORDER BY test_type, created_at DESC"
@@ -603,10 +613,31 @@ def store_classification_results(
               n_compared INTEGER NOT NULL,
               n_degraded INTEGER NOT NULL,
               n_improved INTEGER NOT NULL,
+              n_band_degraded INTEGER NOT NULL DEFAULT 0,
+              degraded_metric_fraction REAL NOT NULL DEFAULT 0.0,
+              worst_pct_diff REAL NOT NULL DEFAULT 0.0,
               metrics_json TEXT NOT NULL,
               PRIMARY KEY (classified_at, node, test_type, baseline_id)
             )
             """
+        )
+        _ensure_column(
+            connection,
+            "classification_results",
+            "n_band_degraded",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
+            "classification_results",
+            "degraded_metric_fraction",
+            "REAL NOT NULL DEFAULT 0.0",
+        )
+        _ensure_column(
+            connection,
+            "classification_results",
+            "worst_pct_diff",
+            "REAL NOT NULL DEFAULT 0.0",
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_classification_node_test_time "
@@ -616,8 +647,9 @@ def store_classification_results(
             """
             INSERT OR REPLACE INTO classification_results (
               classified_at, node, test_type, baseline_id, status, passed,
-              n_compared, n_degraded, n_improved, metrics_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            n_compared, n_degraded, n_improved, n_band_degraded,
+                            degraded_metric_fraction, worst_pct_diff, metrics_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -630,6 +662,9 @@ def store_classification_results(
                     int(verdict.get("n_compared", 0)),
                     int(verdict.get("n_degraded", 0)),
                     int(verdict.get("n_improved", 0)),
+                    int(verdict.get("n_band_degraded", verdict.get("n_degraded", 0))),
+                    float(verdict.get("degraded_metric_fraction", 0.0)),
+                    float(verdict.get("worst_pct_diff", 0.0)),
                     json.dumps(verdict.get("metrics", [])),
                 )
                 for verdict in verdicts

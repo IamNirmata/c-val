@@ -149,6 +149,11 @@ class BaselineClassificationConfig:
     min_samples: int = 8
     # Rolling window (days) of recent runs used to build a baseline.
     window_days: int = 30
+    # DL aggregation: a DL component/node is degraded only when enough severe
+    # metric deviations accumulate, avoiding any-one-metric fleet noise.
+    dl_degraded_metric_fraction: float = 0.02
+    dl_min_degraded_metrics: int = 10
+    dl_degraded_severity_pct: float = 10.0
     # How often the background baseline builder should build candidates.
     build_interval_seconds: int = 86400
     # How often the background classifier should evaluate nodes.
@@ -401,6 +406,21 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             ),
             min_samples=_int(baseline, "min_samples", defaults.baseline.min_samples),
             window_days=_int(baseline, "window_days", defaults.baseline.window_days),
+            dl_degraded_metric_fraction=_float(
+                baseline,
+                "dl_degraded_metric_fraction",
+                defaults.baseline.dl_degraded_metric_fraction,
+            ),
+            dl_min_degraded_metrics=_int(
+                baseline,
+                "dl_min_degraded_metrics",
+                defaults.baseline.dl_min_degraded_metrics,
+            ),
+            dl_degraded_severity_pct=_float(
+                baseline,
+                "dl_degraded_severity_pct",
+                defaults.baseline.dl_degraded_severity_pct,
+            ),
             build_interval_seconds=_int(
                 baseline,
                 "build_interval_seconds",

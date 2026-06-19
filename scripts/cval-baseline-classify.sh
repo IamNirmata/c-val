@@ -37,7 +37,7 @@ WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)
 DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/dltest)}
 DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
-TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest}
+TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest,dltest-numerical,dltest-compute,dltest-collective,dltest-overlap}
 
 usage() {
     cat <<EOF
@@ -107,7 +107,7 @@ refresh_dl_metric_dbs() {
 }
 
 tests_include_dltest() {
-    [[ ",$TEST_TYPES," == *",dltest,"* ]]
+    [[ ",$TEST_TYPES," == *",dltest,"* ]] || [[ ",$TEST_TYPES," == *",dltest-"* ]]
 }
 
 run_cycle() {

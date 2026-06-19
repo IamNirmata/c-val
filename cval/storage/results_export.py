@@ -13,7 +13,8 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.models import LatestStatusRow
+from cval.models import ClassificationResultRow, LatestStatusRow
+from cval.storage.classification_status import classification_rows_by_node_test
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 UTC = dt.timezone.utc
@@ -24,6 +25,10 @@ RESULT_TEST_ALIASES = {
     "storage": "storage",
     "nccl": "nccl",
     "dltest": "dltest",
+    "dltest-numerical": "dltest",
+    "dltest-compute": "dltest",
+    "dltest-collective": "dltest",
+    "dltest-overlap": "dltest",
 }
 
 CSV_COLUMNS = (
@@ -34,6 +39,17 @@ CSV_COLUMNS = (
     "latest_time_utc",
     "latest_time_los_angeles",
     "result",
+    "classification_status",
+    "classification_passed",
+    "classification_baseline_id",
+    "classified_timestamp",
+    "classified_time_los_angeles",
+    "n_compared",
+    "n_degraded",
+    "n_band_degraded",
+    "degraded_metric_fraction",
+    "degraded_metric_percent",
+    "worst_pct_diff",
 )
 
 
@@ -52,6 +68,13 @@ def display_result_test(test_name: str) -> str:
 
     normalized = test_name.strip().lower()
     return "overall" if normalized in {"overall", "all"} else normalized
+
+
+def classification_result_test(test_name: str) -> str:
+    """Return the classification test_type used for a requested result export."""
+
+    display_test = display_result_test(test_name)
+    return "" if display_test == "overall" else display_test
 
 
 def latest_result_rows(rows: list[LatestStatusRow], test_name: str) -> list[LatestStatusRow]:
@@ -96,21 +119,47 @@ def default_results_filename(test_name: str, now: dt.datetime | None = None) -> 
     return f"cval_{safe_test}_{los_angeles_filename_timestamp(now)}.csv"
 
 
-def rows_to_csv_records(rows: list[LatestStatusRow], requested_test: str) -> list[dict[str, str]]:
+def rows_to_csv_records(
+    rows: list[LatestStatusRow],
+    requested_test: str,
+    classifications: list[ClassificationResultRow] | None = None,
+) -> list[dict[str, str]]:
     """Convert status rows to CSV record dictionaries."""
 
     display_test = display_result_test(requested_test)
+    classification_test = classification_result_test(requested_test)
+    by_node_test = classification_rows_by_node_test(classifications or [])
+    records: list[dict[str, str]] = []
+    for row in rows:
+        classification = by_node_test.get((row.node, classification_test))
+        classification_status = classification.status if classification else ""
+        classification_passed = "" if classification is None else str(classification.passed).lower()
+        classified_at = classification.classified_at if classification else None
+        degraded_fraction = classification.degraded_metric_fraction if classification else 0.0
+        records.append(
+            {
+                "node": row.node,
+                "test": display_test,
+                "db_test": row.test,
+                "latest_timestamp": "" if row.latest_timestamp is None else str(row.latest_timestamp),
+                "latest_time_utc": timestamp_to_utc(row.latest_timestamp),
+                "latest_time_los_angeles": timestamp_to_los_angeles(row.latest_timestamp),
+                "result": row.result,
+                "classification_status": classification_status,
+                "classification_passed": classification_passed,
+                "classification_baseline_id": classification.baseline_id if classification else "",
+                "classified_timestamp": "" if classified_at is None else str(classified_at),
+                "classified_time_los_angeles": timestamp_to_los_angeles(classified_at),
+                "n_compared": "" if classification is None else str(classification.n_compared),
+                "n_degraded": "" if classification is None else str(classification.n_degraded),
+                "n_band_degraded": "" if classification is None else str(classification.n_band_degraded),
+                "degraded_metric_fraction": "" if classification is None else f"{degraded_fraction:.6f}",
+                "degraded_metric_percent": "" if classification is None else f"{degraded_fraction * 100.0:.3f}",
+                "worst_pct_diff": "" if classification is None else f"{classification.worst_pct_diff:.3f}",
+            }
+        )
     return [
-        {
-            "node": row.node,
-            "test": display_test,
-            "db_test": row.test,
-            "latest_timestamp": "" if row.latest_timestamp is None else str(row.latest_timestamp),
-            "latest_time_utc": timestamp_to_utc(row.latest_timestamp),
-            "latest_time_los_angeles": timestamp_to_los_angeles(row.latest_timestamp),
-            "result": row.result,
-        }
-        for row in rows
+        record for record in records
     ]
 
 
@@ -119,6 +168,7 @@ def write_latest_results_csv(
     test_name: str,
     output_dir: str | Path = ".",
     now: dt.datetime | None = None,
+    classifications: list[ClassificationResultRow] | None = None,
 ) -> Path:
     """Write latest rows for one test to a local CSV and return the path."""
 
@@ -130,6 +180,6 @@ def write_latest_results_csv(
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
-        writer.writerows(rows_to_csv_records(selected, test_name))
+        writer.writerows(rows_to_csv_records(selected, test_name, classifications))
 
     return output_path

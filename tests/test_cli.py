@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cval.cli import main
-from cval.models import LatestStatusRow
+from cval.models import ClassificationResultRow, LatestStatusRow
 
 
 class CliTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
-        self.assertIn("{config,status,nodes,overview,run,jobs,result,results}", help_text)
+        self.assertIn("{config,status,nodes,overview,run,jobs,result,results,classifications}", help_text)
         self.assertNotIn("submit-plan", help_text)
         self.assertNotIn("run-batch", help_text)
         self.assertNotIn("db-add-result", help_text)
@@ -40,6 +40,9 @@ class CliTests(unittest.TestCase):
                     LatestStatusRow("node-a", "all", 100, "fail"),
                     LatestStatusRow("node-a", "storage", 100, "pass"),
                 ],
+            ), patch(
+                "cval.storage.classification_status.get_latest_classification_rows",
+                return_value=[],
             ):
                 with redirect_stdout(output):
                     exit_code = main(
@@ -59,6 +62,48 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(files), 1)
         self.assertIn("Wrote 2 overall latest result row(s)", output.getvalue())
+
+    def test_classifications_command_writes_csv(self) -> None:
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "cval.storage.classification_status.get_latest_classification_rows",
+                return_value=[
+                    ClassificationResultRow(
+                        200,
+                        "node-a",
+                        "storage",
+                        "storage-1",
+                        "degraded",
+                        False,
+                        12,
+                        2,
+                        0,
+                        2,
+                        0.1667,
+                        22.0,
+                    )
+                ],
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "classifications",
+                            "--test",
+                            "storage",
+                            "--type",
+                            "csv",
+                            "--output-dir",
+                            tmpdir,
+                        ]
+                    )
+
+            files = list(Path(tmpdir).glob("cval_classifications_storage_*.csv"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(files), 1)
+        self.assertIn("Wrote 1 storage classification row(s)", output.getvalue())
 
     def test_prioritize_json_command(self) -> None:
         output = io.StringIO()
