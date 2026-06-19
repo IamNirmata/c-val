@@ -140,11 +140,13 @@ def parse_node_resources(
     usage_by_node: Mapping[str, int] | None = None,
     node_name_filter: str | None = None,
     excluded_node_names: set[str] | None = None,
+    resource_blocked_node_names: set[str] | None = None,
 ) -> list[NodeResource]:
     """Parse the compact node GPU table into schedulable resource records."""
 
     usage = usage_by_node or {}
     excluded = excluded_node_names or set()
+    resource_blocked = resource_blocked_node_names or set()
     nodes: list[NodeResource] = []
     for line in nodes_output.splitlines():
         if not line.strip():
@@ -166,6 +168,7 @@ def parse_node_resources(
                 capacity=capacity,
                 allocatable=allocatable,
                 used=parse_gpu_quantity(usage.get(node_name, 0)),
+                resource_ready=node_name not in resource_blocked,
             )
         )
     return nodes
@@ -194,18 +197,17 @@ def discover_free_nodes_from_outputs(
     active_config = load_config()
     node_payload = nodes_json or {}
     excluded = unschedulable_node_names(node_payload)
-    excluded.update(
-        resource_insufficient_node_names(
-            pods_json,
-            node_payload,
-            active_config,
-        )
+    resource_blocked = resource_insufficient_node_names(
+        pods_json,
+        node_payload,
+        active_config,
     )
     nodes = parse_node_resources(
         nodes_output,
         usage_by_node,
         node_name_filter=node_name_filter,
         excluded_node_names=excluded,
+        resource_blocked_node_names=resource_blocked,
     )
     return nodes, summarize_node_resources(nodes)
 

@@ -47,6 +47,7 @@ class NodeResource:
     capacity: int
     allocatable: int
     used: int
+    resource_ready: bool = True
 
     @property
     def free(self) -> int:
@@ -58,7 +59,7 @@ class NodeResource:
     def is_fully_free(self) -> bool:
         """Return true when a GPU node has no active GPU workload requests."""
 
-        return self.allocatable > 0 and self.free == self.allocatable
+        return self.resource_ready and self.allocatable > 0 and self.free == self.allocatable
 
 
 @dataclass(frozen=True)
