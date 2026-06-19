@@ -37,6 +37,7 @@ WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)
 DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/dltest)}
 DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
 DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
+DL_METRIC_REFRESH_INTERVAL_SECONDS=${CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS:-3600}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
 TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest,dltest-numerical,dltest-compute,dltest-collective,dltest-overlap}
 
@@ -61,6 +62,7 @@ Environment overrides:
     CVAL_DL_RESULTS_ROOT=$DL_RESULTS_ROOT
     CVAL_DL_METRIC_OUTPUT_DIR=$DL_METRIC_OUTPUT_DIR
         CVAL_DL_METRIC_LOCK_FILE=$DL_METRIC_LOCK_FILE
+    CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS=$DL_METRIC_REFRESH_INTERVAL_SECONDS
 EOF
 }
 
@@ -108,6 +110,36 @@ refresh_dl_metric_dbs() {
         --output json | tee "$1/dltest-ingest.json"
 }
 
+dl_metric_dbs_are_fresh() {
+    local now
+    now=$(date +%s)
+    local db
+    for db in \
+        "$DL_METRIC_OUTPUT_DIR/dltest_numerical_correctness.db" \
+        "$DL_METRIC_OUTPUT_DIR/dltest_compute_performance.db" \
+        "$DL_METRIC_OUTPUT_DIR/dltest_collective_performance.db" \
+        "$DL_METRIC_OUTPUT_DIR/dltest_overlap_performance.db"; do
+        [[ -s "$db" ]] || return 1
+        local mtime
+        mtime=$(stat -c %Y "$db")
+        if (( now - mtime >= DL_METRIC_REFRESH_INTERVAL_SECONDS )); then
+            return 1
+        fi
+    done
+    return 0
+}
+
+refresh_dl_metric_dbs_if_needed() {
+    local cycle_dir="$1"
+    if (( DL_METRIC_REFRESH_INTERVAL_SECONDS > 0 )) && dl_metric_dbs_are_fresh; then
+        log "DL metric DBs are fresh; skipping rebuild (interval=${DL_METRIC_REFRESH_INTERVAL_SECONDS}s)"
+        printf '{"skipped": true, "reason": "fresh", "interval_seconds": %s}\n' \
+            "$DL_METRIC_REFRESH_INTERVAL_SECONDS" | tee "$cycle_dir/dltest-ingest.json"
+        return 0
+    fi
+    refresh_dl_metric_dbs "$cycle_dir"
+}
+
 with_dl_metric_lock() {
     local label="$1"
     shift
@@ -149,7 +181,7 @@ classify_one_test() {
 classify_dl_tests() {
     local cycle_dir="$1"
     shift
-    refresh_dl_metric_dbs "$cycle_dir"
+    refresh_dl_metric_dbs_if_needed "$cycle_dir"
     for test_type in "$@"; do
         classify_one_test "$cycle_dir" "$test_type"
     done
@@ -210,8 +242,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$0"
+        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS=%q bash %q run-loop' \
+        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$DL_METRIC_REFRESH_INTERVAL_SECONDS" "$0"
 
     local tmux_body
     printf -v tmux_body \
