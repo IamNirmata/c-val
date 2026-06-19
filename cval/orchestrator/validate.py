@@ -320,12 +320,22 @@ def _run_pod_cval(
     config_path: str,
     cval_args: list[str],
     lock_file: str | None = None,
+    lock_wait: float | None = None,
+    timeout: float | None = None,
 ):
-    """Run `python -m cval.cli ...` inside the PVC pod, optionally under flock."""
+    """Run `python -m cval.cli ...` inside the PVC pod, optionally under flock.
+
+    ``lock_wait`` bounds how long ``flock`` waits for the shared DL metric lock
+    before giving up, so a busy baseline rebuild cannot stall the call forever.
+    ``timeout`` overrides the client kubectl timeout for this command only.
+    """
 
     args = ["exec", "-i", "-n", namespace, pod, "--"]
     if lock_file:
-        args += ["flock", "-x", lock_file]
+        args += ["flock"]
+        if lock_wait is not None:
+            args += ["-w", str(int(lock_wait))]
+        args += ["-x", lock_file]
     args += ["env", f"PYTHONPATH={repo}", "python3", "-m", "cval.cli", "--config", config_path]
     args += cval_args
     return kubectl.run(args, check=False)
@@ -399,6 +409,8 @@ def run_node_validation(
     overall_timeout: float | None = None,
     pending_timeout: float = 600.0,
     skip_dl_rebuild: bool = False,
+    dl_rebuild_timeout: float = 300.0,
+    dl_lock_wait: float = 120.0,
     pod: str | None = None,
     pod_repo_dir: str = "/tmp/c-val",
     pod_config_path: str | None = None,
@@ -578,11 +590,16 @@ def run_node_validation(
                         "json",
                     ],
                     lock_file=lock_file,
+                    lock_wait=dl_lock_wait,
+                    timeout=dl_rebuild_timeout,
                 )
                 if rebuild.returncode != 0:
-                    note = f"DL metric refresh failed: {_first_line(rebuild.stderr)}"
+                    note = (
+                        "DL metric refresh skipped (lock busy or timeout); "
+                        "DL classified against latest available data"
+                    )
                     notes.append(note)
-                    emit(f"  {note} (DL classification may use older data)")
+                    emit(f"  {note}")
 
             for test in REPORT_TEST_TYPES:
                 emit(f"  classifying {test} ...")

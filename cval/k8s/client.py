@@ -40,10 +40,22 @@ class KubectlClient:
         args: Sequence[str],
         check: bool = True,
         input_text: str | None = None,
+        timeout: float | None = None,
     ) -> CommandResult:
-        """Run a kubectl command and optionally raise on non-zero exit."""
+        """Run a kubectl command and optionally raise on non-zero exit.
+
+        ``timeout`` overrides the client default for this call only: a positive
+        value caps this command, ``0`` disables the cap, and ``None`` falls back
+        to the client's configured timeout.
+        """
 
         command = [self.kubectl, *args]
+        if timeout is None:
+            effective_timeout = self.timeout_seconds
+        elif timeout > 0:
+            effective_timeout = timeout
+        else:
+            effective_timeout = None
         try:
             completed = subprocess.run(
                 command,
@@ -52,12 +64,12 @@ class KubectlClient:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
-                timeout=self.timeout_seconds,
+                timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            timeout = self.timeout_seconds or 0
+            timed_out = effective_timeout or 0
             stdout = _timeout_text(exc.stdout)
-            stderr = _timeout_text(exc.stderr) or f"kubectl command timed out after {timeout:g}s"
+            stderr = _timeout_text(exc.stderr) or f"kubectl command timed out after {timed_out:g}s"
             result = CommandResult(
                 args=command,
                 stdout=stdout,
@@ -67,7 +79,7 @@ class KubectlClient:
             if check:
                 command_text = " ".join(command)
                 raise RuntimeError(
-                    f"Command timed out after {timeout:g}s: {command_text}\n{stderr.strip()}"
+                    f"Command timed out after {timed_out:g}s: {command_text}\n{stderr.strip()}"
                 ) from exc
             return result
         result = CommandResult(

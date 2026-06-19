@@ -22,6 +22,19 @@ class KubectlClientTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "{}")
 
+    def test_per_call_timeout_overrides_client_default(self) -> None:
+        seen: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            seen["timeout"] = kwargs["timeout"]
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        with patch("cval.k8s.client.subprocess.run", side_effect=fake_run):
+            KubectlClient(timeout_seconds=60).run(["logs"], timeout=300)
+            self.assertEqual(seen["timeout"], 300)
+            KubectlClient(timeout_seconds=60).run(["logs"], timeout=0)
+            self.assertIsNone(seen["timeout"])
+
     def test_timeout_raises_actionable_error_by_default(self) -> None:
         with patch(
             "cval.k8s.client.subprocess.run",

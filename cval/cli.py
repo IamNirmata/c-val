@@ -153,6 +153,18 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Do not refresh DL metric DBs for the node before classifying",
     )
     validate.add_argument(
+        "--dl-rebuild-timeout",
+        type=float,
+        default=300.0,
+        help="Dedicated timeout (s) for the scoped DL metric refresh",
+    )
+    validate.add_argument(
+        "--dl-lock-wait",
+        type=float,
+        default=120.0,
+        help="Max seconds to wait for the shared DL metric lock before skipping refresh",
+    )
+    validate.add_argument(
         "--dry-run", action="store_true", help="Render only; do not submit a job"
     )
     validate.add_argument("--output", choices=["table", "json"], default="table")
@@ -759,6 +771,8 @@ def handle_validate(args: argparse.Namespace) -> int:
         overall_timeout=args.timeout_seconds,
         pending_timeout=args.pending_timeout,
         skip_dl_rebuild=args.skip_dl_rebuild,
+        dl_rebuild_timeout=args.dl_rebuild_timeout,
+        dl_lock_wait=args.dl_lock_wait,
         pod=args.pvc_pod,
         pod_repo_dir=args.pod_repo_dir,
         pod_config_path=args.pod_config,

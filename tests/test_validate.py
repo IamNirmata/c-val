@@ -279,7 +279,7 @@ class FakeValidateClient:
     def _result(self, stdout="", returncode=0):
         return CommandResult(args=["kubectl"], stdout=stdout, stderr="", returncode=returncode)
 
-    def run(self, args, check=True, input_text=None):
+    def run(self, args, check=True, input_text=None, timeout=None):
         self.calls.append(list(args))
         joined = " ".join(args)
         if "get pods -A" in joined:
