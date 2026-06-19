@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from cval.config import load_config
+from cval.config import CvalConfig, load_config
 from cval.k8s.client import KubectlClient
 from cval.models import NodeResource
 
@@ -24,6 +24,43 @@ def parse_gpu_quantity(value: object) -> int:
     text = str(value).strip()
     if not text or text == "<none>":
         return 0
+    return int(float(text))
+
+
+def parse_cpu_millicores(value: object) -> int:
+    """Parse Kubernetes CPU quantities into millicores."""
+
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text or text == "<none>":
+        return 0
+    if text.endswith("m"):
+        return int(float(text[:-1]))
+    return int(float(text) * 1000)
+
+
+def parse_memory_bytes(value: object) -> int:
+    """Parse common Kubernetes memory quantities into bytes."""
+
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text or text == "<none>":
+        return 0
+    units = {
+        "Ki": 1024,
+        "Mi": 1024**2,
+        "Gi": 1024**3,
+        "Ti": 1024**4,
+        "K": 1000,
+        "M": 1000**2,
+        "G": 1000**3,
+        "T": 1000**4,
+    }
+    for suffix, multiplier in units.items():
+        if text.endswith(suffix):
+            return int(float(text[: -len(suffix)]) * multiplier)
     return int(float(text))
 
 
@@ -60,6 +97,42 @@ def pod_gpu_usage_by_node(pods_json: Mapping[str, object]) -> dict[str, int]:
             continue
         usage_by_node[node_name] = usage_by_node.get(node_name, 0) + pod_effective_gpu_request(pod)
     return usage_by_node
+
+
+def pod_resource_usage_by_node(
+    pods_json: Mapping[str, object],
+    resource_name: str,
+    parser,
+) -> dict[str, int]:
+    """Aggregate active pod requests for one resource by node."""
+
+    usage_by_node: dict[str, int] = {}
+    for pod in _list(pods_json.get("items")):
+        spec = _mapping(pod.get("spec"))
+        status = _mapping(pod.get("status"))
+        node_name = spec.get("nodeName")
+        if not isinstance(node_name, str) or not node_name:
+            continue
+        if status.get("phase") in {"Succeeded", "Failed"}:
+            continue
+        requested = pod_effective_resource_request(pod, resource_name, parser)
+        usage_by_node[node_name] = usage_by_node.get(node_name, 0) + requested
+    return usage_by_node
+
+
+def pod_effective_resource_request(pod: Mapping[str, object], resource_name: str, parser) -> int:
+    """Return scheduler-effective request for one resource on a pod."""
+
+    spec = _mapping(pod.get("spec"))
+    containers = _list(spec.get("containers"))
+    init_containers = _list(spec.get("initContainers"))
+    app_request = sum(_container_resource_request(container, resource_name, parser) for container in containers)
+    init_requests = [
+        _container_resource_request(container, resource_name, parser)
+        for container in init_containers
+    ]
+    init_request = max(init_requests) if init_requests else 0
+    return max(app_request, init_request)
 
 
 def parse_node_resources(
@@ -118,7 +191,16 @@ def discover_free_nodes_from_outputs(
     """Build node resources and totals from raw pod/node command outputs."""
 
     usage_by_node = pod_gpu_usage_by_node(pods_json)
-    excluded = unschedulable_node_names(nodes_json or {})
+    active_config = load_config()
+    node_payload = nodes_json or {}
+    excluded = unschedulable_node_names(node_payload)
+    excluded.update(
+        resource_insufficient_node_names(
+            pods_json,
+            node_payload,
+            active_config,
+        )
+    )
     nodes = parse_node_resources(
         nodes_output,
         usage_by_node,
@@ -126,6 +208,47 @@ def discover_free_nodes_from_outputs(
         excluded_node_names=excluded,
     )
     return nodes, summarize_node_resources(nodes)
+
+
+def resource_insufficient_node_names(
+    pods_json: Mapping[str, object],
+    nodes_json: Mapping[str, object],
+    config: CvalConfig | None = None,
+) -> set[str]:
+    """Return nodes without enough free resources for the validation pod."""
+
+    if not nodes_json:
+        return set()
+    active_config = config or load_config()
+    job_template = active_config.job_template
+    requirements = {
+        "cpu": (parse_cpu_millicores(job_template.cpu), parse_cpu_millicores),
+        "memory": (parse_memory_bytes(job_template.memory), parse_memory_bytes),
+        job_template.gpu_resource_name: (parse_gpu_quantity(job_template.gpu_count), parse_gpu_quantity),
+        job_template.rdma_resource_name: (parse_gpu_quantity(job_template.rdma_count), parse_gpu_quantity),
+    }
+    usage_by_resource = {
+        resource_name: pod_resource_usage_by_node(pods_json, resource_name, parser)
+        for resource_name, (_required, parser) in requirements.items()
+    }
+
+    excluded: set[str] = set()
+    for node in _list(nodes_json.get("items")):
+        node_map = _mapping(node)
+        metadata = _mapping(node_map.get("metadata"))
+        status = _mapping(node_map.get("status"))
+        allocatable = _mapping(status.get("allocatable"))
+        name = metadata.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        for resource_name, (required, parser) in requirements.items():
+            if required <= 0 or resource_name not in allocatable:
+                continue
+            available = parser(allocatable.get(resource_name)) - usage_by_resource[resource_name].get(name, 0)
+            if available < required:
+                excluded.add(name)
+                break
+    return excluded
 
 
 def unschedulable_node_names(
@@ -187,6 +310,15 @@ def _container_gpu_request(container: object) -> int:
     resources = _mapping(container_map.get("resources"))
     requests = _mapping(resources.get("requests"))
     return parse_gpu_quantity(requests.get("nvidia.com/gpu", 0))
+
+
+def _container_resource_request(container: object, resource_name: str, parser) -> int:
+    """Read one resource request from a container spec."""
+
+    container_map = _mapping(container)
+    resources = _mapping(container_map.get("resources"))
+    requests = _mapping(resources.get("requests"))
+    return parser(requests.get(resource_name, 0))
 
 
 def _mapping(value: object) -> Mapping[str, object]:
