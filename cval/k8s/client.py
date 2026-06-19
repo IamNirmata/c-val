@@ -8,6 +8,7 @@ read-only, dry-run, or mutating; this client only executes explicit arguments.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Sequence
@@ -26,10 +27,13 @@ class CommandResult:
 class KubectlClient:
     """Small testable adapter around the `kubectl` executable."""
 
-    def __init__(self, kubectl: str = "kubectl") -> None:
+    def __init__(self, kubectl: str = "kubectl", timeout_seconds: float | None = None) -> None:
         """Store the kubectl binary path or command name."""
 
         self.kubectl = kubectl
+        if timeout_seconds is None:
+            timeout_seconds = float(os.environ.get("CVAL_KUBECTL_TIMEOUT_SECONDS", "120"))
+        self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
 
     def run(
         self,
@@ -40,14 +44,32 @@ class KubectlClient:
         """Run a kubectl command and optionally raise on non-zero exit."""
 
         command = [self.kubectl, *args]
-        completed = subprocess.run(
-            command,
-            input=input_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                input=input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout = self.timeout_seconds or 0
+            stdout = _timeout_text(exc.stdout)
+            stderr = _timeout_text(exc.stderr) or f"kubectl command timed out after {timeout:g}s"
+            result = CommandResult(
+                args=command,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=124,
+            )
+            if check:
+                command_text = " ".join(command)
+                raise RuntimeError(
+                    f"Command timed out after {timeout:g}s: {command_text}\n{stderr.strip()}"
+                ) from exc
+            return result
         result = CommandResult(
             args=command,
             stdout=completed.stdout,
@@ -96,3 +118,11 @@ class KubectlClient:
                 columns,
             ]
         ).stdout
+
+
+def _timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
