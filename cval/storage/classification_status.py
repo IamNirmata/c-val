@@ -218,7 +218,8 @@ except Exception as exc:
 print(json.dumps(out))
 '''
     result = kubectl.run(
-        ["exec", "-n", namespace, status_pod, "--", "python3", "-c", code, db_path]
+        ["exec", "-i", "-n", namespace, status_pod, "--", "python3", "-", db_path],
+        input_text=code,
     )
     return parse_latest_classification_rows_json(result.stdout)
 
