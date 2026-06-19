@@ -36,6 +36,7 @@ INTERVAL_SECONDS=${CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS:-$(config_value basel
 WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)}
 DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/dltest)}
 DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
+DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
 TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest,dltest-numerical,dltest-compute,dltest-collective,dltest-overlap}
 
@@ -59,6 +60,7 @@ Environment overrides:
   CVAL_BASELINE_CLASSIFY_TESTS=$TEST_TYPES
     CVAL_DL_RESULTS_ROOT=$DL_RESULTS_ROOT
     CVAL_DL_METRIC_OUTPUT_DIR=$DL_METRIC_OUTPUT_DIR
+        CVAL_DL_METRIC_LOCK_FILE=$DL_METRIC_LOCK_FILE
 EOF
 }
 
@@ -106,8 +108,51 @@ refresh_dl_metric_dbs() {
         --output json | tee "$1/dltest-ingest.json"
 }
 
+with_dl_metric_lock() {
+    local label="$1"
+    shift
+    mkdir -p "$(dirname "$DL_METRIC_LOCK_FILE")"
+    if command -v flock >/dev/null 2>&1; then
+        log "waiting for DL metric lock: $DL_METRIC_LOCK_FILE ($label)"
+        (
+            flock -x 9
+            log "acquired DL metric lock ($label)"
+            "$@"
+        ) 9>"$DL_METRIC_LOCK_FILE"
+    else
+        log "flock not found; running without DL metric lock ($label)"
+        "$@"
+    fi
+}
+
+is_dl_test() {
+    [[ "$1" == "dltest" || "$1" == dltest-* ]]
+}
+
 tests_include_dltest() {
     [[ ",$TEST_TYPES," == *",dltest,"* ]] || [[ ",$TEST_TYPES," == *",dltest-"* ]]
+}
+
+classify_one_test() {
+    local cycle_dir="$1"
+    local test_type="$2"
+    log "classifying $test_type against active baseline"
+    if ! python -m cval.cli --config "$CONFIG_PATH" baseline classify \
+        --test-type "$test_type" \
+        --window-days "$WINDOW_DAYS" \
+        --store-results \
+        --output json | tee "$cycle_dir/${test_type}.json"; then
+        log "classification skipped or failed for $test_type"
+    fi
+}
+
+classify_dl_tests() {
+    local cycle_dir="$1"
+    shift
+    refresh_dl_metric_dbs "$cycle_dir"
+    for test_type in "$@"; do
+        classify_one_test "$cycle_dir" "$test_type"
+    done
 }
 
 run_cycle() {
@@ -121,23 +166,21 @@ run_cycle() {
     pushd "$REPO_DIR" >/dev/null
     log "baseline classification cycle start: root=$BASELINE_ROOT window_days=$WINDOW_DAYS tests=$TEST_TYPES"
 
-    if tests_include_dltest; then
-        refresh_dl_metric_dbs "$cycle_dir"
-    fi
-
     IFS=',' read -r -a tests <<< "$TEST_TYPES"
+    local dl_tests=()
     for test_type in "${tests[@]}"; do
         test_type=$(echo "$test_type" | xargs)
         [[ -n "$test_type" ]] || continue
-        log "classifying $test_type against active baseline"
-        if ! python -m cval.cli --config "$CONFIG_PATH" baseline classify \
-            --test-type "$test_type" \
-            --window-days "$WINDOW_DAYS" \
-            --store-results \
-            --output json | tee "$cycle_dir/${test_type}.json"; then
-            log "classification skipped or failed for $test_type"
+        if is_dl_test "$test_type"; then
+            dl_tests+=("$test_type")
+        else
+            classify_one_test "$cycle_dir" "$test_type"
         fi
     done
+
+    if (( ${#dl_tests[@]} > 0 )); then
+        with_dl_metric_lock "baseline-classify" classify_dl_tests "$cycle_dir" "${dl_tests[@]}"
+    fi
 
     log "baseline classification cycle complete: artifacts=$cycle_dir"
     popd >/dev/null
@@ -167,8 +210,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$0"
+        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q bash %q run-loop' \
+        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$0"
 
     local tmux_body
     printf -v tmux_body \
