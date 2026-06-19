@@ -14,6 +14,7 @@ cval config
 cval status
 cval nodes
 cval overview
+cval validate
 cval run
 cval jobs
 cval result
@@ -72,6 +73,47 @@ Useful flags:
 - `--threshold-days N`: freshness threshold for valid vs outdated results.
 - `--queue-limit N`: number of queued nodes to show.
 - `--no-jobs`: skip Volcano job listing for a faster view.
+
+## `validate`
+
+Validate one specific node on demand, end to end: it prints the node's
+schedulability, submits a single validation job immediately (no free-node
+search), live-tracks job phase and per-test progress, then classifies the fresh
+result against the active baselines on the PVC access pod and prints a pass/fail
++ degraded-metric report.
+
+```bash
+python -m cval.cli validate --node slc01-cl02-hgx-0186
+python -m cval.cli validate --node slc01-cl02-hgx-0186 --output json
+python -m cval.cli validate --node slc01-cl02-hgx-0186 --dry-run
+```
+
+Flow:
+
+1. Print whether the node is free, schedulable, and resource-ready (informational).
+2. Submit the job regardless of node state (the explicit `validate` is the approval).
+3. Every `--poll-interval` seconds (default 3), print job phase and which tests
+   (`storage`, `nccl`, `dltest`) have finished, parsed from the in-pod logs.
+4. When the job is terminal, refresh the node's DL metric DBs (scoped, under the
+   shared DL lock) and run `baseline classify` for `storage`, `nccl`, and
+   `dltest` on the PVC pod, storing verdicts.
+5. Print a report: raw pass/fail and baseline verdict per test, DL component
+   breakdown, and the degraded metrics with their percentage deviation from
+   baseline.
+
+Useful flags:
+
+- `--git-ref <ref>`: pin the runtime checkout the job clones (default config).
+- `--poll-interval N`: live status cadence in seconds (default 3).
+- `--timeout-seconds N`: overall live-tracking timeout.
+- `--pending-timeout N`: warn if the job is still `Pending` after N seconds (it stays queued).
+- `--skip-dl-rebuild`: classify DL against existing metric DBs without refreshing.
+- `--pvc-pod` / `--pod-repo-dir` / `--pod-config`: override the classification pod and its c-val checkout.
+- `--dry-run`: render the job and show node state without submitting.
+
+The job is submitted into the policy-allowlisted namespace; classification runs
+in the PVC access pod because that is where `/data/continuous_validation` is
+mounted.
 
 ## `run`
 

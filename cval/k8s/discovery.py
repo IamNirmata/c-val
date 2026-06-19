@@ -8,6 +8,7 @@ jobs, such as cordoned nodes or nodes with non-tolerated `NoSchedule` taints.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from cval.config import CvalConfig, load_config
 from cval.k8s.client import KubectlClient
@@ -302,6 +303,109 @@ def discover_free_nodes(
         kubectl.get_nodes_capacity_table(),
         nodes_json=kubectl.get_nodes_json(),
         node_name_filter=resolved_node_name_filter,
+    )
+
+
+@dataclass(frozen=True)
+class NodeStatus:
+    """Schedulability snapshot for one named node, used by targeted validation."""
+
+    name: str
+    found: bool
+    is_gpu_node: bool
+    schedulable: bool
+    resource_ready: bool
+    capacity: int
+    allocatable: int
+    used: int
+    free: int
+    fully_free: bool
+    reason: str
+
+
+def describe_node_from_outputs(
+    node_name: str,
+    pods_json: Mapping[str, object],
+    nodes_output: str,
+    nodes_json: Mapping[str, object] | None = None,
+    config: CvalConfig | None = None,
+) -> NodeStatus:
+    """Describe one node's free/schedulable state from raw command outputs."""
+
+    active_config = config or load_config()
+    node_payload = nodes_json or {}
+    unschedulable = unschedulable_node_names(node_payload)
+    resource_blocked = resource_insufficient_node_names(pods_json, node_payload, active_config)
+    usage = pod_gpu_usage_by_node(pods_json)
+
+    found = False
+    capacity = 0
+    allocatable = 0
+    for line in nodes_output.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == node_name:
+            found = True
+            capacity = parse_gpu_quantity(parts[1])
+            allocatable = parse_gpu_quantity(parts[2])
+            break
+
+    used = parse_gpu_quantity(usage.get(node_name, 0))
+    free = max(allocatable - used, 0)
+    schedulable = node_name not in unschedulable
+    resource_ready = node_name not in resource_blocked
+    is_gpu_node = capacity > 0
+    fully_free = (
+        found
+        and is_gpu_node
+        and schedulable
+        and resource_ready
+        and allocatable > 0
+        and free == allocatable
+    )
+
+    if not found:
+        reason = "node not found in the cluster node list"
+    elif not is_gpu_node:
+        reason = "node has no nvidia.com/gpu capacity (not a GPU node)"
+    elif not schedulable:
+        reason = "node is cordoned or carries a blocking NoSchedule taint"
+    elif not resource_ready:
+        reason = "insufficient free CPU/memory/RDMA for a validation pod"
+    elif free < allocatable:
+        reason = f"{used}/{allocatable} GPUs already in use"
+    else:
+        reason = "free and schedulable"
+
+    return NodeStatus(
+        name=node_name,
+        found=found,
+        is_gpu_node=is_gpu_node,
+        schedulable=schedulable,
+        resource_ready=resource_ready,
+        capacity=capacity,
+        allocatable=allocatable,
+        used=used,
+        free=free,
+        fully_free=fully_free,
+        reason=reason,
+    )
+
+
+def describe_node(
+    node_name: str,
+    client: KubectlClient | None = None,
+    config: CvalConfig | None = None,
+) -> NodeStatus:
+    """Describe one node's free/schedulable state from live read-only calls."""
+
+    kubectl = client or KubectlClient()
+    active_config = config or load_config()
+    return describe_node_from_outputs(
+        node_name,
+        kubectl.get_pods_json(),
+        kubectl.get_nodes_capacity_table(),
+        nodes_json=kubectl.get_nodes_json(),
+        config=active_config,
     )
 
 

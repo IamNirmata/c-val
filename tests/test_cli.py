@@ -24,7 +24,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
-        self.assertIn("{config,status,nodes,overview,run,jobs,result,results,classifications}", help_text)
+        self.assertIn("{config,status,nodes,overview,validate,run,jobs,result,results,classifications}", help_text)
         self.assertNotIn("submit-plan", help_text)
         self.assertNotIn("run-batch", help_text)
         self.assertNotIn("db-add-result", help_text)

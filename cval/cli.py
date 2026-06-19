@@ -89,7 +89,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,status,nodes,overview,run,jobs,result,results,classifications}",
+        metavar="{config,status,nodes,overview,validate,run,jobs,result,results,classifications}",
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
@@ -104,6 +104,59 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     nodes.add_argument("--output", choices=["table", "json"], default="table")
     nodes.set_defaults(handler=handle_nodes)
+
+    validate = subparsers.add_parser(
+        "validate",
+        help="Submit, live-track, classify, and report validation for one node",
+    )
+    validate.add_argument("--node", required=True, help="Target node name to validate")
+    validate.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    validate.add_argument("--git-ref", default=active_config.job.git_ref)
+    validate.add_argument(
+        "--timestamp", type=int, help="Override the run timestamp (defaults to now)"
+    )
+    validate.add_argument(
+        "--poll-interval", type=float, default=3.0, help="Live status poll seconds"
+    )
+    validate.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=active_config.monitoring.timeout_seconds,
+        help="Overall live-tracking timeout",
+    )
+    validate.add_argument(
+        "--pending-timeout",
+        type=float,
+        default=600.0,
+        help="Warn if the job is still Pending after N seconds (it stays queued)",
+    )
+    validate.add_argument(
+        "--window-days", type=int, default=active_config.baseline.window_days
+    )
+    validate.add_argument(
+        "--pvc-pod",
+        default=active_config.cluster.pvc_access_pod,
+        help="PVC access pod used to run classification",
+    )
+    validate.add_argument(
+        "--pod-repo-dir",
+        default="/tmp/c-val",
+        help="c-val checkout directory inside the PVC pod",
+    )
+    validate.add_argument(
+        "--pod-config",
+        help="Config path inside the PVC pod; defaults to <pod-repo-dir>/config/cval.toml",
+    )
+    validate.add_argument(
+        "--skip-dl-rebuild",
+        action="store_true",
+        help="Do not refresh DL metric DBs for the node before classifying",
+    )
+    validate.add_argument(
+        "--dry-run", action="store_true", help="Render only; do not submit a job"
+    )
+    validate.add_argument("--output", choices=["table", "json"], default="table")
+    validate.set_defaults(handler=handle_validate)
 
     status = subparsers.add_parser(
         "status",
@@ -690,6 +743,34 @@ def handle_classifications(args: argparse.Namespace) -> int:
     output_path = write_classifications_csv(rows, args.test, output_dir=args.output_dir)
     print(f"Wrote {len(selected)} {args.test} classification row(s) to {output_path}")
     return 0
+
+
+def handle_validate(args: argparse.Namespace) -> int:
+    """Submit one node, live-track it, classify the fresh result, and report."""
+    from cval.orchestrator.validate import run_node_validation
+
+    report = run_node_validation(
+        args.node,
+        config=args.cval_config,
+        namespace=args.namespace,
+        git_ref=args.git_ref,
+        timestamp=args.timestamp,
+        poll_interval=args.poll_interval,
+        overall_timeout=args.timeout_seconds,
+        pending_timeout=args.pending_timeout,
+        skip_dl_rebuild=args.skip_dl_rebuild,
+        pod=args.pvc_pod,
+        pod_repo_dir=args.pod_repo_dir,
+        pod_config_path=args.pod_config,
+        window_days=args.window_days,
+        dry_run=args.dry_run,
+        verbose=(args.output == "table"),
+    )
+    if args.output == "json":
+        print(json.dumps(report, indent=2))
+    if report.get("dry_run"):
+        return 0
+    return 0 if report.get("ok", False) else 1
 
 
 def handle_db_add_result(args: argparse.Namespace) -> int:

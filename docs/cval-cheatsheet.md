@@ -69,6 +69,23 @@ columns when available: `classification_status`, `n_degraded`,
 
 ---
 
+## Validate one node (on-demand)
+
+```bash
+# Submit a node directly, live-track, classify, and report — no free-node search
+cval validate --node slc01-cl02-hgx-0186
+cval validate --node slc01-cl02-hgx-0186 --output json   # structured report
+cval validate --node slc01-cl02-hgx-0186 --dry-run       # render only, no submit
+cval validate --node slc01-cl02-hgx-0186 --skip-dl-rebuild
+```
+
+Flow: prints node free/schedulable status → queues the job anyway → prints job
+phase + finished tests every 3s → after the job ends, classifies storage/nccl/
+dltest on the PVC pod → reports raw pass/fail, baseline verdicts, DL component
+breakdown, and degraded metrics with % deviation from baseline.
+
+---
+
 ## Plan & submit
 
 ```bash
