@@ -74,6 +74,8 @@ def add_validation_result(
     result: str,
     timestamp: object | None,
     image_name: str = "",
+    pytorch_version: str = "",
+    cuda_version: str = "",
     db_path: str | Path = DEFAULT_VALIDATION_DB_PATH,
 ) -> int:
     """Append one validation result row and return the parsed timestamp."""
@@ -90,17 +92,22 @@ def add_validation_result(
               test TEXT NOT NULL,
               timestamp INTEGER NOT NULL,
               result TEXT NOT NULL CHECK (result IN ('pass','fail','incomplete')),
-              image_name TEXT NOT NULL DEFAULT ''
+              image_name TEXT NOT NULL DEFAULT '',
+              pytorch_version TEXT NOT NULL DEFAULT '',
+              cuda_version TEXT NOT NULL DEFAULT ''
             )
             """
         )
         _ensure_column(connection, "runs", "image_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(connection, "runs", "pytorch_version", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(connection, "runs", "cuda_version", "TEXT NOT NULL DEFAULT ''")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_node_test_ts ON runs(node, test, timestamp)"
         )
         connection.execute(
-            "INSERT INTO runs(node, test, timestamp, result, image_name) VALUES (?,?,?,?,?)",
-            (node, test, parsed_timestamp, result, image_name),
+            "INSERT INTO runs(node, test, timestamp, result, image_name, pytorch_version, cuda_version) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (node, test, parsed_timestamp, result, image_name, pytorch_version, cuda_version),
         )
         connection.commit()
     return parsed_timestamp

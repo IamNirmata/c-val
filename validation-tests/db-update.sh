@@ -22,6 +22,8 @@ GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
 CVAL_IMAGE_NAME=${CVAL_IMAGE_NAME:-}
+CVAL_PYTORCH_VERSION=${CVAL_PYTORCH_VERSION:-}
+CVAL_CUDA_VERSION=${CVAL_CUDA_VERSION:-}
 
 if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
     echo "Loading structured test result state from $CVAL_RESULT_JSON_FILE"
@@ -32,6 +34,8 @@ if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
             GCRRESULT3) GCRRESULT3="$value" ;;
             overall_result) overall_result="$value" ;;
             image_name) CVAL_IMAGE_NAME="$value" ;;
+            pytorch_version) CVAL_PYTORCH_VERSION="$value" ;;
+            cuda_version) CVAL_CUDA_VERSION="$value" ;;
         esac
     done < <(PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli result --result-json "$CVAL_RESULT_JSON_FILE"
     )
@@ -59,6 +63,8 @@ add_main_result() {
         "$result" \
         "$GCRTIME" \
         --image-name "$CVAL_IMAGE_NAME" \
+        --pytorch-version "$CVAL_PYTORCH_VERSION" \
+        --cuda-version "$CVAL_CUDA_VERSION" \
         --db-path "$CVAL_VALIDATION_DB_PATH"
 }
 

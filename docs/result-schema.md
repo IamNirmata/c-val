@@ -21,6 +21,8 @@ cval.results.v1
   "schema_version": "cval.results.v1",
   "node": "slc01-cl02-hgx-0204",
   "image_name": "pytorch:26.05-py3",
+  "pytorch_version": "2.8.0a0+gitabc123",
+  "cuda_version": "12.9",
   "timestamp": "1781134840",
   "generated_at": "2026-06-10T23:47:42.103216Z",
   "overall": "pass",
@@ -48,20 +50,24 @@ cval.results.v1
 
 - Valid statuses: `pass`, `fail`, `incomplete`.
 - `image_name` records the validation image identity used for the run.
+- `pytorch_version` and `cuda_version` are detected from the running image in
+  `0-env.sh` (`torch.__version__` and `torch.version.cuda`) and are best-effort:
+  they are empty strings when torch is unavailable.
 - `overall` is `pass` only when all test statuses are `pass`.
 - `db-update.sh` prefers JSON and falls back to the legacy env file if JSON is missing.
-- DB writes use package-native `cval db-add-*` commands inside the validation pod and store `image_name` with validation, storage, and NCCL rows.
+- DB writes use package-native `cval db-add-*` commands inside the validation pod and store `image_name`, `pytorch_version`, and `cuda_version` with the `runs` validation rows.
 - `cval.validation.results` validates schema version, required tests, valid statuses, and aggregate consistency.
 
 ## DB Rows
 
-Each run should write four latest-status rows:
+Each run should write four latest-status rows in `validation.db` `runs`, each
+carrying `image_name`, `pytorch_version`, and `cuda_version`:
 
 ```text
-<node> storage <timestamp> <status> <image_name>
-<node> nccl    <timestamp> <status> <image_name>
-<node> dltest  <timestamp> <status> <image_name>
-<node> all     <timestamp> <overall> <image_name>
+<node> storage <timestamp> <status>  <image_name> <pytorch_version> <cuda_version>
+<node> nccl    <timestamp> <status>  <image_name> <pytorch_version> <cuda_version>
+<node> dltest  <timestamp> <status>  <image_name> <pytorch_version> <cuda_version>
+<node> all     <timestamp> <overall> <image_name> <pytorch_version> <cuda_version>
 ```
 
 ## Baseline Classification

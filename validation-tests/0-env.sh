@@ -14,6 +14,13 @@ CVAL_GPU_COUNT=${CVAL_GPU_COUNT:-8}
 export CVAL_VALIDATION_ROOT CVAL_REPO_DIR CVAL_VALIDATION_TESTS_DIR CVAL_DL_UNIT_TEST_DIR
 export CVAL_VALIDATION_DB_PATH CVAL_STORAGE_DB_PATH CVAL_NCCL_DB_PATH CVAL_GPU_COUNT
 
+# Detect framework versions from the running image so each result records the
+# exact PyTorch/CUDA build that produced it, alongside image_name. Detection is
+# best-effort: a missing or CPU-only torch leaves the value empty.
+CVAL_PYTORCH_VERSION=${CVAL_PYTORCH_VERSION:-$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo "")}
+CVAL_CUDA_VERSION=${CVAL_CUDA_VERSION:-$(python3 -c 'import torch; print(torch.version.cuda or "")' 2>/dev/null || echo "")}
+export CVAL_PYTORCH_VERSION CVAL_CUDA_VERSION
+
 
 # Test-specific output roots on the shared validation PVC.
 export STORAGE_OUTPUT_DIR="$CVAL_VALIDATION_ROOT/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME"

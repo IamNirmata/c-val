@@ -298,6 +298,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_result.add_argument("result", choices=["pass", "fail", "incomplete"])
     db_add_result.add_argument("timestamp")
     db_add_result.add_argument("--image-name", default="")
+    db_add_result.add_argument("--pytorch-version", default="")
+    db_add_result.add_argument("--cuda-version", default="")
     db_add_result.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_result.set_defaults(handler=handle_db_add_result)
 
@@ -796,6 +798,8 @@ def handle_db_add_result(args: argparse.Namespace) -> int:
         args.result,
         args.timestamp,
         image_name=args.image_name,
+        pytorch_version=args.pytorch_version,
+        cuda_version=args.cuda_version,
         db_path=args.db_path,
     )
     print(f"Added validation result: {args.node} {args.test} {args.result} {timestamp}")

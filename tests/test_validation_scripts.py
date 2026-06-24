@@ -96,6 +96,8 @@ class ValidationScriptTests(unittest.TestCase):
             "node": "slc01-cl02-hgx-0001",
             "timestamp": "12345",
             "image_name": "pytorch:26.05-py3",
+            "pytorch_version": "2.8.0a0+abc123",
+            "cuda_version": "12.9",
             "overall": "fail",
             "tests": {
                 "storage": {"status": "pass", "log": "storage.log", "summary": "storage.txt"},
@@ -111,6 +113,8 @@ class ValidationScriptTests(unittest.TestCase):
 
         self.assertEqual(result.overall, "fail")
         self.assertEqual(result.image_name, "pytorch:26.05-py3")
+        self.assertEqual(result.pytorch_version, "2.8.0a0+abc123")
+        self.assertEqual(result.cuda_version, "12.9")
         self.assertEqual(result.tests["nccl"].status, "fail")
         self.assertEqual(
             validation_result_to_env(result),
@@ -120,6 +124,8 @@ class ValidationScriptTests(unittest.TestCase):
                 "GCRRESULT3": "pass",
                 "overall_result": "fail",
                 "image_name": "pytorch:26.05-py3",
+                "pytorch_version": "2.8.0a0+abc123",
+                "cuda_version": "12.9",
             },
         )
 

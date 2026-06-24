@@ -36,6 +36,8 @@ class ValidationResult:
     overall: str
     tests: dict[str, TestResult]
     image_name: str = ""
+    pytorch_version: str = ""
+    cuda_version: str = ""
 
 
 RESULT_ENV_KEYS = {
@@ -87,6 +89,8 @@ def parse_validation_result(payload: dict[str, Any]) -> ValidationResult:
         node=str(payload.get("node", "")),
         timestamp=str(payload.get("timestamp", "")),
         image_name=str(payload.get("image_name", "")),
+        pytorch_version=str(payload.get("pytorch_version", "")),
+        cuda_version=str(payload.get("cuda_version", "")),
         overall=overall,
         tests=tests,
     )
@@ -101,6 +105,8 @@ def validation_result_to_env(result: ValidationResult) -> dict[str, str]:
     }
     values["overall_result"] = result.overall
     values["image_name"] = result.image_name
+    values["pytorch_version"] = result.pytorch_version
+    values["cuda_version"] = result.cuda_version
     return values
 
 
