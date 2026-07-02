@@ -273,6 +273,21 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="Do not join latest baseline classification columns into the CSV",
     )
+    results.add_argument(
+        "--nccl-db-path",
+        default=active_config.storage.nccl_db_path,
+        help="Override path to test-nccl.db on the PVC pod",
+    )
+    results.add_argument(
+        "--storage-db-path",
+        default=active_config.storage.storage_db_path,
+        help="Override path to test-storage.db on the PVC pod",
+    )
+    results.add_argument(
+        "--no-metrics",
+        action="store_true",
+        help="Do not join NCCL/storage metric columns into the CSV",
+    )
     results.set_defaults(handler=handle_results)
 
     classifications = subparsers.add_parser(
@@ -708,6 +723,7 @@ def handle_results(args: argparse.Namespace) -> int:
     """Export latest per-node results for one selected test to a local CSV."""
     from cval.storage.results_export import latest_result_rows, write_latest_results_csv
     from cval.storage.classification_status import get_latest_classification_rows
+    from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
 
     if args.result_type != "csv":
         raise ValueError("Only --type csv is currently supported")
@@ -725,12 +741,32 @@ def handle_results(args: argparse.Namespace) -> int:
             db_path=args.classification_db_path,
             config=args.cval_config,
         )
+
+    nccl_metrics = None
+    storage_metrics = None
+    if not args.no_metrics:
+        test = args.test.lower()
+        if test in {"nccl", "overall", "all"}:
+            nccl_metrics = get_latest_nccl_metrics(
+                pod=args.pod,
+                namespace=args.namespace,
+                db_path=args.nccl_db_path,
+            )
+        if test in {"storage", "overall", "all"}:
+            storage_metrics = get_latest_storage_metrics(
+                pod=args.pod,
+                namespace=args.namespace,
+                db_path=args.storage_db_path,
+            )
+
     selected = latest_result_rows(rows, args.test)
     output_path = write_latest_results_csv(
         rows,
         args.test,
         output_dir=args.output_dir,
         classifications=classifications,
+        nccl_metrics=nccl_metrics,
+        storage_metrics=storage_metrics,
     )
     print(f"Wrote {len(selected)} {args.test} latest result row(s) to {output_path}")
     return 0

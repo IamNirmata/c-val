@@ -129,3 +129,29 @@ class WorkflowPlan:
     batch_size: int
     days_threshold: float
     dry_run: bool = True
+
+
+@dataclass(frozen=True)
+class NcclMetrics:
+    """Latest NCCL performance metrics for one node (from test-nccl.db)."""
+
+    busbw: float | None
+    latency: float | None
+
+
+@dataclass(frozen=True)
+class StorageMetrics:
+    """Latest FIO storage performance metrics for one node (from test-storage.db)."""
+
+    iodepth_read_1file_iops: float | None
+    iodepth_read_1file_bw: float | None
+    iodepth_write_1file_iops: float | None
+    iodepth_write_1file_bw: float | None
+    numjobs_read_nfiles_iops: float | None
+    numjobs_read_nfiles_bw: float | None
+    numjobs_write_nfiles_iops: float | None
+    numjobs_write_nfiles_bw: float | None
+    randread_iops: float | None
+    randread_bw: float | None
+    randwrite_iops: float | None
+    randwrite_bw: float | None
