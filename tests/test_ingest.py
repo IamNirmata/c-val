@@ -7,8 +7,13 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from cval.storage.ingest import add_nccl_result, add_storage_result, add_validation_result
-
+from cval.storage.ingest import (
+    add_nccl_ib_port_results,
+    add_nccl_ib_ports_from_summary,
+    add_nccl_result,
+    add_storage_result,
+    add_validation_result,
+)
 
 class IngestTests(unittest.TestCase):
     def test_add_validation_result_writes_run_row(self) -> None:
@@ -136,6 +141,76 @@ class IngestTests(unittest.TestCase):
                 row,
                 ("slc01-cl02-hgx-0001", 12345, "pytorch:26.05-py3", 44.7, 626.1),
             )
+
+
+class NcclIbPortIngestTests(unittest.TestCase):
+    def test_add_nccl_ib_port_results_writes_one_row_per_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nccl.db"
+            ports = {
+                "mlx5_0": {"avg_gbps": 0.0, "max_gbps": 0.0, "last_gbps": 0.0, "samples": 26},
+                "mlx5_4": {"avg_gbps": 20.285, "max_gbps": 46.236, "last_gbps": 46.1, "samples": 26},
+                "mlx5_5.2": {"avg_gbps": 12.0, "max_gbps": 24.0, "last_gbps": 23.0, "samples": 26},
+            }
+
+            add_nccl_ib_port_results(
+                "slc01-cl02-hgx-0001",
+                "12345",
+                ports,
+                image_name="pytorch:26.05-py3",
+                db_path=db_path,
+            )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                rows = connection.execute(
+                    "SELECT node, timestamp, device, avg_gbps, max_gbps, samples "
+                    "FROM nccl_ib_port_performance ORDER BY device"
+                ).fetchall()
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[1], ("slc01-cl02-hgx-0001", 12345, "mlx5_4", 20.285, 46.236, 26))
+        self.assertEqual(rows[2][2], "mlx5_5.2")
+
+    def test_add_nccl_ib_ports_from_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nccl.db"
+            summary = Path(tmpdir) / "nccl-summary.json"
+            summary.write_text(
+                json.dumps(
+                    {
+                        "GCR_BUSBW": 44.5,
+                        "GCR_IB_PORT_BW_GBPS": {
+                            "mlx5_4": {"avg_gbps": 20.3, "max_gbps": 46.2, "last_gbps": 46.0, "samples": 20},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            add_nccl_ib_ports_from_summary(
+                "node-a", "12345", summary, image_name="img", db_path=db_path
+            )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                row = connection.execute(
+                    "SELECT node, device, avg_gbps, samples FROM nccl_ib_port_performance"
+                ).fetchone()
+        self.assertEqual(row, ("node-a", "mlx5_4", 20.3, 20))
+
+    def test_add_nccl_ib_ports_from_summary_missing_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nccl.db"
+            summary = Path(tmpdir) / "nccl-summary.json"
+            summary.write_text(json.dumps({"GCR_BUSBW": 44.5}), encoding="utf-8")
+
+            # No GCR_IB_PORT_BW_GBPS block: writes zero rows but must not raise.
+            add_nccl_ib_ports_from_summary("node-a", "12345", summary, db_path=db_path)
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM nccl_ib_port_performance"
+                ).fetchone()[0]
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":

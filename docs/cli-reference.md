@@ -225,6 +225,28 @@ n_band_degraded,degraded_metric_fraction,degraded_metric_percent,worst_pct_diff
 
 Use `--no-classification` to export only the raw pass/fail status columns.
 
+For `storage` and `overall`, per-metric FIO columns (IOPS/bandwidth) are joined
+from `test-storage.db`. For `overall`, aggregate NCCL `nccl_busbw`/`nccl_latency`
+columns are joined from `test-nccl.db`. Use `--no-metrics` to skip the metric join.
+
+### NCCL per-HCA-port output
+
+`results --test nccl` is **long format**: one row per (node, IB port), so every
+HCA port's average bandwidth is visible instead of a single aggregate number.
+
+```text
+node,test,device,latest_timestamp,latest_time_utc,latest_time_los_angeles,result,
+port_avg_gbps,port_max_gbps,port_last_gbps,port_samples,
+node_allreduce_busbw,node_allreduce_latency_ms,
+classification_status,...,worst_pct_diff
+```
+
+- `port_*` columns come from the `nccl_ib_port_performance` table in `test-nccl.db`.
+- `node_allreduce_busbw` / `node_allreduce_latency_ms` are the node's aggregate
+  all-reduce metrics (busbw in GB/s, latency in ms).
+- `--active-ports-only` drops idle ports whose average bandwidth is zero.
+- Nodes with no per-port data yet still emit one row (empty `device`/`port_*`).
+
 ## `classifications`
 
 Export the latest baseline classification verdicts directly from

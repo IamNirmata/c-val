@@ -30,6 +30,7 @@ from cval.storage.status import (
     parse_latest_status_tsv,
 )
 from cval.storage.ingest import (
+    add_nccl_ib_ports_from_summary,
     add_nccl_result,
     add_storage_result,
     add_validation_result,
@@ -288,6 +289,11 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="Do not join NCCL/storage metric columns into the CSV",
     )
+    results.add_argument(
+        "--active-ports-only",
+        action="store_true",
+        help="For --test nccl, drop IB ports whose average bandwidth is zero",
+    )
     results.set_defaults(handler=handle_results)
 
     classifications = subparsers.add_parser(
@@ -334,6 +340,18 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl.add_argument("--image-name", default="")
     db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
+
+    db_add_nccl_ports = subparsers.add_parser("db-add-nccl-ports")
+    db_add_nccl_ports.add_argument("node")
+    db_add_nccl_ports.add_argument("timestamp")
+    db_add_nccl_ports.add_argument(
+        "summary_json",
+        type=Path,
+        help="NCCL summary JSON containing the GCR_IB_PORT_BW_GBPS block",
+    )
+    db_add_nccl_ports.add_argument("--image-name", default="")
+    db_add_nccl_ports.add_argument("--db-path", default=active_config.storage.nccl_db_path)
+    db_add_nccl_ports.set_defaults(handler=handle_db_add_nccl_ports)
 
     db_rebuild_dltest = subparsers.add_parser("db-rebuild-dltest-metrics")
     db_rebuild_dltest.add_argument(
@@ -721,9 +739,17 @@ def handle_result(args: argparse.Namespace) -> int:
 
 def handle_results(args: argparse.Namespace) -> int:
     """Export latest per-node results for one selected test to a local CSV."""
-    from cval.storage.results_export import latest_result_rows, write_latest_results_csv
+    from cval.storage.results_export import (
+        latest_result_rows,
+        write_latest_results_csv,
+        write_nccl_port_results_csv,
+    )
     from cval.storage.classification_status import get_latest_classification_rows
-    from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
+    from cval.storage.metrics import (
+        get_latest_nccl_metrics,
+        get_latest_nccl_port_metrics,
+        get_latest_storage_metrics,
+    )
 
     if args.result_type != "csv":
         raise ValueError("Only --type csv is currently supported")
@@ -742,11 +768,39 @@ def handle_results(args: argparse.Namespace) -> int:
             config=args.cval_config,
         )
 
+    test = args.test.lower()
+
+    # NCCL export is per-HCA-port long format: one row per (node, IB port).
+    if test == "nccl":
+        selected = latest_result_rows(rows, args.test)
+        port_metrics = None
+        agg_metrics = None
+        if not args.no_metrics:
+            port_metrics = get_latest_nccl_port_metrics(
+                pod=args.pod,
+                namespace=args.namespace,
+                db_path=args.nccl_db_path,
+            )
+            agg_metrics = get_latest_nccl_metrics(
+                pod=args.pod,
+                namespace=args.namespace,
+                db_path=args.nccl_db_path,
+            )
+        output_path = write_nccl_port_results_csv(
+            rows,
+            output_dir=args.output_dir,
+            port_metrics=port_metrics,
+            agg_metrics=agg_metrics,
+            classifications=classifications,
+            active_only=args.active_ports_only,
+        )
+        print(f"Wrote {len(selected)} nccl node(s) with per-port IB rows to {output_path}")
+        return 0
+
     nccl_metrics = None
     storage_metrics = None
     if not args.no_metrics:
-        test = args.test.lower()
-        if test in {"nccl", "overall", "all"}:
+        if test in {"overall", "all"}:
             nccl_metrics = get_latest_nccl_metrics(
                 pod=args.pod,
                 namespace=args.namespace,
@@ -868,6 +922,23 @@ def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
         db_path=args.db_path,
     )
     print(f"Added NCCL result: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_add_nccl_ports(args: argparse.Namespace) -> int:
+    """Ingest per-HCA-port IB bandwidth rows from an NCCL summary JSON."""
+
+    if not args.summary_json.exists():
+        print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
+        return 1
+    timestamp = add_nccl_ib_ports_from_summary(
+        args.node,
+        args.timestamp,
+        args.summary_json,
+        image_name=args.image_name,
+        db_path=args.db_path,
+    )
+    print(f"Added NCCL per-port IB metrics: {args.node} {timestamp}")
     return 0
 
 

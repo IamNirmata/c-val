@@ -10,7 +10,9 @@ import torch.distributed as dist
 
 
 GB_UNIT = 1024 * 1024 * 1024
-IBBW_SAMPLE_PATTERN = re.compile(r"(mlx5_\d+):\s*([0-9]+(?:\.[0-9]+)?)\s*([MG]B/s)")
+# Match ibbw.sh sample tokens like "mlx5_4: 46.231 GB/s" or the multi-port
+# "mlx5_5.2: 12.0 GB/s" label (port 1 uses the bare mlx5_<n> device name).
+IBBW_SAMPLE_PATTERN = re.compile(r"(mlx5_\d+(?:\.\d+)?):\s*([0-9]+(?:\.[0-9]+)?)\s*([MG]B/s)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,9 +65,13 @@ def summarize_ibbw_log(path: str | None) -> dict[str, dict[str, float | int]]:
     return summary
 
 
-def _mlx_sort_key(device: str) -> tuple[int, str]:
+def _mlx_sort_key(device: str) -> tuple[int, int, str]:
+    # Labels look like "mlx5_4" (port 1) or "mlx5_5.2" (device 5, port 2).
     suffix = device.rsplit("_", 1)[-1]
-    return (int(suffix), device) if suffix.isdigit() else (10_000, device)
+    dev_part, _, port_part = suffix.partition(".")
+    dev_index = int(dev_part) if dev_part.isdigit() else 10_000
+    port_index = int(port_part) if port_part.isdigit() else 1
+    return (dev_index, port_index, device)
 
 
 def main() -> None:

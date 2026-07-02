@@ -228,6 +228,98 @@ def add_nccl_result(
     return parsed_timestamp
 
 
+def add_nccl_ib_port_results(
+    node: str,
+    timestamp: object,
+    ports: dict[str, dict[str, object]],
+    image_name: str = "",
+    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+) -> int:
+    """Upsert per-HCA-port IB bandwidth rows and return the parsed timestamp.
+
+    ``ports`` maps an IB port label (``mlx5_4`` or multi-port ``mlx5_5.2``) to a
+    summary dict with ``avg_gbps``/``max_gbps``/``last_gbps``/``samples`` keys,
+    matching the ``GCR_IB_PORT_BW_GBPS`` block written by the NCCL summary JSON.
+    One row is written per port so any machine layout is captured verbatim.
+    """
+
+    parsed_timestamp = parse_timestamp(timestamp)
+    with closing(_connect_writable(db_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nccl_ib_port_performance (
+                node TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                device TEXT NOT NULL,
+                image_name TEXT NOT NULL DEFAULT '',
+                avg_gbps REAL,
+                max_gbps REAL,
+                last_gbps REAL,
+                samples INTEGER,
+                PRIMARY KEY (node, timestamp, device)
+            )
+            """
+        )
+
+        def _num(entry: dict[str, object], key: str) -> float | None:
+            value = entry.get(key)
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        for device, entry in ports.items():
+            if not isinstance(entry, dict):
+                continue
+            samples = entry.get("samples")
+            try:
+                samples_int = int(samples) if samples is not None else None
+            except (TypeError, ValueError):
+                samples_int = None
+            connection.execute(
+                "INSERT OR REPLACE INTO nccl_ib_port_performance "
+                "(node, timestamp, device, image_name, avg_gbps, max_gbps, last_gbps, samples) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    node,
+                    parsed_timestamp,
+                    str(device),
+                    image_name,
+                    _num(entry, "avg_gbps"),
+                    _num(entry, "max_gbps"),
+                    _num(entry, "last_gbps"),
+                    samples_int,
+                ),
+            )
+        connection.commit()
+    return parsed_timestamp
+
+
+def add_nccl_ib_ports_from_summary(
+    node: str,
+    timestamp: object,
+    summary_json_path: str | Path,
+    image_name: str = "",
+    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+) -> int:
+    """Read GCR_IB_PORT_BW_GBPS from an NCCL summary JSON and ingest per-port rows."""
+
+    path = Path(summary_json_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    ports = payload.get("GCR_IB_PORT_BW_GBPS", {})
+    if not isinstance(ports, dict):
+        ports = {}
+    return add_nccl_ib_port_results(
+        node,
+        timestamp,
+        ports,
+        image_name=image_name,
+        db_path=db_path,
+    )
+
+
 def _connect_writable(db_path: str | Path) -> sqlite3.Connection:
     """Open SQLite in create-if-needed mode and prepare parent directories."""
 

@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.models import ClassificationResultRow, LatestStatusRow, NcclMetrics, StorageMetrics
+from cval.models import ClassificationResultRow, LatestStatusRow, NcclMetrics, NcclPortMetric, StorageMetrics
 from cval.storage.classification_status import classification_rows_by_node_test
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
@@ -235,6 +235,158 @@ def write_latest_results_csv(
         writer.writeheader()
         writer.writerows(
             rows_to_csv_records(selected, test_name, classifications, nccl_metrics, storage_metrics)
+        )
+
+    return output_path
+
+
+# --- NCCL per-HCA-port long-format export -----------------------------------
+# `cval results --test nccl` emits one row per (node, IB port) so operators see
+# every HCA port's average bandwidth instead of a single aggregate number.
+
+NCCL_PORT_CSV_COLUMNS = (
+    "node",
+    "test",
+    "device",
+    "latest_timestamp",
+    "latest_time_utc",
+    "latest_time_los_angeles",
+    "result",
+    "port_avg_gbps",
+    "port_max_gbps",
+    "port_last_gbps",
+    "port_samples",
+    "node_allreduce_busbw",
+    "node_allreduce_latency_ms",
+    "classification_status",
+    "classification_passed",
+    "classification_baseline_id",
+    "classified_timestamp",
+    "classified_time_los_angeles",
+    "n_compared",
+    "n_degraded",
+    "n_band_degraded",
+    "degraded_metric_fraction",
+    "degraded_metric_percent",
+    "worst_pct_diff",
+)
+
+
+def nccl_port_rows_to_csv_records(
+    rows: list[LatestStatusRow],
+    port_metrics: dict[str, list[NcclPortMetric]] | None = None,
+    agg_metrics: dict[str, NcclMetrics] | None = None,
+    classifications: list[ClassificationResultRow] | None = None,
+    active_only: bool = False,
+) -> list[dict[str, str]]:
+    """Build per-(node, IB port) NCCL records.
+
+    Nodes with no per-port rows still emit one row (empty port columns) so node
+    coverage matches the aggregate export. When ``active_only`` is set, ports
+    whose average bandwidth is zero/None are dropped.
+    """
+
+    ports_by_node = port_metrics or {}
+    agg_by_node = agg_metrics or {}
+    by_node_test = classification_rows_by_node_test(classifications or [])
+    records: list[dict[str, str]] = []
+
+    for row in rows:
+        classification = by_node_test.get((row.node, "nccl"))
+        agg = agg_by_node.get(row.node)
+        base = {
+            "node": row.node,
+            "test": "nccl",
+            "result": row.result,
+            "node_allreduce_busbw": "" if agg is None or agg.busbw is None else f"{agg.busbw:.4f}",
+            "node_allreduce_latency_ms": ""
+            if agg is None or agg.latency is None
+            else f"{agg.latency:.4f}",
+            "classification_status": classification.status if classification else "",
+            "classification_passed": "" if classification is None else str(classification.passed).lower(),
+            "classification_baseline_id": classification.baseline_id if classification else "",
+            "classified_timestamp": ""
+            if classification is None
+            else str(classification.classified_at),
+            "classified_time_los_angeles": ""
+            if classification is None
+            else timestamp_to_los_angeles(classification.classified_at),
+            "n_compared": "" if classification is None else str(classification.n_compared),
+            "n_degraded": "" if classification is None else str(classification.n_degraded),
+            "n_band_degraded": "" if classification is None else str(classification.n_band_degraded),
+            "degraded_metric_fraction": ""
+            if classification is None
+            else f"{classification.degraded_metric_fraction:.6f}",
+            "degraded_metric_percent": ""
+            if classification is None
+            else f"{classification.degraded_metric_fraction * 100.0:.3f}",
+            "worst_pct_diff": "" if classification is None else f"{classification.worst_pct_diff:.3f}",
+        }
+
+        node_ports = ports_by_node.get(row.node, [])
+        if active_only:
+            node_ports = [p for p in node_ports if p.avg_gbps not in (None, 0.0)]
+
+        if not node_ports:
+            record = dict(base)
+            record.update(
+                {
+                    "device": "",
+                    "latest_timestamp": "" if row.latest_timestamp is None else str(row.latest_timestamp),
+                    "latest_time_utc": timestamp_to_utc(row.latest_timestamp),
+                    "latest_time_los_angeles": timestamp_to_los_angeles(row.latest_timestamp),
+                    "port_avg_gbps": "",
+                    "port_max_gbps": "",
+                    "port_last_gbps": "",
+                    "port_samples": "",
+                }
+            )
+            records.append(record)
+            continue
+
+        for port in node_ports:
+            ts = port.timestamp if port.timestamp is not None else row.latest_timestamp
+            record = dict(base)
+            record.update(
+                {
+                    "device": port.device,
+                    "latest_timestamp": "" if ts is None else str(ts),
+                    "latest_time_utc": timestamp_to_utc(ts),
+                    "latest_time_los_angeles": timestamp_to_los_angeles(ts),
+                    "port_avg_gbps": "" if port.avg_gbps is None else f"{port.avg_gbps:.4f}",
+                    "port_max_gbps": "" if port.max_gbps is None else f"{port.max_gbps:.4f}",
+                    "port_last_gbps": "" if port.last_gbps is None else f"{port.last_gbps:.4f}",
+                    "port_samples": "" if port.samples is None else str(port.samples),
+                }
+            )
+            records.append(record)
+
+    return records
+
+
+def write_nccl_port_results_csv(
+    rows: list[LatestStatusRow],
+    output_dir: str | Path = ".",
+    now: dt.datetime | None = None,
+    port_metrics: dict[str, list[NcclPortMetric]] | None = None,
+    agg_metrics: dict[str, NcclMetrics] | None = None,
+    classifications: list[ClassificationResultRow] | None = None,
+    active_only: bool = False,
+) -> Path:
+    """Write per-(node, IB port) NCCL rows to a local CSV and return the path."""
+
+    selected = latest_result_rows(rows, "nccl")
+    directory = Path(output_dir).expanduser().resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    output_path = directory / default_results_filename("nccl", now)
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=NCCL_PORT_CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(
+            nccl_port_rows_to_csv_records(
+                selected, port_metrics, agg_metrics, classifications, active_only
+            )
         )
 
     return output_path

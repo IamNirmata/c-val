@@ -16,8 +16,10 @@ CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation
 CVAL_GPU_COUNT=${CVAL_GPU_COUNT:-8}
 CVAL_NCCL_ITERATIONS=${CVAL_NCCL_ITERATIONS:-20}
 CVAL_NCCL_DATA_SIZE_GB=${CVAL_NCCL_DATA_SIZE_GB:-8}
-CVAL_IBBW_START_DEVICE=${CVAL_IBBW_START_DEVICE:-0}
-CVAL_IBBW_END_DEVICE=${CVAL_IBBW_END_DEVICE:-12}
+# IB port monitoring auto-detects every /sys/class/infiniband port by default.
+# Set both bounds to restrict monitoring to a contiguous mlx5_<n> range.
+CVAL_IBBW_START_DEVICE=${CVAL_IBBW_START_DEVICE:-}
+CVAL_IBBW_END_DEVICE=${CVAL_IBBW_END_DEVICE:-}
 CVAL_RESULT_ENV_FILE=${CVAL_RESULT_ENV_FILE:-"/tmp/cval-results-${GCRNODE:-unknown}-${GCRTIME:-unknown}.env"}
 CVAL_RESULT_JSON_FILE=${CVAL_RESULT_JSON_FILE:-"/tmp/cval-results-${GCRNODE:-unknown}-${GCRTIME:-unknown}.json"}
 
@@ -105,7 +107,11 @@ echo "DLTEST_SUMMARY_FILE: $DLTEST_SUMMARY_FILE"
 echo "CVAL_RESULT_ENV_FILE: $CVAL_RESULT_ENV_FILE"
 echo "CVAL_RESULT_JSON_FILE: $CVAL_RESULT_JSON_FILE"
 echo "CVAL_IMAGE_NAME: $CVAL_IMAGE_NAME"
-echo "CVAL_IBBW_DEVICE_RANGE: mlx5_$CVAL_IBBW_START_DEVICE..mlx5_$CVAL_IBBW_END_DEVICE"
+if [ -n "$CVAL_IBBW_START_DEVICE" ] && [ -n "$CVAL_IBBW_END_DEVICE" ]; then
+	echo "CVAL_IBBW_DEVICE_RANGE: mlx5_$CVAL_IBBW_START_DEVICE..mlx5_$CVAL_IBBW_END_DEVICE"
+else
+	echo "CVAL_IBBW_DEVICE_RANGE: auto-detect all /sys/class/infiniband ports"
+fi
 echo "#########################################################################"
 
 # Phase 1: PVC/NFS storage performance and correctness smoke test.
@@ -132,8 +138,13 @@ start_ibbw_monitor() {
 		return 0
 	fi
 	mkdir -p "$(dirname "$NCCL_IBBW_LOG_FILE")"
-	echo "Starting IBBW monitor: $ibbw_script $CVAL_IBBW_START_DEVICE $CVAL_IBBW_END_DEVICE -> $NCCL_IBBW_LOG_FILE"
-	bash "$ibbw_script" "$CVAL_IBBW_START_DEVICE" "$CVAL_IBBW_END_DEVICE" > "$NCCL_IBBW_LOG_FILE" 2>&1 &
+	if [ -n "$CVAL_IBBW_START_DEVICE" ] && [ -n "$CVAL_IBBW_END_DEVICE" ]; then
+		echo "Starting IBBW monitor: $ibbw_script $CVAL_IBBW_START_DEVICE $CVAL_IBBW_END_DEVICE -> $NCCL_IBBW_LOG_FILE"
+		bash "$ibbw_script" "$CVAL_IBBW_START_DEVICE" "$CVAL_IBBW_END_DEVICE" > "$NCCL_IBBW_LOG_FILE" 2>&1 &
+	else
+		echo "Starting IBBW monitor (auto-detect all ports) -> $NCCL_IBBW_LOG_FILE"
+		bash "$ibbw_script" > "$NCCL_IBBW_LOG_FILE" 2>&1 &
+	fi
 	IBBW_PID=$!
 }
 

@@ -7,23 +7,26 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from cval.models import ClassificationResultRow, LatestStatusRow, NcclMetrics, StorageMetrics
+from cval.models import ClassificationResultRow, LatestStatusRow, NcclMetrics, NcclPortMetric, StorageMetrics
 from cval.storage.classification_status import (
     classification_rows_to_csv_records,
     filter_classification_rows,
     write_classifications_csv,
 )
-from cval.storage.metrics import _parse_nccl_json, _parse_storage_json
+from cval.storage.metrics import _parse_nccl_json, _parse_nccl_port_json, _parse_storage_json
 from cval.storage.results_export import (
     CSV_BASE_COLUMNS,
+    NCCL_PORT_CSV_COLUMNS,
     Nccl_EXTRA_COLUMNS,
     STORAGE_EXTRA_COLUMNS,
     default_results_filename,
     get_csv_columns,
     latest_result_rows,
+    nccl_port_rows_to_csv_records,
     normalize_result_test,
     rows_to_csv_records,
     write_latest_results_csv,
+    write_nccl_port_results_csv,
 )
 
 
@@ -202,6 +205,90 @@ class ResultsExportTests(unittest.TestCase):
         self.assertIn("node-a", result)
         self.assertAlmostEqual(result["node-a"].randread_iops, 3000.0)
         self.assertAlmostEqual(result["node-a"].iodepth_write_1file_bw, 460.0)
+
+    def test_nccl_port_records_one_row_per_port(self) -> None:
+        rows = [LatestStatusRow("node-a", "nccl", 1781748000, "pass")]
+        ports = {
+            "node-a": [
+                NcclPortMetric("node-a", 1781748000, "mlx5_4", 20.285, 46.236, 46.1, 26),
+                NcclPortMetric("node-a", 1781748000, "mlx5_13", 20.33, 46.308, 46.19, 26),
+            ]
+        }
+        agg = {"node-a": NcclMetrics(busbw=44.5, latency=12.3)}
+
+        records = nccl_port_rows_to_csv_records(rows, ports, agg)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["device"], "mlx5_4")
+        self.assertEqual(records[0]["port_avg_gbps"], "20.2850")
+        self.assertEqual(records[0]["port_max_gbps"], "46.2360")
+        self.assertEqual(records[0]["node_allreduce_busbw"], "44.5000")
+        self.assertEqual(records[0]["node_allreduce_latency_ms"], "12.3000")
+        self.assertEqual(records[1]["device"], "mlx5_13")
+
+    def test_nccl_port_records_node_without_ports(self) -> None:
+        rows = [LatestStatusRow("node-z", "nccl", 1781748000, "pass")]
+
+        records = nccl_port_rows_to_csv_records(rows, {}, {})
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["device"], "")
+        self.assertEqual(records[0]["port_avg_gbps"], "")
+
+    def test_nccl_port_records_active_only_filter(self) -> None:
+        rows = [LatestStatusRow("node-a", "nccl", 1781748000, "pass")]
+        ports = {
+            "node-a": [
+                NcclPortMetric("node-a", 1781748000, "mlx5_0", 0.0, 0.0, 0.0, 26),
+                NcclPortMetric("node-a", 1781748000, "mlx5_4", 20.285, 46.236, 46.1, 26),
+            ]
+        }
+
+        records = nccl_port_rows_to_csv_records(rows, ports, {}, active_only=True)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["device"], "mlx5_4")
+
+    def test_write_nccl_port_csv(self) -> None:
+        rows = [LatestStatusRow("node-a", "nccl", 1781748000, "pass")]
+        ports = {
+            "node-a": [
+                NcclPortMetric("node-a", 1781748000, "mlx5_4", 20.285, 46.236, 46.1, 26),
+                NcclPortMetric("node-a", 1781748000, "mlx5_5.2", 12.0, 24.0, 23.0, 26),
+            ]
+        }
+        now = dt.datetime(2026, 6, 18, 3, 0, 0, tzinfo=dt.timezone.utc)
+
+        with TemporaryDirectory() as tmpdir:
+            path = write_nccl_port_results_csv(
+                rows, output_dir=tmpdir, now=now, port_metrics=ports
+            )
+            text = Path(path).read_text(encoding="utf-8")
+
+        self.assertTrue(str(path).endswith("cval_nccl_20260617_200000_PDT.csv"))
+        self.assertEqual(NCCL_PORT_CSV_COLUMNS[0], "node")
+        self.assertIn("node,test,device", text)
+        self.assertIn("mlx5_4", text)
+        self.assertIn("mlx5_5.2", text)
+        self.assertIn("20.2850", text)
+
+    def test_parse_nccl_port_json(self) -> None:
+        raw = (
+            '[{"node": "node-a", "timestamp": 1781748000, "device": "mlx5_4",'
+            ' "avg_gbps": 20.285, "max_gbps": 46.236, "last_gbps": 46.1, "samples": 26},'
+            ' {"node": "node-a", "timestamp": 1781748000, "device": "mlx5_13",'
+            ' "avg_gbps": 20.33, "max_gbps": 46.308, "last_gbps": 46.19, "samples": 26}]'
+        )
+        result = _parse_nccl_port_json(raw)
+        self.assertIn("node-a", result)
+        self.assertEqual(len(result["node-a"]), 2)
+        self.assertEqual(result["node-a"][0].device, "mlx5_4")
+        self.assertAlmostEqual(result["node-a"][0].avg_gbps, 20.285)
+
+    def test_parse_nccl_port_json_empty(self) -> None:
+        self.assertEqual(_parse_nccl_port_json("[]"), {})
+        self.assertEqual(_parse_nccl_port_json(""), {})
+        self.assertEqual(_parse_nccl_port_json("bad json"), {})
 
     def test_classification_csv_helpers(self) -> None:
         rows = [

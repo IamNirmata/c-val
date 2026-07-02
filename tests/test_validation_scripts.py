@@ -88,7 +88,37 @@ class ValidationScriptTests(unittest.TestCase):
 
         self.assertIn("GB/s", script)
         self.assertNotIn("MB/s${space}", script)
-        self.assertIn("mlx5_${start_device}", script)
+
+    def test_ibbw_monitor_auto_detects_all_ports(self) -> None:
+        script = (REPO_ROOT / "validation-tests" / "nccl" / "ibbw.sh").read_text(
+            encoding="utf-8"
+        )
+
+        # Auto-detection enumerates the sysfs tree instead of a fixed range.
+        self.assertIn("/sys/class/infiniband", script)
+        self.assertIn("port_xmit_data", script)
+        self.assertIn("discover_ports", script)
+        # Optional numeric range override is still supported.
+        self.assertIn("start_device", script)
+        self.assertIn("end_device", script)
+
+    def test_run_test_defaults_ibbw_to_auto_detect(self) -> None:
+        run_test = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(
+            encoding="utf-8"
+        )
+
+        # Range env vars remain as optional overrides but default to empty.
+        self.assertIn("CVAL_IBBW_START_DEVICE=${CVAL_IBBW_START_DEVICE:-}", run_test)
+        self.assertIn("CVAL_IBBW_END_DEVICE=${CVAL_IBBW_END_DEVICE:-}", run_test)
+        self.assertIn("auto-detect", run_test)
+
+    def test_db_update_ingests_per_port_ib_metrics(self) -> None:
+        script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("db-add-nccl-ports", script)
+        self.assertIn('"$NCCL_SUMMARY_FILE"', script)
 
     def test_structured_validation_result_schema(self) -> None:
         payload = {

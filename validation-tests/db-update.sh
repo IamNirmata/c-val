@@ -119,6 +119,15 @@ if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
         --image-name "$CVAL_IMAGE_NAME" \
         --db-path "$CVAL_NCCL_DB_PATH"
 
+    # Persist per-HCA-port IB bandwidth (all mlx5 ports) from the summary JSON.
+    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-nccl-ports \
+        "$GCRNODE" \
+        "$GCRTIME" \
+        "$NCCL_SUMMARY_FILE" \
+        --image-name "$CVAL_IMAGE_NAME" \
+        --db-path "$CVAL_NCCL_DB_PATH" \
+        || echo "Warning: per-port IB metric ingestion failed; continuing."
+
     echo "NCCl DB update completed."
 else
     echo "Skipping NCCL metrics DB update because result is $GCRRESULT2 or summary is missing."
