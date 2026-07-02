@@ -235,6 +235,27 @@ class ResultsExportTests(unittest.TestCase):
         self.assertEqual(records[0]["device"], "")
         self.assertEqual(records[0]["port_avg_gbps"], "")
 
+    def test_nccl_port_records_aggregate_fallback(self) -> None:
+        rows = [LatestStatusRow("node-z", "nccl", 1781748000, "pass")]
+        agg = {"node-z": NcclMetrics(busbw=44.52, latency=628.8)}
+
+        records = nccl_port_rows_to_csv_records(rows, {}, agg)
+
+        # No per-port data: copy the aggregate busbw under an "aggregate" device.
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["device"], "aggregate")
+        self.assertEqual(records[0]["port_avg_gbps"], "44.5200")
+        self.assertEqual(records[0]["node_allreduce_busbw"], "44.5200")
+
+    def test_nccl_port_records_aggregate_fallback_disabled(self) -> None:
+        rows = [LatestStatusRow("node-z", "nccl", 1781748000, "pass")]
+        agg = {"node-z": NcclMetrics(busbw=44.52, latency=628.8)}
+
+        records = nccl_port_rows_to_csv_records(rows, {}, agg, aggregate_fallback=False)
+
+        self.assertEqual(records[0]["device"], "")
+        self.assertEqual(records[0]["port_avg_gbps"], "")
+
     def test_nccl_port_records_active_only_filter(self) -> None:
         rows = [LatestStatusRow("node-a", "nccl", 1781748000, "pass")]
         ports = {

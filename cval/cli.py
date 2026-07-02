@@ -294,6 +294,12 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="For --test nccl, drop IB ports whose average bandwidth is zero",
     )
+    results.add_argument(
+        "--no-aggregate-fallback",
+        action="store_true",
+        help="For --test nccl, leave port columns blank for nodes without "
+        "per-port data instead of copying the aggregate busbw",
+    )
     results.set_defaults(handler=handle_results)
 
     classifications = subparsers.add_parser(
@@ -793,6 +799,7 @@ def handle_results(args: argparse.Namespace) -> int:
             agg_metrics=agg_metrics,
             classifications=classifications,
             active_only=args.active_ports_only,
+            aggregate_fallback=not args.no_aggregate_fallback,
         )
         print(f"Wrote {len(selected)} nccl node(s) with per-port IB rows to {output_path}")
         return 0

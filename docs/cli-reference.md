@@ -245,7 +245,9 @@ classification_status,...,worst_pct_diff
 - `node_allreduce_busbw` / `node_allreduce_latency_ms` are the node's aggregate
   all-reduce metrics (busbw in GB/s, latency in ms).
 - `--active-ports-only` drops idle ports whose average bandwidth is zero.
-- Nodes with no per-port data yet still emit one row (empty `device`/`port_*`).
+- Nodes with no per-port data yet still emit one row: by default it uses a
+  synthetic `aggregate` device and copies the node's busbw into `port_avg_gbps`
+  so the column is populated. Pass `--no-aggregate-fallback` to leave it blank.
 
 ## `classifications`
 

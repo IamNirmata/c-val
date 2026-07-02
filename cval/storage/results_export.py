@@ -278,12 +278,16 @@ def nccl_port_rows_to_csv_records(
     agg_metrics: dict[str, NcclMetrics] | None = None,
     classifications: list[ClassificationResultRow] | None = None,
     active_only: bool = False,
+    aggregate_fallback: bool = True,
 ) -> list[dict[str, str]]:
     """Build per-(node, IB port) NCCL records.
 
-    Nodes with no per-port rows still emit one row (empty port columns) so node
-    coverage matches the aggregate export. When ``active_only`` is set, ports
-    whose average bandwidth is zero/None are dropped.
+    Nodes with no per-port rows still emit one row so node coverage matches the
+    aggregate export. When ``aggregate_fallback`` is set (default), that row uses
+    a synthetic ``aggregate`` device and copies the node's all-reduce ``busbw``
+    into ``port_avg_gbps`` so the column is populated for analysis; otherwise the
+    port columns are left blank. When ``active_only`` is set, ports whose average
+    bandwidth is zero/None are dropped.
     """
 
     ports_by_node = port_metrics or {}
@@ -329,13 +333,21 @@ def nccl_port_rows_to_csv_records(
 
         if not node_ports:
             record = dict(base)
+            fallback_avg = ""
+            fallback_device = ""
+            if aggregate_fallback and agg is not None and agg.busbw is not None:
+                # No per-port measurement for this node: surface the node-level
+                # all-reduce busbw under a synthetic "aggregate" device so the
+                # port column is populated (and clearly not a real HCA port).
+                fallback_device = "aggregate"
+                fallback_avg = f"{agg.busbw:.4f}"
             record.update(
                 {
-                    "device": "",
+                    "device": fallback_device,
                     "latest_timestamp": "" if row.latest_timestamp is None else str(row.latest_timestamp),
                     "latest_time_utc": timestamp_to_utc(row.latest_timestamp),
                     "latest_time_los_angeles": timestamp_to_los_angeles(row.latest_timestamp),
-                    "port_avg_gbps": "",
+                    "port_avg_gbps": fallback_avg,
                     "port_max_gbps": "",
                     "port_last_gbps": "",
                     "port_samples": "",
@@ -372,6 +384,7 @@ def write_nccl_port_results_csv(
     agg_metrics: dict[str, NcclMetrics] | None = None,
     classifications: list[ClassificationResultRow] | None = None,
     active_only: bool = False,
+    aggregate_fallback: bool = True,
 ) -> Path:
     """Write per-(node, IB port) NCCL rows to a local CSV and return the path."""
 
@@ -385,7 +398,12 @@ def write_nccl_port_results_csv(
         writer.writeheader()
         writer.writerows(
             nccl_port_rows_to_csv_records(
-                selected, port_metrics, agg_metrics, classifications, active_only
+                selected,
+                port_metrics,
+                agg_metrics,
+                classifications,
+                active_only,
+                aggregate_fallback,
             )
         )
 
