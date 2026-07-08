@@ -122,6 +122,20 @@ Useful flags:
 - `--skip-dl-rebuild`: classify DL against existing metric DBs without refreshing.
 - `--pvc-pod` / `--pod-repo-dir` / `--pod-config`: override the classification pod and its c-val checkout.
 - `--dry-run`: render the job and show node state without submitting.
+- `--download`: after the run, save this node's logs, results, and baseline
+  comparison as a local zip (`cval-<node>-<timestamp>.zip`); `--download-dir`
+  sets the destination (default: current directory).
+
+The downloaded zip mirrors the PVC layout and bundles the baseline comparison:
+
+```text
+storage/<node>/storage-<node>-<ts>/   # FIO JSONs, storage log + summary
+nccl/<node>/nccl-<node>-<ts>/          # nccl log, ibbw log, nccl-summary.json
+dltest/<node>/dltest-<node>-<ts>/      # dltest log + summary + per-rank JSONs
+results/<node>/cval-results-<node>-<ts>.{json,env}
+report.json                            # structured verdicts (raw + baseline)
+report.txt                             # the rendered operator report
+```
 
 The job is submitted into the policy-allowlisted namespace; classification runs
 in the PVC access pod because that is where `/data/continuous_validation` is

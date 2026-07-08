@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import unittest
+import zipfile
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from cval.config import CvalConfig, JobTemplateConfig
 from cval.k8s.client import CommandResult
@@ -11,6 +16,7 @@ from cval.k8s.discovery import describe_node_from_outputs
 from cval.orchestrator.validate import (
     build_validation_report,
     degraded_metrics_from_verdict,
+    finalize_download_zip,
     parse_test_progress,
     raw_results_from_log,
     render_validation_report,
@@ -396,6 +402,68 @@ class TestRunNodeValidation(unittest.TestCase):
         self.assertTrue(any(" ".join(call).startswith("create -n") for call in client.calls))
         classify_calls = [c for c in client.calls if "baseline" in c and "classify" in c]
         self.assertEqual(len(classify_calls), 3)
+
+
+class TestFinalizeDownloadZip(unittest.TestCase):
+    def _pod_zip_b64(self, files: dict[str, str]) -> str:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, content in files.items():
+                archive.writestr(name, content)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def test_adds_report_and_preserves_artifacts(self):
+        pod_b64 = self._pod_zip_b64(
+            {
+                "nccl/node-x/nccl-node-x-123/nccl-node-x-123.log": "nccl log body",
+                "results/node-x/cval-results-node-x-123.json": '{"overall": "pass"}',
+            }
+        )
+        report = build_validation_report(
+            node="node-x",
+            timestamp=123,
+            job_name="cval-node-x-123",
+            job_phase="Completed",
+            schedulability={"status_label": "cordoned", "reason": "cordoned"},
+            raw_results={"storage": "pass", "nccl": "pass", "dltest": "pass"},
+            verdicts={"storage": None, "nccl": None, "dltest": None},
+        )
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "cval-node-x-123.zip"
+            info = finalize_download_zip(pod_b64, report, out)
+
+            self.assertTrue(out.exists())
+            with zipfile.ZipFile(out) as archive:
+                names = set(archive.namelist())
+                report_json = archive.read("report.json").decode("utf-8")
+                log_body = archive.read("nccl/node-x/nccl-node-x-123/nccl-node-x-123.log").decode()
+
+        self.assertIn("report.json", names)
+        self.assertIn("report.txt", names)
+        self.assertIn("nccl/node-x/nccl-node-x-123/nccl-node-x-123.log", names)
+        self.assertEqual(log_body, "nccl log body")
+        self.assertEqual(json.loads(report_json)["node"], "node-x")
+        self.assertEqual(info["files"], len(names))
+        self.assertGreater(info["bytes"], 0)
+
+    def test_empty_pod_archive_still_writes_report(self):
+        report = build_validation_report(
+            node="node-y",
+            timestamp=9,
+            job_name="cval-node-y-9",
+            job_phase="Completed",
+            schedulability={},
+            raw_results={"storage": "pass", "nccl": "pass", "dltest": "pass"},
+            verdicts={"storage": None, "nccl": None, "dltest": None},
+        )
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "cval-node-y-9.zip"
+            info = finalize_download_zip("", report, out)
+            with zipfile.ZipFile(out) as archive:
+                names = set(archive.namelist())
+        self.assertEqual(names, {"report.json", "report.txt"})
+        self.assertEqual(info["files"], 2)
 
 
 if __name__ == "__main__":

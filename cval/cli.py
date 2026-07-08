@@ -168,6 +168,17 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     validate.add_argument(
         "--dry-run", action="store_true", help="Render only; do not submit a job"
     )
+    validate.add_argument(
+        "--download",
+        action="store_true",
+        help="Save this run's logs, results, and baseline comparison as a local zip",
+    )
+    validate.add_argument(
+        "--download-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="Directory to write the artifact zip into (default: current directory)",
+    )
     validate.add_argument("--output", choices=["table", "json"], default="table")
     validate.set_defaults(handler=handle_validate)
 
@@ -877,6 +888,8 @@ def handle_validate(args: argparse.Namespace) -> int:
         pod_config_path=args.pod_config,
         window_days=args.window_days,
         dry_run=args.dry_run,
+        download=args.download,
+        download_dir=args.download_dir,
         verbose=(args.output == "table"),
     )
     if args.output == "json":
