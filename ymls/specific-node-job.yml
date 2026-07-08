@@ -40,6 +40,11 @@ spec:
                 claimName: pvc-claim-placeholder
           tolerations:
             # Discovery filters non-tolerated NoSchedule taints before rendering.
+            # Allow validation to run on a cordoned (suspected-unhealthy) node:
+            # kubectl cordon adds this taint, which normal workloads do not tolerate.
+            - key: "node.kubernetes.io/unschedulable"
+              operator: "Exists"
+              effect: "NoSchedule"
             - key: "rdma-toleration-key-placeholder"
               operator: "Exists"
               effect: "NoSchedule"

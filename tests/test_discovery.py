@@ -5,6 +5,8 @@ import unittest
 from cval.k8s.discovery import (
     discover_free_nodes_from_outputs,
     fully_free_node_names,
+    node_is_cordoned,
+    node_is_ready,
     parse_cpu_millicores,
     parse_memory_bytes,
     resource_insufficient_node_names,
@@ -119,6 +121,21 @@ class DiscoveryTests(unittest.TestCase):
         }
 
         self.assertEqual(unschedulable_node_names(nodes_json), {"cordoned", "tainted"})
+
+    def test_node_is_cordoned(self) -> None:
+        self.assertTrue(node_is_cordoned({"spec": {"unschedulable": True}}))
+        self.assertFalse(node_is_cordoned({"spec": {}}))
+        self.assertFalse(node_is_cordoned({}))
+
+    def test_node_is_ready(self) -> None:
+        ready = {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+        not_ready = {"status": {"conditions": [{"type": "Ready", "status": "False"}]}}
+        unknown = {"status": {"conditions": [{"type": "Ready", "status": "Unknown"}]}}
+        self.assertTrue(node_is_ready(ready))
+        self.assertFalse(node_is_ready(not_ready))
+        self.assertFalse(node_is_ready(unknown))
+        # Missing Ready condition is treated as ready so partial fixtures are benign.
+        self.assertTrue(node_is_ready({"status": {}}))
 
     def test_excludes_nodes_without_validation_pod_resources(self) -> None:
         config = CvalConfig(

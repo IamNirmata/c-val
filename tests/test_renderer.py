@@ -107,6 +107,16 @@ class RendererTests(unittest.TestCase):
       self.assertIn('name: CVAL_IBBW_END_DEVICE\n                  value: "13"', rendered.yaml_text)
       self.assertNotIn("validation-8", rendered.yaml_text)
 
+    def test_repository_template_tolerates_cordon_taint(self) -> None:
+        rendered = render_validation_job_from_file(
+            default_template_path(),
+            "slc01-cl02-hgx-0001",
+            timestamp=12345,
+            git_ref="abc123",
+        )
+        # Validation must be able to land on a cordoned (suspected-unhealthy) node.
+        self.assertIn("node.kubernetes.io/unschedulable", rendered.yaml_text)
+
 
 if __name__ == "__main__":
     unittest.main()

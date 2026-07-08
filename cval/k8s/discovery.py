@@ -321,6 +321,45 @@ class NodeStatus:
     free: int
     fully_free: bool
     reason: str
+    cordoned: bool = False
+    ready: bool = True
+    status_label: str = ""
+
+
+def _node_map_by_name(
+    nodes_json: Mapping[str, object], node_name: str
+) -> Mapping[str, object]:
+    """Return the raw node object for one node name, or an empty mapping."""
+
+    for node in _list(nodes_json.get("items")):
+        node_map = _mapping(node)
+        metadata = _mapping(node_map.get("metadata"))
+        if metadata.get("name") == node_name:
+            return node_map
+    return {}
+
+
+def node_is_cordoned(node_map: Mapping[str, object]) -> bool:
+    """Return True when the node has `spec.unschedulable: true` (kubectl cordon)."""
+
+    return _mapping(node_map.get("spec")).get("unschedulable") is True
+
+
+def node_is_ready(node_map: Mapping[str, object]) -> bool:
+    """Return the kubelet Ready state.
+
+    A node is treated as ready unless a `Ready` condition is present with a
+    status other than ``"True"`` (``False``/``Unknown`` means NotReady). A
+    missing condition is treated as ready so partial fixtures do not read as
+    unhealthy.
+    """
+
+    status = _mapping(node_map.get("status"))
+    for condition in _list(status.get("conditions")):
+        condition_map = _mapping(condition)
+        if condition_map.get("type") == "Ready":
+            return condition_map.get("status") == "True"
+    return True
 
 
 def describe_node_from_outputs(
@@ -354,6 +393,9 @@ def describe_node_from_outputs(
     schedulable = node_name not in unschedulable
     resource_ready = node_name not in resource_blocked
     is_gpu_node = capacity > 0
+    node_map = _node_map_by_name(node_payload, node_name)
+    cordoned = node_is_cordoned(node_map)
+    ready = node_is_ready(node_map) if found else False
     fully_free = (
         found
         and is_gpu_node
@@ -364,16 +406,28 @@ def describe_node_from_outputs(
     )
 
     if not found:
+        status_label = "not_found"
         reason = "node not found in the cluster node list"
     elif not is_gpu_node:
+        status_label = "not_gpu"
         reason = "node has no nvidia.com/gpu capacity (not a GPU node)"
+    elif not ready:
+        status_label = "not_ready"
+        reason = "node kubelet reports NotReady"
+    elif cordoned:
+        status_label = "cordoned"
+        reason = "node is cordoned (spec.unschedulable); validation can still target it"
     elif not schedulable:
-        reason = "node is cordoned or carries a blocking NoSchedule taint"
+        status_label = "unschedulable"
+        reason = "node carries a blocking NoSchedule taint"
     elif not resource_ready:
+        status_label = "resource_pressure"
         reason = "insufficient free CPU/memory/RDMA for a validation pod"
     elif free < allocatable:
+        status_label = "busy"
         reason = f"{used}/{allocatable} GPUs already in use"
     else:
+        status_label = "ready"
         reason = "free and schedulable"
 
     return NodeStatus(
@@ -388,6 +442,9 @@ def describe_node_from_outputs(
         free=free,
         fully_free=fully_free,
         reason=reason,
+        cordoned=cordoned,
+        ready=ready,
+        status_label=status_label,
     )
 
 

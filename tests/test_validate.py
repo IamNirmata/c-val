@@ -179,7 +179,7 @@ class TestDescribeNode(unittest.TestCase):
             )
         )
 
-    def _nodes_json(self, name, *, unschedulable=False, allocatable=None):
+    def _nodes_json(self, name, *, unschedulable=False, allocatable=None, ready=True):
         spec = {"unschedulable": True} if unschedulable else {}
         return {
             "items": [
@@ -187,6 +187,9 @@ class TestDescribeNode(unittest.TestCase):
                     "metadata": {"name": name},
                     "spec": spec,
                     "status": {
+                        "conditions": [
+                            {"type": "Ready", "status": "True" if ready else "False"}
+                        ],
                         "allocatable": allocatable
                         or {
                             "cpu": "110",
@@ -211,6 +214,9 @@ class TestDescribeNode(unittest.TestCase):
         self.assertTrue(status.fully_free)
         self.assertTrue(status.schedulable)
         self.assertTrue(status.resource_ready)
+        self.assertTrue(status.ready)
+        self.assertFalse(status.cordoned)
+        self.assertEqual(status.status_label, "ready")
 
     def test_cordoned_node(self):
         status = describe_node_from_outputs(
@@ -222,6 +228,19 @@ class TestDescribeNode(unittest.TestCase):
         )
         self.assertFalse(status.schedulable)
         self.assertFalse(status.fully_free)
+        self.assertTrue(status.cordoned)
+        self.assertEqual(status.status_label, "cordoned")
+
+    def test_not_ready_node(self):
+        status = describe_node_from_outputs(
+            "node-x",
+            {"items": []},
+            "node-x 8 8",
+            self._nodes_json("node-x", ready=False),
+            self._config(),
+        )
+        self.assertFalse(status.ready)
+        self.assertEqual(status.status_label, "not_ready")
 
     def test_resource_blocked_node(self):
         pods = {

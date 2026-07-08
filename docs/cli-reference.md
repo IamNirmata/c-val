@@ -90,7 +90,9 @@ python -m cval.cli validate --node slc01-cl02-hgx-0186 --dry-run
 
 Flow:
 
-1. Print whether the node is free, schedulable, and resource-ready (informational).
+1. Print the node's status: `ready`, `cordoned`, `unschedulable`, `not_ready`,
+   `busy`, `resource_pressure`, `not_gpu`, or `not_found` — plus `ready`,
+   `cordoned`, `schedulable`, `resource_ready`, and `gpus_free/allocatable`.
 2. Submit the job regardless of node state (the explicit `validate` is the approval).
 3. Every `--poll-interval` seconds (default 3), print job phase and which tests
    (`storage`, `nccl`, `dltest`) have finished, parsed from the in-pod logs.
@@ -100,6 +102,16 @@ Flow:
 5. Print a report: raw pass/fail and baseline verdict per test, DL component
    breakdown, and the degraded metrics with their percentage deviation from
    baseline.
+
+### Validating cordoned nodes
+
+When a node is suspected unhealthy it is usually **cordoned** (`kubectl cordon`)
+so user workloads drain off it. `validate` is built for exactly this: it reports
+`status=cordoned [CORDONED]` and still targets the node, because the rendered
+validation job tolerates the `node.kubernetes.io/unschedulable:NoSchedule` taint
+that cordon adds. No manual template edits are needed — cordoned and uncordoned
+nodes use the same job. (Automatic discovery in `run`/`cval-live` still skips
+cordoned nodes; only the targeted `validate` runs on them.)
 
 Useful flags:
 

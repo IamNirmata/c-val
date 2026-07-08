@@ -223,8 +223,13 @@ def render_validation_report(report: dict[str, Any]) -> str:
 
     sched = report.get("schedulability") or {}
     if sched:
+        status_label = sched.get("status_label")
+        cordoned = sched.get("cordoned")
+        cordon_note = " [CORDONED]" if cordoned else ""
+        label_line = f" status={status_label}" if status_label else ""
         lines.append(
-            f"node state: free={sched.get('fully_free')} "
+            f"node state:{label_line}{cordon_note} "
+            f"ready={sched.get('ready')} free={sched.get('fully_free')} "
             f"schedulable={sched.get('schedulable')} "
             f"resource_ready={sched.get('resource_ready')} "
             f"({sched.get('reason', '')})"
@@ -444,6 +449,9 @@ def run_node_validation(
         schedulability = {
             "found": status.found,
             "is_gpu_node": status.is_gpu_node,
+            "status_label": status.status_label,
+            "ready": status.ready,
+            "cordoned": status.cordoned,
             "schedulable": status.schedulable,
             "resource_ready": status.resource_ready,
             "fully_free": status.fully_free,
@@ -451,11 +459,17 @@ def run_node_validation(
             "allocatable_gpus": status.allocatable,
             "reason": status.reason,
         }
+        cordon_note = " [CORDONED]" if status.cordoned else ""
         emit(
-            f"node {node}: free={status.fully_free} schedulable={status.schedulable} "
+            f"node {node}: status={status.status_label}{cordon_note} "
+            f"ready={status.ready} free={status.fully_free} schedulable={status.schedulable} "
             f"resource_ready={status.resource_ready} gpus_free={status.free}/{status.allocatable} "
             f"-> {status.reason}"
         )
+        if status.cordoned:
+            notes.append(
+                "node is cordoned; validation job tolerates the cordon taint and targets it anyway"
+            )
     except Exception as exc:  # noqa: BLE001 - status is best-effort, never blocks submit
         schedulability = {"found": False, "reason": f"could not determine node state: {exc}"}
         notes.append(f"node status check failed: {_first_line(str(exc))}")
