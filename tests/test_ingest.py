@@ -9,7 +9,12 @@ from pathlib import Path
 
 from cval.storage.ingest import (
     NCCL_IB_PORT_COLUMNS,
+    NCCL_LATEST_STATUS_VIEW,
+    NCCL_RANKING_VIEW,
+    OLD_NCCL_IB_PORT_PERFORMANCE_TABLE,
+    OLD_NCCL_PERFORMANCE_TABLE,
     add_nccl_health_from_summary,
+    add_nccl_health_result,
     add_nccl_result,
     add_storage_result,
     add_validation_result,
@@ -136,7 +141,8 @@ class IngestTests(unittest.TestCase):
 
             with closing(sqlite3.connect(db_path)) as connection:
                 row = connection.execute(
-                    "SELECT node, timestamp, image_name, busbw, latency FROM nccl_performance"
+                    f"SELECT node, timestamp, image_name, busbw, latency "
+                    f"FROM {OLD_NCCL_PERFORMANCE_TABLE}"
                 ).fetchone()
             self.assertEqual(
                 row,
@@ -235,6 +241,9 @@ class NcclHealthIngestTests(unittest.TestCase):
             summary = migrate_nccl_health(
                 db_path, validation_db_path=validation_db, default_iterations=20
             )
+            rerun_summary = migrate_nccl_health(
+                db_path, validation_db_path=validation_db, default_iterations=20
+            )
 
             with closing(sqlite3.connect(db_path)) as connection:
                 rows = connection.execute(
@@ -242,13 +251,76 @@ class NcclHealthIngestTests(unittest.TestCase):
                     "LATENCY, mlx5_0, mlx5_13 FROM IB_HEALTH ORDER BY timestamp"
                 ).fetchall()
                 legacy_count = connection.execute(
-                    "SELECT COUNT(*) FROM nccl_ib_port_performance"
+                    f"SELECT COUNT(*) FROM {OLD_NCCL_IB_PORT_PERFORMANCE_TABLE}"
                 ).fetchone()[0]
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
 
         self.assertEqual(summary, {"migrated_runs": 2, "total_rows": 2, "rows_with_ports": 1})
+        self.assertEqual(rerun_summary, summary)
         self.assertEqual(rows[0], ("node-a", 12345, 20, "13.0", "2.9.0", 26, 44.5, 628.2, 46.1, 46.3))
         self.assertEqual(rows[1][0:3], ("node-a", 12346, 20))
-        self.assertEqual(legacy_count, 2)  # additive migration keeps rollback data
+        self.assertEqual(legacy_count, 2)
+        self.assertIn(OLD_NCCL_PERFORMANCE_TABLE, table_names)
+        self.assertIn(OLD_NCCL_IB_PORT_PERFORMANCE_TABLE, table_names)
+        self.assertNotIn("nccl_performance", table_names)
+        self.assertNotIn("nccl_ib_port_performance", table_names)
+
+    def test_latest_status_and_five_run_ranking_views(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nccl.db"
+            for index, (bus_bw, latency) in enumerate(
+                ((10, 60), (20, 50), (30, 40), (40, 30), (50, 20), (60, 10)),
+                start=1,
+            ):
+                add_nccl_health_result(
+                    "node-a",
+                    100 + index,
+                    iterations=20,
+                    bus_bw=bus_bw,
+                    latency=latency,
+                    port_max_gbps={"mlx5_0": index},
+                    db_path=db_path,
+                )
+            for index, (bus_bw, latency) in enumerate(
+                ((70, 9), (80, 8), (90, 7)),
+                start=1,
+            ):
+                add_nccl_health_result(
+                    "node-b",
+                    200 + index,
+                    iterations=20,
+                    bus_bw=bus_bw,
+                    latency=latency,
+                    port_max_gbps={"mlx5_0": 6 + index},
+                    db_path=db_path,
+                )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                latest = connection.execute(
+                    f"SELECT Node, timestamp, BUS_BW FROM {NCCL_LATEST_STATUS_VIEW} "
+                    "ORDER BY Node"
+                ).fetchall()
+                ranking = connection.execute(
+                    f"SELECT node, bus_bw, bus_bw_pctl, latency, latency_pctl, mlx5_0 "
+                    f"FROM {NCCL_RANKING_VIEW}"
+                ).fetchall()
+                views = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'view'"
+                    )
+                }
+
+        self.assertEqual(latest, [("node-a", 106, 60.0), ("node-b", 203, 90.0)])
+        self.assertEqual([row[0] for row in ranking], ["node-a", "node-b"])
+        self.assertEqual(ranking[0], ("node-a", 40.0, 0.0, 30.0, 100.0, 4.0))
+        self.assertEqual(ranking[1], ("node-b", 80.0, 100.0, 8.0, 0.0, 8.0))
+        self.assertEqual(views, {NCCL_LATEST_STATUS_VIEW, NCCL_RANKING_VIEW})
 
 
 if __name__ == "__main__":

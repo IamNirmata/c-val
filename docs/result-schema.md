@@ -110,7 +110,28 @@ BUS_BW, LATENCY, mlx5_0, mlx5_1, ... mlx5_13
 
 Dynamic NCCL baselines and `cval results --test nccl` read `IB_HEALTH`.
 The export mirrors the same wide one-row-per-node shape and appends
-classification columns. Legacy `nccl_performance` and
-`nccl_ib_port_performance` tables are preserved for rollback but are no longer
-written by new validation runs. `cval db-migrate-nccl-health` performs the
-additive consolidation and is safe to rerun.
+classification columns. Legacy tables are renamed to
+`OLD_nccl_performance` and `OLD_nccl_ib_port_performance` for rollback and are
+not read by normal operations. `cval db-migrate-nccl-health` performs the
+consolidation, table renames, and view creation; it is safe to rerun.
+
+### NCCL operational views
+
+`LATEST_NODE_STATUS` contains the complete latest `IB_HEALTH` record for each
+node (maximum `timestamp` per `Node`).
+
+`NODE_RANKING` averages each node's latest five `IB_HEALTH` records. If fewer
+than five exist, all available records are used. Its columns are:
+
+```text
+node, bus_bw, bus_bw_pctl, latency, latency_pctl, mlx5_0, ... mlx5_13
+```
+
+- `bus_bw`, `latency`, and every `mlx5_*` value are rolling averages.
+- `bus_bw_pctl` is `PERCENT_RANK() × 100` ordered by `bus_bw`: a low value is a
+  low fleet bandwidth percentile.
+- `latency_pctl` is `PERCENT_RANK() × 100` ordered by `latency`: a low value is
+  a low (better) fleet latency percentile.
+- Rows are ordered by `bus_bw` ascending, then node name.
+- SQLite `AVG` ignores missing historical port values; real zero values remain
+  part of the average.

@@ -25,6 +25,10 @@ DEFAULT_NCCL_DB_PATH = _CONFIG.storage.nccl_db_path
 
 NCCL_HEALTH_TABLE = "IB_HEALTH"
 NCCL_IB_PORT_COLUMNS = tuple(f"mlx5_{index}" for index in range(14))
+OLD_NCCL_PERFORMANCE_TABLE = "OLD_nccl_performance"
+OLD_NCCL_IB_PORT_PERFORMANCE_TABLE = "OLD_nccl_ib_port_performance"
+NCCL_LATEST_STATUS_VIEW = "LATEST_NODE_STATUS"
+NCCL_RANKING_VIEW = "NODE_RANKING"
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 
 STORAGE_FILE_PREFIXES = {
@@ -103,6 +107,122 @@ def _create_nccl_health_table(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _create_nccl_health_views(
+    connection: sqlite3.Connection,
+    *,
+    replace: bool = False,
+) -> None:
+    """Create the latest-node and rolling five-run ranking views."""
+
+    if replace:
+        connection.execute(f"DROP VIEW IF EXISTS {NCCL_LATEST_STATUS_VIEW}")
+        connection.execute(f"DROP VIEW IF EXISTS {NCCL_RANKING_VIEW}")
+
+    connection.execute(
+        f"""
+        CREATE VIEW IF NOT EXISTS {NCCL_LATEST_STATUS_VIEW} AS
+        SELECT health.*
+        FROM {NCCL_HEALTH_TABLE} AS health
+        INNER JOIN (
+            SELECT Node, MAX(timestamp) AS latest_timestamp
+            FROM {NCCL_HEALTH_TABLE}
+            GROUP BY Node
+        ) AS latest
+          ON latest.Node = health.Node
+         AND latest.latest_timestamp = health.timestamp
+        ORDER BY health.Node
+        """
+    )
+
+    port_averages = ",\n                ".join(
+        f"AVG({column}) AS {column}" for column in NCCL_IB_PORT_COLUMNS
+    )
+    port_select = ",\n            ".join(NCCL_IB_PORT_COLUMNS)
+    connection.execute(
+        f"""
+        CREATE VIEW IF NOT EXISTS {NCCL_RANKING_VIEW} AS
+        WITH recent AS (
+            SELECT
+                health.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY Node
+                    ORDER BY timestamp DESC
+                ) AS recency
+            FROM {NCCL_HEALTH_TABLE} AS health
+        ),
+        averages AS (
+            SELECT
+                Node AS node,
+                AVG(BUS_BW) AS bus_bw,
+                AVG(LATENCY) AS latency,
+                {port_averages}
+            FROM recent
+            WHERE recency <= 5
+            GROUP BY Node
+        ),
+        ranked AS (
+            SELECT
+                node,
+                bus_bw,
+                100.0 * PERCENT_RANK() OVER (ORDER BY bus_bw) AS bus_bw_pctl,
+                latency,
+                100.0 * PERCENT_RANK() OVER (ORDER BY latency) AS latency_pctl,
+                {port_select}
+            FROM averages
+            WHERE bus_bw IS NOT NULL AND latency IS NOT NULL
+        )
+        SELECT *
+        FROM ranked
+        ORDER BY bus_bw ASC, node ASC
+        """
+    )
+
+
+def _rename_legacy_nccl_tables(connection: sqlite3.Connection) -> None:
+    """Rename legacy NCCL tables to explicit ``OLD_*`` rollback names."""
+
+    table_names = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    renames = (
+        (
+            "nccl_performance",
+            OLD_NCCL_PERFORMANCE_TABLE,
+            ("node", "timestamp", "image_name", "busbw", "latency"),
+        ),
+        (
+            "nccl_ib_port_performance",
+            OLD_NCCL_IB_PORT_PERFORMANCE_TABLE,
+            (
+                "node",
+                "timestamp",
+                "device",
+                "image_name",
+                "avg_gbps",
+                "max_gbps",
+                "last_gbps",
+                "samples",
+            ),
+        ),
+    )
+    for source, target, columns in renames:
+        if source in table_names and target not in table_names:
+            connection.execute(f"ALTER TABLE {source} RENAME TO {target}")
+            table_names.remove(source)
+            table_names.add(target)
+        elif source in table_names and target in table_names:
+            column_list = ", ".join(columns)
+            connection.execute(
+                f"INSERT OR REPLACE INTO {target} ({column_list}) "
+                f"SELECT {column_list} FROM {source}"
+            )
+            connection.execute(f"DROP TABLE {source}")
+            table_names.remove(source)
 
 
 def _optional_float(value: object) -> float | None:
@@ -184,6 +304,7 @@ def add_nccl_health_result(
             f"ON CONFLICT(Node, timestamp) DO UPDATE SET {updates}",
             values,
         )
+        _create_nccl_health_views(connection)
         connection.commit()
     return parsed_timestamp
 
@@ -242,9 +363,9 @@ def migrate_nccl_health(
 ) -> dict[str, int]:
     """Consolidate legacy NCCL rows into ``IB_HEALTH`` without dropping data.
 
-    Legacy ``nccl_performance`` and ``nccl_ib_port_performance`` tables remain
-    untouched for rollback. Re-running this migration is safe: non-empty/new
-    values are preserved and missing values are filled from legacy rows.
+    Legacy tables are renamed to explicit ``OLD_*`` rollback names. Re-running
+    this migration is safe: non-empty/new values are preserved and missing
+    values are filled from either pre-rename or ``OLD_*`` legacy rows.
     """
 
     path = Path(db_path).expanduser().resolve()
@@ -278,9 +399,11 @@ def migrate_nccl_health(
             )
         }
         aggregate_rows: dict[tuple[str, int], tuple[str, float | None, float | None]] = {}
-        if "nccl_performance" in table_names:
+        for table in (OLD_NCCL_PERFORMANCE_TABLE, "nccl_performance"):
+            if table not in table_names:
+                continue
             for node, timestamp, image, bus_bw, latency in connection.execute(
-                "SELECT node, timestamp, image_name, busbw, latency FROM nccl_performance"
+                f"SELECT node, timestamp, image_name, busbw, latency FROM {table}"
             ):
                 aggregate_rows[(str(node), int(timestamp))] = (
                     str(image or ""),
@@ -291,10 +414,12 @@ def migrate_nccl_health(
         port_rows: dict[tuple[str, int], dict[str, object]] = {}
         port_images: dict[tuple[str, int], str] = {}
         sample_counts: dict[tuple[str, int], list[int]] = {}
-        if "nccl_ib_port_performance" in table_names:
+        for table in (OLD_NCCL_IB_PORT_PERFORMANCE_TABLE, "nccl_ib_port_performance"):
+            if table not in table_names:
+                continue
             for node, timestamp, device, image, max_gbps, samples in connection.execute(
                 "SELECT node, timestamp, device, image_name, max_gbps, samples "
-                "FROM nccl_ib_port_performance"
+                f"FROM {table}"
             ):
                 key = (str(node), int(timestamp))
                 device_name = str(device)
@@ -353,6 +478,8 @@ def migrate_nccl_health(
                 f"ON CONFLICT(Node, timestamp) DO UPDATE SET {updates}",
                 values,
             )
+        _rename_legacy_nccl_tables(connection)
+        _create_nccl_health_views(connection, replace=True)
         connection.commit()
         total = connection.execute(
             f"SELECT COUNT(*) FROM {NCCL_HEALTH_TABLE}"
@@ -494,13 +621,13 @@ def add_nccl_result(
     image_name: str = "",
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
 ) -> int:
-    """Upsert one NCCL metric row and return the parsed timestamp."""
+    """Upsert one rollback-only legacy NCCL aggregate row."""
 
     parsed_timestamp = parse_timestamp(timestamp)
     with closing(_connect_writable(db_path)) as connection:
         connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS nccl_performance (
+            f"""
+            CREATE TABLE IF NOT EXISTS {OLD_NCCL_PERFORMANCE_TABLE} (
                 node TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 image_name TEXT NOT NULL DEFAULT '',
@@ -512,12 +639,12 @@ def add_nccl_result(
         )
         _ensure_column(
             connection,
-            "nccl_performance",
+            OLD_NCCL_PERFORMANCE_TABLE,
             "image_name",
             "TEXT NOT NULL DEFAULT ''",
         )
         connection.execute(
-            "INSERT OR REPLACE INTO nccl_performance "
+            f"INSERT OR REPLACE INTO {OLD_NCCL_PERFORMANCE_TABLE} "
             "(node, timestamp, image_name, busbw, latency) VALUES (?, ?, ?, ?, ?)",
             (node, parsed_timestamp, image_name, float(busbw), float(latency)),
         )
@@ -532,7 +659,7 @@ def add_nccl_ib_port_results(
     image_name: str = "",
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
 ) -> int:
-    """Upsert per-HCA-port IB bandwidth rows and return the parsed timestamp.
+    """Upsert rollback-only legacy per-HCA-port rows.
 
     ``ports`` maps an IB port label (``mlx5_4`` or multi-port ``mlx5_5.2``) to a
     summary dict with ``avg_gbps``/``max_gbps``/``last_gbps``/``samples`` keys,
@@ -543,8 +670,8 @@ def add_nccl_ib_port_results(
     parsed_timestamp = parse_timestamp(timestamp)
     with closing(_connect_writable(db_path)) as connection:
         connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS nccl_ib_port_performance (
+            f"""
+            CREATE TABLE IF NOT EXISTS {OLD_NCCL_IB_PORT_PERFORMANCE_TABLE} (
                 node TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 device TEXT NOT NULL,
@@ -576,7 +703,7 @@ def add_nccl_ib_port_results(
             except (TypeError, ValueError):
                 samples_int = None
             connection.execute(
-                "INSERT OR REPLACE INTO nccl_ib_port_performance "
+                f"INSERT OR REPLACE INTO {OLD_NCCL_IB_PORT_PERFORMANCE_TABLE} "
                 "(node, timestamp, device, image_name, avg_gbps, max_gbps, last_gbps, samples) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
