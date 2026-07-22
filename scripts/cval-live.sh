@@ -105,6 +105,9 @@ ensure_runner_worktree() {
     mkdir -p "$(dirname "$RUNNER_WORKTREE")"
     if [[ ! -d "$RUNNER_WORKTREE" ]] || ! git -C "$RUNNER_WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         rm -rf "$RUNNER_WORKTREE"
+        # /tmp may be cleaned while Git still retains the worktree registration.
+        # Prune stale registrations before recreating the detached runner.
+        git -C "$SOURCE_REPO" worktree prune
         git -C "$SOURCE_REPO" worktree add --detach "$RUNNER_WORKTREE" "$git_ref"
     else
         git -C "$RUNNER_WORKTREE" fetch --quiet origin main
