@@ -129,9 +129,9 @@ node, bus_bw, bus_bw_pctl, latency, latency_pctl, mlx5_0, ... mlx5_13
 
 - `bus_bw`, `latency`, and every `mlx5_*` value are rolling averages.
 - `bus_bw_pctl` is `PERCENT_RANK() × 100` ordered by `bus_bw`: a low value is a
-  low fleet bandwidth percentile.
+  low fleet bandwidth percentile (rounded to two decimals).
 - `latency_pctl` is `PERCENT_RANK() × 100` ordered by `latency`: a low value is
-  a low (better) fleet latency percentile.
+  a low (better) fleet latency percentile (rounded to two decimals).
 - Rows are ordered by `bus_bw` ascending, then node name.
 - SQLite `AVG` ignores missing historical port values; real zero values remain
   part of the average.

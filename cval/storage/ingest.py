@@ -166,9 +166,9 @@ def _create_nccl_health_views(
             SELECT
                 node,
                 bus_bw,
-                100.0 * PERCENT_RANK() OVER (ORDER BY bus_bw) AS bus_bw_pctl,
+                ROUND(100.0 * PERCENT_RANK() OVER (ORDER BY bus_bw), 2) AS bus_bw_pctl,
                 latency,
-                100.0 * PERCENT_RANK() OVER (ORDER BY latency) AS latency_pctl,
+                ROUND(100.0 * PERCENT_RANK() OVER (ORDER BY latency), 2) AS latency_pctl,
                 {port_select}
             FROM averages
             WHERE bus_bw IS NOT NULL AND latency IS NOT NULL
