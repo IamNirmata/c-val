@@ -396,6 +396,17 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_rebuild_dltest.add_argument("--output", choices=["table", "json"], default="table")
     db_rebuild_dltest.set_defaults(handler=handle_db_rebuild_dltest_metrics)
 
+    db_migrate_dltest_iterations = subparsers.add_parser("db-migrate-dltest-iterations")
+    db_migrate_dltest_iterations.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(active_config.storage.dl_numerical_db_path).parent,
+    )
+    db_migrate_dltest_iterations.add_argument(
+        "--historical-iterations", type=int, default=20
+    )
+    db_migrate_dltest_iterations.set_defaults(handler=handle_db_migrate_dltest_iterations)
+
     # Baseline commands (read-only and ingestion)
     baseline = subparsers.add_parser("baseline", help="Manage baselines and peer comparison")
     baseline_sub = baseline.add_subparsers(dest="baseline_command", required=True)
@@ -1019,6 +1030,19 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
     print(f"compute_performance: {summary['compute_performance_rows']} rows")
     print(f"collective_performance: {summary['collective_performance_rows']} rows")
     print(f"overlap_performance: {summary['overlap_performance_rows']} rows")
+    return 0
+
+
+def handle_db_migrate_dltest_iterations(args: argparse.Namespace) -> int:
+    """Add and backfill the iterations column on all four DL metric DBs."""
+
+    from cval.storage.dltest_ingest import migrate_dltest_iterations
+
+    summary = migrate_dltest_iterations(
+        args.output_dir,
+        historical_iterations=args.historical_iterations,
+    )
+    print(json.dumps(summary, sort_keys=True))
     return 0
 
 

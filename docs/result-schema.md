@@ -76,6 +76,25 @@ These latest-status rows and the storage/NCCL/DL metric DBs are the inputs to
 dynamic baseline building and node classification. See
 [Baselines and Node Classification](baselines.md).
 
+## DL metric DB iterations
+
+Every metric table in the four DL metadata DBs contains an `iterations`
+column:
+
+```text
+dltest_numerical_correctness.db → numerical_correctness
+dltest_compute_performance.db → compute_performance
+dltest_collective_performance.db → collective_performance
+dltest_overlap_performance.db → overlap_performance
+```
+
+The value is repeated on every metric row for its run so results produced with
+different workload iteration counts can be filtered and stratified. Ingestion
+reads the value from `dltest-summary-*.json`. Artifacts without a summary are
+historical and use `20`, the prior c-val default. The additive
+`db-migrate-dltest-iterations` command adds/backfills this column on existing
+DBs without rebuilding millions of metric rows.
+
 ## NCCL and IB health (`test-nccl.db`)
 
 The NCCL phase runs `ibbw.sh`, which **auto-detects every IB device and port**

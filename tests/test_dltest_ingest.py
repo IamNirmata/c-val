@@ -9,9 +9,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from cval.storage.dltest_ingest import (
+    HISTORICAL_DL_ITERATIONS,
+    dl_run_iterations,
     find_dl_run_dirs,
     ingest_dltest_results,
     load_rank_files,
+    migrate_dltest_iterations,
     parse_rank,
 )
 
@@ -146,8 +149,68 @@ class DltestIngestTests(unittest.TestCase):
             }
             for db_name, table_name in expected_tables.items():
                 with sqlite3.connect(output_dir / db_name) as connection:
-                    count = connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                    count, minimum, maximum = connection.execute(
+                        f"SELECT COUNT(*), MIN(iterations), MAX(iterations) FROM {table_name}"
+                    ).fetchone()
                 self.assertGreater(count, 0)
+                self.assertEqual((minimum, maximum), (HISTORICAL_DL_ITERATIONS, HISTORICAL_DL_ITERATIONS))
+
+    def test_summary_iterations_are_written_to_all_metric_dbs(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output_dir = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            _write_rank_json(
+                run_dir / "workdir/test_plans/80gb-example/runs/example_RANK0.json", 0
+            )
+            (run_dir / "dltest-summary-node-a-1781649558.json").write_text(
+                json.dumps({"iterations": 77}), encoding="utf-8"
+            )
+
+            self.assertEqual(dl_run_iterations(run_dir), 77)
+            ingest_dltest_results(root, output_dir)
+
+            for db_path in output_dir.glob("dltest_*.db"):
+                table_name = db_path.stem.removeprefix("dltest_")
+                with sqlite3.connect(db_path) as connection:
+                    values = connection.execute(
+                        f"SELECT DISTINCT iterations FROM {table_name}"
+                    ).fetchall()
+                self.assertEqual(values, [(77,)])
+
+    def test_migration_adds_and_backfills_iterations_to_all_tables(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            tables = (
+                "numerical_correctness",
+                "compute_performance",
+                "collective_performance",
+                "overlap_performance",
+            )
+            for table_name in tables:
+                db_path = output_dir / f"dltest_{table_name}.db"
+                with sqlite3.connect(db_path) as connection:
+                    connection.execute(
+                        f"CREATE TABLE {table_name} (id INTEGER PRIMARY KEY, metric_value REAL)"
+                    )
+                    connection.executemany(
+                        f"INSERT INTO {table_name}(metric_value) VALUES (?)", [(1.0,), (2.0,)]
+                    )
+                    connection.commit()
+
+            summary = migrate_dltest_iterations(output_dir, historical_iterations=20)
+            rerun = migrate_dltest_iterations(output_dir, historical_iterations=20)
+
+            self.assertEqual(summary, {table_name: 2 for table_name in tables})
+            self.assertEqual(rerun, summary)
+            for table_name in tables:
+                with sqlite3.connect(output_dir / f"dltest_{table_name}.db") as connection:
+                    columns = [r[1] for r in connection.execute(f"PRAGMA table_info({table_name})")]
+                    values = connection.execute(
+                        f"SELECT DISTINCT iterations FROM {table_name}"
+                    ).fetchall()
+                self.assertIn("iterations", columns)
+                self.assertEqual(values, [(20,)])
 
     def test_ingest_raises_when_no_rank_jsons_exist(self) -> None:
         with TemporaryDirectory() as tmpdir:

@@ -31,6 +31,7 @@ METADATA_FIELDS = frozenset(("task_name", "status", "error_msg", "coll_name", "l
 TASK_GROUPS = ("nn_tasks", "f_tasks", "coll_tasks", "overlap_tasks")
 RANK_PATTERN = re.compile(r"(?:^|_)rank(?P<rank>\d+)(?:_|$)", re.IGNORECASE)
 RUN_DIR_PATTERN = re.compile(r"^dltest-(?P<node>.+)-(?P<timestamp>\d+)$")
+HISTORICAL_DL_ITERATIONS = 20
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class RankFile:
     run_key: str
     node: str
     cval_timestamp: int | None
+    iterations: int
     sample_dir: str
     test_plan: str
     dltest_run_id: str
@@ -51,6 +53,7 @@ class StandardMetricRow:
     run_key: str
     node: str
     cval_timestamp: int | None
+    iterations: int
     sample_dir: str
     test_plan: str
     dltest_run_id: str
@@ -68,6 +71,7 @@ class OverlapMetricRow:
     run_key: str
     node: str
     cval_timestamp: int | None
+    iterations: int
     sample_dir: str
     test_plan: str
     dltest_run_id: str
@@ -129,11 +133,25 @@ def find_dl_run_dirs(results_root: Path) -> list[Path]:
     return run_dirs
 
 
+def dl_run_iterations(run_dir: Path) -> int:
+    """Read the run's summary iteration count, falling back for old artifacts."""
+
+    for summary_path in sorted(run_dir.glob("dltest-summary-*.json")):
+        try:
+            value = json.loads(summary_path.read_text(encoding="utf-8")).get("iterations")
+            if value is not None and int(value) > 0:
+                return int(value)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return HISTORICAL_DL_ITERATIONS
+
+
 def load_rank_files(results_root: Path) -> Iterable[RankFile]:
     """Yield rank JSON payloads from all c-val DL run directories."""
 
     for run_dir in find_dl_run_dirs(results_root):
         run_key, node, cval_timestamp = parse_run_dir(run_dir)
+        iterations = dl_run_iterations(run_dir)
         for runs_dir in sorted(run_dir.glob("workdir/test_plans/*/runs")):
             for rank_path in sorted(runs_dir.glob("*.json")):
                 payload = json.loads(rank_path.read_text(encoding="utf-8"))
@@ -142,6 +160,7 @@ def load_rank_files(results_root: Path) -> Iterable[RankFile]:
                     run_key=run_key,
                     node=node,
                     cval_timestamp=cval_timestamp,
+                    iterations=iterations,
                     sample_dir=str(run_dir),
                     test_plan=str(payload.get("test_plan", runs_dir.parent.name)),
                     dltest_run_id=dltest_run_id,
@@ -198,6 +217,7 @@ def standard_rows(
                 run_key=rank_file.run_key,
                 node=rank_file.node,
                 cval_timestamp=rank_file.cval_timestamp,
+                iterations=rank_file.iterations,
                 sample_dir=rank_file.sample_dir,
                 test_plan=rank_file.test_plan,
                 dltest_run_id=rank_file.dltest_run_id,
@@ -226,6 +246,7 @@ def overlap_metric_rows(rank_file: RankFile, task: dict[str, Any]) -> list[Overl
                 run_key=rank_file.run_key,
                 node=rank_file.node,
                 cval_timestamp=rank_file.cval_timestamp,
+                iterations=rank_file.iterations,
                 sample_dir=rank_file.sample_dir,
                 test_plan=rank_file.test_plan,
                 dltest_run_id=rank_file.dltest_run_id,
@@ -296,6 +317,28 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def ensure_iterations_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    historical_iterations: int = HISTORICAL_DL_ITERATIONS,
+) -> None:
+    """Add/backfill the DL iteration count on an existing metric table."""
+
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})")}
+    if "iterations" not in columns:
+        # SQLite stores the constant DEFAULT in table metadata, so this is fast
+        # even for multi-million-row metric DBs and existing rows read as 20.
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN iterations INTEGER "
+            f"NOT NULL DEFAULT {int(historical_iterations)}"
+        )
+    else:
+        connection.execute(
+            f"UPDATE {table_name} SET iterations = ? WHERE iterations IS NULL",
+            (int(historical_iterations),),
+        )
+
+
 def write_standard_db(db_path: Path, table_name: str, rows: list[StandardMetricRow]) -> None:
     """Write standard metric rows to a SQLite DB."""
 
@@ -306,6 +349,7 @@ def write_standard_db(db_path: Path, table_name: str, rows: list[StandardMetricR
                 run_key TEXT NOT NULL,
                 node TEXT,
                 cval_timestamp INTEGER,
+                iterations INTEGER NOT NULL DEFAULT {HISTORICAL_DL_ITERATIONS},
                 sample_dir TEXT NOT NULL,
                 test_plan TEXT NOT NULL,
                 dltest_run_id TEXT NOT NULL,
@@ -320,6 +364,7 @@ def write_standard_db(db_path: Path, table_name: str, rows: list[StandardMetricR
             )
             """
         )
+        ensure_iterations_column(connection, table_name)
         connection.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table_name}_node_ts ON {table_name}(node, cval_timestamp)"
         )
@@ -329,9 +374,9 @@ def write_standard_db(db_path: Path, table_name: str, rows: list[StandardMetricR
         connection.executemany(
             f"""
             INSERT OR REPLACE INTO {table_name} (
-                run_key, node, cval_timestamp, sample_dir, test_plan, dltest_run_id,
+                run_key, node, cval_timestamp, iterations, sample_dir, test_plan, dltest_run_id,
                 rank, task_group, task_name, status, metric_name, metric_value, source_file
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [tuple(row.__dict__.values()) for row in rows],
         )
@@ -348,6 +393,7 @@ def write_overlap_db(db_path: Path, table_name: str, rows: list[OverlapMetricRow
                 run_key TEXT NOT NULL,
                 node TEXT,
                 cval_timestamp INTEGER,
+                iterations INTEGER NOT NULL DEFAULT {HISTORICAL_DL_ITERATIONS},
                 sample_dir TEXT NOT NULL,
                 test_plan TEXT NOT NULL,
                 dltest_run_id TEXT NOT NULL,
@@ -364,6 +410,7 @@ def write_overlap_db(db_path: Path, table_name: str, rows: list[OverlapMetricRow
             )
             """
         )
+        ensure_iterations_column(connection, table_name)
         connection.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table_name}_node_ts ON {table_name}(node, cval_timestamp)"
         )
@@ -373,14 +420,57 @@ def write_overlap_db(db_path: Path, table_name: str, rows: list[OverlapMetricRow
         connection.executemany(
             f"""
             INSERT OR REPLACE INTO {table_name} (
-                run_key, node, cval_timestamp, sample_dir, test_plan, dltest_run_id,
+                run_key, node, cval_timestamp, iterations, sample_dir, test_plan, dltest_run_id,
                 rank, task_group, task_name, status, coll_name, layer_name,
                 metric_name, metric_value, source_file
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [tuple(row.__dict__.values()) for row in rows],
         )
         connection.commit()
+
+
+def migrate_dltest_iterations(
+    output_dir: str | Path | None = None,
+    *,
+    historical_iterations: int = HISTORICAL_DL_ITERATIONS,
+) -> dict[str, int]:
+    """Add/backfill ``iterations`` on every existing DL metric DB table."""
+
+    if historical_iterations <= 0:
+        raise ValueError("historical_iterations must be positive")
+    output = (
+        Path(output_dir)
+        if output_dir is not None
+        else default_dl_metric_db_paths()["numerical_correctness"].parent
+    )
+    specs = {
+        "numerical_correctness": output / "dltest_numerical_correctness.db",
+        "compute_performance": output / "dltest_compute_performance.db",
+        "collective_performance": output / "dltest_collective_performance.db",
+        "overlap_performance": output / "dltest_overlap_performance.db",
+    }
+    summary: dict[str, int] = {}
+    for table_name, db_path in specs.items():
+        if not db_path.exists():
+            summary[table_name] = 0
+            continue
+        with closing(connect(db_path)) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if table_name not in tables:
+                summary[table_name] = 0
+                continue
+            ensure_iterations_column(connection, table_name, historical_iterations)
+            connection.commit()
+            summary[table_name] = int(
+                connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            )
+    return summary
 
 
 def ingest_dltest_results(
