@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +12,7 @@ from cval.models import ClassificationResultRow, LatestStatusRow, NcclHealthMetr
 from cval.storage.classification_status import (
     classification_rows_to_csv_records,
     filter_classification_rows,
+    latest_classification_rows_from_db,
     write_classifications_csv,
 )
 from cval.storage.metrics import _parse_nccl_health_json, _parse_nccl_json, _parse_storage_json
@@ -31,6 +33,35 @@ from cval.storage.results_export import (
 
 
 class ResultsExportTests(unittest.TestCase):
+    def test_latest_classification_reader_uses_scalar_summary_columns(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "classification.db"
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE classification_results (
+                        classified_at INTEGER, node TEXT, test_type TEXT,
+                        baseline_id TEXT, status TEXT, passed INTEGER,
+                        n_compared INTEGER, n_degraded INTEGER, n_improved INTEGER,
+                        n_band_degraded INTEGER, degraded_metric_fraction REAL,
+                        worst_pct_diff REAL, metrics_json TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO classification_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (100, "node-a", "dltest", "b1", "degraded", 0, 100, 5, 0,
+                     7, 0.05, 42.0, "x" * 1_000_000),
+                )
+                connection.commit()
+
+            rows = latest_classification_rows_from_db(db_path)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].n_band_degraded, 7)
+        self.assertEqual(rows[0].degraded_metric_fraction, 0.05)
+        self.assertEqual(rows[0].worst_pct_diff, 42.0)
+
     def test_normalize_overall_to_all(self) -> None:
         self.assertEqual(normalize_result_test("overall"), "all")
         self.assertEqual(normalize_result_test("all"), "all")

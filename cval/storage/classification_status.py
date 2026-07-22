@@ -160,9 +160,33 @@ try:
         print("[]")
         raise SystemExit(0)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(classification_results)")}
+    selected = [
+        "cr.classified_at", "cr.node", "cr.test_type", "cr.baseline_id",
+        "cr.status", "cr.passed", "cr.n_compared", "cr.n_degraded",
+        "cr.n_improved",
+    ]
+    selected.append(
+        "cr.n_band_degraded" if "n_band_degraded" in columns
+        else "NULL AS n_band_degraded"
+    )
+    selected.append(
+        "cr.degraded_metric_fraction" if "degraded_metric_fraction" in columns
+        else "NULL AS degraded_metric_fraction"
+    )
+    selected.append(
+        "cr.worst_pct_diff" if "worst_pct_diff" in columns
+        else "NULL AS worst_pct_diff"
+    )
+    # metrics_json can be very large for DL tests. Read it only when an older
+    # schema lacks scalar fallback columns; current schemas never transfer it.
+    need_metrics_json = "n_band_degraded" not in columns or "worst_pct_diff" not in columns
+    selected.append(
+        "cr.metrics_json" if need_metrics_json and "metrics_json" in columns
+        else "'[]' AS metrics_json"
+    )
     rows = conn.execute(
-        """
-        SELECT cr.* FROM classification_results cr
+        f"""
+        SELECT {', '.join(selected)} FROM classification_results cr
         JOIN (
           SELECT node, test_type, MAX(classified_at) AS latest_classified_at
           FROM classification_results
@@ -178,7 +202,7 @@ try:
     for row in rows:
         n_compared = int(row["n_compared"] or 0)
         n_degraded = int(row["n_degraded"] or 0)
-        metrics_json = row["metrics_json"] if "metrics_json" in columns else "[]"
+        metrics_json = row["metrics_json"]
         fallback_band, fallback_worst = metric_fallbacks(metrics_json)
         n_band_degraded = (
             int(row["n_band_degraded"] or 0)
@@ -228,9 +252,17 @@ def _latest_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "classification_results" not in tables:
         return []
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(classification_results)")}
+    selected = [
+        "cr.classified_at", "cr.node", "cr.test_type", "cr.baseline_id",
+        "cr.status", "cr.passed", "cr.n_compared", "cr.n_degraded", "cr.n_improved",
+        "cr.n_band_degraded" if "n_band_degraded" in columns else "NULL AS n_band_degraded",
+        "cr.degraded_metric_fraction" if "degraded_metric_fraction" in columns else "NULL AS degraded_metric_fraction",
+        "cr.worst_pct_diff" if "worst_pct_diff" in columns else "NULL AS worst_pct_diff",
+    ]
     return connection.execute(
-        """
-        SELECT cr.* FROM classification_results cr
+        f"""
+        SELECT {', '.join(selected)} FROM classification_results cr
         JOIN (
           SELECT node, test_type, MAX(classified_at) AS latest_classified_at
           FROM classification_results
