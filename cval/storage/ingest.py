@@ -13,6 +13,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from cval.config import load_config
 
@@ -21,6 +22,10 @@ _CONFIG = load_config()
 DEFAULT_VALIDATION_DB_PATH = _CONFIG.storage.validation_db_path
 DEFAULT_STORAGE_DB_PATH = _CONFIG.storage.storage_db_path
 DEFAULT_NCCL_DB_PATH = _CONFIG.storage.nccl_db_path
+
+NCCL_HEALTH_TABLE = "IB_HEALTH"
+NCCL_IB_PORT_COLUMNS = tuple(f"mlx5_{index}" for index in range(14))
+LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 
 STORAGE_FILE_PREFIXES = {
     "iodepth_read_1file.json": "iodepth_read_1file",
@@ -66,6 +71,298 @@ def parse_timestamp(value: object | None) -> int:
         pass
 
     raise ValueError(f"Could not parse timestamp: {value!r}")
+
+
+def timestamp_to_los_angeles(timestamp: int) -> str:
+    """Return an epoch timestamp as an ISO-8601 America/Los_Angeles value."""
+
+    return dt.datetime.fromtimestamp(int(timestamp), tz=LOS_ANGELES).isoformat()
+
+
+def _create_nccl_health_table(connection: sqlite3.Connection) -> None:
+    """Create the consolidated one-row-per-NCCL-run health table."""
+
+    port_columns = ",\n                ".join(
+        f"{column} REAL" for column in NCCL_IB_PORT_COLUMNS
+    )
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {NCCL_HEALTH_TABLE} (
+            Node TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            la_timestamp TEXT NOT NULL,
+            iterations INTEGER,
+            image_name TEXT NOT NULL DEFAULT '',
+            cuda TEXT NOT NULL DEFAULT '',
+            pytorch TEXT NOT NULL DEFAULT '',
+            samples INTEGER,
+            BUS_BW REAL,
+            LATENCY REAL,
+            {port_columns},
+            PRIMARY KEY (Node, timestamp)
+        )
+        """
+    )
+
+
+def _optional_float(value: object) -> float | None:
+    """Convert a nullable numeric value to float without raising."""
+
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: object) -> int | None:
+    """Convert a nullable numeric value to int without raising."""
+
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def add_nccl_health_result(
+    node: str,
+    timestamp: object,
+    *,
+    iterations: int | str | None,
+    image_name: str = "",
+    cuda_version: str = "",
+    pytorch_version: str = "",
+    samples: int | str | None = None,
+    bus_bw: float | str | None = None,
+    latency: float | str | None = None,
+    port_max_gbps: dict[str, object] | None = None,
+    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+) -> int:
+    """Upsert one consolidated ``IB_HEALTH`` row for an NCCL validation run."""
+
+    parsed_timestamp = parse_timestamp(timestamp)
+    ports = port_max_gbps or {}
+    columns = (
+        "Node",
+        "timestamp",
+        "la_timestamp",
+        "iterations",
+        "image_name",
+        "cuda",
+        "pytorch",
+        "samples",
+        "BUS_BW",
+        "LATENCY",
+        *NCCL_IB_PORT_COLUMNS,
+    )
+    values = (
+        node,
+        parsed_timestamp,
+        timestamp_to_los_angeles(parsed_timestamp),
+        _optional_int(iterations),
+        image_name,
+        cuda_version,
+        pytorch_version,
+        _optional_int(samples),
+        _optional_float(bus_bw),
+        _optional_float(latency),
+        *(_optional_float(ports.get(column)) for column in NCCL_IB_PORT_COLUMNS),
+    )
+    placeholders = ", ".join("?" for _ in columns)
+    updates = ", ".join(
+        f"{column}=excluded.{column}" for column in columns if column not in {"Node", "timestamp"}
+    )
+
+    with closing(_connect_writable(db_path)) as connection:
+        _create_nccl_health_table(connection)
+        connection.execute(
+            f"INSERT INTO {NCCL_HEALTH_TABLE} ({', '.join(columns)}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT(Node, timestamp) DO UPDATE SET {updates}",
+            values,
+        )
+        connection.commit()
+    return parsed_timestamp
+
+
+def add_nccl_health_from_summary(
+    node: str,
+    timestamp: object,
+    summary_json_path: str | Path,
+    *,
+    iterations: int | str | None = None,
+    image_name: str = "",
+    cuda_version: str = "",
+    pytorch_version: str = "",
+    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+) -> int:
+    """Parse an NCCL summary JSON and upsert one consolidated health row."""
+
+    payload = json.loads(Path(summary_json_path).read_text(encoding="utf-8"))
+    ports = payload.get("GCR_IB_PORT_BW_GBPS", {})
+    ports = ports if isinstance(ports, dict) else {}
+    port_maxima: dict[str, object] = {}
+    sample_counts: list[int] = []
+    for column in NCCL_IB_PORT_COLUMNS:
+        entry = ports.get(column)
+        if not isinstance(entry, dict):
+            continue
+        port_maxima[column] = entry.get("max_gbps")
+        count = _optional_int(entry.get("samples"))
+        if count is not None:
+            sample_counts.append(count)
+
+    resolved_iterations = iterations
+    if resolved_iterations is None:
+        resolved_iterations = payload.get("GCR_ITERATIONS")
+
+    return add_nccl_health_result(
+        node,
+        timestamp,
+        iterations=resolved_iterations,
+        image_name=image_name,
+        cuda_version=cuda_version,
+        pytorch_version=pytorch_version,
+        samples=max(sample_counts) if sample_counts else None,
+        bus_bw=payload.get("GCR_BUSBW"),
+        latency=payload.get("GCR_LATENCY"),
+        port_max_gbps=port_maxima,
+        db_path=db_path,
+    )
+
+
+def migrate_nccl_health(
+    db_path: str | Path,
+    *,
+    validation_db_path: str | Path | None = None,
+    default_iterations: int = 20,
+) -> dict[str, int]:
+    """Consolidate legacy NCCL rows into ``IB_HEALTH`` without dropping data.
+
+    Legacy ``nccl_performance`` and ``nccl_ib_port_performance`` tables remain
+    untouched for rollback. Re-running this migration is safe: non-empty/new
+    values are preserved and missing values are filled from legacy rows.
+    """
+
+    path = Path(db_path).expanduser().resolve()
+    version_rows: dict[tuple[str, int], tuple[str, str, str]] = {}
+    if validation_db_path:
+        validation_path = Path(validation_db_path).expanduser().resolve()
+        if validation_path.exists():
+            with closing(
+                sqlite3.connect(f"file:{validation_path}?mode=ro", uri=True, timeout=30)
+            ) as validation_connection:
+                try:
+                    rows = validation_connection.execute(
+                        "SELECT node, timestamp, image_name, cuda_version, pytorch_version "
+                        "FROM runs WHERE test = 'nccl' ORDER BY rowid"
+                    ).fetchall()
+                    for node, timestamp, image, cuda, pytorch in rows:
+                        version_rows[(str(node), int(timestamp))] = (
+                            str(image or ""),
+                            str(cuda or ""),
+                            str(pytorch or ""),
+                        )
+                except sqlite3.Error:
+                    pass
+
+    with closing(_connect_writable(path)) as connection:
+        _create_nccl_health_table(connection)
+        table_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        aggregate_rows: dict[tuple[str, int], tuple[str, float | None, float | None]] = {}
+        if "nccl_performance" in table_names:
+            for node, timestamp, image, bus_bw, latency in connection.execute(
+                "SELECT node, timestamp, image_name, busbw, latency FROM nccl_performance"
+            ):
+                aggregate_rows[(str(node), int(timestamp))] = (
+                    str(image or ""),
+                    _optional_float(bus_bw),
+                    _optional_float(latency),
+                )
+
+        port_rows: dict[tuple[str, int], dict[str, object]] = {}
+        port_images: dict[tuple[str, int], str] = {}
+        sample_counts: dict[tuple[str, int], list[int]] = {}
+        if "nccl_ib_port_performance" in table_names:
+            for node, timestamp, device, image, max_gbps, samples in connection.execute(
+                "SELECT node, timestamp, device, image_name, max_gbps, samples "
+                "FROM nccl_ib_port_performance"
+            ):
+                key = (str(node), int(timestamp))
+                device_name = str(device)
+                if device_name in NCCL_IB_PORT_COLUMNS:
+                    port_rows.setdefault(key, {})[device_name] = max_gbps
+                if image:
+                    port_images[key] = str(image)
+                sample = _optional_int(samples)
+                if sample is not None:
+                    sample_counts.setdefault(key, []).append(sample)
+
+        keys = sorted(set(aggregate_rows) | set(port_rows))
+        columns = (
+            "Node",
+            "timestamp",
+            "la_timestamp",
+            "iterations",
+            "image_name",
+            "cuda",
+            "pytorch",
+            "samples",
+            "BUS_BW",
+            "LATENCY",
+            *NCCL_IB_PORT_COLUMNS,
+        )
+        placeholders = ", ".join("?" for _ in columns)
+        update_columns = columns[2:]
+        updates = ", ".join(
+            f"{column}=CASE "
+            f"WHEN excluded.{column} IS NULL OR excluded.{column} = '' "
+            f"THEN {NCCL_HEALTH_TABLE}.{column} ELSE excluded.{column} END"
+            for column in update_columns
+        )
+        for key in keys:
+            node, timestamp = key
+            aggregate_image, bus_bw, latency = aggregate_rows.get(key, ("", None, None))
+            version_image, cuda, pytorch = version_rows.get(key, ("", "", ""))
+            ports = port_rows.get(key, {})
+            samples = sample_counts.get(key, [])
+            values = (
+                node,
+                timestamp,
+                timestamp_to_los_angeles(timestamp),
+                default_iterations,
+                aggregate_image or port_images.get(key, "") or version_image,
+                cuda,
+                pytorch,
+                max(samples) if samples else None,
+                bus_bw,
+                latency,
+                *(_optional_float(ports.get(column)) for column in NCCL_IB_PORT_COLUMNS),
+            )
+            connection.execute(
+                f"INSERT INTO {NCCL_HEALTH_TABLE} ({', '.join(columns)}) "
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT(Node, timestamp) DO UPDATE SET {updates}",
+                values,
+            )
+        connection.commit()
+        total = connection.execute(
+            f"SELECT COUNT(*) FROM {NCCL_HEALTH_TABLE}"
+        ).fetchone()[0]
+        with_ports = connection.execute(
+            f"SELECT COUNT(*) FROM {NCCL_HEALTH_TABLE} WHERE "
+            + " OR ".join(f"{column} IS NOT NULL" for column in NCCL_IB_PORT_COLUMNS)
+        ).fetchone()[0]
+
+    return {"migrated_runs": len(keys), "total_rows": int(total), "rows_with_ports": int(with_ports)}
 
 
 def add_validation_result(

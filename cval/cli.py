@@ -30,10 +30,12 @@ from cval.storage.status import (
     parse_latest_status_tsv,
 )
 from cval.storage.ingest import (
+    add_nccl_health_from_summary,
     add_nccl_ib_ports_from_summary,
     add_nccl_result,
     add_storage_result,
     add_validation_result,
+    migrate_nccl_health,
 )
 from cval.validation.results import load_validation_result, validation_result_to_env_lines
 
@@ -300,17 +302,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="Do not join NCCL/storage metric columns into the CSV",
     )
-    results.add_argument(
-        "--active-ports-only",
-        action="store_true",
-        help="For --test nccl, drop IB ports whose average bandwidth is zero",
-    )
-    results.add_argument(
-        "--no-aggregate-fallback",
-        action="store_true",
-        help="For --test nccl, leave port columns blank for nodes without "
-        "per-port data instead of copying the aggregate busbw",
-    )
     results.set_defaults(handler=handle_results)
 
     classifications = subparsers.add_parser(
@@ -369,6 +360,25 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl_ports.add_argument("--image-name", default="")
     db_add_nccl_ports.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl_ports.set_defaults(handler=handle_db_add_nccl_ports)
+
+    db_add_nccl_health = subparsers.add_parser("db-add-nccl-health")
+    db_add_nccl_health.add_argument("node")
+    db_add_nccl_health.add_argument("timestamp")
+    db_add_nccl_health.add_argument("summary_json", type=Path)
+    db_add_nccl_health.add_argument("--iterations", type=int)
+    db_add_nccl_health.add_argument("--image-name", default="")
+    db_add_nccl_health.add_argument("--cuda-version", default="")
+    db_add_nccl_health.add_argument("--pytorch-version", default="")
+    db_add_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
+    db_add_nccl_health.set_defaults(handler=handle_db_add_nccl_health)
+
+    db_migrate_nccl_health = subparsers.add_parser("db-migrate-nccl-health")
+    db_migrate_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
+    db_migrate_nccl_health.add_argument(
+        "--validation-db-path", default=active_config.storage.validation_db_path
+    )
+    db_migrate_nccl_health.add_argument("--default-iterations", type=int, default=20)
+    db_migrate_nccl_health.set_defaults(handler=handle_db_migrate_nccl_health)
 
     db_rebuild_dltest = subparsers.add_parser("db-rebuild-dltest-metrics")
     db_rebuild_dltest.add_argument(
@@ -759,12 +769,12 @@ def handle_results(args: argparse.Namespace) -> int:
     from cval.storage.results_export import (
         latest_result_rows,
         write_latest_results_csv,
-        write_nccl_port_results_csv,
+        write_nccl_health_results_csv,
     )
     from cval.storage.classification_status import get_latest_classification_rows
     from cval.storage.metrics import (
+        get_latest_nccl_health_metrics,
         get_latest_nccl_metrics,
-        get_latest_nccl_port_metrics,
         get_latest_storage_metrics,
     )
 
@@ -787,32 +797,23 @@ def handle_results(args: argparse.Namespace) -> int:
 
     test = args.test.lower()
 
-    # NCCL export is per-HCA-port long format: one row per (node, IB port).
+    # NCCL export mirrors IB_HEALTH: one wide row per node/run.
     if test == "nccl":
         selected = latest_result_rows(rows, args.test)
-        port_metrics = None
-        agg_metrics = None
+        health_metrics = None
         if not args.no_metrics:
-            port_metrics = get_latest_nccl_port_metrics(
+            health_metrics = get_latest_nccl_health_metrics(
                 pod=args.pod,
                 namespace=args.namespace,
                 db_path=args.nccl_db_path,
             )
-            agg_metrics = get_latest_nccl_metrics(
-                pod=args.pod,
-                namespace=args.namespace,
-                db_path=args.nccl_db_path,
-            )
-        output_path = write_nccl_port_results_csv(
+        output_path = write_nccl_health_results_csv(
             rows,
             output_dir=args.output_dir,
-            port_metrics=port_metrics,
-            agg_metrics=agg_metrics,
+            health_metrics=health_metrics,
             classifications=classifications,
-            active_only=args.active_ports_only,
-            aggregate_fallback=not args.no_aggregate_fallback,
         )
-        print(f"Wrote {len(selected)} nccl node(s) with per-port IB rows to {output_path}")
+        print(f"Wrote {len(selected)} nccl IB_HEALTH row(s) to {output_path}")
         return 0
 
     nccl_metrics = None
@@ -959,6 +960,38 @@ def handle_db_add_nccl_ports(args: argparse.Namespace) -> int:
         db_path=args.db_path,
     )
     print(f"Added NCCL per-port IB metrics: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
+    """Ingest one consolidated NCCL/IB health row from a summary JSON."""
+
+    if not args.summary_json.exists():
+        print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
+        return 1
+    timestamp = add_nccl_health_from_summary(
+        args.node,
+        args.timestamp,
+        args.summary_json,
+        iterations=args.iterations,
+        image_name=args.image_name,
+        cuda_version=args.cuda_version,
+        pytorch_version=args.pytorch_version,
+        db_path=args.db_path,
+    )
+    print(f"Added consolidated IB_HEALTH result: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_migrate_nccl_health(args: argparse.Namespace) -> int:
+    """Consolidate legacy NCCL tables into the additive IB_HEALTH table."""
+
+    summary = migrate_nccl_health(
+        args.db_path,
+        validation_db_path=args.validation_db_path,
+        default_iterations=args.default_iterations,
+    )
+    print(json.dumps(summary, sort_keys=True))
     return 0
 
 

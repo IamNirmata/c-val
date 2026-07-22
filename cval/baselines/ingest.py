@@ -152,9 +152,9 @@ def compute_peer_stats(
                 # Compute mean/stdev of NCCL metrics
                 query = """
                     SELECT
-                      AVG(busbw) as mean_busbw,
-                      AVG(latency) as mean_latency
-                    FROM nccl_performance
+                                            AVG(BUS_BW) as mean_busbw,
+                                            AVG(LATENCY) as mean_latency
+                                        FROM IB_HEALTH
                     WHERE timestamp > (strftime('%s', 'now') - ? * 86400)
                 """
                 if node:

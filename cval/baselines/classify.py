@@ -61,13 +61,18 @@ def _node_values_storage(db_path: str | Path, node: str, window_days: int) -> di
 def _node_values_nccl(db_path: str | Path, node: str, window_days: int) -> dict[str, float]:
     rows = _query_rows(
         db_path,
-        "nccl_performance",
-        NCCL_COLUMNS,
+        "IB_HEALTH",
+        ("BUS_BW", "LATENCY"),
         "timestamp",
         window_days,
-        {"node": node},
+        {"Node": node},
     )
-    return _median_by_column(NCCL_COLUMNS, rows)
+    source = _median_by_column(("BUS_BW", "LATENCY"), rows)
+    return {
+        metric: source[source_column]
+        for metric, source_column in (("busbw", "BUS_BW"), ("latency", "LATENCY"))
+        if source_column in source
+    }
 
 
 def _node_values_dl(
@@ -411,7 +416,7 @@ def _distinct_nodes(
     if baseline_test_type == "storage":
         _collect(db_path or config.storage.storage_db_path, "storage_performance", "timestamp")
     elif baseline_test_type == "nccl":
-        _collect(db_path or config.storage.nccl_db_path, "nccl_performance", "timestamp")
+        _collect(db_path or config.storage.nccl_db_path, "IB_HEALTH", "timestamp")
     elif baseline_test_type == "dltest":
         paths = dl_db_paths or _default_dl_db_paths(config)
         for table, _direction, _tolerance_attr, _keep_rank in _DL_DB_SPECS:

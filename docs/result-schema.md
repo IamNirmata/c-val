@@ -76,13 +76,14 @@ These latest-status rows and the storage/NCCL/DL metric DBs are the inputs to
 dynamic baseline building and node classification. See
 [Baselines and Node Classification](baselines.md).
 
-## NCCL per-HCA-port IB bandwidth
+## NCCL and IB health (`test-nccl.db`)
 
 The NCCL phase runs `ibbw.sh`, which **auto-detects every IB device and port**
 under `/sys/class/infiniband/` (an optional numeric range still restricts it to
 `mlx5_<start>..mlx5_<end>`). It samples each port's `port_xmit_data` counter
-during the all-reduce. `single-node-allreduce.py` averages those samples per
-port into the NCCL summary JSON under `GCR_IB_PORT_BW_GBPS`:
+during the all-reduce. `single-node-allreduce.py` summarizes those samples per
+port under `GCR_IB_PORT_BW_GBPS` and records `GCR_ITERATIONS`, aggregate
+`GCR_BUSBW`, and aggregate `GCR_LATENCY`:
 
 ```json
 "GCR_IB_PORT_BW_GBPS": {
@@ -92,17 +93,24 @@ port into the NCCL summary JSON under `GCR_IB_PORT_BW_GBPS`:
 }
 ```
 
-Port labels use the bare device name for port 1 (`mlx5_4`) and `device.port`
-for additional ports (`mlx5_5.2`). `db-update.sh` ingests this block via
-`cval db-add-nccl-ports` into an **additive** `nccl_ib_port_performance` table in
-`test-nccl.db`, one row per port:
+Port labels use the bare device name for port 1 (`mlx5_4`). `db-update.sh`
+ingests the summary via `cval db-add-nccl-health` into `IB_HEALTH`, with exactly
+**one row per node/test run**. Only each port's `max_gbps` is retained:
 
 ```text
-node  timestamp  device    image_name  avg_gbps  max_gbps  last_gbps  samples
+Node, timestamp, la_timestamp, iterations, image_name, cuda, pytorch, samples,
+BUS_BW, LATENCY, mlx5_0, mlx5_1, ... mlx5_13
 ```
 
-The aggregate all-reduce `busbw`/`latency` stay in the separate
-`nccl_performance` table (the input baselines classify against). `cval results
---test nccl` emits one row per (node, IB port) with `port_avg_gbps`/`port_max_gbps`
-plus the node's aggregate `node_allreduce_busbw`/`node_allreduce_latency_ms`;
-`--active-ports-only` drops idle (zero-bandwidth) ports.
+- `BUS_BW` (GB/s) and `LATENCY` (ms) are the aggregate 8-GPU all-reduce values.
+- `mlx5_0` ... `mlx5_13` are maximum observed transmit bandwidths in GB/s.
+- `samples` is the number of HCA counter samples collected during the run.
+- `la_timestamp` is ISO-8601 in `America/Los_Angeles`.
+- `cuda` / `pytorch` are the versions detected inside the validation image.
+
+Dynamic NCCL baselines and `cval results --test nccl` read `IB_HEALTH`.
+The export mirrors the same wide one-row-per-node shape and appends
+classification columns. Legacy `nccl_performance` and
+`nccl_ib_port_performance` tables are preserved for rollback but are no longer
+written by new validation runs. `cval db-migrate-nccl-health` performs the
+additive consolidation and is safe to rerun.

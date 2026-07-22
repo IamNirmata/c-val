@@ -153,6 +153,23 @@ class NcclPortMetric:
 
 
 @dataclass(frozen=True)
+class NcclHealthMetric:
+    """One consolidated NCCL/IB health row for a node's latest run."""
+
+    node: str
+    timestamp: int | None
+    la_timestamp: str
+    iterations: int | None
+    image_name: str
+    cuda: str
+    pytorch: str
+    samples: int | None
+    bus_bw: float | None
+    latency: float | None
+    port_max_gbps: dict[str, float | None]
+
+
+@dataclass(frozen=True)
 class StorageMetrics:
     """Latest FIO storage performance metrics for one node (from test-storage.db)."""
 

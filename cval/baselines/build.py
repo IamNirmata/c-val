@@ -191,26 +191,30 @@ def build_nccl_baseline(
     node: str | None = None,
     baseline_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build an NCCL baseline from ``nccl_performance`` (busbw low-bad, latency high-bad)."""
+    """Build an NCCL baseline from ``IB_HEALTH`` aggregate metrics."""
 
     config = config or load_config()
     db_path = db_path or config.storage.nccl_db_path
     window_days = config.baseline.window_days if window_days is None else window_days
     min_samples = config.baseline.min_samples if min_samples is None else min_samples
 
-    columns = ("busbw", "latency")
+    source_columns = ("BUS_BW", "LATENCY")
     rows = _query_rows(
         db_path,
-        "nccl_performance",
-        columns,
+        "IB_HEALTH",
+        source_columns,
         "timestamp",
         window_days,
-        {"image_name": image_name, "node": node},
+        {"image_name": image_name, "Node": node},
     )
-    series = _collect_positive(columns, rows)
+    source_series = _collect_positive(source_columns, rows)
+    series = {
+        "busbw": source_series["BUS_BW"],
+        "latency": source_series["LATENCY"],
+    }
 
     metrics: dict[str, Any] = {}
-    for column in columns:
+    for column in ("busbw", "latency"):
         values = series[column]
         if len(values) >= min_samples:
             metric_stat = stats.summarize_metric(
@@ -220,7 +224,7 @@ def build_nccl_baseline(
                 tolerance_pct=config.baseline.nccl_peer_tolerance_pct,
                 z_threshold=config.baseline.robust_z_threshold,
             ).to_dict()
-            metric_stat["source_table"] = "nccl_performance"
+            metric_stat["source_table"] = "IB_HEALTH"
             metrics[column] = metric_stat
 
     return _assemble_record(

@@ -112,13 +112,16 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn("CVAL_IBBW_END_DEVICE=${CVAL_IBBW_END_DEVICE:-}", run_test)
         self.assertIn("auto-detect", run_test)
 
-    def test_db_update_ingests_per_port_ib_metrics(self) -> None:
+    def test_db_update_ingests_consolidated_ib_health(self) -> None:
         script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("db-add-nccl-ports", script)
+        self.assertIn("db-add-nccl-health", script)
         self.assertIn('"$NCCL_SUMMARY_FILE"', script)
+        self.assertIn('--iterations "$CVAL_NCCL_ITERATIONS"', script)
+        self.assertIn('--cuda-version "$CVAL_CUDA_VERSION"', script)
+        self.assertIn('--pytorch-version "$CVAL_PYTORCH_VERSION"', script)
 
     def test_structured_validation_result_schema(self) -> None:
         payload = {

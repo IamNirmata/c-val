@@ -57,13 +57,13 @@ def _make_nccl_two_nodes(path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute(
             """
-            CREATE TABLE nccl_performance (
-                node TEXT NOT NULL,
+            CREATE TABLE IB_HEALTH (
+                Node TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 image_name TEXT NOT NULL DEFAULT '',
-                busbw REAL,
-                latency REAL,
-                PRIMARY KEY (node, timestamp)
+                BUS_BW REAL,
+                LATENCY REAL,
+                PRIMARY KEY (Node, timestamp)
             )
             """
         )
@@ -71,7 +71,7 @@ def _make_nccl_two_nodes(path: Path) -> None:
         def insert(node: str, busbw: float, latency: float, n_rows: int) -> None:
             for i in range(n_rows):
                 connection.execute(
-                    "INSERT INTO nccl_performance (node, timestamp, image_name, busbw, latency) "
+                    "INSERT INTO IB_HEALTH (Node, timestamp, image_name, BUS_BW, LATENCY) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (node, NOW - i * 60, "img:1", busbw + (i % 5 - 2) * 0.5, latency),
                 )

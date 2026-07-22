@@ -13,8 +13,9 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.models import ClassificationResultRow, LatestStatusRow, NcclMetrics, NcclPortMetric, StorageMetrics
+from cval.models import ClassificationResultRow, LatestStatusRow, NcclHealthMetric, NcclMetrics, StorageMetrics
 from cval.storage.classification_status import classification_rows_by_node_test
+from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 UTC = dt.timezone.utc
@@ -240,24 +241,24 @@ def write_latest_results_csv(
     return output_path
 
 
-# --- NCCL per-HCA-port long-format export -----------------------------------
-# `cval results --test nccl` emits one row per (node, IB port) so operators see
-# every HCA port's average bandwidth instead of a single aggregate number.
+# --- NCCL/IB health wide-format export --------------------------------------
 
-NCCL_PORT_CSV_COLUMNS = (
+NCCL_HEALTH_CSV_COLUMNS = (
     "node",
     "test",
-    "device",
     "latest_timestamp",
     "latest_time_utc",
     "latest_time_los_angeles",
     "result",
-    "port_avg_gbps",
-    "port_max_gbps",
-    "port_last_gbps",
-    "port_samples",
-    "node_allreduce_busbw",
-    "node_allreduce_latency_ms",
+    "la_timestamp",
+    "iterations",
+    "image_name",
+    "cuda",
+    "pytorch",
+    "samples",
+    "BUS_BW",
+    "LATENCY",
+    *NCCL_IB_PORT_COLUMNS,
     "classification_status",
     "classification_passed",
     "classification_baseline_id",
@@ -272,40 +273,36 @@ NCCL_PORT_CSV_COLUMNS = (
 )
 
 
-def nccl_port_rows_to_csv_records(
+def nccl_health_rows_to_csv_records(
     rows: list[LatestStatusRow],
-    port_metrics: dict[str, list[NcclPortMetric]] | None = None,
-    agg_metrics: dict[str, NcclMetrics] | None = None,
+    health_metrics: dict[str, NcclHealthMetric] | None = None,
     classifications: list[ClassificationResultRow] | None = None,
-    active_only: bool = False,
-    aggregate_fallback: bool = True,
 ) -> list[dict[str, str]]:
-    """Build per-(node, IB port) NCCL records.
+    """Build one wide NCCL/IB health record per node."""
 
-    Nodes with no per-port rows still emit one row so node coverage matches the
-    aggregate export. When ``aggregate_fallback`` is set (default), that row uses
-    a synthetic ``aggregate`` device and copies the node's all-reduce ``busbw``
-    into ``port_avg_gbps`` so the column is populated for analysis; otherwise the
-    port columns are left blank. When ``active_only`` is set, ports whose average
-    bandwidth is zero/None are dropped.
-    """
-
-    ports_by_node = port_metrics or {}
-    agg_by_node = agg_metrics or {}
+    health_by_node = health_metrics or {}
     by_node_test = classification_rows_by_node_test(classifications or [])
     records: list[dict[str, str]] = []
 
     for row in rows:
         classification = by_node_test.get((row.node, "nccl"))
-        agg = agg_by_node.get(row.node)
-        base = {
+        health = health_by_node.get(row.node)
+        timestamp = health.timestamp if health and health.timestamp is not None else row.latest_timestamp
+        record = {
             "node": row.node,
             "test": "nccl",
+            "latest_timestamp": "" if timestamp is None else str(timestamp),
+            "latest_time_utc": timestamp_to_utc(timestamp),
+            "latest_time_los_angeles": timestamp_to_los_angeles(timestamp),
             "result": row.result,
-            "node_allreduce_busbw": "" if agg is None or agg.busbw is None else f"{agg.busbw:.4f}",
-            "node_allreduce_latency_ms": ""
-            if agg is None or agg.latency is None
-            else f"{agg.latency:.4f}",
+            "la_timestamp": health.la_timestamp if health else "",
+            "iterations": "" if health is None or health.iterations is None else str(health.iterations),
+            "image_name": health.image_name if health else "",
+            "cuda": health.cuda if health else "",
+            "pytorch": health.pytorch if health else "",
+            "samples": "" if health is None or health.samples is None else str(health.samples),
+            "BUS_BW": "" if health is None or health.bus_bw is None else f"{health.bus_bw:.4f}",
+            "LATENCY": "" if health is None or health.latency is None else f"{health.latency:.4f}",
             "classification_status": classification.status if classification else "",
             "classification_passed": "" if classification is None else str(classification.passed).lower(),
             "classification_baseline_id": classification.baseline_id if classification else "",
@@ -326,67 +323,22 @@ def nccl_port_rows_to_csv_records(
             else f"{classification.degraded_metric_fraction * 100.0:.3f}",
             "worst_pct_diff": "" if classification is None else f"{classification.worst_pct_diff:.3f}",
         }
-
-        node_ports = ports_by_node.get(row.node, [])
-        if active_only:
-            node_ports = [p for p in node_ports if p.avg_gbps not in (None, 0.0)]
-
-        if not node_ports:
-            record = dict(base)
-            fallback_avg = ""
-            fallback_device = ""
-            if aggregate_fallback and agg is not None and agg.busbw is not None:
-                # No per-port measurement for this node: surface the node-level
-                # all-reduce busbw under a synthetic "aggregate" device so the
-                # port column is populated (and clearly not a real HCA port).
-                fallback_device = "aggregate"
-                fallback_avg = f"{agg.busbw:.4f}"
-            record.update(
-                {
-                    "device": fallback_device,
-                    "latest_timestamp": "" if row.latest_timestamp is None else str(row.latest_timestamp),
-                    "latest_time_utc": timestamp_to_utc(row.latest_timestamp),
-                    "latest_time_los_angeles": timestamp_to_los_angeles(row.latest_timestamp),
-                    "port_avg_gbps": fallback_avg,
-                    "port_max_gbps": "",
-                    "port_last_gbps": "",
-                    "port_samples": "",
-                }
-            )
-            records.append(record)
-            continue
-
-        for port in node_ports:
-            ts = port.timestamp if port.timestamp is not None else row.latest_timestamp
-            record = dict(base)
-            record.update(
-                {
-                    "device": port.device,
-                    "latest_timestamp": "" if ts is None else str(ts),
-                    "latest_time_utc": timestamp_to_utc(ts),
-                    "latest_time_los_angeles": timestamp_to_los_angeles(ts),
-                    "port_avg_gbps": "" if port.avg_gbps is None else f"{port.avg_gbps:.4f}",
-                    "port_max_gbps": "" if port.max_gbps is None else f"{port.max_gbps:.4f}",
-                    "port_last_gbps": "" if port.last_gbps is None else f"{port.last_gbps:.4f}",
-                    "port_samples": "" if port.samples is None else str(port.samples),
-                }
-            )
-            records.append(record)
+        for column in NCCL_IB_PORT_COLUMNS:
+            value = health.port_max_gbps.get(column) if health else None
+            record[column] = "" if value is None else f"{value:.4f}"
+        records.append(record)
 
     return records
 
 
-def write_nccl_port_results_csv(
+def write_nccl_health_results_csv(
     rows: list[LatestStatusRow],
     output_dir: str | Path = ".",
     now: dt.datetime | None = None,
-    port_metrics: dict[str, list[NcclPortMetric]] | None = None,
-    agg_metrics: dict[str, NcclMetrics] | None = None,
+    health_metrics: dict[str, NcclHealthMetric] | None = None,
     classifications: list[ClassificationResultRow] | None = None,
-    active_only: bool = False,
-    aggregate_fallback: bool = True,
 ) -> Path:
-    """Write per-(node, IB port) NCCL rows to a local CSV and return the path."""
+    """Write one wide NCCL/IB health row per node to a local CSV."""
 
     selected = latest_result_rows(rows, "nccl")
     directory = Path(output_dir).expanduser().resolve()
@@ -394,17 +346,10 @@ def write_nccl_port_results_csv(
     output_path = directory / default_results_filename("nccl", now)
 
     with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=NCCL_PORT_CSV_COLUMNS, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=NCCL_HEALTH_CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(
-            nccl_port_rows_to_csv_records(
-                selected,
-                port_metrics,
-                agg_metrics,
-                classifications,
-                active_only,
-                aggregate_fallback,
-            )
+            nccl_health_rows_to_csv_records(selected, health_metrics, classifications)
         )
 
     return output_path

@@ -24,6 +24,7 @@ GCRRESULT3=${GCRRESULT3:-fail}
 CVAL_IMAGE_NAME=${CVAL_IMAGE_NAME:-}
 CVAL_PYTORCH_VERSION=${CVAL_PYTORCH_VERSION:-}
 CVAL_CUDA_VERSION=${CVAL_CUDA_VERSION:-}
+CVAL_NCCL_ITERATIONS=${CVAL_NCCL_ITERATIONS:-20}
 
 if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
     echo "Loading structured test result state from $CVAL_RESULT_JSON_FILE"
@@ -111,24 +112,19 @@ if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
     echo "GCR_LATENCY: $GCR_LATENCY"
     echo "--------------------------------"
 
-    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-nccl-result \
-        "$GCRNODE" \
-        "$GCRTIME" \
-        "$GCR_BUSBW" \
-        "$GCR_LATENCY" \
-        --image-name "$CVAL_IMAGE_NAME" \
-        --db-path "$CVAL_NCCL_DB_PATH"
-
-    # Persist per-HCA-port IB bandwidth (all mlx5 ports) from the summary JSON.
-    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-nccl-ports \
+    # Persist one consolidated row: aggregate all-reduce BUS_BW/LATENCY plus
+    # each HCA port's maximum observed bandwidth (mlx5_0..mlx5_13).
+    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-nccl-health \
         "$GCRNODE" \
         "$GCRTIME" \
         "$NCCL_SUMMARY_FILE" \
+        --iterations "$CVAL_NCCL_ITERATIONS" \
         --image-name "$CVAL_IMAGE_NAME" \
-        --db-path "$CVAL_NCCL_DB_PATH" \
-        || echo "Warning: per-port IB metric ingestion failed; continuing."
+        --cuda-version "$CVAL_CUDA_VERSION" \
+        --pytorch-version "$CVAL_PYTORCH_VERSION" \
+        --db-path "$CVAL_NCCL_DB_PATH"
 
-    echo "NCCl DB update completed."
+    echo "NCCL IB_HEALTH DB update completed."
 else
     echo "Skipping NCCL metrics DB update because result is $GCRRESULT2 or summary is missing."
 fi
