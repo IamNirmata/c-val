@@ -95,22 +95,40 @@ spec:
                   value: "storage-storage-db-path-placeholder"
                 - name: CVAL_NCCL_DB_PATH
                   value: "storage-nccl-db-path-placeholder"
-                - name: CVAL_GPU_COUNT
-                  value: "validation-gpu-count-placeholder"
+                - name: RUN_STORAGE
+                  value: "test-storage-enabled-placeholder"
+                - name: CVAL_STORAGE_INSTALL_FIO
+                  value: "test-storage-install-fio-placeholder"
+                - name: RUN_NCCL
+                  value: "test-nccl-enabled-placeholder"
+                - name: CVAL_NCCL_GPU_COUNT
+                  value: "test-nccl-gpu-count-placeholder"
                 - name: CVAL_NCCL_ITERATIONS
-                  value: "validation-nccl-iterations-placeholder"
+                  value: "test-nccl-iterations-placeholder"
                 - name: CVAL_NCCL_DATA_SIZE_GB
-                  value: "validation-nccl-data-size-gb-placeholder"
+                  value: "test-nccl-data-size-gb-placeholder"
+                - name: CVAL_IBBW_ENABLED
+                  value: "test-nccl-ibbw-enabled-placeholder"
                 - name: CVAL_IBBW_START_DEVICE
-                  value: "validation-ibbw-start-device-placeholder"
+                  value: "test-nccl-ibbw-start-device-placeholder"
                 - name: CVAL_IBBW_END_DEVICE
-                  value: "validation-ibbw-end-device-placeholder"
+                  value: "test-nccl-ibbw-end-device-placeholder"
+                - name: CVAL_NCCL_NET
+                  value: "test-nccl-net-placeholder"
+                - name: CVAL_NCCL_P2P_DISABLE
+                  value: "test-nccl-p2p-disable-placeholder"
+                - name: CVAL_NCCL_SHM_DISABLE
+                  value: "test-nccl-shm-disable-placeholder"
+                - name: CVAL_NCCL_DEBUG
+                  value: "test-nccl-debug-placeholder"
+                - name: RUN_DLTEST
+                  value: "test-dltest-enabled-placeholder"
+                - name: CVAL_DL_GPU_COUNT
+                  value: "test-dltest-gpu-count-placeholder"
                 - name: CVAL_DL_TEST_PLAN
-                  value: "validation-dl-test-plan-placeholder"
-                - name: CVAL_DL_BASELINE_TEST_ID
-                  value: "validation-dl-baseline-test-id-placeholder"
+                  value: "test-dltest-plan-placeholder"
                 - name: CVAL_DL_ITERATIONS
-                  value: "validation-dl-iterations-placeholder"
+                  value: "test-dltest-iterations-placeholder"
               volumeMounts:
                 - name: dshm
                   mountPath: /dev/shm

@@ -98,17 +98,47 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
-class ValidationConfig:
-    """Validation workload defaults used inside pods."""
+class StorageTestConfig:
+    """Storage/FIO phase controls."""
 
+    enabled: bool = True
+    install_fio: bool = True
+
+
+@dataclass(frozen=True)
+class NcclTestConfig:
+    """NCCL all-reduce and HCA monitoring controls."""
+
+    enabled: bool = True
     gpu_count: int = 8
-    nccl_iterations: int = 20
-    nccl_data_size_gb: int = 8
+    iterations: int = 20
+    data_size_gb: int = 8
+    ibbw_enabled: bool = True
     ibbw_start_device: int = 0
     ibbw_end_device: int = 13
-    dl_test_plan: str = "80gb-example"
-    dl_baseline_test_id: str = "b200-pt2.8.0-cuda12.9"
-    dl_iterations: int = 100
+    net: str = "IB"
+    p2p_disable: bool = True
+    shm_disable: bool = True
+    debug: str = "INFO"
+
+
+@dataclass(frozen=True)
+class DlTestConfig:
+    """Deep-learning unit-test phase controls."""
+
+    enabled: bool = True
+    gpu_count: int = 8
+    test_plan: str = "80gb-example"
+    iterations: int = 100
+
+
+@dataclass(frozen=True)
+class TestsConfig:
+    """All independently switchable validation phases."""
+
+    storage: StorageTestConfig = field(default_factory=StorageTestConfig)
+    nccl: NcclTestConfig = field(default_factory=NcclTestConfig)
+    dltest: DlTestConfig = field(default_factory=DlTestConfig)
 
 
 @dataclass(frozen=True)
@@ -141,7 +171,6 @@ class BaselineClassificationConfig:
     dl_compute_tolerance_pct: float = 3.0
     dl_numerical_tolerance_pct: float = 0.1
     dl_overlap_tolerance_pct: float = 20.0
-    classify_outliers: bool = True
     # Robust z-score cutoff (Iglewicz & Hoaglin recommend 3.5) used when
     # building dynamic baselines and flagging outliers.
     robust_z_threshold: float = 3.5
@@ -171,7 +200,7 @@ class CvalConfig:
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    tests: TestsConfig = field(default_factory=TestsConfig)
     job_template: JobTemplateConfig = field(default_factory=JobTemplateConfig)
     baseline: BaselineClassificationConfig = field(default_factory=BaselineClassificationConfig)
 
@@ -223,11 +252,14 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
     monitoring = _section(data, "monitoring")
     storage = _section(data, "storage")
     runtime = _section(data, "runtime")
-    validation = _section(data, "validation")
+    tests = _section(data, "tests")
+    storage_test = _section(tests, "storage")
+    nccl_test = _section(tests, "nccl")
+    dltest = _section(tests, "dltest")
     job_template = _section(data, "job_template")
     baseline = _section(data, "baseline")
 
-    return CvalConfig(
+    config = CvalConfig(
         cluster=ClusterConfig(
             namespace=_str(cluster, "namespace", defaults.cluster.namespace),
             pvc_access_pod=_str(cluster, "pvc_access_pod", defaults.cluster.pvc_access_pod),
@@ -309,35 +341,48 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 defaults.runtime.dl_results_root_path,
             ),
         ),
-        validation=ValidationConfig(
-            gpu_count=_int(validation, "gpu_count", defaults.validation.gpu_count),
-            nccl_iterations=_int(
-                validation,
-                "nccl_iterations",
-                defaults.validation.nccl_iterations,
+        tests=TestsConfig(
+            storage=StorageTestConfig(
+                enabled=_bool(storage_test, "enabled", defaults.tests.storage.enabled),
+                install_fio=_bool(
+                    storage_test, "install_fio", defaults.tests.storage.install_fio
+                ),
             ),
-            nccl_data_size_gb=_int(
-                validation,
-                "nccl_data_size_gb",
-                defaults.validation.nccl_data_size_gb,
+            nccl=NcclTestConfig(
+                enabled=_bool(nccl_test, "enabled", defaults.tests.nccl.enabled),
+                gpu_count=_int(nccl_test, "gpu_count", defaults.tests.nccl.gpu_count),
+                iterations=_int(nccl_test, "iterations", defaults.tests.nccl.iterations),
+                data_size_gb=_int(
+                    nccl_test, "data_size_gb", defaults.tests.nccl.data_size_gb
+                ),
+                ibbw_enabled=_bool(
+                    nccl_test, "ibbw_enabled", defaults.tests.nccl.ibbw_enabled
+                ),
+                ibbw_start_device=_int(
+                    nccl_test,
+                    "ibbw_start_device",
+                    defaults.tests.nccl.ibbw_start_device,
+                ),
+                ibbw_end_device=_int(
+                    nccl_test,
+                    "ibbw_end_device",
+                    defaults.tests.nccl.ibbw_end_device,
+                ),
+                net=_str(nccl_test, "net", defaults.tests.nccl.net),
+                p2p_disable=_bool(
+                    nccl_test, "p2p_disable", defaults.tests.nccl.p2p_disable
+                ),
+                shm_disable=_bool(
+                    nccl_test, "shm_disable", defaults.tests.nccl.shm_disable
+                ),
+                debug=_str(nccl_test, "debug", defaults.tests.nccl.debug),
             ),
-            ibbw_start_device=_int(
-                validation,
-                "ibbw_start_device",
-                defaults.validation.ibbw_start_device,
+            dltest=DlTestConfig(
+                enabled=_bool(dltest, "enabled", defaults.tests.dltest.enabled),
+                gpu_count=_int(dltest, "gpu_count", defaults.tests.dltest.gpu_count),
+                test_plan=_str(dltest, "test_plan", defaults.tests.dltest.test_plan),
+                iterations=_int(dltest, "iterations", defaults.tests.dltest.iterations),
             ),
-            ibbw_end_device=_int(
-                validation,
-                "ibbw_end_device",
-                defaults.validation.ibbw_end_device,
-            ),
-            dl_test_plan=_str(validation, "dl_test_plan", defaults.validation.dl_test_plan),
-            dl_baseline_test_id=_str(
-                validation,
-                "dl_baseline_test_id",
-                defaults.validation.dl_baseline_test_id,
-            ),
-            dl_iterations=_int(validation, "dl_iterations", defaults.validation.dl_iterations),
         ),
         job_template=JobTemplateConfig(
             namespace=_str(job_template, "namespace", defaults.job_template.namespace),
@@ -398,9 +443,6 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             dl_overlap_tolerance_pct=_float(
                 baseline, "dl_overlap_tolerance_pct", defaults.baseline.dl_overlap_tolerance_pct
             ),
-            classify_outliers=_bool(
-                baseline, "classify_outliers", defaults.baseline.classify_outliers
-            ),
             robust_z_threshold=_float(
                 baseline, "robust_z_threshold", defaults.baseline.robust_z_threshold
             ),
@@ -433,6 +475,42 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             ),
         ),
     )
+    _validate_config(config)
+    return config
+
+
+def _validate_config(config: CvalConfig) -> None:
+    """Reject invalid test settings before rendering or submitting jobs."""
+
+    tests = config.tests
+    if not any((tests.storage.enabled, tests.nccl.enabled, tests.dltest.enabled)):
+        raise ValueError("At least one test must be enabled under [tests.*]")
+    if tests.nccl.gpu_count <= 0 or tests.dltest.gpu_count <= 0:
+        raise ValueError("NCCL and DL GPU counts must be positive")
+    if tests.nccl.iterations <= 0 or tests.dltest.iterations <= 0:
+        raise ValueError("NCCL and DL iterations must be positive")
+    if tests.nccl.data_size_gb <= 0:
+        raise ValueError("NCCL data_size_gb must be positive")
+    if tests.nccl.ibbw_start_device < 0:
+        raise ValueError("NCCL ibbw_start_device must be non-negative")
+    if tests.nccl.ibbw_end_device < tests.nccl.ibbw_start_device:
+        raise ValueError("NCCL ibbw_end_device must be >= ibbw_start_device")
+    if not tests.nccl.net.strip() or not tests.nccl.debug.strip():
+        raise ValueError("NCCL net and debug values must not be empty")
+    if not tests.dltest.test_plan.strip():
+        raise ValueError("DL test_plan must not be empty")
+    try:
+        reserved_gpus = int(config.job_template.gpu_count)
+    except ValueError as exc:
+        raise ValueError("job_template.gpu_count must be an integer") from exc
+    required_gpus = max(
+        tests.nccl.gpu_count if tests.nccl.enabled else 0,
+        tests.dltest.gpu_count if tests.dltest.enabled else 0,
+    )
+    if reserved_gpus < required_gpus:
+        raise ValueError(
+            "job_template.gpu_count must cover each enabled GPU test's gpu_count"
+        )
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:

@@ -17,9 +17,9 @@ The wrapper launches the installed DL unit-test harness with `torchrun` across
 marks the DL phase as `pass`; any non-zero exit marks it `fail` and is reflected
 in the structured `cval.results.v1` JSON artifact.
 
-The GPU count, test plan, baseline ID, and iteration count come from
-`config/cval.toml` under `[validation]` and are injected into the validation pod
-as environment variables.
+The enable switch, GPU count, test plan, and iteration count come from
+`config/cval.toml` under `[tests.dltest]` and are injected as `RUN_DLTEST`,
+`CVAL_DL_GPU_COUNT`, `CVAL_DL_TEST_PLAN`, and `CVAL_DL_ITERATIONS`.
 
 ## What It Exercises
 

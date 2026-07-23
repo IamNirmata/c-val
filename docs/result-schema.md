@@ -28,16 +28,19 @@ cval.results.v1
   "overall": "pass",
   "tests": {
     "storage": {
+      "enabled": true,
       "status": "pass",
       "log": "/data/continuous_validation/storage/.../storage.log",
       "summary": "/data/continuous_validation/storage/.../storage-summary.txt"
     },
     "nccl": {
+      "enabled": true,
       "status": "pass",
       "log": "/data/continuous_validation/nccl/.../nccl.log",
       "summary": "/data/continuous_validation/nccl/.../nccl-summary.json"
     },
     "dltest": {
+      "enabled": true,
       "status": "pass",
       "log": "/data/continuous_validation/dltest/.../dltest.log",
       "summary": "/data/continuous_validation/dltest/.../dltest-summary.json"
@@ -53,7 +56,10 @@ cval.results.v1
 - `pytorch_version` and `cuda_version` are detected from the running image in
   `0-env.sh` (`torch.__version__` and `torch.version.cuda`) and are best-effort:
   they are empty strings when torch is unavailable.
-- `overall` is `pass` only when all test statuses are `pass`.
+- Every test has an `enabled` boolean. A disabled test is not executed and is
+  recorded as `status="incomplete", enabled=false`.
+- `overall` is `pass` only when every enabled test passes. It is `incomplete`
+  when no tests are enabled (the config loader normally rejects that case).
 - `db-update.sh` prefers JSON and falls back to the legacy env file if JSON is missing.
 - DB writes use package-native `cval db-add-*` commands inside the validation pod and store `image_name`, `pytorch_version`, and `cuda_version` with the `runs` validation rows.
 - `cval.validation.results` validates schema version, required tests, valid statuses, and aggregate consistency.

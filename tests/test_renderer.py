@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from cval.config import load_config
 from cval.jobs.renderer import default_template_path, render_validation_job, render_validation_job_from_file
 
 
@@ -87,26 +90,30 @@ class RendererTests(unittest.TestCase):
             )
 
     def test_repository_template_renders_configured_runtime_env(self) -> None:
-      rendered = render_validation_job_from_file(
-        default_template_path(),
-        "slc01-cl02-hgx-0001",
-        timestamp=12345,
-        git_ref="abc123",
-      )
+        rendered = render_validation_job_from_file(
+            default_template_path(),
+            "slc01-cl02-hgx-0001",
+            timestamp=12345,
+            git_ref="abc123",
+        )
 
-      self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
-      self.assertIn('name: CVAL_REPO_DIR', rendered.yaml_text)
-      self.assertIn('value: "/workspace/c-val"', rendered.yaml_text)
-      self.assertIn('name: CVAL_GPU_COUNT', rendered.yaml_text)
-      self.assertIn('name: CVAL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
-      self.assertIn('name: CVAL_IMAGE_NAME', rendered.yaml_text)
-      self.assertIn('value: "pytorch:26.05-py3"', rendered.yaml_text)
-      self.assertIn('name: CVAL_IBBW_START_DEVICE', rendered.yaml_text)
-      self.assertIn('name: CVAL_IBBW_START_DEVICE\n                  value: "0"', rendered.yaml_text)
-      self.assertIn('name: CVAL_IBBW_END_DEVICE', rendered.yaml_text)
-      self.assertIn('name: CVAL_IBBW_END_DEVICE\n                  value: "13"', rendered.yaml_text)
-      self.assertIn('name: CVAL_DL_ITERATIONS\n                  value: "100"', rendered.yaml_text)
-      self.assertNotIn("validation-8", rendered.yaml_text)
+        self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
+        self.assertIn('name: CVAL_REPO_DIR', rendered.yaml_text)
+        self.assertIn('value: "/workspace/c-val"', rendered.yaml_text)
+        self.assertIn('name: RUN_STORAGE\n                  value: "true"', rendered.yaml_text)
+        self.assertIn('name: RUN_NCCL\n                  value: "true"', rendered.yaml_text)
+        self.assertIn('name: RUN_DLTEST\n                  value: "true"', rendered.yaml_text)
+        self.assertIn('name: CVAL_NCCL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
+        self.assertIn('name: CVAL_DL_GPU_COUNT\n                  value: "8"', rendered.yaml_text)
+        self.assertIn('name: CVAL_IMAGE_NAME', rendered.yaml_text)
+        self.assertIn('value: "pytorch:26.05-py3"', rendered.yaml_text)
+        self.assertIn('name: CVAL_IBBW_START_DEVICE', rendered.yaml_text)
+        self.assertIn('name: CVAL_IBBW_START_DEVICE\n                  value: "0"', rendered.yaml_text)
+        self.assertIn('name: CVAL_IBBW_END_DEVICE', rendered.yaml_text)
+        self.assertIn('name: CVAL_IBBW_END_DEVICE\n                  value: "13"', rendered.yaml_text)
+        self.assertIn('name: CVAL_DL_ITERATIONS\n                  value: "100"', rendered.yaml_text)
+        self.assertIn('name: CVAL_NCCL_NET\n                  value: "IB"', rendered.yaml_text)
+        self.assertNotIn("validation-8", rendered.yaml_text)
 
     def test_repository_template_tolerates_cordon_taint(self) -> None:
         rendered = render_validation_job_from_file(
@@ -117,6 +124,31 @@ class RendererTests(unittest.TestCase):
         )
         # Validation must be able to land on a cordoned (suspected-unhealthy) node.
         self.assertIn("node.kubernetes.io/unschedulable", rendered.yaml_text)
+
+    def test_repository_template_renders_disabled_test_switch(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[tests.storage]
+enabled = true
+[tests.nccl]
+enabled = false
+[tests.dltest]
+enabled = true
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            rendered = render_validation_job_from_file(
+                default_template_path(),
+                "slc01-cl02-hgx-0001",
+                timestamp=12345,
+                git_ref="abc123",
+                cval_config=config,
+            )
+
+        self.assertIn('name: RUN_NCCL\n                  value: "false"', rendered.yaml_text)
 
 
 if __name__ == "__main__":

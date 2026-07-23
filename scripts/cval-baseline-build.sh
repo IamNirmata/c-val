@@ -24,7 +24,10 @@ from pathlib import Path
 path, section, key, default = sys.argv[1:]
 try:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    value = data.get(section, {}).get(key, default)
+    current = data
+    for part in section.split("."):
+        current = current.get(part, {}) if isinstance(current, dict) else {}
+    value = current.get(key, default) if isinstance(current, dict) else default
 except FileNotFoundError:
     value = default
 print(value)
@@ -35,7 +38,10 @@ BASELINE_ROOT=${CVAL_BASELINE_ROOT:-$(config_value baseline baseline_root_path /
 INTERVAL_SECONDS=${CVAL_BASELINE_BUILD_INTERVAL_SECONDS:-$(config_value baseline build_interval_seconds 86400)}
 WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)}
 MIN_SAMPLES=${CVAL_BASELINE_MIN_SAMPLES:-$(config_value baseline min_samples 8)}
-DL_TEST_PLAN=${CVAL_BASELINE_DL_TEST_PLAN:-$(config_value validation dl_test_plan 80gb-example)}
+STORAGE_ENABLED=${CVAL_STORAGE_ENABLED:-$(config_value tests.storage enabled true)}
+NCCL_ENABLED=${CVAL_NCCL_ENABLED:-$(config_value tests.nccl enabled true)}
+DLTEST_ENABLED=${CVAL_DLTEST_ENABLED:-$(config_value tests.dltest enabled true)}
+DL_TEST_PLAN=${CVAL_BASELINE_DL_TEST_PLAN:-$(config_value tests.dltest test_plan 80gb-example)}
 DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/dltest)}
 DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
 DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
@@ -68,6 +74,13 @@ EOF
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+is_enabled() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 require_command() {
@@ -158,6 +171,14 @@ run_cycle() {
     baseline_id="auto-$(date -u +%Y%m%dT%H%M%SZ)"
 
     for test_type in storage nccl; do
+        if [[ "$test_type" == "storage" ]] && ! is_enabled "$STORAGE_ENABLED"; then
+            log "skipping storage baseline (test disabled)"
+            continue
+        fi
+        if [[ "$test_type" == "nccl" ]] && ! is_enabled "$NCCL_ENABLED"; then
+            log "skipping nccl baseline (test disabled)"
+            continue
+        fi
         log "building $test_type baseline_id=${test_type}-${baseline_id}"
         python -m cval.cli --config "$CONFIG_PATH" baseline build \
             --test-type "$test_type" \
@@ -168,7 +189,11 @@ run_cycle() {
             --output json | tee "$cycle_dir/${test_type}.json"
     done
 
-    with_dl_metric_lock "baseline-build" run_dl_baseline_build "$cycle_dir" "$baseline_id"
+    if is_enabled "$DLTEST_ENABLED"; then
+        with_dl_metric_lock "baseline-build" run_dl_baseline_build "$cycle_dir" "$baseline_id"
+    else
+        log "skipping dltest baseline (test disabled)"
+    fi
 
     log "baseline build cycle complete: artifacts=$cycle_dir"
     popd >/dev/null

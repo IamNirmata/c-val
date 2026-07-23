@@ -4,7 +4,7 @@ set -u -o pipefail
 # Run the JSON-native dl_unit_test package and summarize rank JSON outputs for c-val.
 
 echo "Running DL Test on node: $GCRNODE at time: $GCRTIME"
-GPU_COUNT=${1:-${CVAL_GPU_COUNT:-8}}
+GPU_COUNT=${1:-${CVAL_DL_GPU_COUNT:-8}}
 CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-/data/continuous_validation/deep-learning-unit-test-main}
 CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:-80gb-example}
 CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-100}

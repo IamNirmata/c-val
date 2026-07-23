@@ -13,6 +13,13 @@ CVAL_VALIDATION_DB_PATH=${CVAL_VALIDATION_DB_PATH:-$CVAL_VALIDATION_ROOT/metadat
 CVAL_STORAGE_DB_PATH=${CVAL_STORAGE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-storage.db}
 CVAL_NCCL_DB_PATH=${CVAL_NCCL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-nccl.db}
 
+is_enabled() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/storage/$GCRNODE/storage-$GCRNODE-$GCRTIME}
 echo "Storage Output dir: $STORAGE_OUTPUT_DIR"
 NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/nccl/$GCRNODE/nccl-$GCRNODE-$GCRTIME}
@@ -21,6 +28,9 @@ echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
 GCRRESULT3=${GCRRESULT3:-fail}
+RUN_STORAGE=${RUN_STORAGE:-true}
+RUN_NCCL=${RUN_NCCL:-true}
+RUN_DLTEST=${RUN_DLTEST:-true}
 CVAL_IMAGE_NAME=${CVAL_IMAGE_NAME:-}
 CVAL_PYTORCH_VERSION=${CVAL_PYTORCH_VERSION:-}
 CVAL_CUDA_VERSION=${CVAL_CUDA_VERSION:-}
@@ -33,6 +43,9 @@ if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
             GCRRESULT1) GCRRESULT1="$value" ;;
             GCRRESULT2) GCRRESULT2="$value" ;;
             GCRRESULT3) GCRRESULT3="$value" ;;
+            RUN_STORAGE) RUN_STORAGE="$value" ;;
+            RUN_NCCL) RUN_NCCL="$value" ;;
+            RUN_DLTEST) RUN_DLTEST="$value" ;;
             overall_result) overall_result="$value" ;;
             image_name) CVAL_IMAGE_NAME="$value" ;;
             pytorch_version) CVAL_PYTORCH_VERSION="$value" ;;
@@ -48,11 +61,21 @@ else
     echo "Warning: c-val result state file not found; using fail defaults."
 fi
 
-overall_result=${overall_result:-pass}
-# Recompute aggregate status defensively before writing the `all` row.
-if [ "$GCRRESULT1" != "pass" ] || [ "$GCRRESULT2" != "pass" ] || [ "$GCRRESULT3" != "pass" ]; then
-    overall_result=fail
-fi
+# Recompute aggregate status defensively across enabled phases only.
+overall_result=pass
+enabled_count=0
+for pair in \
+    "$RUN_STORAGE:$GCRRESULT1" \
+    "$RUN_NCCL:$GCRRESULT2" \
+    "$RUN_DLTEST:$GCRRESULT3"; do
+    enabled=${pair%%:*}
+    result=${pair#*:}
+    if is_enabled "$enabled"; then
+        enabled_count=$((enabled_count + 1))
+        [ "$result" = "pass" ] || overall_result=fail
+    fi
+done
+[ "$enabled_count" -gt 0 ] || overall_result=incomplete
 
 add_main_result() {
     # Keep the main DB as one row per test plus one aggregate `all` row.
@@ -79,7 +102,7 @@ echo "Main DB update completed."
 
 
 # Storage metrics are valid only when the storage phase itself passed.
-if [ "$GCRRESULT1" = "pass" ]; then
+if is_enabled "$RUN_STORAGE" && [ "$GCRRESULT1" = "pass" ]; then
     echo "Updating storage db with test results"
     PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-storage-result \
         "$GCRNODE" \
@@ -100,7 +123,7 @@ NCCL_LOG_FILE=${NCCL_LOG_FILE:-$NCCL_OUTPUT_DIR/nccl-$GCRNODE-$GCRTIME.log}
 echo "NCCL Log file: $NCCL_LOG_FILE"
 
 
-if [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
+if is_enabled "$RUN_NCCL" && [ "$GCRRESULT2" = "pass" ] && [ -f "$NCCL_SUMMARY_FILE" ]; then
     # Use python to parse the JSON (available on all systems, unlike 'jq')
     export GCR_LATENCY=$(python3 -c "import json; print(json.load(open('$NCCL_SUMMARY_FILE'))['GCR_LATENCY'])")
     export GCR_ALGBW=$(python3 -c "import json; print(json.load(open('$NCCL_SUMMARY_FILE'))['GCR_ALGBW'])")

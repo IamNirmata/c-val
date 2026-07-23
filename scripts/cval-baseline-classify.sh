@@ -24,7 +24,10 @@ from pathlib import Path
 path, section, key, default = sys.argv[1:]
 try:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    value = data.get(section, {}).get(key, default)
+    current = data
+    for part in section.split("."):
+        current = current.get(part, {}) if isinstance(current, dict) else {}
+    value = current.get(key, default) if isinstance(current, dict) else default
 except FileNotFoundError:
     value = default
 print(value)
@@ -40,6 +43,9 @@ DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refres
 DL_METRIC_REFRESH_INTERVAL_SECONDS=${CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS:-3600}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
 TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest,dltest-numerical,dltest-compute,dltest-collective,dltest-overlap}
+STORAGE_ENABLED=${CVAL_STORAGE_ENABLED:-$(config_value tests.storage enabled true)}
+NCCL_ENABLED=${CVAL_NCCL_ENABLED:-$(config_value tests.nccl enabled true)}
+DLTEST_ENABLED=${CVAL_DLTEST_ENABLED:-$(config_value tests.dltest enabled true)}
 
 usage() {
     cat <<EOF
@@ -68,6 +74,22 @@ EOF
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+is_enabled() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+test_is_enabled() {
+    case "$1" in
+        storage) is_enabled "$STORAGE_ENABLED" ;;
+        nccl) is_enabled "$NCCL_ENABLED" ;;
+        dltest|dltest-*) is_enabled "$DLTEST_ENABLED" ;;
+        *) return 1 ;;
+    esac
 }
 
 require_command() {
@@ -203,6 +225,10 @@ run_cycle() {
     for test_type in "${tests[@]}"; do
         test_type=$(echo "$test_type" | xargs)
         [[ -n "$test_type" ]] || continue
+        if ! test_is_enabled "$test_type"; then
+            log "skipping $test_type classification (test disabled)"
+            continue
+        fi
         if is_dl_test "$test_type"; then
             dl_tests+=("$test_type")
         else

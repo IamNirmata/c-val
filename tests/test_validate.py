@@ -62,6 +62,13 @@ class TestRawResults(unittest.TestCase):
         raw = raw_results_from_log("Final c-val test results: storage=pass nccl=pass dltest=pass")
         self.assertEqual(raw["all"], "pass")
 
+    def test_disabled_phase_is_ignored_for_aggregate(self):
+        raw = raw_results_from_log(
+            "Final c-val test results: storage=pass nccl=pass dltest=incomplete",
+            enabled_tests={"storage", "nccl"},
+        )
+        self.assertEqual(raw["all"], "pass")
+
     def test_missing_line(self):
         self.assertEqual(raw_results_from_log("nothing here"), {})
 

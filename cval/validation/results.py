@@ -22,6 +22,7 @@ class TestResult:
 
     name: str
     status: str
+    enabled: bool = True
     log: str = ""
     summary: str = ""
 
@@ -44,6 +45,12 @@ RESULT_ENV_KEYS = {
     "storage": "GCRRESULT1",
     "nccl": "GCRRESULT2",
     "dltest": "GCRRESULT3",
+}
+
+RESULT_ENABLED_ENV_KEYS = {
+    "storage": "RUN_STORAGE",
+    "nccl": "RUN_NCCL",
+    "dltest": "RUN_DLTEST",
 }
 
 
@@ -71,15 +78,28 @@ def parse_validation_result(payload: dict[str, Any]) -> ValidationResult:
         status = str(raw.get("status", "fail"))
         if status not in VALID_STATUSES:
             raise ValueError(f"Invalid status for {name}: {status}")
+        enabled_raw = raw.get("enabled", True)
+        if not isinstance(enabled_raw, bool):
+            raise ValueError(f"enabled for {name} must be a JSON boolean")
+        enabled = enabled_raw
+        if not enabled and status != "incomplete":
+            raise ValueError(f"Disabled test {name} must have status 'incomplete'")
         tests[name] = TestResult(
             name=name,
             status=status,
+            enabled=enabled,
             log=str(raw.get("log", "")),
             summary=str(raw.get("summary", "")),
         )
 
     overall = str(payload.get("overall", "fail"))
-    expected_overall = "pass" if all(test.status == "pass" for test in tests.values()) else "fail"
+    enabled_tests = [test for test in tests.values() if test.enabled]
+    if not enabled_tests:
+        expected_overall = "incomplete"
+    else:
+        expected_overall = (
+            "pass" if all(test.status == "pass" for test in enabled_tests) else "fail"
+        )
     # Prevent result JSON from claiming all-pass when any component failed.
     if overall != expected_overall:
         raise ValueError(f"overall must be {expected_overall!r} for the provided tests")
@@ -103,6 +123,12 @@ def validation_result_to_env(result: ValidationResult) -> dict[str, str]:
         env_key: result.tests[test_name].status
         for test_name, env_key in RESULT_ENV_KEYS.items()
     }
+    values.update(
+        {
+            env_key: str(result.tests[test_name].enabled).lower()
+            for test_name, env_key in RESULT_ENABLED_ENV_KEYS.items()
+        }
+    )
     values["overall_result"] = result.overall
     values["image_name"] = result.image_name
     values["pytorch_version"] = result.pytorch_version

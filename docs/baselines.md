@@ -353,7 +353,6 @@ storage_peer_tolerance_pct = 10.0   # Storage relative-tolerance floor
 dl_compute_tolerance_pct = 3.0      # DL compute/collective time
 dl_numerical_tolerance_pct = 0.1    # DL numerical correctness (near-exact)
 dl_overlap_tolerance_pct = 20.0     # DL overlap (high variance)
-classify_outliers = true            # enable classification
 robust_z_threshold = 3.5            # modified z-score cutoff
 min_samples = 8                     # minimum clean samples per metric
 window_days = 30                    # rolling window for building baselines

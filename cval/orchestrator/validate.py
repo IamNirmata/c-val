@@ -82,8 +82,11 @@ def parse_test_progress(log_text: str) -> dict[str, str]:
     return progress
 
 
-def raw_results_from_log(log_text: str) -> dict[str, str]:
-    """Extract authoritative per-test pass/fail from the final results line."""
+def raw_results_from_log(
+    log_text: str,
+    enabled_tests: set[str] | None = None,
+) -> dict[str, str]:
+    """Extract per-test results and aggregate across enabled phases."""
 
     match = _FINAL_RESULT_RE.search(log_text or "")
     if not match:
@@ -93,7 +96,13 @@ def raw_results_from_log(log_text: str) -> dict[str, str]:
         "nccl": _normalize_result(match.group(2)),
         "dltest": _normalize_result(match.group(3)),
     }
-    results["all"] = "pass" if all(v == "pass" for v in results.values()) else "fail"
+    enabled = enabled_tests if enabled_tests is not None else set(REPORT_TEST_TYPES)
+    if not enabled:
+        results["all"] = "incomplete"
+    else:
+        results["all"] = (
+            "pass" if all(results.get(test) == "pass" for test in enabled) else "fail"
+        )
     return results
 
 
@@ -571,6 +580,18 @@ def run_node_validation(
     )
     window_days = config.baseline.window_days if window_days is None else window_days
     notes: list[str] = []
+    enabled_tests = {
+        test
+        for test, enabled in (
+            ("storage", config.tests.storage.enabled),
+            ("nccl", config.tests.nccl.enabled),
+            ("dltest", config.tests.dltest.enabled),
+        )
+        if enabled
+    }
+    disabled_tests = sorted(set(REPORT_TEST_TYPES) - enabled_tests)
+    if disabled_tests:
+        notes.append(f"disabled tests skipped: {', '.join(disabled_tests)}")
 
     def emit(message: str) -> None:
         if verbose:
@@ -694,7 +715,7 @@ def run_node_validation(
         emit("\ninterrupted; the validation job is still running. Re-run classification later.")
 
     # 5. Raw pass/fail from the in-pod logs, augmented by validation.db.
-    raw_results = raw_results_from_log(logs)
+    raw_results = raw_results_from_log(logs, enabled_tests=enabled_tests)
     try:
         rows = get_latest_status_rows(
             client=kubectl,
@@ -717,7 +738,7 @@ def run_node_validation(
             repo, pod_config = _pod_repo_paths(pod_repo_dir, pod_config_path)
             emit(f"classifying results on PVC pod {pvc_pod} ...")
 
-            if not skip_dl_rebuild:
+            if config.tests.dltest.enabled and not skip_dl_rebuild:
                 node_root = f"{config.runtime.dl_results_root_path.rstrip('/')}/{node}"
                 meta_dir = str(Path(config.storage.dl_numerical_db_path).parent)
                 lock_file = f"{config.baseline.baseline_root_path.rstrip('/')}/.dl-metric-refresh.lock"
@@ -750,6 +771,9 @@ def run_node_validation(
                     emit(f"  {note}")
 
             for test in REPORT_TEST_TYPES:
+                if test not in enabled_tests:
+                    emit(f"  skipping {test} classification (test disabled) ...")
+                    continue
                 emit(f"  classifying {test} ...")
                 result = _run_pod_cval(
                     kubectl,

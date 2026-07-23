@@ -221,6 +221,9 @@ def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
 def _runtime_replacements(config: CvalConfig) -> dict[str, str]:
     """Return validation-runtime placeholder replacements from config."""
 
+    storage = config.tests.storage
+    nccl = config.tests.nccl
+    dltest = config.tests.dltest
     return {
         "runtime-repo-dir-placeholder": config.runtime.repo_dir,
         "runtime-validation-root-placeholder": config.runtime.validation_root,
@@ -229,12 +232,27 @@ def _runtime_replacements(config: CvalConfig) -> dict[str, str]:
         "storage-validation-db-path-placeholder": config.storage.validation_db_path,
         "storage-storage-db-path-placeholder": config.storage.storage_db_path,
         "storage-nccl-db-path-placeholder": config.storage.nccl_db_path,
-        "validation-gpu-count-placeholder": str(config.validation.gpu_count),
-        "validation-nccl-iterations-placeholder": str(config.validation.nccl_iterations),
-        "validation-nccl-data-size-gb-placeholder": str(config.validation.nccl_data_size_gb),
-        "validation-ibbw-start-device-placeholder": str(config.validation.ibbw_start_device),
-        "validation-ibbw-end-device-placeholder": str(config.validation.ibbw_end_device),
-        "validation-dl-test-plan-placeholder": config.validation.dl_test_plan,
-        "validation-dl-baseline-test-id-placeholder": config.validation.dl_baseline_test_id,
-        "validation-dl-iterations-placeholder": str(config.validation.dl_iterations),
+        "test-storage-enabled-placeholder": _shell_bool(storage.enabled),
+        "test-storage-install-fio-placeholder": _shell_bool(storage.install_fio),
+        "test-nccl-enabled-placeholder": _shell_bool(nccl.enabled),
+        "test-nccl-gpu-count-placeholder": str(nccl.gpu_count),
+        "test-nccl-iterations-placeholder": str(nccl.iterations),
+        "test-nccl-data-size-gb-placeholder": str(nccl.data_size_gb),
+        "test-nccl-ibbw-enabled-placeholder": _shell_bool(nccl.ibbw_enabled),
+        "test-nccl-ibbw-start-device-placeholder": str(nccl.ibbw_start_device),
+        "test-nccl-ibbw-end-device-placeholder": str(nccl.ibbw_end_device),
+        "test-nccl-net-placeholder": nccl.net,
+        "test-nccl-p2p-disable-placeholder": _shell_bool(nccl.p2p_disable),
+        "test-nccl-shm-disable-placeholder": _shell_bool(nccl.shm_disable),
+        "test-nccl-debug-placeholder": nccl.debug,
+        "test-dltest-enabled-placeholder": _shell_bool(dltest.enabled),
+        "test-dltest-gpu-count-placeholder": str(dltest.gpu_count),
+        "test-dltest-plan-placeholder": dltest.test_plan,
+        "test-dltest-iterations-placeholder": str(dltest.iterations),
     }
+
+
+def _shell_bool(value: bool) -> str:
+    """Render a TOML boolean as a shell-friendly lowercase value."""
+
+    return "true" if value else "false"

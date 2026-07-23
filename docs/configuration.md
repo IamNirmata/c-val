@@ -57,7 +57,6 @@ batch_size = 5
 [job]
 template_path = "ymls/specific-node-job.yml"
 job_prefix = "cval"
-image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/IamNirmata/c-val.git"
 git_ref = "main"
 
@@ -86,15 +85,28 @@ validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
 dl_results_root_path = "/data/continuous_validation/dltest"
 
-[validation]
+[tests.storage]
+enabled = true
+install_fio = true
+
+[tests.nccl]
+enabled = true
 gpu_count = 8
-nccl_iterations = 20
-nccl_data_size_gb = 8
+iterations = 20
+data_size_gb = 8
+ibbw_enabled = true
 ibbw_start_device = 0
 ibbw_end_device = 13
-dl_test_plan = "80gb-example"
-dl_baseline_test_id = "b200-pt2.8.0-cuda12.9"
-dl_iterations = 100
+net = "IB"
+p2p_disable = true
+shm_disable = true
+debug = "INFO"
+
+[tests.dltest]
+enabled = true
+gpu_count = 8
+test_plan = "80gb-example"
+iterations = 100
 
 [job_template]
 namespace = "gcr-admin"
@@ -117,7 +129,6 @@ storage_peer_tolerance_pct = 10.0
 dl_compute_tolerance_pct = 3.0
 dl_numerical_tolerance_pct = 0.1
 dl_overlap_tolerance_pct = 20.0
-classify_outliers = true
 robust_z_threshold = 3.5
 min_samples = 8
 window_days = 30
@@ -128,6 +139,31 @@ build_interval_seconds = 86400
 classify_interval_seconds = 300
 ```
 
+## Test switches
+
+Each phase can be independently enabled or disabled:
+
+```toml
+[tests.storage]
+enabled = true
+
+[tests.nccl]
+enabled = true
+
+[tests.dltest]
+enabled = true
+```
+
+These values are rendered into the pod as `RUN_STORAGE`, `RUN_NCCL`, and
+`RUN_DLTEST`. A disabled phase is not executed and does not write metric rows.
+Its structured result is `status="incomplete", enabled=false`; the aggregate
+result is computed from enabled phases only. At least one phase must remain
+enabled. Background baseline build/classification loops also skip disabled test
+families.
+
+`job_template.gpu_count` is the Kubernetes GPU reservation for the whole pod;
+keep it at least as large as the `gpu_count` of each enabled GPU test.
+
 The `[runtime]` `dl_results_root_path` points at remapped DL rank JSON artifacts
 (`dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json`). The
 `[storage]` `dl_*_db_path` entries point at the four DL metric DBs rebuilt from
@@ -137,10 +173,8 @@ node classification (see [Baselines and Node Classification](baselines.md)).
 
 ## Precedence
 
-`job.image_name` is the human-readable image identity written into job names,
-result JSON, and SQLite rows. It should normally match the trailing image and
-tag from `job_template.container_image`; if omitted, c-val derives it from the
-container image reference.
+The human-readable image identity written into job names, result JSON, and
+SQLite rows is derived from `job_template.container_image`.
 
 1. CLI flags such as `--batch-size`, `--git-ref`, and `--namespace`.
 2. Config file supplied by `--config`.

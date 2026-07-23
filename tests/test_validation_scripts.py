@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import subprocess
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -59,6 +60,10 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn('add_main_result "nccl" "$GCRRESULT2"', script)
         self.assertIn('add_main_result "dltest" "$GCRRESULT3"', script)
         self.assertIn('add_main_result "all" "$overall_result"', script)
+        self.assertIn('RUN_STORAGE) RUN_STORAGE="$value"', script)
+        self.assertIn('RUN_NCCL) RUN_NCCL="$value"', script)
+        self.assertIn('is_enabled "$RUN_STORAGE"', script)
+        self.assertIn('is_enabled "$RUN_NCCL"', script)
         self.assertIn('--image-name "$CVAL_IMAGE_NAME"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
 
@@ -72,9 +77,13 @@ class ValidationScriptTests(unittest.TestCase):
 
         self.assertIn("CVAL_VALIDATION_TESTS_DIR", run_test)
         self.assertIn("CVAL_NCCL_ITERATIONS", run_test)
+        self.assertIn("RUN_STORAGE", run_test)
+        self.assertIn("RUN_NCCL", run_test)
+        self.assertIn("RUN_DLTEST", run_test)
         self.assertIn("CVAL_IBBW_START_DEVICE", run_test)
         self.assertIn("CVAL_IBBW_END_DEVICE", run_test)
-        self.assertIn("--nproc_per_node=\"$CVAL_GPU_COUNT\"", run_test)
+        self.assertIn("--nproc_per_node=\"$CVAL_NCCL_GPU_COUNT\"", run_test)
+        self.assertIn('"$CVAL_DL_GPU_COUNT"', run_test)
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)
         self.assertIn("CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-100}", dltest)
@@ -160,8 +169,69 @@ class ValidationScriptTests(unittest.TestCase):
                 "image_name": "pytorch:26.05-py3",
                 "pytorch_version": "2.8.0a0+abc123",
                 "cuda_version": "12.9",
+                "RUN_STORAGE": "true",
+                "RUN_NCCL": "true",
+                "RUN_DLTEST": "true",
             },
         )
+
+    def test_structured_result_allows_disabled_phase(self) -> None:
+        payload = {
+            "schema_version": "cval.results.v1",
+            "node": "node-a",
+            "timestamp": "12345",
+            "overall": "pass",
+            "tests": {
+                "storage": {"enabled": True, "status": "pass"},
+                "nccl": {"enabled": True, "status": "pass"},
+                "dltest": {"enabled": False, "status": "incomplete"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "result.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            result = load_validation_result(path)
+
+        self.assertFalse(result.tests["dltest"].enabled)
+        self.assertEqual(result.overall, "pass")
+        self.assertEqual(validation_result_to_env(result)["RUN_DLTEST"], "false")
+
+    def test_all_disabled_script_path_invokes_no_test_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = os.environ | {
+                "RUN_STORAGE": "false",
+                "RUN_NCCL": "false",
+                "RUN_DLTEST": "false",
+                "GCRNODE": "node-a",
+                "GCRTIME": "123",
+                "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                "CVAL_RESULT_ENV_FILE": str(root / "result.env"),
+                "CVAL_RESULT_JSON_FILE": str(root / "result.json"),
+                "STORAGE_OUTPUT_DIR": str(root / "storage"),
+                "NCCL_OUTPUT_DIR": str(root / "nccl"),
+                "DLTEST_OUTPUT_DIR": str(root / "dl"),
+                "STORAGE_LOG_FILE": str(root / "storage.log"),
+                "STORAGE_SUMMARY_FILE": str(root / "storage.txt"),
+                "NCCL_LOG_FILE": str(root / "nccl.log"),
+                "NCCL_SUMMARY_FILE": str(root / "nccl.json"),
+                "NCCL_IBBW_LOG_FILE": str(root / "ibbw.log"),
+                "DLTEST_LOG_FILE": str(root / "dl.log"),
+                "DLTEST_SUMMARY_FILE": str(root / "dl.json"),
+            }
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests" / "run-test.sh")],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            payload = json.loads((root / "result.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(completed.stdout.count("SKIPPED (disabled by config)"), 3)
+        self.assertEqual(payload["overall"], "incomplete")
+        self.assertTrue(all(not test["enabled"] for test in payload["tests"].values()))
 
     def test_dltest_summary_script_summarizes_rank_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

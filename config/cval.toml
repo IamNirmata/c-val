@@ -1,7 +1,5 @@
-# c-val default configuration.
-#
-# TOML is used because it is human-readable, supports comments and typed nested
-# values, and is parsed by Python 3.11+ with stdlib `tomllib`.
+# c-val operator configuration.
+# Test switches and benchmark parameters live together under [tests.*].
 
 [cluster]
 namespace = "gcr-admin"
@@ -16,7 +14,6 @@ batch_size = 4
 [job]
 template_path = "ymls/specific-node-job.yml"
 job_prefix = "cval"
-image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/IamNirmata/c-val.git"
 git_ref = "main"
 
@@ -36,6 +33,10 @@ pending_start_timeout_seconds = 480
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"
 nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
+dl_numerical_db_path = "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
+dl_compute_db_path = "/data/continuous_validation/metadata/dltest_compute_performance.db"
+dl_collective_db_path = "/data/continuous_validation/metadata/dltest_collective_performance.db"
+dl_overlap_db_path = "/data/continuous_validation/metadata/dltest_overlap_performance.db"
 
 [runtime]
 repo_dir = "/workspace/c-val"
@@ -44,17 +45,39 @@ validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
 dl_results_root_path = "/data/continuous_validation/dltest"
 
-[validation]
+# ---------------------------------------------------------------------------
+# Validation phases. Set enabled=false to skip a phase in new validation jobs.
+# Disabled phases are recorded as incomplete/enabled=false and do not ingest
+# performance metrics. At least one phase must remain enabled.
+
+[tests.storage]
+enabled = true
+# Install fio in the validation container before running the checked-in profiles.
+install_fio = true
+
+[tests.nccl]
+enabled = true
 gpu_count = 8
-nccl_iterations = 20
-nccl_data_size_gb = 8
+iterations = 20
+# This is Gi-elements per rank (BF16 consumes 2 bytes/element).
+data_size_gb = 8
+ibbw_enabled = true
 ibbw_start_device = 0
 ibbw_end_device = 13
-dl_test_plan = "80gb-example"
-dl_baseline_test_id = "b200-pt2.8.0-cuda12.9"
-dl_iterations = 100
+net = "IB"
+p2p_disable = true
+shm_disable = true
+debug = "INFO"
+
+[tests.dltest]
+enabled = true
+gpu_count = 8
+test_plan = "80gb-example"
+iterations = 100
 
 [job_template]
+# Kubernetes resources reserved by the validation pod. Keep gpu_count >= each
+# enabled GPU test's gpu_count.
 namespace = "gcr-admin"
 queue = "gcr-admin"
 app_label = "hari-gcr-bonete-test"
@@ -84,8 +107,6 @@ dl_compute_tolerance_pct = 3.0
 dl_numerical_tolerance_pct = 0.1
 # DL overlap tasks: lenient baseline (20%) due to high variance
 dl_overlap_tolerance_pct = 20.0
-# Enable automatic outlier classification
-classify_outliers = true
 # Robust z-score cutoff for dynamic baselines (Iglewicz & Hoaglin: 3.5)
 robust_z_threshold = 3.5
 # Minimum clean samples before a metric baseline is trusted
