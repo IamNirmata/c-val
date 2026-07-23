@@ -5,7 +5,8 @@ discovery commands, dry-run planning, approval-gated submission, read-only
 monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
-Public commands: config, status, nodes, plan, run, jobs, result.
+Public commands: config, nodes, validate, status, plan, run, jobs, result,
+results, classifications, baseline, and overview.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -31,11 +32,8 @@ from cval.storage.status import (
 )
 from cval.storage.ingest import (
     add_nccl_health_from_summary,
-    add_nccl_ib_ports_from_summary,
-    add_nccl_result,
     add_storage_result,
     add_validation_result,
-    migrate_nccl_health,
 )
 from cval.validation.results import load_validation_result, validation_result_to_env_lines
 
@@ -92,7 +90,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,status,nodes,overview,validate,run,jobs,result,results,classifications}",
+        metavar="{config,nodes,validate,status,plan,run,jobs,result,results,classifications,baseline,overview}",
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
@@ -194,7 +192,9 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
 
-    plan = subparsers.add_parser("plan")
+    plan = subparsers.add_parser(
+        "plan", help="Build a detailed dry-run queue and rendered job plan"
+    )
     _add_plan_inputs(plan, active_config)
     plan.add_argument(
         "--include-yaml",
@@ -203,35 +203,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     plan.add_argument("--output", choices=["table", "json"], default="table")
     plan.set_defaults(handler=handle_plan)
-
-    prioritize = subparsers.add_parser("prioritize")
-    prioritize.add_argument(
-        "--free-nodes", required=True, help="Comma-separated free node names"
-    )
-    prioritize.add_argument(
-        "--db-status-json", type=Path, help="JSON object mapping node to timestamp"
-    )
-    prioritize.add_argument(
-        "--db-status-tsv", type=Path, help="TSV output from existing latest-status command"
-    )
-    prioritize.add_argument(
-        "--threshold-days", type=float, default=active_config.scheduling.days_threshold
-    )
-    prioritize.add_argument("--output", choices=["table", "json"], default="table")
-    prioritize.set_defaults(handler=handle_prioritize)
-
-    run_batch = subparsers.add_parser("run-batch")
-    run_batch.add_argument("--nodes", required=True, help="Comma-separated target nodes")
-    run_batch.add_argument(
-        "--batch-size", type=int, default=active_config.scheduling.batch_size
-    )
-    run_batch.add_argument("--timestamp", type=int)
-    run_batch.add_argument("--template", type=Path, default=active_config.job.template_path)
-    run_batch.add_argument("--job-prefix", default=active_config.job.job_prefix)
-    run_batch.add_argument("--git-repo", default=active_config.job.git_repo)
-    run_batch.add_argument("--git-ref", default=active_config.job.git_ref)
-    run_batch.add_argument("--output", choices=["table", "json"], default="table")
-    run_batch.set_defaults(handler=handle_run_batch)
 
     run = subparsers.add_parser(
         "run",
@@ -340,27 +311,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_storage.add_argument("--db-path", default=active_config.storage.storage_db_path)
     db_add_storage.set_defaults(handler=handle_db_add_storage_result)
 
-    db_add_nccl = subparsers.add_parser("db-add-nccl-result")
-    db_add_nccl.add_argument("node")
-    db_add_nccl.add_argument("timestamp")
-    db_add_nccl.add_argument("busbw")
-    db_add_nccl.add_argument("latency")
-    db_add_nccl.add_argument("--image-name", default="")
-    db_add_nccl.add_argument("--db-path", default=active_config.storage.nccl_db_path)
-    db_add_nccl.set_defaults(handler=handle_db_add_nccl_result)
-
-    db_add_nccl_ports = subparsers.add_parser("db-add-nccl-ports")
-    db_add_nccl_ports.add_argument("node")
-    db_add_nccl_ports.add_argument("timestamp")
-    db_add_nccl_ports.add_argument(
-        "summary_json",
-        type=Path,
-        help="NCCL summary JSON containing the GCR_IB_PORT_BW_GBPS block",
-    )
-    db_add_nccl_ports.add_argument("--image-name", default="")
-    db_add_nccl_ports.add_argument("--db-path", default=active_config.storage.nccl_db_path)
-    db_add_nccl_ports.set_defaults(handler=handle_db_add_nccl_ports)
-
     db_add_nccl_health = subparsers.add_parser("db-add-nccl-health")
     db_add_nccl_health.add_argument("node")
     db_add_nccl_health.add_argument("timestamp")
@@ -371,14 +321,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl_health.add_argument("--pytorch-version", default="")
     db_add_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl_health.set_defaults(handler=handle_db_add_nccl_health)
-
-    db_migrate_nccl_health = subparsers.add_parser("db-migrate-nccl-health")
-    db_migrate_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
-    db_migrate_nccl_health.add_argument(
-        "--validation-db-path", default=active_config.storage.validation_db_path
-    )
-    db_migrate_nccl_health.add_argument("--default-iterations", type=int, default=20)
-    db_migrate_nccl_health.set_defaults(handler=handle_db_migrate_nccl_health)
 
     db_rebuild_dltest = subparsers.add_parser("db-rebuild-dltest-metrics")
     db_rebuild_dltest.add_argument(
@@ -396,17 +338,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_rebuild_dltest.add_argument("--output", choices=["table", "json"], default="table")
     db_rebuild_dltest.set_defaults(handler=handle_db_rebuild_dltest_metrics)
 
-    db_migrate_dltest_iterations = subparsers.add_parser("db-migrate-dltest-iterations")
-    db_migrate_dltest_iterations.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(active_config.storage.dl_numerical_db_path).parent,
-    )
-    db_migrate_dltest_iterations.add_argument(
-        "--historical-iterations", type=int, default=20
-    )
-    db_migrate_dltest_iterations.set_defaults(handler=handle_db_migrate_dltest_iterations)
-
     # Baseline commands (read-only and ingestion)
     baseline = subparsers.add_parser("baseline", help="Manage baselines and peer comparison")
     baseline_sub = baseline.add_subparsers(dest="baseline_command", required=True)
@@ -418,26 +349,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     baseline_list.add_argument("--output", choices=["table", "json"], default="table")
     baseline_list.set_defaults(handler=handle_baseline_list)
-
-    baseline_load = baseline_sub.add_parser("load", help="Load baseline summary from directory")
-    baseline_load.add_argument("baseline_dir", type=Path, help="Baseline directory path")
-    baseline_load.add_argument("test_type", choices=["nccl", "storage", "dltest"])
-    baseline_load.add_argument("--output", choices=["json"], default="json")
-    baseline_load.set_defaults(handler=handle_baseline_load)
-
-    baseline_ingest = baseline_sub.add_parser("ingest", help="Store baseline in DB")
-    baseline_ingest.add_argument("baseline_dir", type=Path, help="Baseline directory path")
-    baseline_ingest.add_argument("test_type", choices=["nccl", "storage", "dltest"])
-    baseline_ingest.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    baseline_ingest.set_defaults(handler=handle_baseline_ingest)
-
-    baseline_compare = baseline_sub.add_parser("compare", help="Compare result vs. baseline")
-    baseline_compare.add_argument("baseline_id", help="Baseline ID to compare against")
-    baseline_compare.add_argument("test_type", choices=["nccl", "storage", "dltest"])
-    baseline_compare.add_argument("--result-json", type=Path, help="Result JSON to compare")
-    baseline_compare.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    baseline_compare.add_argument("--output", choices=["json", "table"], default="table")
-    baseline_compare.set_defaults(handler=handle_baseline_compare)
 
     baseline_build = baseline_sub.add_parser(
         "build", help="Build a dynamic baseline from result DBs (robust stats)"
@@ -631,71 +542,6 @@ def handle_plan(args: argparse.Namespace) -> int:
             f"{planned.candidate.priority:>3} {planned.candidate.node:<32} "
             f"{planned.candidate.reason:<13} {planned.rendered_job.job_name}"
         )
-    return 0
-
-
-def handle_prioritize(args: argparse.Namespace) -> int:
-    """Build a priority queue from explicit free nodes and status history."""
-    from cval.scheduler.priority import build_priority_queue
-
-    db_status: dict[str, int] = {}
-    if args.db_status_json is not None:
-        data = json.loads(args.db_status_json.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("DB status JSON must map node names to timestamps")
-        db_status = {str(node): int(timestamp) for node, timestamp in data.items()}
-    elif args.db_status_tsv is not None:
-        db_status = parse_latest_status_tsv(
-            args.db_status_tsv.read_text(encoding="utf-8")
-        )
-
-    queue = build_priority_queue(
-        _parse_csv(args.free_nodes),
-        db_status,
-        days_threshold=args.threshold_days,
-    )
-    if args.output == "json":
-        print(json.dumps([asdict(candidate) for candidate in queue], indent=2))
-        return 0
-
-    print(f"{'PRI':>3} {'NODE':<32} {'LAST_TS':>12} {'AGE_DAYS':>9} REASON")
-    for candidate in queue:
-        age = "" if candidate.age_days is None else f"{candidate.age_days:.2f}"
-        print(
-            f"{candidate.priority:>3} {candidate.node:<32} "
-            f"{candidate.last_tested_timestamp:>12} {age:>9} {candidate.reason}"
-        )
-    return 0
-
-
-def handle_run_batch(args: argparse.Namespace) -> int:
-    """Render a local dry-run batch from explicit node names."""
-    from cval.jobs.renderer import render_validation_job_from_file
-
-    nodes = _parse_csv(args.nodes)[: args.batch_size]
-    rendered_jobs = [
-        render_validation_job_from_file(
-            args.template,
-            node_name=node,
-            timestamp=args.timestamp,
-            job_prefix=args.job_prefix,
-            git_repo=args.git_repo,
-            git_ref=args.git_ref,
-            cval_config=args.cval_config,
-        )
-        for node in nodes
-    ]
-    if args.output == "json":
-        print(
-            json.dumps(
-                [asdict(job) | {"dry_run": True} for job in rendered_jobs], indent=2
-            )
-        )
-        return 0
-
-    print(f"Dry run: {len(rendered_jobs)} job(s) would be submitted")
-    for job in rendered_jobs:
-        print(f"  {job.node_name} -> {job.job_name}")
     return 0
 
 
@@ -942,38 +788,6 @@ def handle_db_add_storage_result(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_db_add_nccl_result(args: argparse.Namespace) -> int:
-    """Write one NCCL metric row."""
-
-    timestamp = add_nccl_result(
-        args.node,
-        args.timestamp,
-        args.busbw,
-        args.latency,
-        image_name=args.image_name,
-        db_path=args.db_path,
-    )
-    print(f"Added NCCL result: {args.node} {timestamp}")
-    return 0
-
-
-def handle_db_add_nccl_ports(args: argparse.Namespace) -> int:
-    """Ingest per-HCA-port IB bandwidth rows from an NCCL summary JSON."""
-
-    if not args.summary_json.exists():
-        print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
-        return 1
-    timestamp = add_nccl_ib_ports_from_summary(
-        args.node,
-        args.timestamp,
-        args.summary_json,
-        image_name=args.image_name,
-        db_path=args.db_path,
-    )
-    print(f"Added NCCL per-port IB metrics: {args.node} {timestamp}")
-    return 0
-
-
 def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
     """Ingest one consolidated NCCL/IB health row from a summary JSON."""
 
@@ -991,18 +805,6 @@ def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
         db_path=args.db_path,
     )
     print(f"Added consolidated IB_HEALTH result: {args.node} {timestamp}")
-    return 0
-
-
-def handle_db_migrate_nccl_health(args: argparse.Namespace) -> int:
-    """Consolidate legacy NCCL tables into the additive IB_HEALTH table."""
-
-    summary = migrate_nccl_health(
-        args.db_path,
-        validation_db_path=args.validation_db_path,
-        default_iterations=args.default_iterations,
-    )
-    print(json.dumps(summary, sort_keys=True))
     return 0
 
 
@@ -1030,19 +832,6 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
     print(f"compute_performance: {summary['compute_performance_rows']} rows")
     print(f"collective_performance: {summary['collective_performance_rows']} rows")
     print(f"overlap_performance: {summary['overlap_performance_rows']} rows")
-    return 0
-
-
-def handle_db_migrate_dltest_iterations(args: argparse.Namespace) -> int:
-    """Add and backfill the iterations column on all four DL metric DBs."""
-
-    from cval.storage.dltest_ingest import migrate_dltest_iterations
-
-    summary = migrate_dltest_iterations(
-        args.output_dir,
-        historical_iterations=args.historical_iterations,
-    )
-    print(json.dumps(summary, sort_keys=True))
     return 0
 
 
@@ -1078,70 +867,6 @@ def handle_baseline_list(args: argparse.Namespace) -> int:
     print(f"{'BASELINE_ID':<40} {'TEST_TYPE':<10} {'STATUS':<10} {'N':>5} STRATUM")
     for baseline_id, test_type, status, stratum_key, n_samples, _created_at in baselines:
         print(f"{baseline_id:<40} {test_type:<10} {status:<10} {n_samples:>5} {stratum_key}")
-    return 0
-
-
-def handle_baseline_load(args: argparse.Namespace) -> int:
-    """Load and display a baseline summary from a directory."""
-    from cval.baselines.ingest import load_baseline_summary
-
-    baseline = load_baseline_summary(args.baseline_dir, args.test_type)
-    if not baseline:
-        print(f"Baseline not found: {args.baseline_dir}")
-        return 1
-
-    print(json.dumps(asdict(baseline), indent=2))
-    return 0
-
-
-def handle_baseline_ingest(args: argparse.Namespace) -> int:
-    """Ingest a baseline from a directory into the validation DB."""
-    from cval.baselines.ingest import load_baseline_summary
-    from cval.baselines.storage import store_baseline
-
-    baseline = load_baseline_summary(args.baseline_dir, args.test_type)
-    if not baseline:
-        print(f"Baseline not found: {args.baseline_dir}")
-        return 1
-
-    store_baseline(baseline, db_path=args.db_path, test_type=args.test_type)
-    print(f"Ingested baseline: {baseline.baseline_id} ({args.test_type}) at {args.baseline_dir}")
-    return 0
-
-
-def handle_baseline_compare(args: argparse.Namespace) -> int:
-    """Compare a result against a baseline and output classification."""
-    from cval.baselines.ingest import classify_result_vs_baseline
-    from cval.baselines.storage import load_baseline_from_db
-
-    baseline = load_baseline_from_db(args.baseline_id, args.test_type, db_path=args.db_path)
-    if not baseline:
-        print(f"Baseline not found: {args.baseline_id} ({args.test_type})")
-        return 1
-
-    result_dict = {}
-    if args.result_json:
-        result = load_validation_result(args.result_json)
-        # Convert result to dict based on test type
-        if args.test_type == "dltest":
-            result_dict = asdict(result) if hasattr(result, "__dataclass_fields__") else result
-        else:
-            result_dict = asdict(result) if hasattr(result, "__dataclass_fields__") else result
-
-    classification = classify_result_vs_baseline(result_dict, baseline)
-
-    if args.output == "json":
-        print(json.dumps(classification, indent=2))
-        return 0
-
-    print(f"Classification: {classification['status'].upper()}")
-    print(f"Test type: {classification['test_type']}")
-    print(f"Violations: {len(classification['violations'])}")
-    for violation in classification['violations']:
-        print(
-            f"  {violation['metric']}: expected={violation['expected']}, "
-            f"actual={violation['actual']}, diff={violation['pct_diff']:.2f}%"
-        )
     return 0
 
 

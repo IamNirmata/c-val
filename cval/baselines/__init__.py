@@ -16,11 +16,6 @@ Per-test rules:
 """
 
 __all__ = [
-    "BaselineMetrics",
-    "BaselineConfig",
-    "load_baseline_summary",
-    "compute_peer_stats",
-    "classify_result_vs_baseline",
     "build_baseline",
     "store_dynamic_baseline",
     "activate_baseline",
@@ -35,15 +30,6 @@ __all__ = [
     "classify_nodes",
 ]
 
-from cval.baselines.models import (
-    BaselineConfig,
-    BaselineMetrics,
-)
-from cval.baselines.ingest import (
-    load_baseline_summary,
-    compute_peer_stats,
-    classify_result_vs_baseline,
-)
 from cval.baselines.build import build_baseline
 from cval.baselines.classify import classify_node, classify_nodes
 from cval.baselines.storage import (

@@ -430,49 +430,6 @@ def write_overlap_db(db_path: Path, table_name: str, rows: list[OverlapMetricRow
         connection.commit()
 
 
-def migrate_dltest_iterations(
-    output_dir: str | Path | None = None,
-    *,
-    historical_iterations: int = HISTORICAL_DL_ITERATIONS,
-) -> dict[str, int]:
-    """Add/backfill ``iterations`` on every existing DL metric DB table."""
-
-    if historical_iterations <= 0:
-        raise ValueError("historical_iterations must be positive")
-    output = (
-        Path(output_dir)
-        if output_dir is not None
-        else default_dl_metric_db_paths()["numerical_correctness"].parent
-    )
-    specs = {
-        "numerical_correctness": output / "dltest_numerical_correctness.db",
-        "compute_performance": output / "dltest_compute_performance.db",
-        "collective_performance": output / "dltest_collective_performance.db",
-        "overlap_performance": output / "dltest_overlap_performance.db",
-    }
-    summary: dict[str, int] = {}
-    for table_name, db_path in specs.items():
-        if not db_path.exists():
-            summary[table_name] = 0
-            continue
-        with closing(connect(db_path)) as connection:
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            if table_name not in tables:
-                summary[table_name] = 0
-                continue
-            ensure_iterations_column(connection, table_name, historical_iterations)
-            connection.commit()
-            summary[table_name] = int(
-                connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-            )
-    return summary
-
-
 def ingest_dltest_results(
     results_root: str | Path | None = None,
     output_dir: str | Path | None = None,

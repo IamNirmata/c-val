@@ -24,8 +24,11 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
-        self.assertIn("{config,status,nodes,overview,validate,run,jobs,result,results,classifications}", help_text)
-        self.assertNotIn("submit-plan", help_text)
+        self.assertIn(
+            "{config,nodes,validate,status,plan,run,jobs,result,results,classifications,baseline,overview}",
+            help_text,
+        )
+        self.assertNotIn("prioritize", help_text)
         self.assertNotIn("run-batch", help_text)
         self.assertNotIn("db-add-result", help_text)
 
@@ -105,30 +108,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(files), 1)
         self.assertIn("Wrote 1 storage classification row(s)", output.getvalue())
 
-    def test_prioritize_json_command(self) -> None:
-        output = io.StringIO()
-
-        with redirect_stdout(output):
-            exit_code = main(
-                [
-                    "prioritize",
-                    "--free-nodes",
-                    "slc01-cl02-hgx-0002,slc01-cl02-hgx-0001",
-                    "--threshold-days",
-                    "4",
-                    "--output",
-                    "json",
-                ]
-            )
-
-        self.assertEqual(exit_code, 0)
-        queue = json.loads(output.getvalue())
-        self.assertEqual(
-            [candidate["node"] for candidate in queue],
-            ["slc01-cl02-hgx-0001", "slc01-cl02-hgx-0002"],
-        )
-        self.assertTrue(all(candidate["reason"] == "never-tested" for candidate in queue))
-
     def test_run_command_defaults_to_dry_run(self) -> None:
         output = io.StringIO()
 
@@ -155,25 +134,6 @@ class CliTests(unittest.TestCase):
             result["jobs"][0]["job_name"],
             "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
-
-    def test_legacy_run_batch_command_still_works(self) -> None:
-        output = io.StringIO()
-
-        with redirect_stdout(output):
-            exit_code = main(
-                [
-                    "run-batch",
-                    "--nodes",
-                    "slc01-cl02-hgx-0001",
-                    "--batch-size",
-                    "1",
-                    "--timestamp",
-                    "12345",
-                ]
-            )
-
-        self.assertEqual(exit_code, 0)
-        self.assertIn("Dry run: 1 job(s) would be submitted", output.getvalue())
 
     def test_config_command_prints_effective_config(self) -> None:
         output = io.StringIO()

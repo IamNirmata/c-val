@@ -140,19 +140,6 @@ class NcclMetrics:
 
 
 @dataclass(frozen=True)
-class NcclPortMetric:
-    """Latest per-HCA-port IB bandwidth for one node (from test-nccl.db)."""
-
-    node: str
-    timestamp: int | None
-    device: str
-    avg_gbps: float | None
-    max_gbps: float | None
-    last_gbps: float | None
-    samples: int | None
-
-
-@dataclass(frozen=True)
 class NcclHealthMetric:
     """One consolidated NCCL/IB health row for a node's latest run."""
 

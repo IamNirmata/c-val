@@ -346,31 +346,9 @@ scripts/cval-baseline-build.sh start
 scripts/cval-baseline-classify.sh start
 ```
 
-Legacy directory-based references remain available:
+## Internal Runtime Hooks
 
-```bash
-python -m cval.cli baseline load   <baseline-dir> <test-type>
-python -m cval.cli baseline ingest <baseline-dir> <test-type>
-python -m cval.cli baseline compare <baseline-id> <test-type> --result-json <result.json>
-```
-
-## Internal Compatibility Commands
-
-These names are hidden from `--help` but still parse for existing scripts and
-old notes:
-
-```text
-discover-free-nodes
-plan
-submit-plan
-job-status
-monitor-jobs
-result-env
-prioritize
-render-job
-run-batch
-db-add-result
-db-add-storage-result
-db-add-nccl-result
-db-rebuild-dltest-metrics
-```
+The in-pod scripts use a small hidden API: `db-add-result`,
+`db-add-storage-result`, `db-add-nccl-health`, and
+`db-rebuild-dltest-metrics`. They are implementation details, not operator
+commands. Completed migrations and legacy aliases are intentionally absent.

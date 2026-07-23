@@ -91,9 +91,8 @@ dltest_overlap_performance.db → overlap_performance
 The value is repeated on every metric row for its run so results produced with
 different workload iteration counts can be filtered and stratified. Ingestion
 reads the value from `dltest-summary-*.json`. Artifacts without a summary are
-historical and use `20`, the prior c-val default. The additive
-`db-migrate-dltest-iterations` command adds/backfills this column on existing
-DBs without rebuilding millions of metric rows. New validation jobs default to
+historical and use `20`, the prior c-val default. Normal ingestion lazily adds
+the column when an older restored DB lacks it. New validation jobs default to
 `100` DL iterations; changing the runtime default does not rewrite historical
 rows.
 
@@ -133,8 +132,8 @@ Dynamic NCCL baselines and `cval results --test nccl` read `IB_HEALTH`.
 The export mirrors the same wide one-row-per-node shape and appends
 classification columns. Legacy tables are renamed to
 `OLD_nccl_performance` and `OLD_nccl_ib_port_performance` for rollback and are
-not read by normal operations. `cval db-migrate-nccl-health` performs the
-consolidation, table renames, and view creation; it is safe to rerun.
+not read or written by normal operations. New installations create `IB_HEALTH`
+and its views automatically on the first NCCL result write.
 
 ### NCCL operational views
 

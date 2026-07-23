@@ -11,14 +11,10 @@ from cval.storage.ingest import (
     NCCL_IB_PORT_COLUMNS,
     NCCL_LATEST_STATUS_VIEW,
     NCCL_RANKING_VIEW,
-    OLD_NCCL_IB_PORT_PERFORMANCE_TABLE,
-    OLD_NCCL_PERFORMANCE_TABLE,
     add_nccl_health_from_summary,
     add_nccl_health_result,
-    add_nccl_result,
     add_storage_result,
     add_validation_result,
-    migrate_nccl_health,
 )
 
 class IngestTests(unittest.TestCase):
@@ -126,30 +122,6 @@ class IngestTests(unittest.TestCase):
                 ("slc01-cl02-hgx-0001", 12345, "pytorch:26.05-py3", 10.0, 20.0),
             )
 
-    def test_add_nccl_result_writes_metric_row(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "nccl.db"
-
-            add_nccl_result(
-                "slc01-cl02-hgx-0001",
-                "12345",
-                "44.7",
-                "626.1",
-                image_name="pytorch:26.05-py3",
-                db_path=db_path,
-            )
-
-            with closing(sqlite3.connect(db_path)) as connection:
-                row = connection.execute(
-                    f"SELECT node, timestamp, image_name, busbw, latency "
-                    f"FROM {OLD_NCCL_PERFORMANCE_TABLE}"
-                ).fetchone()
-            self.assertEqual(
-                row,
-                ("slc01-cl02-hgx-0001", 12345, "pytorch:26.05-py3", 44.7, 626.1),
-            )
-
-
 class NcclHealthIngestTests(unittest.TestCase):
     def test_add_nccl_health_writes_one_wide_row_with_port_maxima(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -203,72 +175,6 @@ class NcclHealthIngestTests(unittest.TestCase):
         self.assertIn("-08:00", row[2])
         self.assertEqual(row[3:10], (20, "pytorch:26.05-py3", "13.0", "2.9.0", 26, 44.5, 628.2))
         self.assertEqual(row[10:], (46.1, 46.3))
-
-    def test_migrate_legacy_tables_to_one_row_per_run(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "nccl.db"
-            validation_db = Path(tmpdir) / "validation.db"
-            with closing(sqlite3.connect(db_path)) as connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE nccl_performance (
-                        node TEXT, timestamp INTEGER, image_name TEXT, busbw REAL, latency REAL
-                    );
-                    CREATE TABLE nccl_ib_port_performance (
-                        node TEXT, timestamp INTEGER, device TEXT, image_name TEXT,
-                        avg_gbps REAL, max_gbps REAL, last_gbps REAL, samples INTEGER
-                    );
-                    INSERT INTO nccl_performance VALUES ('node-a', 12345, 'img', 44.5, 628.2);
-                    INSERT INTO nccl_performance VALUES ('node-a', 12346, 'img', 45.0, 620.0);
-                    INSERT INTO nccl_ib_port_performance
-                        VALUES ('node-a', 12345, 'mlx5_0', '', 20.0, 46.1, 45.9, 26);
-                    INSERT INTO nccl_ib_port_performance
-                        VALUES ('node-a', 12345, 'mlx5_13', '', 20.2, 46.3, 46.0, 26);
-                    """
-                )
-                connection.commit()
-            with closing(sqlite3.connect(validation_db)) as connection:
-                connection.execute(
-                    "CREATE TABLE runs (node TEXT, test TEXT, timestamp INTEGER, result TEXT, "
-                    "image_name TEXT, pytorch_version TEXT, cuda_version TEXT)"
-                )
-                connection.execute(
-                    "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    ("node-a", "nccl", 12345, "pass", "img", "2.9.0", "13.0"),
-                )
-                connection.commit()
-
-            summary = migrate_nccl_health(
-                db_path, validation_db_path=validation_db, default_iterations=20
-            )
-            rerun_summary = migrate_nccl_health(
-                db_path, validation_db_path=validation_db, default_iterations=20
-            )
-
-            with closing(sqlite3.connect(db_path)) as connection:
-                rows = connection.execute(
-                    "SELECT Node, timestamp, iterations, cuda, pytorch, samples, BUS_BW, "
-                    "LATENCY, mlx5_0, mlx5_13 FROM IB_HEALTH ORDER BY timestamp"
-                ).fetchall()
-                legacy_count = connection.execute(
-                    f"SELECT COUNT(*) FROM {OLD_NCCL_IB_PORT_PERFORMANCE_TABLE}"
-                ).fetchone()[0]
-                table_names = {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    )
-                }
-
-        self.assertEqual(summary, {"migrated_runs": 2, "total_rows": 2, "rows_with_ports": 1})
-        self.assertEqual(rerun_summary, summary)
-        self.assertEqual(rows[0], ("node-a", 12345, 20, "13.0", "2.9.0", 26, 44.5, 628.2, 46.1, 46.3))
-        self.assertEqual(rows[1][0:3], ("node-a", 12346, 20))
-        self.assertEqual(legacy_count, 2)
-        self.assertIn(OLD_NCCL_PERFORMANCE_TABLE, table_names)
-        self.assertIn(OLD_NCCL_IB_PORT_PERFORMANCE_TABLE, table_names)
-        self.assertNotIn("nccl_performance", table_names)
-        self.assertNotIn("nccl_ib_port_performance", table_names)
 
     def test_latest_status_and_five_run_ranking_views(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -122,10 +122,10 @@ In-pod DB ingestion commands used by `validation-tests/db-update.sh`:
 ```bash
 cval db-add-result <node> <test> <pass|fail|incomplete> <timestamp> --db-path <validation.db>
 cval db-add-storage-result <node> <timestamp> <storage-result-dir> --db-path <test-storage.db>
-cval db-add-nccl-result <node> <timestamp> <busbw> <latency> --db-path <test-nccl.db>
+cval db-add-nccl-health <node> <timestamp> <nccl-summary.json> --db-path <test-nccl.db>
 ```
 
-The DB ingestion commands remain hidden compatibility commands for in-pod scripts.
+These required DB ingestion hooks stay hidden from the operator-facing help.
 
 ## Safety Boundary
 

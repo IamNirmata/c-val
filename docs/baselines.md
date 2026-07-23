@@ -367,35 +367,6 @@ classification.
 
 ---
 
-## Directory baselines (legacy)
-
-Hand-authored references are still supported for fixed golden baselines. They live
-under `/data/continuous_validation/baselines/{test_type}/{baseline_id}/` with a
-`summary.json`, and use the `load` / `ingest` / `compare` commands:
-
-```bash
-cval baseline load   /data/continuous_validation/baselines/nccl/<id> nccl
-cval baseline ingest /data/continuous_validation/baselines/nccl/<id> nccl
-cval baseline compare <id> nccl --result-json /path/to/result.json
-```
-
-A `summary.json` holds fixed reference metrics, for example NCCL:
-
-```json
-{
-  "test_plan": "all-reduce-8gpu",
-  "timestamp": 1700000000,
-  "node": "slc01-cl02-hgx-0001",
-  "busbw": 500.0,
-  "latency": 25.5
-}
-```
-
-The `load_baseline_summary` / `classify_result_vs_baseline` API in
-`cval.baselines.ingest` remains available for these fixed references.
-
----
-
 ## Integration with Hermes
 
 The Hermes `c-val-hpc-engineer` skill can build baselines, classify nodes, and
