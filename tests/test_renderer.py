@@ -105,6 +105,7 @@ class RendererTests(unittest.TestCase):
       self.assertIn('name: CVAL_IBBW_START_DEVICE\n                  value: "0"', rendered.yaml_text)
       self.assertIn('name: CVAL_IBBW_END_DEVICE', rendered.yaml_text)
       self.assertIn('name: CVAL_IBBW_END_DEVICE\n                  value: "13"', rendered.yaml_text)
+      self.assertIn('name: CVAL_DL_ITERATIONS\n                  value: "100"', rendered.yaml_text)
       self.assertNotIn("validation-8", rendered.yaml_text)
 
     def test_repository_template_tolerates_cordon_taint(self) -> None:

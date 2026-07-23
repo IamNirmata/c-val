@@ -108,7 +108,7 @@ class ValidationConfig:
     ibbw_end_device: int = 13
     dl_test_plan: str = "80gb-example"
     dl_baseline_test_id: str = "b200-pt2.8.0-cuda12.9"
-    dl_iterations: int = 20
+    dl_iterations: int = 100
 
 
 @dataclass(frozen=True)

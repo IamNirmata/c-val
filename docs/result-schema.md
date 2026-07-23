@@ -93,7 +93,9 @@ different workload iteration counts can be filtered and stratified. Ingestion
 reads the value from `dltest-summary-*.json`. Artifacts without a summary are
 historical and use `20`, the prior c-val default. The additive
 `db-migrate-dltest-iterations` command adds/backfills this column on existing
-DBs without rebuilding millions of metric rows.
+DBs without rebuilding millions of metric rows. New validation jobs default to
+`100` DL iterations; changing the runtime default does not rewrite historical
+rows.
 
 ## NCCL and IB health (`test-nccl.db`)
 

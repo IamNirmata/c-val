@@ -52,7 +52,7 @@ ibbw_start_device = 0
 ibbw_end_device = 13
 dl_test_plan = "80gb-example"
 dl_baseline_test_id = "b200-pt2.8.0-cuda12.9"
-dl_iterations = 20
+dl_iterations = 100
 
 [job_template]
 namespace = "gcr-admin"

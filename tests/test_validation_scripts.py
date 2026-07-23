@@ -77,6 +77,7 @@ class ValidationScriptTests(unittest.TestCase):
         self.assertIn("--nproc_per_node=\"$CVAL_GPU_COUNT\"", run_test)
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)
+        self.assertIn("CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-100}", dltest)
         self.assertIn("-m dl_unit_test", dltest)
         self.assertIn("DLTEST_WORK_DIR", dltest)
         self.assertIn("summarize_results.py", dltest)
