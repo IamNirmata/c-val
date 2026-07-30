@@ -20,6 +20,11 @@ because Python 3.11+ includes `tomllib`. YAML remains reserved for Kubernetes
 manifests, JSON for machine outputs and result artifacts, and env vars for
 last-mile runtime overrides.
 
+The Volcano renderer uses PyYAML separately from TOML configuration. It rejects
+duplicate semantic keys and validates the one-task/one-container object tree
+both before and after substitutions, so escaped, tagged, flow-style, or
+configuration-induced key collisions cannot reach submission.
+
 ## Read-Only Status Access
 
 `cval status` opens SQLite with `mode=ro` through the PVC access pod. It must not create tables or mutate metadata.
@@ -28,13 +33,62 @@ last-mile runtime overrides.
 
 Validation jobs accept `CVAL_GIT_REF` so operators can pin a commit or tag. This prevents accidental validation against a moving `main` branch.
 
+## Generic Runtime Payload Instead of Test-Specific YAML
+
+The Volcano template contains shared infrastructure and a single encoded runtime
+context rather than one environment placeholder for every storage/NCCL/DL
+setting. The renderer builds that context from validated typed configuration,
+shell-quotes every fixed-name value, and base64-encodes it for YAML-safe
+transport. The pod sources it after checking out the pinned ref. This makes
+adding test settings independent of Kubernetes template edits while preserving
+current v1 runner variables during migration.
+
 ## Structured Result JSON Before DB Ingestion
 
-`run-test.sh` writes `cval.results.v1` JSON after each phase. `db-update.sh` reads that JSON to decide per-test and aggregate DB rows. This makes failures visible and prevents unconditional `all/pass` writes.
+The generic runner atomically writes `cval.results.v2` at initialization and
+every state transition. Dynamic test IDs, phases, timings, config digests, and
+canonical evidence paths are preserved even after interruption. `db-update.sh`
+uses the v2 reader's legacy storage/NCCL/DL projection for compatibility writes
+and can independently dispatch U7 canonical per-test ingestion. Historical
+`cval.results.v1` remains readable and is never rewritten.
 
-## No Automatic Deletion
+## Keep U6 and U7 Writes Independently Default-Off
 
-`jobs --watch` reports timeout but does not delete or cancel jobs. Cleanup needs explicit operator approval.
+Deploying code must not silently create a new live database. Run history and
+canonical per-test ingestion therefore use separate strict snapshot-bound
+Booleans, both defaulting to false. Compatibility writes continue unchanged.
+Each gate needs its own backup, dry-run evidence, exact activation command, and
+operator approval.
+
+## Framework Owns Adapter Transactions
+
+The common per-test raw row is committed independently from test-specific
+metrics. A passing test's trusted adapter runs in a fresh spawned process and
+uses SQL RPC; the parent retains the raw SQLite connection, authorizer,
+transaction, schema checks, durable receipt validation, commit, and rollback.
+Adapter failure rolls back all metric DDL/rows/receipt while preserving raw
+status and other tests. Failed or interrupted tests never invoke metric parsing
+but do validate an existing adapter schema.
+
+Repository adapters are trusted extension code, not an OS sandbox. Direct
+filesystem/process abuse or opening another SQLite connection is outside this
+contract; framework APIs never hand an adapter the parent's live connection or
+authority over another test's declared DB path.
+
+## Core Owns Logs and Timeouts
+
+Tests do not implement framework logging or process supervision. The generic
+runner executes setup and workload as argument arrays, applies one bounded
+per-test deadline, terminates the process group on timeout, streams stdout and
+stderr into global and per-test files, emits `cval.event.v1`, and continues to
+later tests after a test failure.
+
+## Monitoring Does Not Delete; the Live Loop Has Prefix-Bounded Pruning
+
+`jobs --watch` reports timeout but does not delete or cancel jobs. The separate
+continuous runner automatically prunes stale `Pending` jobs matching its
+configured namespace and shared job-name prefix. Other cleanup needs explicit
+operator approval.
 
 ## Rebuild Live Candidates Per Slot
 
@@ -82,3 +136,62 @@ raw metric DBs. Dynamic baselines and derived node classifications live under
 immutable while allowing baseline decisions to evolve as active baselines change.
 `classification-results.db` records whether a node passed the active baseline at
 classification time without rewriting the original validation outcome.
+
+## Content-Address U8 Candidates From Exact Evidence
+
+U8 candidate identity includes canonical environment factors, current
+descriptor and health-policy versions, one adapter schema version, effective
+robust-z policy, every source/result/config/combination/receipt digest, exact
+observation content, exact per-result sample keys, statistics, thresholds, and
+lifecycle parent. Creation/storage timestamps are excluded. Observations are
+canonically sorted before all order-sensitive statistics, so adapter iteration
+order cannot create a different baseline from identical evidence.
+
+This is stricter than identifying a candidate only from median/MAD summaries:
+two evidence sets that happen to summarize alike must not share an identity.
+
+## Keep U8 Candidate and Metric Classification Logic in Core
+
+Repository adapters are trusted readers, not alternative health engines. They
+declare exact metric specs, return typed finite observations, and expose an
+explicit `health_policy_version`. Core validates provenance and sample coverage,
+builds robust candidates, creates normalized bands, applies DNR precedence, and
+produces metric verdicts. A `strategy="custom"` plugin may only aggregate those
+metric verdicts and must record a versioned aggregation policy. Exporting a
+custom `build_candidate` hook is rejected.
+
+This boundary prevents a plugin from overriding raw failure DNR, hiding a
+missing rank, changing metric evidence, or fabricating content identity.
+
+## Treat Exact Sample Membership as Health Evidence
+
+Distinct result-ID coverage is insufficient for pooled metrics: a result can
+still omit half its ranks while retaining the same ID. U8 therefore persists
+every `(source, expanded_metric, result_id, sample_key)` membership. Training
+requires one stable non-empty sample-key set across all source results;
+classification requires exact current membership. Missing or extra samples are
+DNR `incomplete_metric_coverage`, never nominal.
+
+## Make Immutable SQLite Evidence Authoritative
+
+Candidate sources, receipt provenance, sample coverage, statistics, bands, and
+build-trigger decisions are correctness-authoritative and protected by exact
+schema manifests plus SQL update/delete guards. Every baseline has one immutable
+trigger row and belongs to one unbranched candidate chain. Legal lifecycle
+updates are limited to `candidate -> active -> superseded`; a partial unique
+index enforces one active baseline per test/combination. Multi-query reads begin
+an explicit query-only transaction so concurrent activation cannot mix
+lifecycle snapshots.
+
+`health_build_state` is deliberately advisory. It can optimize a future
+evaluator and can be rebuilt; corruption there cannot authorize or block a
+candidate activation.
+
+## Keep U8 Operationally Inactive Until U9 Approval
+
+U8 ships callable pure engine and local SQLite lifecycle services, not an
+automatic evaluator. Built-in descriptors retain `auto_activate=false`; no
+current CLI/background loop creates or activates live health DBs. U9 evaluator,
+classification-history writes, live migration, and deployment are separate
+approval-gated changes. Existing compatibility baseline commands and DBs remain
+unchanged.

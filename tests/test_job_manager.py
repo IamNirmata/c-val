@@ -11,22 +11,9 @@ from cval.orchestrator.workflow import build_workflow_plan
 from cval.policy import ExecutionPolicy, PolicyViolation
 
 
-TEMPLATE = """
-apiVersion: batch.volcano.sh/v1alpha1
-kind: Job
-metadata:
-  generateName: jobname-placeholder
-spec:
-  tasks:
-    - template:
-        spec:
-          nodeSelector:
-            kubernetes.io/hostname: "nodename-placeholder"
-          containers:
-            - env:
-                - name: GCRTIME
-                  value: "time-placeholder"
-"""
+TEMPLATE = (
+        Path(__file__).resolve().parents[1] / "ymls/specific-node-job.yml"
+).read_text(encoding="utf-8")
 
 
 class FakeKubectlClient:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -25,7 +26,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
         self.assertIn(
-            "{config,nodes,validate,status,plan,run,jobs,result,results,classifications,baseline,overview}",
+            "{config,tests,nodes,validate,status,history,plan,run,jobs,result,results,"
+            "classifications,baseline,overview}",
             help_text,
         )
         self.assertNotIn("prioritize", help_text)
@@ -145,6 +147,130 @@ class CliTests(unittest.TestCase):
         config = json.loads(output.getvalue())
         self.assertEqual(config["job"]["job_prefix"], "cval")
         self.assertEqual(config["cluster"]["namespace"], "gcr-admin")
+        self.assertEqual(
+            config["tests"]["nccl"]["config_path"],
+            "validation-tests/nccl/test_config.toml",
+        )
+
+    def test_tests_list_command_prints_registry_json(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["tests", "list", "--output", "json"])
+
+        self.assertEqual(exit_code, 0)
+        rows = json.loads(output.getvalue())
+        self.assertEqual([row["id"] for row in rows], ["storage", "nccl", "dltest"])
+        self.assertTrue(all(row["schema_version"] == "cval.test.v1" for row in rows))
+
+    def test_tests_describe_command_prints_effective_settings(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["tests", "describe", "nccl"])
+
+        self.assertEqual(exit_code, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["metadata"]["id"], "nccl")
+        self.assertEqual(result["settings"]["iterations"], 20)
+        self.assertEqual(result["requirements"]["gpu_count"], 8)
+
+    def test_tests_validate_command_reports_counts(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["tests", "validate", "--output", "json"])
+
+        self.assertEqual(exit_code, 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["registered_count"], 3)
+        self.assertEqual(result["enabled_count"], 3)
+
+    def test_invalid_config_is_reported_without_traceback(self) -> None:
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[tests.nccl]
+enabled = true
+iterations = 99
+""",
+                encoding="utf-8",
+            )
+            with redirect_stderr(stderr):
+                exit_code = main(["--config", str(config_path), "tests", "validate"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Configuration error:", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_dl_rebuild_uses_exact_paths_from_cli_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            results_root = root / "results"
+            rank_path = (
+                results_root
+                / "dltest-node-a-123/workdir/test_plans/plan/runs/example_RANK0.json"
+            )
+            rank_path.parent.mkdir(parents=True)
+            rank_path.write_text(
+                json.dumps(
+                    {
+                        "runID": "example_RANK0",
+                        "test_plan": "plan",
+                        "nn_tasks": [
+                            {
+                                "task_name": "linear",
+                                "status": "completed",
+                                "norm_output": 1.0,
+                                "fp_gpu_time": 2.0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            custom_paths = {
+                "dl_numerical_db_path": root / "one/numerical.custom.db",
+                "dl_compute_db_path": root / "two/compute.custom.db",
+                "dl_collective_db_path": root / "three/collective.custom.db",
+                "dl_overlap_db_path": root / "four/overlap.custom.db",
+            }
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                "[storage]\n"
+                + "\n".join(
+                    f'{key} = "{path}"' for key, path in custom_paths.items()
+                )
+                + f'\n[runtime]\ndl_results_root_path = "{results_root}"\n'
+                + "\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "db-rebuild-dltest-metrics",
+                        "--results-root",
+                        str(results_root),
+                        "--output",
+                        "json",
+                    ]
+                )
+
+            receipt = json.loads(output.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            set(receipt["db_paths"].values()),
+            {str(path) for path in custom_paths.values()},
+        )
 
     def test_config_file_overrides_cli_defaults(self) -> None:
         output = io.StringIO()
@@ -183,6 +309,159 @@ job_prefix = "custom"
             result["jobs"][0]["job_name"],
             "custom-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
+
+    def test_history_command_writes_read_only_json(self) -> None:
+        from cval.storage.run_history import RunHistoryRow
+
+        output = io.StringIO()
+        row = RunHistoryRow(
+            run_id="node-a-123",
+            node="node-a",
+            started_timestamp=123,
+            started_timestamp_la="1969-12-31T16:02:03-08:00",
+            completed_timestamp=124,
+            overall_status="pass",
+            tests_ran="storage,nccl",
+            image_name="image",
+            pytorch_version="2.8",
+            cuda_version="12.9",
+            git_ref="abc",
+            global_config_digest="sha256:" + "a" * 64,
+            result_path="/data/result.json",
+            created_at=125,
+            updated_at=125,
+        )
+        with patch(
+            "cval.storage.run_history.get_run_history_rows",
+            return_value=[row],
+        ) as get_rows:
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "history",
+                        "--node",
+                        "node-a",
+                        "--test",
+                        "nccl",
+                        "--output",
+                        "json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue())[0]["run_id"], "node-a-123")
+        self.assertEqual(get_rows.call_args.kwargs["node"], "node-a")
+        self.assertEqual(get_rows.call_args.kwargs["test_id"], "nccl")
+
+    def test_db_upsert_run_history_command_is_idempotent(self) -> None:
+        from cval.config import encode_config_snapshot, load_config
+        from cval.validation.registry import validation_test_config_digest
+        from cval.validation.results import (
+            parse_validation_result_v2,
+            validation_result_v2_digest,
+        )
+        from cval.validation.runtime import effective_config_digest
+        from tests.test_results_v2 import payload
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                f'''
+[storage]
+run_history_enabled = true
+run_history_db_path = "{root / 'history.db'}"
+
+[runtime]
+validation_root = "{root}"
+''',
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            value = payload()
+            del value["tests"]["smoke"]  # type: ignore[index]
+            value["global_config_digest"] = effective_config_digest(config)
+            for registered in config.tests.registry.tests:
+                state = value["tests"][registered.id]  # type: ignore[index]
+                state["display_name"] = registered.definition.metadata.display_name
+                state["config_path"] = registered.config_path
+                state["config_digest"] = validation_test_config_digest(registered)
+                run_dir = (
+                    root
+                    / "validation_tests"
+                    / registered.id
+                    / "runs/node-a/node-a-123"
+                )
+                log_dir = root / "logs" / registered.id / "node-a/node-a-123"
+                (run_dir / "artifacts").mkdir(parents=True)
+                log_dir.mkdir(parents=True)
+                for filename in ("stdout.log", "stderr.log", "events.jsonl"):
+                    (log_dir / filename).touch()
+                state.update(
+                    {
+                        "stdout": str(log_dir / "stdout.log"),
+                        "stderr": str(log_dir / "stderr.log"),
+                        "log": str(log_dir / "events.jsonl"),
+                        "summary": str(
+                            run_dir
+                            / registered.definition.artifacts.summary_filename
+                        ),
+                        "result": str(run_dir / "result.json"),
+                        "artifacts": str(run_dir / "artifacts"),
+                    }
+                )
+                (run_dir / "result.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "cval.test-result.v1",
+                            "test_id": registered.id,
+                            "status": state["status"],
+                            "phase": state["phase"],
+                            "started_at": state["started_at"],
+                            "completed_at": state["completed_at"],
+                            "duration_ms": state["duration_ms"],
+                            "exit_code": state["exit_code"],
+                            "summary": state["summary"],
+                            "artifacts": state["artifacts"],
+                            "message": state["message"],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            result = parse_validation_result_v2(value)
+            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+            result_path.parent.mkdir(parents=True)
+            db_path = Path(tmpdir) / "history.db"
+            result_path.write_text(json.dumps(value), encoding="utf-8")
+            environment = {
+                "CVAL_CONFIG_SNAPSHOT_B64": encode_config_snapshot(config),
+                "CVAL_REPO_DIR": str(Path(__file__).resolve().parents[1]),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                for _ in range(2):
+                    with redirect_stdout(output):
+                        exit_code = main(
+                            [
+                                "--config",
+                                str(config_path),
+                                "db-upsert-run-history",
+                                "--result-json",
+                                str(result_path),
+                                "--result-digest",
+                                validation_result_v2_digest(result),
+                                "--db-path",
+                                str(db_path),
+                            ]
+                        )
+            with closing(sqlite3.connect(db_path)) as connection:
+                counts = (
+                    connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
+                    connection.execute("SELECT COUNT(*) FROM run_tests").fetchone()[0],
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(counts, (1, 3))
 
     def test_plan_command_uses_provided_free_nodes(self) -> None:
         output = io.StringIO()
@@ -305,14 +584,78 @@ job_prefix = "custom"
         self.assertIn("overall_result=fail", output.getvalue())
         self.assertIn("image_name=pytorch:26.05-py3", output.getvalue())
 
+    def test_result_command_reads_v2_for_legacy_db_update(self) -> None:
+        from tests.test_results_v2 import payload
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_path = Path(tmpdir) / "result.json"
+            result_path.write_text(json.dumps(payload()), encoding="utf-8")
+            with redirect_stdout(output):
+                exit_code = main(["result", "--result-json", str(result_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("GCRRESULT1=pass", output.getvalue())
+        self.assertIn("GCRRESULT2=pass", output.getvalue())
+        self.assertIn("GCRRESULT3=pass", output.getvalue())
+        self.assertIn("overall_result=pass", output.getvalue())
+
     def test_db_add_result_command_writes_sqlite_row(self) -> None:
+        from cval.config import encode_config_snapshot, load_config
+        from cval.validation.results import (
+            load_validation_result,
+            validation_result_digest,
+        )
+
         output = io.StringIO()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "validation.db"
-            with redirect_stdout(output):
-                exit_code = main(
-                    [
+            root = Path(tmpdir)
+            db_path = root / "validation.db"
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                f'''[storage]
+validation_db_path = "{db_path}"
+[runtime]
+validation_root = "{root}"
+''',
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            result_path = (
+                root
+                / "logs/job_logs/slc01-cl02-hgx-0001/"
+                "slc01-cl02-hgx-0001-12345/result.json"
+            )
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "cval.results.v1",
+                        "node": "slc01-cl02-hgx-0001",
+                        "timestamp": "12345",
+                        "overall": "pass",
+                        "image_name": "pytorch:26.05-py3",
+                        "tests": {
+                            "storage": {"status": "pass"},
+                            "nccl": {"status": "pass"},
+                            "dltest": {"status": "pass"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = load_validation_result(result_path)
+            with patch.dict(
+                os.environ,
+                {"CVAL_CONFIG_SNAPSHOT_B64": encode_config_snapshot(config)},
+                clear=False,
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(
+                        [
+                        "--config",
+                        str(config_path),
                         "db-add-result",
                         "slc01-cl02-hgx-0001",
                         "all",
@@ -320,10 +663,14 @@ job_prefix = "custom"
                         "12345",
                         "--image-name",
                         "pytorch:26.05-py3",
+                        "--result-json",
+                        str(result_path),
+                        "--result-digest",
+                        validation_result_digest(result),
                         "--db-path",
                         str(db_path),
-                    ]
-                )
+                        ]
+                    )
 
             with closing(sqlite3.connect(db_path)) as connection:
                 row = connection.execute(

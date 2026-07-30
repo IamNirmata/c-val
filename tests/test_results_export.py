@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -36,7 +37,7 @@ class ResultsExportTests(unittest.TestCase):
     def test_latest_classification_reader_uses_scalar_summary_columns(self) -> None:
         with TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "classification.db"
-            with sqlite3.connect(db_path) as connection:
+            with closing(sqlite3.connect(db_path)) as connection:
                 connection.execute(
                     """
                     CREATE TABLE classification_results (

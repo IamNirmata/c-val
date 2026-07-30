@@ -3,6 +3,7 @@
 import sqlite3
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,7 +20,7 @@ def _make_storage_two_nodes(path: Path) -> None:
     columns_ddl = ", ".join(f"{column} REAL" for column in STORAGE_METRIC_COLUMNS)
     insert_columns = ", ".join(STORAGE_METRIC_COLUMNS)
     placeholders = ", ".join("?" for _ in STORAGE_METRIC_COLUMNS)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             f"""
             CREATE TABLE storage_performance (
@@ -54,7 +55,7 @@ def _make_storage_two_nodes(path: Path) -> None:
 
 
 def _make_nccl_two_nodes(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             """
             CREATE TABLE IB_HEALTH (
@@ -82,7 +83,7 @@ def _make_nccl_two_nodes(path: Path) -> None:
 
 
 def _make_dl_compute_db(path: Path, node: str, degraded_metrics: int) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             """
             CREATE TABLE compute_performance (

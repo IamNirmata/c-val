@@ -87,18 +87,19 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[Pod starts] --> B[Checkout CVAL_GIT_REF]
-    B --> C[source 0-env.sh]
-    C --> D[run-test.sh]
-    D --> E[Storage FIO]
-    E --> F[Write result JSON and env state]
-    F --> G[NCCL allreduce]
-    G --> H[Write result JSON and env state]
-    H --> I[DL unit test]
-    I --> J[Write result JSON and env state]
-    J --> K[db-update.sh]
-    K --> L[Write validation.db per-test rows]
-    K --> M[Write storage metrics DB]
-    K --> N[Write NCCL metrics DB]
+    B --> C[Decode generic runtime context]
+    C --> D[Reserve run ID and start global logging]
+    D --> E[Generic Python runner]
+    E --> F[Load enabled registry in order]
+    F --> G[Run test setup with deadline]
+    G --> H[Run test workload with remaining deadline]
+    H --> I[Stream global and per-test logs/events]
+    I --> J[Atomically write cval.results.v2]
+    J --> K{More enabled tests?}
+    K -- Yes --> G
+    K -- No --> L[source compatibility aliases then db-update.sh]
+    L --> M[Write validation.db per-test rows]
+    L --> N[Write storage/NCCL metrics DBs]
 ```
 
 ## Completion Criteria
@@ -107,7 +108,8 @@ A one-node c-val 2.0 run is considered successful when all are true:
 
 - Volcano job phase is `Completed`.
 - Pod phase is `Succeeded` and exit code is `0`.
-- `cval.results.v1` JSON exists.
+- Canonical `cval.results.v2` JSON exists and validates.
+- Every enabled test is terminal and global/per-test logs plus events exist.
 - `storage`, `nccl`, `dltest`, and `all` rows exist in latest status for the node.
 - Storage and NCCL metric DB updates complete.
 - DL test log shows completed task output without failure markers.

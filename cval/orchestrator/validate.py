@@ -43,6 +43,7 @@ _DB_UPDATE_DONE_MARKER = "Main DB update completed."
 _FINAL_RESULT_RE = re.compile(
     r"Final c-val test results:\s*storage=(\w+)\s+nccl=(\w+)\s+dltest=(\w+)"
 )
+_CVAL_EVENT_RE = re.compile(r"^CVAL_EVENT\s+(\{.*\})$", re.MULTILINE)
 
 REPORT_TEST_TYPES = ("storage", "nccl", "dltest")
 SUCCESS_PHASES = frozenset({"Completed", "Succeeded"})
@@ -79,6 +80,18 @@ def parse_test_progress(log_text: str) -> dict[str, str]:
         progress["nccl"] = _normalize_result(match.group(2))
         progress["dltest"] = _normalize_result(match.group(3))
 
+    for event in _structured_progress_events(log_text):
+        test = event.get("test")
+        if not isinstance(test, str) or not test:
+            continue
+        event_name = event.get("event")
+        if event_name in {"test_setup_started", "test_started"}:
+            progress[test] = "running"
+        elif event_name in {"test_finished", "test_timed_out"}:
+            progress[test] = _normalize_result(str(event.get("status", "fail")))
+        elif event_name == "test_skipped":
+            progress[test] = "incomplete"
+
     return progress
 
 
@@ -88,15 +101,35 @@ def raw_results_from_log(
 ) -> dict[str, str]:
     """Extract per-test results and aggregate across enabled phases."""
 
+    results: dict[str, str] = {}
+    for event in _structured_progress_events(log_text or ""):
+        test = event.get("test")
+        event_name = event.get("event")
+        if isinstance(test, str) and event_name in {
+            "test_finished",
+            "test_timed_out",
+            "test_skipped",
+        }:
+            results[test] = _normalize_result(str(event.get("status", "incomplete")))
+        if event_name == "run_finished":
+            results["all"] = _normalize_result(
+                str(event.get("overall", event.get("status", "incomplete")))
+            )
+
     match = _FINAL_RESULT_RE.search(log_text or "")
-    if not match:
+    if match:
+        results.update(
+            {
+                "storage": _normalize_result(match.group(1)),
+                "nccl": _normalize_result(match.group(2)),
+                "dltest": _normalize_result(match.group(3)),
+            }
+        )
+    if not results:
         return {}
-    results = {
-        "storage": _normalize_result(match.group(1)),
-        "nccl": _normalize_result(match.group(2)),
-        "dltest": _normalize_result(match.group(3)),
-    }
     enabled = enabled_tests if enabled_tests is not None else set(REPORT_TEST_TYPES)
+    if "all" in results:
+        return results
     if not enabled:
         results["all"] = "incomplete"
     else:
@@ -106,10 +139,45 @@ def raw_results_from_log(
     return results
 
 
+def _structured_progress_events(log_text: str) -> list[dict[str, Any]]:
+    """Return valid structured c-val event objects in log order."""
+
+    events: list[dict[str, Any]] = []
+    for match in _CVAL_EVENT_RE.finditer(log_text or ""):
+        try:
+            event = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("schema_version") == "cval.event.v1":
+            events.append(event)
+    return events
+
+
 def log_signals_db_updated(log_text: str) -> bool:
     """Return True once the in-pod DB ingestion has finished."""
 
+    ingestion_events = [
+        event
+        for event in _structured_progress_events(log_text or "")
+        if event.get("event") == "ingestion_finished"
+    ]
+    if ingestion_events:
+        return ingestion_events[-1].get("status") == "pass"
     return bool(log_text) and _DB_UPDATE_DONE_MARKER in log_text
+
+
+def render_test_progress_line(
+    elapsed: float,
+    phase: str,
+    test_ids: list[str],
+    progress: dict[str, str],
+) -> str:
+    """Render one dynamic live-status line in registry order."""
+
+    cells = " ".join(
+        f"{test_id}={progress.get(test_id, '-').upper()}" for test_id in test_ids
+    )
+    return f"[{elapsed:5.0f}s] phase={phase:<9} {cells}".rstrip()
 
 
 def degraded_metrics_from_verdict(
@@ -149,6 +217,8 @@ def build_validation_report(
     metric_limit: int | None = 25,
     dry_run: bool = False,
     interrupted: bool = False,
+    ingestion_complete: bool = True,
+    fresh_status_complete: bool = True,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the structured single-node validation report."""
@@ -205,7 +275,15 @@ def build_validation_report(
         "job_phase": job_phase,
         "dry_run": dry_run,
         "interrupted": interrupted,
-        "ok": job_ok and not interrupted,
+        "ok": (
+            job_ok
+            and not interrupted
+            and ingestion_complete
+            and fresh_status_complete
+            and raw_overall == "pass"
+        ),
+        "ingestion_complete": ingestion_complete,
+        "fresh_status_complete": fresh_status_complete,
         "schedulability": schedulability,
         "raw_results": raw_results,
         "raw_overall": raw_overall,
@@ -363,18 +441,24 @@ def _run_pod_cval(
         args += ["-x", lock_file]
     args += ["env", f"PYTHONPATH={repo}", "python3", "-m", "cval.cli", "--config", config_path]
     args += cval_args
-    return kubectl.run(args, check=False)
+    return kubectl.run(args, check=False, timeout=timeout)
 
 
 # Pod-side collector: zips this run's logs/summaries/result files from the PVC
 # and prints the archive as base64 on stdout (diagnostics go to stderr). Run via
 # `python3 - <node> <timestamp> <validation_root>` over kubectl exec stdin.
 _DOWNLOAD_SCRIPT = r"""
-import base64, io, os, sys, zipfile
+import base64, glob, io, os, sys, zipfile
 
 node, ts, root = sys.argv[1], sys.argv[2], sys.argv[3]
 max_bytes = 25 * 1024 * 1024
-candidates = [
+run_id = node + "-" + ts
+candidates = sorted(glob.glob(root + "/logs/*/" + node + "/" + run_id))
+candidates += sorted(
+    glob.glob(root + "/validation_tests/*/runs/" + node + "/" + run_id)
+)
+candidates += [
+    # Legacy v1 paths remain as read-only fallbacks during migration.
     root + "/storage/" + node + "/storage-" + node + "-" + ts,
     root + "/nccl/" + node + "/nccl-" + node + "-" + ts,
     root + "/dltest/" + node + "/dltest-" + node + "-" + ts,
@@ -538,8 +622,18 @@ def _build_single_node_plan(
     return plan, rendered
 
 
-def _pod_logs(kubectl: KubectlClient, namespace: str, pod_name: str) -> str:
-    result = kubectl.run(["logs", "-n", namespace, pod_name], check=False)
+def _pod_logs(
+    kubectl: KubectlClient,
+    namespace: str,
+    pod_name: str,
+    *,
+    timeout: float | None = None,
+) -> str:
+    result = kubectl.run(
+        ["logs", "-n", namespace, pod_name, "--tail=2000"],
+        check=False,
+        timeout=timeout,
+    )
     return result.stdout if result.returncode == 0 else ""
 
 
@@ -578,18 +672,17 @@ def run_node_validation(
     overall_timeout = (
         config.monitoring.timeout_seconds if overall_timeout is None else overall_timeout
     )
+    if overall_timeout <= 0:
+        raise ValueError("overall_timeout must be positive")
+    if poll_interval <= 0:
+        raise ValueError("poll_interval must be positive")
     window_days = config.baseline.window_days if window_days is None else window_days
     notes: list[str] = []
-    enabled_tests = {
-        test
-        for test, enabled in (
-            ("storage", config.tests.storage.enabled),
-            ("nccl", config.tests.nccl.enabled),
-            ("dltest", config.tests.dltest.enabled),
-        )
-        if enabled
-    }
-    disabled_tests = sorted(set(REPORT_TEST_TYPES) - enabled_tests)
+    enabled_test_order = [test.id for test in config.tests.registry.enabled]
+    enabled_tests = set(enabled_test_order)
+    disabled_tests = [
+        test.id for test in config.tests.registry.tests if not test.enabled
+    ]
     if disabled_tests:
         notes.append(f"disabled tests skipped: {', '.join(disabled_tests)}")
 
@@ -671,6 +764,7 @@ def run_node_validation(
 
     # 4. Live tracking: poll phase + parse logs for per-test progress.
     start = clock()
+    deadline = start + overall_timeout
     last_status_line = ""
     seen_progress: dict[str, str] = {}
     phase = "Unknown"
@@ -678,19 +772,40 @@ def run_node_validation(
     logs = ""
     try:
         while True:
-            phase = get_job_phase(job_name, namespace=namespace, client=kubectl).phase
+            remaining = deadline - clock()
+            if remaining <= 0:
+                notes.append(
+                    f"overall timeout ({overall_timeout:.0f}s) reached before terminal phase"
+                )
+                emit(f"[{overall_timeout:5.0f}s] overall timeout reached; stopping live tracking")
+                break
+            phase = get_job_phase(
+                job_name,
+                namespace=namespace,
+                client=kubectl,
+                timeout=remaining,
+            ).phase
+            remaining = deadline - clock()
+            if remaining <= 0:
+                notes.append(
+                    f"overall timeout ({overall_timeout:.0f}s) reached before log fetch"
+                )
+                break
+            logs = _pod_logs(
+                kubectl,
+                namespace,
+                pod_name,
+                timeout=remaining,
+            )
             elapsed = clock() - start
-            logs = _pod_logs(kubectl, namespace, pod_name)
             progress = parse_test_progress(logs)
             seen_progress.update(progress)
 
-            def cell(test: str) -> str:
-                value = seen_progress.get(test)
-                return value.upper() if value else "-"
-
-            status_line = (
-                f"[{elapsed:5.0f}s] phase={phase:<9} "
-                f"storage={cell('storage')} nccl={cell('nccl')} dltest={cell('dltest')}"
+            status_line = render_test_progress_line(
+                elapsed,
+                phase,
+                enabled_test_order,
+                seen_progress,
             )
             if status_line != last_status_line:
                 emit(status_line)
@@ -699,23 +814,25 @@ def run_node_validation(
             if phase in TERMINAL_PHASES:
                 emit(f"[{elapsed:5.0f}s] job reached terminal phase: {phase}")
                 break
-            if elapsed >= overall_timeout:
-                notes.append(f"overall timeout ({overall_timeout:.0f}s) reached before terminal phase")
-                emit(f"[{elapsed:5.0f}s] overall timeout reached; stopping live tracking")
-                break
             if phase == "Pending" and elapsed >= pending_timeout and not seen_progress:
                 emit(
                     f"[{elapsed:5.0f}s] still Pending after {pending_timeout:.0f}s; "
                     "node not schedulable yet (job left queued)"
                 )
-            sleeper(poll_interval)
+            remaining = deadline - clock()
+            if remaining <= 0:
+                continue
+            sleeper(min(poll_interval, remaining))
     except KeyboardInterrupt:
         interrupted = True
         notes.append("interrupted by operator; job left running")
         emit("\ninterrupted; the validation job is still running. Re-run classification later.")
 
-    # 5. Raw pass/fail from the in-pod logs, augmented by validation.db.
+    # 5. Raw pass/fail from logs, augmented only by rows from this exact run.
     raw_results = raw_results_from_log(logs, enabled_tests=enabled_tests)
+    ingestion_complete = log_signals_db_updated(logs)
+    fresh_status_tests: set[str] = set()
+    fresh_status_results: dict[str, str] = {}
     try:
         rows = get_latest_status_rows(
             client=kubectl,
@@ -724,24 +841,56 @@ def run_node_validation(
             db_path=config.storage.validation_db_path,
         )
         for row in rows:
-            if row.node == node:
+            if row.node == node and row.latest_timestamp == timestamp:
                 raw_results.setdefault(row.test, row.result)
+                fresh_status_tests.add(row.test)
+                fresh_status_results[row.test] = row.result
+            elif row.node == node and row.test in enabled_tests:
+                notes.append(
+                    f"ignored stale {row.test} DB row at timestamp "
+                    f"{row.latest_timestamp}; expected {timestamp}"
+                )
     except Exception as exc:  # noqa: BLE001
         notes.append(f"could not read validation.db status: {_first_line(str(exc))}")
 
     verdicts: dict[str, dict[str, Any] | None] = {t: None for t in REPORT_TEST_TYPES}
 
-    # 6. Classify on the PVC pod (where /data is mounted), unless interrupted.
-    if not interrupted:
+    # 6. Classify only a successful, fully ingested run with fresh DB rows.
+    compatibility_status_tests = enabled_tests & {"storage", "nccl", "dltest"}
+    required_fresh_tests = compatibility_status_tests | {"all"}
+    fresh_rows_complete = required_fresh_tests.issubset(fresh_status_tests)
+    fresh_rows_match = all(
+        fresh_status_results.get(test) == raw_results.get(test)
+        for test in required_fresh_tests
+    )
+    can_classify = (
+        not interrupted
+        and phase in SUCCESS_PHASES
+        and ingestion_complete
+        and fresh_rows_complete
+        and fresh_rows_match
+    )
+    if can_classify:
         try:
             pvc_pod = resolve_status_pod(kubectl, namespace, pod or config.cluster.pvc_access_pod)
             repo, pod_config = _pod_repo_paths(pod_repo_dir, pod_config_path)
             emit(f"classifying results on PVC pod {pvc_pod} ...")
 
-            if config.tests.dltest.enabled and not skip_dl_rebuild:
-                node_root = f"{config.runtime.dl_results_root_path.rstrip('/')}/{node}"
-                meta_dir = str(Path(config.storage.dl_numerical_db_path).parent)
-                lock_file = f"{config.baseline.baseline_root_path.rstrip('/')}/.dl-metric-refresh.lock"
+            dl_refresh_ok = not config.tests.dltest.enabled
+            dl_lock_file = (
+                f"{config.baseline.baseline_root_path.rstrip('/')}/"
+                ".dl-metric-refresh.lock"
+            )
+            if (
+                config.tests.dltest.enabled
+                and raw_results.get("dltest") == "pass"
+                and "dltest" in fresh_status_tests
+                and not skip_dl_rebuild
+            ):
+                run_root = (
+                    f"{config.runtime.dl_results_root_path.rstrip('/')}/"
+                    f"{node}/{node}-{timestamp}"
+                )
                 emit("  refreshing DL metric DBs for this node (scoped, locked) ...")
                 rebuild = _run_pod_cval(
                     kubectl,
@@ -752,27 +901,48 @@ def run_node_validation(
                     [
                         "db-rebuild-dltest-metrics",
                         "--results-root",
-                        node_root,
-                        "--output-dir",
-                        meta_dir,
+                        run_root,
                         "--output",
                         "json",
                     ],
-                    lock_file=lock_file,
+                    lock_file=dl_lock_file,
                     lock_wait=dl_lock_wait,
                     timeout=dl_rebuild_timeout,
                 )
-                if rebuild.returncode != 0:
-                    note = (
-                        "DL metric refresh skipped (lock busy or timeout); "
-                        "DL classified against latest available data"
-                    )
+                if rebuild.returncode == 0:
+                    try:
+                        receipt = json.loads(rebuild.stdout)
+                        expected_db_paths = {
+                            "numerical_correctness": config.storage.dl_numerical_db_path,
+                            "compute_performance": config.storage.dl_compute_db_path,
+                            "collective_performance": config.storage.dl_collective_db_path,
+                            "overlap_performance": config.storage.dl_overlap_db_path,
+                        }
+                        dl_refresh_ok = (
+                            isinstance(receipt, dict)
+                            and int(receipt.get("runs", 0)) == 1
+                            and int(receipt.get("rank_files", 0)) > 0
+                            and receipt.get("db_paths") == expected_db_paths
+                            and bool(receipt.get("generation_id"))
+                        )
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        dl_refresh_ok = False
+                if not dl_refresh_ok:
+                    note = "DL metric refresh did not confirm this exact run; DL classification skipped"
                     notes.append(note)
                     emit(f"  {note}")
+            elif config.tests.dltest.enabled and skip_dl_rebuild:
+                notes.append("DL metric refresh explicitly skipped; DL classification skipped")
 
             for test in REPORT_TEST_TYPES:
                 if test not in enabled_tests:
                     emit(f"  skipping {test} classification (test disabled) ...")
+                    continue
+                if raw_results.get(test) != "pass" or test not in fresh_status_tests:
+                    emit(f"  skipping {test} classification (no fresh passing result) ...")
+                    continue
+                if test == "dltest" and not dl_refresh_ok:
+                    emit("  skipping dltest classification (fresh metric receipt unavailable) ...")
                     continue
                 emit(f"  classifying {test} ...")
                 result = _run_pod_cval(
@@ -794,6 +964,8 @@ def run_node_validation(
                         "--output",
                         "json",
                     ],
+                    lock_file=dl_lock_file if test == "dltest" else None,
+                    lock_wait=dl_lock_wait if test == "dltest" else None,
                 )
                 if result.returncode == 0:
                     verdicts[test] = _parse_classify_verdict(result.stdout)
@@ -807,6 +979,10 @@ def run_node_validation(
             note = f"classification step failed: {_first_line(str(exc))}"
             notes.append(note)
             emit(f"  {note}")
+    elif not interrupted:
+        notes.append(
+            "classification skipped: job was not successfully ingested with fresh rows"
+        )
 
     # 7. Build and render the report.
     report = build_validation_report(
@@ -818,6 +994,8 @@ def run_node_validation(
         raw_results=raw_results,
         verdicts=verdicts,
         interrupted=interrupted,
+        ingestion_complete=ingestion_complete,
+        fresh_status_complete=fresh_rows_complete and fresh_rows_match,
         notes=notes,
     )
 

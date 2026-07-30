@@ -34,8 +34,10 @@ scripts/cval-live.sh stop
 ```
 
 If a job remains `Pending` past `pending_start_timeout_seconds`, the runner
-deletes only that c-val validation job and then rebuilds the live ranked list
-before submitting a replacement.
+deletes every stale `Pending` Volcano job in the configured namespace whose
+name matches the shared `JOB_PREFIX`, then rebuilds the live ranked list before
+submitting replacements. Use a dedicated prefix and inspect matching jobs
+before starting the loop.
 
 ## One-Node Validation
 
@@ -70,9 +72,9 @@ before submitting a replacement.
 5. Monitor read-only:
 
    ```bash
-    python -m cval.cli jobs \
+   python -m cval.cli jobs \
      --jobs <job-name> \
-       --watch \
+     --watch \
      --timeout-seconds 1200 \
      --poll-interval-seconds 30 \
      --output json
@@ -165,14 +167,18 @@ the same commands from the c-val checkout. Do not paste credentials into docs or
 commands; use the kubeconfig already present on the operator machine.
 
 For DL tests, the scripts first rebuild the four DL metric DBs from rank JSON
-files under `/data/continuous_validation/dltest`. To run that rebuild manually:
+files under `/data/continuous_validation/validation_tests/dltest/runs`. To run
+that rebuild manually:
 
 ```bash
 python -m cval.cli db-rebuild-dltest-metrics \
-  --results-root /data/continuous_validation/dltest \
+  --results-root /data/continuous_validation/validation_tests/dltest/runs \
   --output-dir /data/continuous_validation/metadata
 ```
 
 ## Cleanup
 
-c-val 2.0 does not delete jobs automatically. If cleanup is required, ask for explicit approval and run the exact delete command only for the intended validation job.
+The `jobs --watch` command and `cval-live.sh stop` never delete jobs. A running
+`cval-live` loop does automatically prune matching stale `Pending` jobs as
+described above. Any other cleanup requires explicit approval and an exact
+delete command for the intended validation job.

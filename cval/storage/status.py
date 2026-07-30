@@ -97,6 +97,7 @@ import sys
 
 db_path = sys.argv[1]
 rows_out = []
+conn = None
 try:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -115,6 +116,9 @@ try:
 except Exception as exc:
     print(f"Error reading latest_status from {db_path}: {exc}", file=sys.stderr)
     sys.exit(1)
+finally:
+    if conn is not None:
+        conn.close()
 
 print(json.dumps(rows_out))
 '''

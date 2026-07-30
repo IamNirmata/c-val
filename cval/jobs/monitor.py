@@ -41,23 +41,25 @@ def get_job_phase(
     job_name: str,
     namespace: str | None = None,
     client: KubectlClient | None = None,
+    timeout: float | None = None,
 ) -> JobPhase:
     """Read one Volcano job phase using a non-mutating kubectl get."""
 
     kubectl = client or KubectlClient()
     resolved_namespace = namespace or load_config().cluster.namespace
-    result = kubectl.run(
-        [
-            "get",
-            "vcjob",
-            "-n",
-            resolved_namespace,
-            job_name,
-            "-o",
-            "jsonpath={.status.state.phase}",
-        ],
-        check=False,
-    )
+    args = [
+        "get",
+        "vcjob",
+        "-n",
+        resolved_namespace,
+        job_name,
+        "-o",
+        "jsonpath={.status.state.phase}",
+    ]
+    if timeout is None:
+        result = kubectl.run(args, check=False)
+    else:
+        result = kubectl.run(args, check=False, timeout=timeout)
     # Missing jobs or transient API failures are reported as Unknown, not raised.
     phase = result.stdout.strip() if result.returncode == 0 else "Unknown"
     return JobPhase(job_name=job_name, phase=phase or "Unknown")

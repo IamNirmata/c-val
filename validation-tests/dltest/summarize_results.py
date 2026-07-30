@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -41,6 +42,7 @@ def load_rank_results(runs_dir: Path) -> list[dict[str, Any]]:
                 "test_plan": str(payload.get("test_plan", "")),
                 "task_counts": _task_counts(payload),
                 "status_counts": _status_counts(payload),
+                "tasks_valid": _tasks_valid(payload),
             }
         )
     return results
@@ -59,8 +61,26 @@ def build_summary(args: argparse.Namespace) -> dict[str, Any]:
         for status, count in aggregate_statuses.items()
         if status and status != "completed" and count
     }
+    ranks = [result["rank"] for result in rank_results]
+    expected_ranks = set(range(args.gpu_count))
+    observed_ranks = {rank for rank in ranks if isinstance(rank, int)}
+    rank_coverage_valid = (
+        len(ranks) == args.gpu_count
+        and len(observed_ranks) == args.gpu_count
+        and observed_ranks == expected_ranks
+    )
+    plans_match = all(
+        result["test_plan"] == args.test_plan for result in rank_results
+    )
+    tasks_complete = all(result["tasks_valid"] for result in rank_results)
     effective_status = args.status
-    if not rank_results or failed_statuses:
+    if (
+        not rank_results
+        or failed_statuses
+        or not rank_coverage_valid
+        or not plans_match
+        or not tasks_complete
+    ):
         effective_status = "fail"
 
     return {
@@ -74,6 +94,11 @@ def build_summary(args: argparse.Namespace) -> dict[str, Any]:
         "runs_dir": str(args.runs_dir),
         "log_file": args.log_file,
         "rank_result_count": len(rank_results),
+        "expected_ranks": sorted(expected_ranks),
+        "observed_ranks": sorted(observed_ranks),
+        "rank_coverage_valid": rank_coverage_valid,
+        "test_plans_match": plans_match,
+        "tasks_complete": tasks_complete,
         "task_counts": dict(sorted(aggregate_counts.items())),
         "status_counts": dict(sorted(aggregate_statuses.items())),
         "rank_results": rank_results,
@@ -100,6 +125,21 @@ def _status_counts(payload: dict[str, Any]) -> dict[str, int]:
     return dict(counts)
 
 
+def _tasks_valid(payload: dict[str, Any]) -> bool:
+    """Return true when at least one task exists and every task completed."""
+
+    count = 0
+    for group in TASK_GROUPS:
+        tasks = payload.get(group, [])
+        if not isinstance(tasks, list):
+            return False
+        for task in tasks:
+            if not isinstance(task, dict) or task.get("status") != "completed":
+                return False
+            count += 1
+    return count > 0
+
+
 def _rank_from_run_id(run_id: str) -> int | None:
     match = RANK_PATTERN.search(run_id)
     return int(match.group("rank")) if match else None
@@ -109,7 +149,16 @@ def main() -> int:
     args = parse_args()
     summary = build_summary(args)
     args.summary_file.parent.mkdir(parents=True, exist_ok=True)
-    args.summary_file.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary = args.summary_file.with_name(f".{args.summary_file.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, args.summary_file)
+    finally:
+        temporary.unlink(missing_ok=True)
     return 0 if summary["status"] == "pass" else 1
 
 

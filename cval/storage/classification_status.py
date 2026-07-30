@@ -12,6 +12,7 @@ import csv
 import datetime as dt
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -100,7 +101,7 @@ def latest_classification_rows_from_db(db_path: str | Path) -> list[Classificati
     path = Path(db_path)
     if not path.exists():
         return []
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
         connection.row_factory = sqlite3.Row
         return [_row_from_dict(dict(row)) for row in _latest_rows(connection)]
 
@@ -152,6 +153,7 @@ def metric_fallbacks(metrics_json):
                 pass
     return band_degraded, worst
 
+conn = None
 try:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -238,6 +240,9 @@ try:
 except Exception as exc:
     print(f"Error reading classification_results from {db_path}: {exc}", file=sys.stderr)
     raise SystemExit(1)
+finally:
+    if conn is not None:
+        conn.close()
 
 print(json.dumps(out))
 '''

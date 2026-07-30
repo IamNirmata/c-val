@@ -5,7 +5,7 @@ discovery commands, dry-run planning, approval-gated submission, read-only
 monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
-Public commands: config, nodes, validate, status, plan, run, jobs, result,
+Public commands: config, tests, nodes, validate, status, history, plan, run, jobs, result,
 results, classifications, baseline, and overview.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
@@ -14,15 +14,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from cval.config import CvalConfig, config_to_dict, load_config
+from cval.config import (
+    CvalConfig,
+    config_to_dict,
+    encode_config_snapshot,
+    load_config,
+    load_config_snapshot,
+)
 from cval.jobs.manager import submission_result_to_dict, submit_workflow_plan
 from cval.jobs.monitor import get_job_phases, monitored_jobs_to_dict, monitor_jobs_until_terminal
 from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
-from cval.orchestrator.workflow import build_workflow_plan, workflow_plan_to_dict
 from cval.policy import ExecutionPolicy, PolicyViolation
 from cval.storage.status import (
     get_latest_status_rows,
@@ -33,9 +39,16 @@ from cval.storage.status import (
 from cval.storage.ingest import (
     add_nccl_health_from_summary,
     add_storage_result,
+    add_validation_run_results,
     add_validation_result,
+    parse_timestamp,
 )
-from cval.validation.results import load_validation_result, validation_result_to_env_lines
+from cval.validation.results import (
+    ValidationResultV2,
+    load_validation_result,
+    validation_result_to_env,
+    validation_result_to_env_lines,
+)
 
 CLASSIFIABLE_TEST_CHOICES = [
     "nccl",
@@ -57,7 +70,22 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
     config_args, _ = bootstrap.parse_known_args(raw_argv)
-    config = load_config(config_args.config)
+    try:
+        snapshot = os.environ.get("CVAL_CONFIG_SNAPSHOT_B64")
+        runtime_repo_root = os.environ.get("CVAL_TEST_REPO_ROOT") or os.environ.get(
+            "CVAL_REPO_DIR"
+        )
+        config = (
+            load_config(config_args.config)
+            if config_args.config is not None or not snapshot
+            else load_config_snapshot(
+                snapshot,
+                repo_root=Path(runtime_repo_root) if runtime_repo_root else None,
+            )
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
 
     parser = build_parser(config)
     args = parser.parse_args(raw_argv)
@@ -90,12 +118,40 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{config,nodes,validate,status,plan,run,jobs,result,results,classifications,baseline,overview}",
+        metavar=(
+            "{config,tests,nodes,validate,status,history,plan,run,jobs,result,results,"
+            "classifications,baseline,overview}"
+        ),
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
     show_config.add_argument("--output", choices=["json"], default="json")
     show_config.set_defaults(handler=handle_config)
+
+    tests_command = subparsers.add_parser(
+        "tests", help="Inspect and validate the registered validation tests"
+    )
+    tests_sub = tests_command.add_subparsers(dest="tests_command", required=True)
+
+    tests_list = tests_sub.add_parser("list", help="List registered validation tests")
+    tests_list.add_argument(
+        "--enabled-only", action="store_true", help="Show only enabled tests"
+    )
+    tests_list.add_argument("--output", choices=["table", "json"], default="table")
+    tests_list.set_defaults(handler=handle_tests_list)
+
+    tests_describe = tests_sub.add_parser(
+        "describe", help="Show one effective test descriptor"
+    )
+    tests_describe.add_argument("test_id")
+    tests_describe.add_argument("--output", choices=["table", "json"], default="json")
+    tests_describe.set_defaults(handler=handle_tests_describe)
+
+    tests_validate = tests_sub.add_parser(
+        "validate", help="Validate all registered test descriptors and shared resources"
+    )
+    tests_validate.add_argument("--output", choices=["table", "json"], default="table")
+    tests_validate.set_defaults(handler=handle_tests_validate)
 
     nodes = subparsers.add_parser("nodes", help="List schedulable GPU nodes and free capacity")
     nodes.add_argument(
@@ -191,6 +247,22 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     status.add_argument("--db-path", default=active_config.storage.validation_db_path)
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
+
+    history = subparsers.add_parser(
+        "history", help="Read normalized node run history from the PVC access pod"
+    )
+    history.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
+    history.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
+    history.add_argument("--db-path", default=active_config.storage.run_history_db_path)
+    history.add_argument("--run-id")
+    history.add_argument("--node")
+    history.add_argument("--test")
+    history.add_argument(
+        "--status", choices=["pass", "fail", "incomplete"]
+    )
+    history.add_argument("--limit", type=int, default=100)
+    history.add_argument("--output", choices=["table", "json"], default="table")
+    history.set_defaults(handler=handle_history)
 
     plan = subparsers.add_parser(
         "plan", help="Build a detailed dry-run queue and rendered job plan"
@@ -300,14 +372,58 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_result.add_argument("--image-name", default="")
     db_add_result.add_argument("--pytorch-version", default="")
     db_add_result.add_argument("--cuda-version", default="")
+    db_add_result.add_argument("--result-json", type=Path, required=True)
+    db_add_result.add_argument("--result-digest", default="")
     db_add_result.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_result.set_defaults(handler=handle_db_add_result)
+
+    db_add_run = subparsers.add_parser("db-add-run-results")
+    db_add_run.add_argument("node")
+    db_add_run.add_argument("timestamp")
+    db_add_run.add_argument("--storage-result", required=True, choices=["pass", "fail", "incomplete"])
+    db_add_run.add_argument("--nccl-result", required=True, choices=["pass", "fail", "incomplete"])
+    db_add_run.add_argument("--dltest-result", required=True, choices=["pass", "fail", "incomplete"])
+    db_add_run.add_argument("--overall-result", required=True, choices=["pass", "fail", "incomplete"])
+    db_add_run.add_argument("--image-name", default="")
+    db_add_run.add_argument("--pytorch-version", default="")
+    db_add_run.add_argument("--cuda-version", default="")
+    db_add_run.add_argument("--result-json", type=Path, required=True)
+    db_add_run.add_argument("--result-digest", default="")
+    db_add_run.add_argument("--db-path", default=active_config.storage.validation_db_path)
+    db_add_run.set_defaults(handler=handle_db_add_run_results)
+
+    db_upsert_history = subparsers.add_parser("db-upsert-run-history")
+    db_upsert_history.add_argument("--result-json", type=Path, required=True)
+    db_upsert_history.add_argument("--result-digest", required=True)
+    db_upsert_history.add_argument(
+        "--db-path", default=active_config.storage.run_history_db_path
+    )
+    db_upsert_history.set_defaults(handler=handle_db_upsert_run_history)
+
+    db_ingest_tests = subparsers.add_parser("db-ingest-test-results")
+    db_ingest_tests.add_argument("--result-json", type=Path, required=True)
+    db_ingest_tests.add_argument("--result-digest", required=True)
+    db_ingest_tests.set_defaults(handler=handle_db_ingest_test_results)
+
+    db_preflight_tests = subparsers.add_parser("db-preflight-test-results")
+    db_preflight_tests.add_argument("--result-json", type=Path, required=True)
+    db_preflight_tests.add_argument("--result-digest", required=True)
+    db_preflight_tests.set_defaults(handler=handle_db_preflight_test_results)
+
+    db_preflight_compat = subparsers.add_parser("db-preflight-compatibility-result")
+    db_preflight_compat.add_argument("--result-json", type=Path, required=True)
+    db_preflight_compat.add_argument("--result-digest", required=True)
+    db_preflight_compat.set_defaults(handler=handle_db_preflight_compatibility_result)
 
     db_add_storage = subparsers.add_parser("db-add-storage-result")
     db_add_storage.add_argument("node")
     db_add_storage.add_argument("timestamp")
     db_add_storage.add_argument("results_dir", type=Path)
     db_add_storage.add_argument("--image-name", default="")
+    db_add_storage.add_argument("--run-id", default="")
+    db_add_storage.add_argument("--immutable", action="store_true")
+    db_add_storage.add_argument("--result-json", type=Path, required=True)
+    db_add_storage.add_argument("--result-digest", default="")
     db_add_storage.add_argument("--db-path", default=active_config.storage.storage_db_path)
     db_add_storage.set_defaults(handler=handle_db_add_storage_result)
 
@@ -319,6 +435,11 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl_health.add_argument("--image-name", default="")
     db_add_nccl_health.add_argument("--cuda-version", default="")
     db_add_nccl_health.add_argument("--pytorch-version", default="")
+    db_add_nccl_health.add_argument("--run-id", default="")
+    db_add_nccl_health.add_argument("--immutable", action="store_true")
+    db_add_nccl_health.add_argument("--require-hca-samples", action="store_true")
+    db_add_nccl_health.add_argument("--result-json", type=Path, required=True)
+    db_add_nccl_health.add_argument("--result-digest", default="")
     db_add_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl_health.set_defaults(handler=handle_db_add_nccl_health)
 
@@ -327,13 +448,16 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "--results-root",
         type=Path,
         default=Path(active_config.runtime.dl_results_root_path),
-        help="Root containing dltest-* run directories with rank JSON files",
+        help="Root containing canonical or legacy DL run directories with rank JSON",
     )
     db_rebuild_dltest.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(active_config.storage.dl_numerical_db_path).parent,
-        help="Directory where the four DL metric DBs are written",
+        default=None,
+        help=(
+            "Override directory for standard DL DB filenames; defaults to each "
+            "exact configured storage.dl_*_db_path"
+        ),
     )
     db_rebuild_dltest.add_argument("--output", choices=["table", "json"], default="table")
     db_rebuild_dltest.set_defaults(handler=handle_db_rebuild_dltest_metrics)
@@ -491,6 +615,105 @@ def handle_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_tests_list(args: argparse.Namespace) -> int:
+    """List registered tests without importing or executing their adapters."""
+
+    registry = args.cval_config.tests.registry
+    tests = registry.enabled if args.enabled_only else registry.tests
+    if args.output == "json":
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": test.id,
+                        "display_name": test.definition.metadata.display_name,
+                        "enabled": test.enabled,
+                        "order": test.definition.metadata.order,
+                        "config_path": test.config_path,
+                        "schema_version": test.definition.schema_version,
+                    }
+                    for test in tests
+                ],
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"Registered validation tests: {len(tests)}")
+    print(f"{'ID':<18} {'ENABLED':<8} {'ORDER':>5} {'SCHEMA':<16} CONFIG")
+    for test in tests:
+        print(
+            f"{test.id:<18} {str(test.enabled).lower():<8} "
+            f"{test.definition.metadata.order:>5} "
+            f"{test.definition.schema_version:<16} {test.config_path}"
+        )
+    return 0
+
+
+def handle_tests_describe(args: argparse.Namespace) -> int:
+    """Show one registered test's effective composed configuration."""
+
+    test = args.cval_config.tests.registry.get(args.test_id)
+    if test is None:
+        print(f"Validation test is not registered: {args.test_id}", file=sys.stderr)
+        return 1
+    data = test.to_dict()
+    if args.output == "json":
+        print(json.dumps(data, indent=2))
+        return 0
+
+    metadata = test.definition.metadata
+    requirements = test.definition.requirements
+    print(f"Validation test: {test.id} ({metadata.display_name})")
+    print(f"Enabled: {str(test.enabled).lower()} | order: {metadata.order}")
+    print(f"Config: {test.config_path} | schema: {test.definition.schema_version}")
+    print(
+        f"Entrypoint: {metadata.entrypoint} | setup: {metadata.setup} | "
+        f"timeout: {metadata.timeout_seconds}s"
+    )
+    print(
+        f"Requirements: cpu={requirements.cpu} memory={requirements.memory} "
+        f"gpu={requirements.gpu_count} rdma={requirements.rdma_count} "
+        f"shared_memory={requirements.shared_memory}"
+    )
+    return 0
+
+
+def handle_tests_validate(args: argparse.Namespace) -> int:
+    """Report successful registry validation performed during config load."""
+
+    from cval.validation.plugins import PluginLoadError, validate_registry_plugins
+
+    registry = args.cval_config.tests.registry
+    try:
+        loaded_plugins = validate_registry_plugins(registry.tests)
+    except PluginLoadError as exc:
+        print(f"Validation adapter error: {exc}", file=sys.stderr)
+        return 1
+    payload = {
+        "valid": True,
+        "registered_count": len(registry.tests),
+        "enabled_count": len(registry.enabled),
+        "plugin_count": len(loaded_plugins),
+        "plugins": list(loaded_plugins),
+        "tests": [test.id for test in registry.tests],
+    }
+    if args.output == "json":
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(
+        f"Validation test registry is valid: {payload['registered_count']} registered, "
+        f"{payload['enabled_count']} enabled"
+    )
+    for test in registry.tests:
+        state = "enabled" if test.enabled else "disabled"
+        print(
+            f"  {test.definition.metadata.order:>3} {test.id:<18} "
+            f"{state:<8} {test.config_path}"
+        )
+    return 0
+
+
 def handle_status(args: argparse.Namespace) -> int:
     """Read latest validation status without mutating SQLite metadata."""
 
@@ -516,8 +739,43 @@ def handle_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_history(args: argparse.Namespace) -> int:
+    """Read normalized node run history without mutating SQLite."""
+
+    from cval.storage.run_history import (
+        get_run_history_rows,
+        run_history_rows_to_dicts,
+    )
+
+    rows = get_run_history_rows(
+        pod=args.pod,
+        namespace=args.namespace,
+        db_path=args.db_path,
+        run_id=args.run_id,
+        node=args.node,
+        test_id=args.test,
+        status=args.status,
+        limit=args.limit,
+        config=args.cval_config,
+    )
+    if args.output == "json":
+        print(json.dumps(run_history_rows_to_dicts(rows), indent=2))
+        return 0
+
+    print(f"Node run history rows: {len(rows)}")
+    print(f"{'STARTED':>12} {'NODE':<30} {'STATUS':<10} {'TESTS':<28} RUN_ID")
+    for row in rows:
+        print(
+            f"{row.started_timestamp:>12} {row.node:<30} "
+            f"{row.overall_status:<10} {row.tests_ran:<28} {row.run_id}"
+        )
+    return 0
+
+
 def handle_plan(args: argparse.Namespace) -> int:
     """Build and print a dry-run workflow plan."""
+
+    from cval.orchestrator.workflow import workflow_plan_to_dict
 
     plan = _build_plan_from_args(args)
 
@@ -757,9 +1015,64 @@ def handle_validate(args: argparse.Namespace) -> int:
     return 0 if report.get("ok", False) else 1
 
 
+def _compatibility_write_authorization(args: argparse.Namespace):
+    from cval.storage.write_provenance import authorize_result_write
+
+    authorization = authorize_result_write(
+        args.result_json,
+        result_digest=args.result_digest,
+        config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
+        config=args.cval_config,
+    )
+    result = authorization.result
+    if args.node != result.node or parse_timestamp(args.timestamp) != parse_timestamp(
+        result.timestamp
+    ):
+        raise ValueError("Compatibility writer identity does not match validated result")
+    for argument_name, result_value in (
+        ("image_name", result.image_name),
+        ("pytorch_version", result.pytorch_version),
+        ("cuda_version", result.cuda_version),
+    ):
+        if hasattr(args, argument_name) and getattr(args, argument_name) != result_value:
+            raise ValueError(
+                f"Compatibility writer {argument_name} does not match validated result"
+            )
+    if (
+        isinstance(result, ValidationResultV2)
+        and hasattr(args, "run_id")
+        and args.run_id
+        and args.run_id != result.run_id
+    ):
+        raise ValueError("Compatibility writer run_id does not match validated result")
+    return authorization
+
+
+def _require_v2_db_target(authorization, db_path: str | Path, config_field: str) -> None:
+    if not isinstance(authorization.result, ValidationResultV2):
+        return
+    expected = Path(getattr(authorization.config.storage, config_field)).expanduser()
+    if Path(db_path).expanduser() != expected:
+        raise ValueError(
+            f"Compatibility DB target does not match snapshot storage.{config_field}"
+        )
+
+
 def handle_db_add_result(args: argparse.Namespace) -> int:
     """Append one validation result row to the main SQLite DB."""
 
+    authorization = _compatibility_write_authorization(args)
+    values = validation_result_to_env(authorization.result)
+    expected_result = (
+        values["overall_result"]
+        if args.test == "all"
+        else authorization.result.tests.get(args.test).status
+        if args.test in authorization.result.tests
+        else None
+    )
+    if expected_result != args.result:
+        raise ValueError("Compatibility status row does not match validated result")
+    _require_v2_db_target(authorization, args.db_path, "validation_db_path")
     timestamp = add_validation_result(
         args.node,
         args.test,
@@ -769,20 +1082,140 @@ def handle_db_add_result(args: argparse.Namespace) -> int:
         pytorch_version=args.pytorch_version,
         cuda_version=args.cuda_version,
         db_path=args.db_path,
+        _authorization=authorization,
     )
     print(f"Added validation result: {args.node} {args.test} {args.result} {timestamp}")
+    return 0
+
+
+def handle_db_add_run_results(args: argparse.Namespace) -> int:
+    """Atomically append fixed compatibility status rows for one run."""
+
+    authorization = _compatibility_write_authorization(args)
+    projected = validation_result_to_env(authorization.result)
+    expected_results = {
+        "storage": projected["GCRRESULT1"],
+        "nccl": projected["GCRRESULT2"],
+        "dltest": projected["GCRRESULT3"],
+        "all": projected["overall_result"],
+    }
+    actual_results = {
+        "storage": args.storage_result,
+        "nccl": args.nccl_result,
+        "dltest": args.dltest_result,
+        "all": args.overall_result,
+    }
+    if actual_results != expected_results:
+        raise ValueError("Compatibility status set does not match validated result")
+    _require_v2_db_target(authorization, args.db_path, "validation_db_path")
+    timestamp = add_validation_run_results(
+        args.node,
+        args.timestamp,
+        actual_results,
+        image_name=args.image_name,
+        pytorch_version=args.pytorch_version,
+        cuda_version=args.cuda_version,
+        db_path=args.db_path,
+        _authorization=authorization,
+    )
+    print(f"Added atomic validation run results: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_upsert_run_history(args: argparse.Namespace) -> int:
+    """Persist one validated v2 result into normalized run history."""
+
+    from cval.storage.run_history import ingest_run_history_file
+
+    run_id = ingest_run_history_file(
+        args.result_json,
+        db_path=args.db_path,
+        config=args.cval_config,
+        result_digest=args.result_digest,
+        config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
+    )
+    print(f"Upserted node run history: {run_id}")
+    return 0
+
+
+def handle_db_ingest_test_results(args: argparse.Namespace) -> int:
+    """Persist common raw rows and declared metrics from one finalized v2 run."""
+
+    from cval.validation.ingestion import ingest_test_results_file
+
+    try:
+        report = ingest_test_results_file(
+            args.result_json,
+            config=args.cval_config,
+            result_digest=args.result_digest,
+            config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - hidden in-pod command boundary
+        print(f"Modular per-test ingestion failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(report.to_dict(), sort_keys=True))
+    return 0 if report.ok else 1
+
+
+def handle_db_preflight_test_results(args: argparse.Namespace) -> int:
+    """Validate modular evidence/targets without creating or changing files."""
+
+    from cval.validation.ingestion import preflight_test_results_file
+
+    try:
+        run_id = preflight_test_results_file(
+            args.result_json,
+            config=args.cval_config,
+            result_digest=args.result_digest,
+            config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - hidden in-pod command boundary
+        print(f"Modular per-test preflight failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Modular per-test preflight passed: {run_id}")
+    return 0
+
+
+def handle_db_preflight_compatibility_result(args: argparse.Namespace) -> int:
+    """Validate v1/v2 compatibility provenance and targets without writing."""
+
+    from cval.storage.write_provenance import authorize_result_write
+
+    try:
+        authorization = authorize_result_write(
+            args.result_json,
+            result_digest=args.result_digest,
+            config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
+            config=args.cval_config,
+        )
+    except Exception as exc:  # noqa: BLE001 - hidden in-pod boundary
+        print(f"Compatibility write preflight failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Compatibility write preflight passed: "
+        f"{authorization.result.node}-{authorization.result.timestamp}"
+    )
     return 0
 
 
 def handle_db_add_storage_result(args: argparse.Namespace) -> int:
     """Parse storage artifacts and write one storage metrics row."""
 
+    authorization = _compatibility_write_authorization(args)
+    if isinstance(authorization.result, ValidationResultV2):
+        test = authorization.result.tests.get("storage")
+        if test is None or test.status != "pass" or Path(test.artifacts) != args.results_dir:
+            raise ValueError("Storage command does not match validated v2 evidence")
+    _require_v2_db_target(authorization, args.db_path, "storage_db_path")
     timestamp = add_storage_result(
         args.node,
         args.timestamp,
         args.results_dir,
         image_name=args.image_name,
+        run_id=args.run_id,
+        immutable=args.immutable,
         db_path=args.db_path,
+        _authorization=authorization,
     )
     print(f"Added storage result: {args.node} {timestamp}")
     return 0
@@ -791,9 +1224,15 @@ def handle_db_add_storage_result(args: argparse.Namespace) -> int:
 def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
     """Ingest one consolidated NCCL/IB health row from a summary JSON."""
 
+    authorization = _compatibility_write_authorization(args)
     if not args.summary_json.exists():
         print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
         return 1
+    if isinstance(authorization.result, ValidationResultV2):
+        test = authorization.result.tests.get("nccl")
+        if test is None or test.status != "pass" or Path(test.summary) != args.summary_json:
+            raise ValueError("NCCL command does not match validated v2 evidence")
+    _require_v2_db_target(authorization, args.db_path, "nccl_db_path")
     timestamp = add_nccl_health_from_summary(
         args.node,
         args.timestamp,
@@ -802,7 +1241,11 @@ def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
         image_name=args.image_name,
         cuda_version=args.cuda_version,
         pytorch_version=args.pytorch_version,
+        run_id=args.run_id,
+        immutable=args.immutable,
+        require_hca_samples=args.require_hca_samples,
         db_path=args.db_path,
+        _authorization=authorization,
     )
     print(f"Added consolidated IB_HEALTH result: {args.node} {timestamp}")
     return 0
@@ -811,9 +1254,24 @@ def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
 def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
     """Rebuild the four DL metric DBs from rank JSON artifacts."""
     from cval.storage.dltest_ingest import ingest_dltest_results
+    from cval.storage.write_provenance import authorize_dl_rebuild
 
     try:
-        summary = ingest_dltest_results(args.results_root, args.output_dir)
+        authorization = authorize_dl_rebuild(
+            args.results_root,
+            args.output_dir,
+            config=args.cval_config,
+            config_snapshot_b64=os.environ.get(
+                "CVAL_CONFIG_SNAPSHOT_B64",
+                encode_config_snapshot(args.cval_config),
+            ),
+        )
+        summary = ingest_dltest_results(
+            args.results_root,
+            args.output_dir,
+            config=args.cval_config,
+            _authorization=authorization,
+        )
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1127,6 +1585,8 @@ def handle_overview(args: argparse.Namespace) -> int:
 
 def _build_plan_from_args(args: argparse.Namespace):
     """Resolve status inputs, discover nodes if needed, and build a workflow plan."""
+
+    from cval.orchestrator.workflow import build_workflow_plan
 
     db_status = _load_db_status(args)
     if args.free_nodes:

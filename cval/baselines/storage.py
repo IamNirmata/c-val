@@ -155,24 +155,6 @@ def _store_dynamic_baseline_in_db(record: dict, db_path: str | Path, status: str
     return baseline_id
 
 
-def _split_dl_record(record: dict) -> list[tuple[Path, dict]]:
-    """Split a combined DL baseline into one record per DL metric DB."""
-
-    targets: list[tuple[Path, dict]] = []
-    metrics = record.get("metrics", {})
-    for source_table in DL_BASELINE_DB_FILENAMES:
-        component_metrics = {
-            metric_name: metric_stat
-            for metric_name, metric_stat in metrics.items()
-            if metric_stat.get("source_table") == source_table
-        }
-        component_record = dict(record)
-        component_record["metrics"] = component_metrics
-        component_record["component"] = source_table
-        targets.append((default_dynamic_baseline_db_path("dltest", source_table), component_record))
-    return targets
-
-
 def _split_dl_record_for_config(record: dict, config=None) -> list[tuple[Path, dict]]:
     """Split a DL record using paths from the supplied config."""
 

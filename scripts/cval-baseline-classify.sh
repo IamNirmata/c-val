@@ -16,14 +16,15 @@ config_value() {
     local section="$1"
     local key="$2"
     local default_value="$3"
-    python - "$CONFIG_PATH" "$section" "$key" "$default_value" <<'PY'
+    PYTHONPATH="$REPO_DIR" python - "$CONFIG_PATH" "$section" "$key" "$default_value" <<'PY'
 import sys
-import tomllib
 from pathlib import Path
+
+from cval.config import config_to_dict, load_config
 
 path, section, key, default = sys.argv[1:]
 try:
-    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    data = config_to_dict(load_config(Path(path)))
     current = data
     for part in section.split("."):
         current = current.get(part, {}) if isinstance(current, dict) else {}
@@ -37,8 +38,12 @@ PY
 BASELINE_ROOT=${CVAL_BASELINE_ROOT:-$(config_value baseline baseline_root_path /data/continuous_validation/baselines)}
 INTERVAL_SECONDS=${CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS:-$(config_value baseline classify_interval_seconds 300)}
 WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)}
-DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/dltest)}
-DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
+DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/validation_tests/dltest/runs)}
+DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-}
+DL_NUMERICAL_DB=$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)
+DL_COMPUTE_DB=$(config_value storage dl_compute_db_path /data/continuous_validation/metadata/dltest_compute_performance.db)
+DL_COLLECTIVE_DB=$(config_value storage dl_collective_db_path /data/continuous_validation/metadata/dltest_collective_performance.db)
+DL_OVERLAP_DB=$(config_value storage dl_overlap_db_path /data/continuous_validation/metadata/dltest_overlap_performance.db)
 DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
 DL_METRIC_REFRESH_INTERVAL_SECONDS=${CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS:-3600}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
@@ -125,22 +130,33 @@ EOF
 }
 
 refresh_dl_metric_dbs() {
-    log "refreshing DL metric DBs from $DL_RESULTS_ROOT -> $DL_METRIC_OUTPUT_DIR"
-    python -m cval.cli --config "$CONFIG_PATH" db-rebuild-dltest-metrics \
-        --results-root "$DL_RESULTS_ROOT" \
-        --output-dir "$DL_METRIC_OUTPUT_DIR" \
-        --output json | tee "$1/dltest-ingest.json"
+    local target=${DL_METRIC_OUTPUT_DIR:-configured-db-paths}
+    local args=(
+        python -m cval.cli --config "$CONFIG_PATH" db-rebuild-dltest-metrics
+        --results-root "$DL_RESULTS_ROOT"
+        --output json
+    )
+    if [[ -n "$DL_METRIC_OUTPUT_DIR" ]]; then
+        args+=(--output-dir "$DL_METRIC_OUTPUT_DIR")
+    fi
+    log "refreshing DL metric DBs from $DL_RESULTS_ROOT -> $target"
+    "${args[@]}" | tee "$1/dltest-ingest.json"
 }
 
 dl_metric_dbs_are_fresh() {
     local now
     now=$(date +%s)
     local db
-    for db in \
-        "$DL_METRIC_OUTPUT_DIR/dltest_numerical_correctness.db" \
-        "$DL_METRIC_OUTPUT_DIR/dltest_compute_performance.db" \
-        "$DL_METRIC_OUTPUT_DIR/dltest_collective_performance.db" \
-        "$DL_METRIC_OUTPUT_DIR/dltest_overlap_performance.db"; do
+    local db_paths=("$DL_NUMERICAL_DB" "$DL_COMPUTE_DB" "$DL_COLLECTIVE_DB" "$DL_OVERLAP_DB")
+    if [[ -n "$DL_METRIC_OUTPUT_DIR" ]]; then
+        db_paths=(
+            "$DL_METRIC_OUTPUT_DIR/dltest_numerical_correctness.db"
+            "$DL_METRIC_OUTPUT_DIR/dltest_compute_performance.db"
+            "$DL_METRIC_OUTPUT_DIR/dltest_collective_performance.db"
+            "$DL_METRIC_OUTPUT_DIR/dltest_overlap_performance.db"
+        )
+    fi
+    for db in "${db_paths[@]}"; do
         [[ -s "$db" ]] || return 1
         local mtime
         mtime=$(stat -c %Y "$db")

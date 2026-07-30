@@ -1,6 +1,11 @@
 # Result Schema
 
-c-val 2.0 writes one structured result JSON per node validation run.
+> **Legacy compatibility schema:** New generic-runner jobs emit
+> `cval.results.v2` under the canonical global job-log directory. This v1
+> reader remains supported for historical artifacts and pinned old jobs. See
+> [Structured Result Schema v2](result-schema-v2.md).
+
+c-val 2.0 historically wrote one structured result JSON per node validation run.
 
 Path:
 
@@ -63,6 +68,9 @@ cval.results.v1
 - `db-update.sh` prefers JSON and falls back to the legacy env file if JSON is missing.
 - DB writes use package-native `cval db-add-*` commands inside the validation pod and store `image_name`, `pytorch_version`, and `cuda_version` with the `runs` validation rows.
 - `cval.validation.results` validates schema version, required tests, valid statuses, and aggregate consistency.
+- V1 remains a compatibility-write surface only. Registry-driven canonical
+  per-test ingestion accepts finalized `cval.results.v2` exclusively and is
+  independently gated by `storage.per_test_ingestion_enabled=false` by default.
 
 ## DB Rows
 

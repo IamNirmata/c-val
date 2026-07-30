@@ -40,6 +40,7 @@ _NCCL_FETCH_SCRIPT = """\
 import json, sqlite3, sys
 db_path = {db_path!r}
 rows_out = []
+conn = None
 try:
     conn = sqlite3.connect(f"file:{{db_path}}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -54,6 +55,9 @@ try:
         rows_out.append({{"node": row["node"], "busbw": row["busbw"], "latency": row["latency"]}})
 except Exception as exc:
     print(f"nccl metrics error: {{exc}}", file=sys.stderr)
+finally:
+    if conn is not None:
+        conn.close()
 print(json.dumps(rows_out))
 """
 
@@ -62,6 +66,7 @@ import json, sqlite3, sys
 db_path = {db_path!r}
 cols = {cols!r}
 rows_out = []
+conn = None
 try:
     conn = sqlite3.connect(f"file:{{db_path}}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -79,6 +84,9 @@ try:
         rows_out.append(entry)
 except Exception as exc:
     print(f"storage metrics error: {{exc}}", file=sys.stderr)
+finally:
+    if conn is not None:
+        conn.close()
 print(json.dumps(rows_out))
 """
 
@@ -87,6 +95,7 @@ import json, sqlite3, sys
 db_path = {db_path!r}
 port_columns = {port_columns!r}
 rows_out = []
+conn = None
 try:
     conn = sqlite3.connect(f"file:{{db_path}}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -116,6 +125,9 @@ try:
         rows_out.append(entry)
 except Exception as exc:
     print(f"IB_HEALTH metrics error: {{exc}}", file=sys.stderr)
+finally:
+    if conn is not None:
+        conn.close()
 print(json.dumps(rows_out))
 """
 

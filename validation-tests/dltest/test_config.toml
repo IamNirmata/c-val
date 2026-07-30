@@ -1,0 +1,77 @@
+schema_version = "cval.test.v1"
+
+[test]
+id = "dltest"
+display_name = "Deep-learning unit test"
+description = "Numerical correctness, compute, collective, and overlap validation."
+order = 30
+entrypoint = "run-test.sh"
+setup = "setup.sh"
+timeout_seconds = 2400
+continue_on_failure = true
+
+[requirements]
+cpu = "32"
+memory = "128Gi"
+gpu_count = 8
+rdma_count = 0
+shared_memory = "128Gi"
+read_sysfs = false
+
+[settings]
+gpu_count = 8
+test_plan = "80gb-example"
+iterations = 100
+
+[settings.health_aggregation]
+degraded_metric_fraction = 0.02
+min_degraded_metrics = 10
+degraded_severity_pct = 10.0
+
+[artifacts]
+results_db_path = "validation_tests/dltest/dltest_results.db"
+health_classes_db_path = "validation_tests/dltest/dltest_health_classes.db"
+summary_filename = "summary.json"
+
+[plugin]
+adapter = "plugin.py"
+api_version = "cval.plugin.v1"
+capabilities = ["config", "ingest", "health"]
+
+[health]
+enabled = true
+policy_version = "dltest.health.v1"
+strategy = "custom"
+min_samples = 8
+min_new_results = 10
+target_class_count = 5
+combination_factors = ["image_name", "cuda_version", "pytorch_version", "test_plan", "iterations"]
+auto_activate = false
+
+[[health.metrics]]
+name = "numerical-correctness"
+source = "numerical_correctness"
+direction = "two_sided"
+units = "mixed"
+tolerance_pct = 0.1
+
+[[health.metrics]]
+name = "compute-performance"
+source = "compute_performance"
+direction = "high_bad"
+units = "ms"
+tolerance_pct = 3.0
+
+[[health.metrics]]
+name = "collective-performance"
+source = "collective_performance"
+direction = "high_bad"
+units = "ms"
+tolerance_pct = 3.0
+
+[[health.metrics]]
+name = "overlap-performance"
+source = "overlap_performance"
+direction = "two_sided"
+units = "ms"
+tolerance_pct = 20.0

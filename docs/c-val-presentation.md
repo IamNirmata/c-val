@@ -177,7 +177,9 @@ This is **opportunistic, non-interfering** sampling: deep coverage without steal
 - **Real submission is double-gated:** `--submit --confirm submit` + policy checks.
 - **Policy gates:** namespace allowlist, max batch size, confirmation phrase.
 - **Read-only everywhere it matters:** status opens SQLite `mode=ro`; monitoring only reads job phase.
-- **No blind cleanup.** `jobs --watch` never deletes; the live runner may prune only its own stale `Pending` validation jobs after a configured timeout.
+- **Bounded cleanup.** `jobs --watch` never deletes; the separately started live
+  runner prunes stale `Pending` jobs matching its configured namespace and
+  shared job-name prefix after a timeout.
 - **Pinned code refs:** validation runs a pinned commit/tag, not a moving branch.
 
 <!--

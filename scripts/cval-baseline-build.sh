@@ -16,14 +16,15 @@ config_value() {
     local section="$1"
     local key="$2"
     local default_value="$3"
-    python - "$CONFIG_PATH" "$section" "$key" "$default_value" <<'PY'
+    PYTHONPATH="$REPO_DIR" python - "$CONFIG_PATH" "$section" "$key" "$default_value" <<'PY'
 import sys
-import tomllib
 from pathlib import Path
+
+from cval.config import config_to_dict, load_config
 
 path, section, key, default = sys.argv[1:]
 try:
-    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    data = config_to_dict(load_config(Path(path)))
     current = data
     for part in section.split("."):
         current = current.get(part, {}) if isinstance(current, dict) else {}
@@ -41,9 +42,9 @@ MIN_SAMPLES=${CVAL_BASELINE_MIN_SAMPLES:-$(config_value baseline min_samples 8)}
 STORAGE_ENABLED=${CVAL_STORAGE_ENABLED:-$(config_value tests.storage enabled true)}
 NCCL_ENABLED=${CVAL_NCCL_ENABLED:-$(config_value tests.nccl enabled true)}
 DLTEST_ENABLED=${CVAL_DLTEST_ENABLED:-$(config_value tests.dltest enabled true)}
-DL_TEST_PLAN=${CVAL_BASELINE_DL_TEST_PLAN:-$(config_value tests.dltest test_plan 80gb-example)}
-DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/dltest)}
-DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-$(dirname "$(config_value storage dl_numerical_db_path /data/continuous_validation/metadata/dltest_numerical_correctness.db)")}
+DL_TEST_PLAN=${CVAL_BASELINE_DL_TEST_PLAN:-$(config_value tests.dltest.settings test_plan 80gb-example)}
+DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/validation_tests/dltest/runs)}
+DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-}
 DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
 LOG_DIR=${CVAL_BASELINE_BUILD_LOG_DIR:-$BASELINE_ROOT/logs/build}
 
@@ -116,11 +117,17 @@ EOF
 }
 
 refresh_dl_metric_dbs() {
-    log "refreshing DL metric DBs from $DL_RESULTS_ROOT -> $DL_METRIC_OUTPUT_DIR"
-    python -m cval.cli --config "$CONFIG_PATH" db-rebuild-dltest-metrics \
-        --results-root "$DL_RESULTS_ROOT" \
-        --output-dir "$DL_METRIC_OUTPUT_DIR" \
-        --output json | tee "$1/dltest-ingest.json"
+    local target=${DL_METRIC_OUTPUT_DIR:-configured-db-paths}
+    local args=(
+        python -m cval.cli --config "$CONFIG_PATH" db-rebuild-dltest-metrics
+        --results-root "$DL_RESULTS_ROOT"
+        --output json
+    )
+    if [[ -n "$DL_METRIC_OUTPUT_DIR" ]]; then
+        args+=(--output-dir "$DL_METRIC_OUTPUT_DIR")
+    fi
+    log "refreshing DL metric DBs from $DL_RESULTS_ROOT -> $target"
+    "${args[@]}" | tee "$1/dltest-ingest.json"
 }
 
 with_dl_metric_lock() {

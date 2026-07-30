@@ -1,5 +1,11 @@
 # c-val 2.0 Implementation Notes
 
+> **Historical snapshot:** This document describes the initial package-oriented
+> refactor slice and its then-current v1 behavior. It is not the current
+> implementation contract. See [Documentation](README.md),
+> [Modular Validation Contract](modular-validation-contract.md), and the
+> [implementation tracker](todo/cval-update.md) for the U0–U8 state.
+
 This document tracks the first package-oriented refactor slice. The goal is to move c-val from a notebook-first prototype toward a dry-run-first Python package and CLI that Hermes can safely operate.
 
 ## Current Slice
@@ -117,7 +123,7 @@ Inspect a structured validation result in shell-friendly form:
 cval result --result-json /data/continuous_validation/results/<node>/cval-results-<node>-<timestamp>.json
 ```
 
-In-pod DB ingestion commands used by `validation-tests/db-update.sh`:
+At that initial slice, in-pod DB ingestion used:
 
 ```bash
 cval db-add-result <node> <test> <pass|fail|incomplete> <timestamp> --db-path <validation.db>
@@ -125,7 +131,10 @@ cval db-add-storage-result <node> <timestamp> <storage-result-dir> --db-path <te
 cval db-add-nccl-health <node> <timestamp> <nccl-summary.json> --db-path <test-nccl.db>
 ```
 
-These required DB ingestion hooks stay hidden from the operator-facing help.
+These hooks remain hidden compatibility implementation details. Current
+`db-update.sh` writes required compatibility metrics first and commits all fixed
+status rows atomically through `db-add-run-results`; see
+[CLI Reference](cli-reference.md#hidden-in-pod-ingestion-hooks).
 
 ## Safety Boundary
 

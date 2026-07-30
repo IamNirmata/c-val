@@ -9,17 +9,24 @@ and reasonable CPU/GPU timing behavior.
 c-val runs the DL test as the third validation phase, after storage and NCCL:
 
 ```bash
-bash /workspace/c-val/validation-tests/dltest/dltest.sh 8
+bash /workspace/c-val/validation-tests/dltest/setup.sh
+bash /workspace/c-val/validation-tests/dltest/run-test.sh 8
 ```
+
+`dltest.sh` remains a thin compatibility wrapper for pinned jobs and older
+operator commands.
 
 The wrapper launches the installed DL unit-test harness with `torchrun` across
 8 local GPU ranks and writes raw output to `DLTEST_LOG_FILE`. A zero exit code
 marks the DL phase as `pass`; any non-zero exit marks it `fail` and is reflected
-in the structured `cval.results.v1` JSON artifact.
+in the structured `cval.results.v2` JSON artifact.
 
 The enable switch, GPU count, test plan, and iteration count come from
-`config/cval.toml` under `[tests.dltest]` and are injected as `RUN_DLTEST`,
-`CVAL_DL_GPU_COUNT`, `CVAL_DL_TEST_PLAN`, and `CVAL_DL_ITERATIONS`.
+the composed registry: `enabled` and `config_path` are under `[tests.dltest]`
+in `config/cval.toml`, while GPU count, test plan, and iterations live in
+`validation-tests/dltest/test_config.toml`. During the compatibility stage they
+are injected as `RUN_DLTEST`, `CVAL_DL_GPU_COUNT`, `CVAL_DL_TEST_PLAN`, and
+`CVAL_DL_ITERATIONS`.
 
 ## What It Exercises
 

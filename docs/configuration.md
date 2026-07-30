@@ -2,6 +2,11 @@
 
 c-val uses TOML as its canonical operator configuration format.
 
+Configuration is composed from the global operator file and explicitly
+registered per-test files. The global file owns orchestration, infrastructure,
+activation, and shared job resources. Each validation test owns its workload
+and health settings in `validation-tests/<test-id>/test_config.toml`.
+
 Default config:
 
 ```text
@@ -28,8 +33,12 @@ TOML is the best fit for c-val's durable configuration because:
 - it is readable and reviewable in Git
 - it supports comments and typed nested sections
 - Python 3.11+ parses it with stdlib `tomllib`
-- it avoids adding PyYAML or other config dependencies
+- operator TOML parsing remains independent of YAML parsing
 - it maps cleanly to dataclasses in `cval.config`
+
+PyYAML is a runtime dependency only for safe Kubernetes manifest validation:
+the renderer parses both the source template and final substituted YAML with a
+duplicate-rejecting loader before any manifest can be submitted.
 
 Other formats still have roles:
 
@@ -66,11 +75,14 @@ max_batch_size = 5
 confirmation_phrase = "submit"
 
 [monitoring]
-timeout_seconds = 180
+timeout_seconds = 6000
 poll_interval_seconds = 60
 
 [storage]
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
+run_history_enabled = false
+run_history_db_path = "/data/continuous_validation/metadata/node-run-history.db"
+per_test_ingestion_enabled = false
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"
 nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
 dl_numerical_db_path = "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
@@ -83,30 +95,19 @@ repo_dir = "/workspace/c-val"
 validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
-dl_results_root_path = "/data/continuous_validation/dltest"
+dl_results_root_path = "/data/continuous_validation/validation_tests/dltest/runs"
 
 [tests.storage]
 enabled = true
-install_fio = true
+config_path = "validation-tests/storage/test_config.toml"
 
 [tests.nccl]
 enabled = true
-gpu_count = 8
-iterations = 20
-data_size_gb = 8
-ibbw_enabled = true
-ibbw_start_device = 0
-ibbw_end_device = 13
-net = "IB"
-p2p_disable = true
-shm_disable = true
-debug = "INFO"
+config_path = "validation-tests/nccl/test_config.toml"
 
 [tests.dltest]
 enabled = true
-gpu_count = 8
-test_plan = "80gb-example"
-iterations = 100
+config_path = "validation-tests/dltest/test_config.toml"
 
 [job_template]
 namespace = "gcr-admin"
@@ -124,52 +125,131 @@ rdma_count = "1"
 
 [baseline]
 baseline_root_path = "/data/continuous_validation/baselines"
-nccl_peer_tolerance_pct = 5.0
-storage_peer_tolerance_pct = 10.0
-dl_compute_tolerance_pct = 3.0
-dl_numerical_tolerance_pct = 0.1
-dl_overlap_tolerance_pct = 20.0
 robust_z_threshold = 3.5
 min_samples = 8
 window_days = 30
-dl_degraded_metric_fraction = 0.02
-dl_min_degraded_metrics = 10
-dl_degraded_severity_pct = 10.0
 build_interval_seconds = 86400
 classify_interval_seconds = 300
 ```
 
-## Test switches
+## Test registry and switches
 
-Each phase can be independently enabled or disabled:
+Each test is explicitly registered and can be independently enabled or disabled:
 
 ```toml
 [tests.storage]
 enabled = true
+config_path = "validation-tests/storage/test_config.toml"
 
 [tests.nccl]
 enabled = true
+config_path = "validation-tests/nccl/test_config.toml"
 
 [tests.dltest]
 enabled = true
+config_path = "validation-tests/dltest/test_config.toml"
 ```
 
-These values are rendered into the pod as `RUN_STORAGE`, `RUN_NCCL`, and
-`RUN_DLTEST`. A disabled phase is not executed and does not write metric rows.
-Its structured result is `status="incomplete", enabled=false`; the aggregate
-result is computed from enabled phases only. At least one phase must remain
-enabled. Background baseline build/classification loops also skip disabled test
-families.
+`config_path` is resolved against the c-val repository root, not the current
+working directory or the location of an override global config. Absolute paths,
+missing files, duplicate paths, mismatched IDs, and paths escaping the checkout
+are rejected before job rendering. Merely adding a directory cannot activate a
+test.
 
-`job_template.gpu_count` is the Kubernetes GPU reservation for the whole pod;
-keep it at least as large as the `gpu_count` of each enabled GPU test.
+During the compatibility stage, activation and settings for the three existing
+tests are still rendered into the pod as current `RUN_*` and `CVAL_*` aliases.
+They are derived from the complete composed registry and carried in one
+deterministic generic runtime payload rather than individual Kubernetes YAML
+placeholders. A disabled phase is not executed and does not write metric
+rows. Its structured result is `status="incomplete", enabled=false`; aggregate
+status is computed from enabled phases only. At least one test must remain
+enabled. Background baseline loops also consume the composed activation state.
+
+## Per-test configuration
+
+Current test-owned files:
+
+```text
+validation-tests/storage/test_config.toml
+validation-tests/nccl/test_config.toml
+validation-tests/dltest/test_config.toml
+```
+
+Each descriptor uses `schema_version = "cval.test.v1"` and declares:
+
+- Test identity, display name, deterministic order, entrypoint, setup, and timeout.
+- Minimum shared CPU, memory, GPU, RDMA, and `/dev/shm` requirements.
+- An arbitrary test-owned `[settings]` table.
+- Validation-root-relative result and health database paths.
+- Test-owned health policy version, combination factors, metrics, directions,
+  tolerances, sample trigger controls, and activation preference.
+
+Every enabled `[health]` table requires a versioned `policy_version`, for
+example `storage.health.v1`. The loaded plugin must export the identical
+`health_policy_version`. Bump both when an observation's meaning, expansion,
+sample identity, or custom aggregation becomes incompatible; the descriptor
+digest then prevents an old active candidate from being evaluated as current.
+
+`health.auto_activate=false` remains mandatory in all built-ins. It is not a
+general production feature flag: U8 has no live evaluator wiring, and setting it
+to true does not authorize health DB creation, migration, activation, or
+deployment. Those operations require the later U9 design and explicit approval.
+
+The loader validates that global shared job resources cover every enabled test.
+The current storage/NCCL/DL consumers receive compatibility dataclasses derived
+from these descriptors, so workload values remain unchanged while fixed test
+assumptions are removed incrementally.
+
+The complete field contract is in
+[Modular Validation Contract](modular-validation-contract.md).
+
+## Rendered runtime context
+
+The job manifest contains only shared runtime fields plus
+`CVAL_RUNTIME_ENV_B64`. The payload decodes to shell-quoted exports generated
+from typed configuration, including:
+
+- `CVAL_CONFIG_PATH` and a stable `CVAL_CONFIG_DIGEST`.
+- Ordered `CVAL_ENABLED_TESTS` and `CVAL_TEST_REGISTRY_JSON`.
+- Test config paths and activation states.
+- Temporary v1 `RUN_*`/`CVAL_*` compatibility values.
+
+The manifest also assigns `CVAL_RUN_ID=<node>-<timestamp>`. The generic runner
+uses this context for arbitrary registered tests; fixed exports remain only for
+compatibility ingestion and pinned readers. Operators cannot inject arbitrary
+shell source through TOML: names are fixed and values are shell-quoted before
+base64 encoding.
+
+`job_template` values are Kubernetes reservations for the whole pod. They must
+cover the minimum requirements declared by every enabled test; config loading
+fails before rendering when they do not. `gpu_resource_name` and
+`rdma_resource_name` must be distinct. The renderer semantically rejects YAML
+key collisions before and after substitution.
+
+## Storage write gates
+
+`run_history_enabled` and `per_test_ingestion_enabled` are strict TOML Booleans
+and independent production-write gates. Both default to `false`.
+
+- `run_history_enabled=true` allows finalized v2 envelopes to populate
+  `metadata/node-run-history.db`.
+- `per_test_ingestion_enabled=true` enables canonical common rows and declared
+  storage/NCCL/DL adapter metrics under
+  `validation_tests/<test-id>/<test-id>_results.db`.
+
+The in-pod script compares these values with the immutable config snapshot.
+Environment text cannot override a false snapshot value. Enabling either gate,
+creating a live target, or migrating historical data requires a separate
+backup/dry-run/activation approval.
 
 The `[runtime]` `dl_results_root_path` points at remapped DL rank JSON artifacts
 (`dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json`). The
 `[storage]` `dl_*_db_path` entries point at the four DL metric DBs rebuilt from
-those JSON files. The `[baseline]` root path, tolerances, `window_days`, DL
-aggregation thresholds, and loop intervals control dynamic baseline building and
-node classification (see [Baselines and Node Classification](baselines.md)).
+those JSON files. Global `[baseline]` values control the shared root, robust
+statistics defaults, window, and loop cadence. Test-specific tolerances,
+combination factors, and DL aggregation settings are test-owned. Existing
+baseline code receives the same effective compatibility values (see
+[Baselines and Node Classification](baselines.md)).
 
 ## Precedence
 
@@ -188,6 +268,14 @@ Show the effective config:
 
 ```bash
 python -m cval.cli config
+```
+
+Inspect and validate the composed registry:
+
+```bash
+python -m cval.cli tests list
+python -m cval.cli tests describe nccl
+python -m cval.cli tests validate --output json
 ```
 
 Dry-run a job to confirm configured defaults:

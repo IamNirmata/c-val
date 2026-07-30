@@ -7,13 +7,21 @@ c-val builds **baselines** from historical validation results and uses them to
 - **degraded**: on the failing side of the band; warrants investigation
 - **improved**: better than the good-side tail (informational)
 
-There are two layers:
+There are three layers:
 
-1. **Dynamic baselines (recommended)** — built directly from the result DBs with
+1. **U8 versioned health classes (implemented locally, not operationally
+  activated)** — per-test, environment-combination candidates with stable
+  classes 0–5, exact provenance/sample coverage, normalized threshold bands,
+  and immutable SQLite evidence.
+2. **Compatibility dynamic baselines (current operational system)** — built directly from the result DBs with
    robust statistics, stored as versioned records in SQLite, and used to
-   classify nodes. This is the primary system.
-2. **Directory baselines (legacy)** — hand-authored `summary.json` references
+  classify nodes through the existing baseline CLI and background scripts.
+3. **Directory baselines (legacy)** — hand-authored `summary.json` references
    loaded from disk, for fixed golden references.
+
+The commands later in this document operate the compatibility dynamic-baseline
+system. U8 intentionally has no production evaluator/CLI wiring yet; U9 and any
+live per-test health DB activation require separate approval.
 
 ---
 
@@ -63,20 +71,24 @@ this, avoids dividing by zero (MeanAD fallback in the z-score), and uses the tig
 relative tolerance (`dl_numerical_tolerance_pct`, default 0.1%) as the band. Any
 real spread is itself a signal.
 
-### Stratification
+### U8 stratification
 
 Baselines are computed per stratum so comparisons stay apples-to-apples. The keys
 differ by test type because the schemas do:
 
-- **storage / NCCL**: stratify by `image_name` (and optionally `node`).
-- **DL**: stratify by `test_plan`.
+- **storage**: image, CUDA, and PyTorch versions.
+- **NCCL**: image, CUDA, PyTorch, iteration count, and BF16 data size.
+- **DL**: image, CUDA, PyTorch, test plan, and iteration count.
 
 GPU SKU / topology are not yet recorded per run and are left for future work.
 
 ### Sample size
 
-A metric is only baselined when it has at least `min_samples` clean values
-(default 8); median/MAD are unstable below that.
+U8 requires at least `min_samples` distinct qualifying results (default 8 in
+built-ins), complete expanded-metric result membership, and the same exact
+non-empty sample-key set in every result. A pooled metric cannot become nominal
+after a rank/sample disappears. A new candidate also requires
+`min_new_results` IDs absent from the preceding immutable candidate snapshot.
 
 ---
 
@@ -99,14 +111,18 @@ DL metric DBs are rebuilt from remapped rank JSON artifacts before DL baseline
 build/classification:
 
 ```text
-/data/continuous_validation/dltest/<node>/dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json
+/data/continuous_validation/validation_tests/dltest/runs/<node>/<run-id>/artifacts/workdir/test_plans/<plan>/runs/*.json
 ```
+
+The scanner also accepts historical
+`/data/continuous_validation/dltest/<node>/dltest-*/workdir/...` layouts when
+that legacy root is supplied explicitly.
 
 The maintenance command is:
 
 ```bash
 python -m cval.cli db-rebuild-dltest-metrics \
-  --results-root /data/continuous_validation/dltest \
+  --results-root /data/continuous_validation/validation_tests/dltest/runs \
   --output-dir /data/continuous_validation/metadata
 ```
 
@@ -139,7 +155,48 @@ output.
 
 ---
 
-## Versioned baseline records
+## U8 versioned health records
+
+U8 stores one database per test at
+`validation_tests/<test-id>/<test-id>_health_classes.db`. Candidate IDs are
+SHA-256 content identities over canonical combination factors, descriptor and
+health-policy versions, adapter-schema version, robust-z policy, exact source
+and durable-receipt provenance, exact observations/sample coverage, statistics,
+thresholds, and lifecycle parent. Adapter observation order and wall-clock
+storage time do not alter identity.
+
+Metric center/spread reuse the established median/MAD kernel. With
+$\sigma_{MAD}=1.4826\,MAD$, the degradation width is:
+
+$$
+\Delta = \max\left(z\sigma_{MAD},\;\frac{t}{100}|m|\right)
+$$
+
+where $m$ is the median, $z$ is the effective robust-z policy, and $t$ is the
+configured tolerance. Classes 2/3/4 occupy the directional $1\Delta$,
+$2\Delta$, and beyond-$3\Delta$ degradation bands; class 0 is the good-side
+tail where applicable, class 1 is nominal, and class 5 is DNR with no threshold.
+For zero-center metrics, severity falls back to delta-relative distance rather
+than falsely reporting zero percent.
+
+Declarative aggregation is `max_metric_class.v1`. DL uses the validated
+`dl_severity_count_fraction.v1` final aggregation while preserving every
+framework-generated metric verdict. Candidate construction is always
+framework-owned; custom adapters cannot replace statistics, DNR, or provenance.
+
+The lifecycle remains:
+
+```text
+candidate  ->  active  ->  superseded
+```
+
+Building never activates. Explicit activation atomically supersedes only the
+current parent in the same `(test_id, combination_key)`. Exact SQL triggers
+protect all correctness evidence and legal lifecycle transitions; the mutable
+build-state row is advisory only. See
+[U8 Health Engine Design Report](u8-health-engine-design-report.md).
+
+## Compatibility dynamic baseline records
 
 Baselines are immutable, versioned records in SQLite DBs under
 `/data/continuous_validation/baselines`, with a lifecycle status:
@@ -346,23 +403,26 @@ Low-level robust statistics live in `cval.baselines.stats` (`summarize_metric`,
 
 ## Configuration
 
+Shared lifecycle and robust-statistics defaults remain global:
+
 ```toml
 [baseline]
-nccl_peer_tolerance_pct = 5.0       # NCCL relative-tolerance floor
-storage_peer_tolerance_pct = 10.0   # Storage relative-tolerance floor
-dl_compute_tolerance_pct = 3.0      # DL compute/collective time
-dl_numerical_tolerance_pct = 0.1    # DL numerical correctness (near-exact)
-dl_overlap_tolerance_pct = 20.0     # DL overlap (high variance)
 robust_z_threshold = 3.5            # modified z-score cutoff
 min_samples = 8                     # minimum clean samples per metric
 window_days = 30                    # rolling window for building baselines
-dl_degraded_metric_fraction = 0.02  # DL bad-metric share required for degraded
-dl_min_degraded_metrics = 10        # DL bad-metric count required for degraded
-dl_degraded_severity_pct = 10.0     # DL miss must be this far off to count
 ```
 
-These values feed both baseline building (band width, trimming, window) and
-classification.
+Test-specific tolerances, directions, combination factors, and rebuild controls
+live under `[health]` and `[[health.metrics]]` in each test's
+`test_config.toml`. DL verdict aggregation lives under
+`[settings.health_aggregation]` in
+`validation-tests/dltest/test_config.toml`. The composed config exposes
+compatibility values to the current baseline modules, so classification behavior
+is unchanged while ownership moves to each test.
+
+Every enabled U8 health descriptor also declares a versioned
+`health.policy_version`, matched by the repository adapter. It must change when
+observation or aggregation semantics become incompatible.
 
 ---
 
@@ -378,4 +438,5 @@ summarize degraded nodes through these commands. See
 - **Trend analysis**: rolling baselines over time to catch slow degradation.
 - **Auto-promotion guardrail**: promote an improved baseline only when stable and
   not drifting too far from the current active one.
-- **Live wiring**: auto-classify each completed validation in `cval-live`.
+- **U9 evaluator/live wiring**: build and classify completed canonical results
+  without weakening default-off write gates or U8 activation controls.

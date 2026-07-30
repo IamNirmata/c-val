@@ -270,14 +270,15 @@ Storage performance is critical for **data loading** and **checkpointing**.
 
 ## How results are recorded
 
-Each run writes a structured `cval.results.v1` JSON artifact and ingests rows into SQLite:
+Each run writes a dynamic `cval.results.v2` artifact, structured progress
+events, canonical global/per-test logs, and then ingests compatibility rows into
+SQLite:
 
 ```text
 /data/continuous_validation/
-  storage/<node>/...                     # FIO artifacts
-  nccl/<node>/...                        # all-reduce + IB logs
-  dltest/<node>/.../runs/*.json          # DL rank outputs (source of truth)
-  results/<node>/cval-results-*.json     # cval.results.v1
+  logs/job_logs/<node>/<run-id>/         # global logs, events, result.json
+  logs/<test-id>/<node>/<run-id>/        # per-test stdout/stderr/events
+  validation_tests/<test-id>/runs/...    # summaries and raw artifacts
   metadata/validation.db                 # latest status (raw pass/fail)
   metadata/test-storage.db, test-nccl.db, dltest_*.db
 ```

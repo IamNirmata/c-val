@@ -110,6 +110,7 @@ def main() -> None:
         if args.result_file:
             metrics = {
                 "GCR_ITERATIONS": args.iterations,
+                "GCR_DATA_SIZE_GB": args.data_size_gb,
                 "GCR_LATENCY": duration * 1000,
                 "GCR_ALGBW": alg_bw,
                 "GCR_BUSBW": bus_bw,

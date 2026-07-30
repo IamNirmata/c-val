@@ -11,7 +11,9 @@ The public operator/Hermes CLI is intentionally small:
 
 ```text
 cval config
+cval tests list|describe|validate
 cval status
+cval history
 cval nodes
 cval overview
 cval validate
@@ -37,6 +39,28 @@ python -m cval.cli config
 python -m cval.cli --config /path/to/cval.toml config
 ```
 
+The effective JSON includes composed per-test descriptors and settings.
+
+## `tests`
+
+Inspect and validate the explicit repository-local validation test registry.
+These commands are read-only and never execute workloads. `list` and
+`describe` do not import adapters; `validate` imports every declared
+repository adapter to verify API version, capabilities, required methods, and
+adapter-owned config.
+
+```bash
+python -m cval.cli tests list
+python -m cval.cli tests list --enabled-only --output json
+python -m cval.cli tests describe nccl
+python -m cval.cli tests describe nccl --output table
+python -m cval.cli tests validate --output json
+```
+
+Configuration loading validates IDs, schemas, repository-confined paths,
+entrypoint/setup files, unique enabled order, and shared resource coverage. An
+invalid registry returns exit code `2` with a concise configuration error.
+
 ## `status`
 
 Read latest validation status from SQLite through the PVC access pod using
@@ -47,6 +71,46 @@ python -m cval.cli status --output table
 python -m cval.cli status --output json
 python -m cval.cli status --output tsv
 ```
+
+## `history`
+
+Read normalized `cval.results.v2` run history from the PVC access pod. This
+command opens SQLite in `mode=ro` and never creates a missing database.
+
+```bash
+python -m cval.cli history
+python -m cval.cli history --node <node> --limit 20
+python -m cval.cli history --test nccl --status fail --output json
+python -m cval.cli history --run-id <run-id> --output json
+```
+
+See [Node Run History](run-history.md) for schema and activation safety.
+
+## Hidden in-pod ingestion hooks
+
+The following commands stay out of public `--help` and are called only by the
+validated in-pod `db-update.sh` sequence:
+
+```text
+db-preflight-compatibility-result
+db-preflight-test-results
+db-add-storage-result
+db-add-nccl-health
+db-add-run-results
+db-upsert-run-history
+db-ingest-test-results
+```
+
+Both preflight commands are read-only and bind the complete result digest,
+immutable config snapshot, canonical evidence paths, and all configured DB
+targets before the first v2 write. Required compatibility metrics are written
+first; `db-add-run-results` then commits all fixed compatibility status rows in
+one transaction. The older hidden `db-add-result` hook remains compatibility
+code but is not the active `db-update.sh` status path. `db-upsert-run-history` requires
+`run_history_enabled=true`; `db-ingest-test-results` requires the independent
+`per_test_ingestion_enabled=true` gate. Both are `false` by default. These are
+not migration or activation commands and should not be invoked manually on the
+live PVC.
 
 ## `nodes`
 
@@ -197,7 +261,8 @@ python -m cval.cli jobs \
 
 ## `result`
 
-Inspect structured result JSON in env-line form:
+Inspect `cval.results.v2` or historical v1 JSON. The default env-line form is a
+temporary storage/NCCL/DL projection used by `db-update.sh`:
 
 ```bash
 python -m cval.cli result --result-json <result.json>
@@ -217,6 +282,9 @@ Or emit JSON:
 ```bash
 python -m cval.cli result --result-json <result.json> --output json
 ```
+
+JSON output preserves the full dynamic test map and should be used by new
+automation.
 
 ## `results`
 
@@ -346,9 +414,6 @@ scripts/cval-baseline-build.sh start
 scripts/cval-baseline-classify.sh start
 ```
 
-## Internal Runtime Hooks
-
-The in-pod scripts use a small hidden API: `db-add-result`,
-`db-add-storage-result`, `db-add-nccl-health`, and
-`db-rebuild-dltest-metrics`. They are implementation details, not operator
-commands. Completed migrations and legacy aliases are intentionally absent.
+`db-rebuild-dltest-metrics` is a separate hidden maintenance hook used by the
+baseline loops. All hidden hooks are implementation details, not operator
+commands; completed migrations and removed aliases stay absent.

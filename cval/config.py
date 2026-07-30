@@ -7,11 +7,20 @@ clear nested sections.
 
 from __future__ import annotations
 
+import base64
+import json
+import math
 import os
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from cval.validation.registry import (
+    ValidationTestRegistry,
+    load_test_registry,
+    parse_resource_quantity,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "cval.toml"
@@ -61,7 +70,7 @@ class PolicyConfig:
 class MonitoringConfig:
     """Polling defaults for read-only job monitoring."""
 
-    timeout_seconds: float = 180
+    timeout_seconds: float = 6000
     poll_interval_seconds: float = 60
 
 
@@ -70,6 +79,11 @@ class StorageConfig:
     """SQLite metadata paths on the shared validation PVC."""
 
     validation_db_path: str = "/data/continuous_validation/metadata/validation.db"
+    run_history_enabled: bool = False
+    per_test_ingestion_enabled: bool = False
+    run_history_db_path: str = (
+        "/data/continuous_validation/metadata/node-run-history.db"
+    )
     storage_db_path: str = "/data/continuous_validation/metadata/test-storage.db"
     nccl_db_path: str = "/data/continuous_validation/metadata/test-nccl.db"
     dl_numerical_db_path: str = (
@@ -94,7 +108,9 @@ class RuntimeConfig:
     validation_root: str = "/data/continuous_validation"
     validation_tests_dir: str = "/workspace/c-val/validation-tests"
     dl_unit_test_dir: str = "/data/continuous_validation/deep-learning-unit-test-main"
-    dl_results_root_path: str = "/data/continuous_validation/dltest"
+    dl_results_root_path: str = (
+        "/data/continuous_validation/validation_tests/dltest/runs"
+    )
 
 
 @dataclass(frozen=True)
@@ -114,8 +130,8 @@ class NcclTestConfig:
     iterations: int = 20
     data_size_gb: int = 8
     ibbw_enabled: bool = True
-    ibbw_start_device: int = 0
-    ibbw_end_device: int = 13
+    ibbw_start_device: int | None = None
+    ibbw_end_device: int | None = None
     net: str = "IB"
     p2p_disable: bool = True
     shm_disable: bool = True
@@ -134,11 +150,12 @@ class DlTestConfig:
 
 @dataclass(frozen=True)
 class TestsConfig:
-    """All independently switchable validation phases."""
+    """Dynamic registry plus compatibility views for current consumers."""
 
     storage: StorageTestConfig = field(default_factory=StorageTestConfig)
     nccl: NcclTestConfig = field(default_factory=NcclTestConfig)
     dltest: DlTestConfig = field(default_factory=DlTestConfig)
+    registry: ValidationTestRegistry = field(default_factory=ValidationTestRegistry)
 
 
 @dataclass(frozen=True)
@@ -218,7 +235,7 @@ def load_config(path: Path | str | None = None) -> CvalConfig:
     if not config_path.exists():
         if path is not None or os.environ.get("CVAL_CONFIG"):
             raise FileNotFoundError(f"c-val config file not found: {config_path}")
-        return default_config()
+        return _build_config({})
 
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -231,7 +248,95 @@ def config_to_dict(config: CvalConfig) -> dict[str, Any]:
 
     data = asdict(config)
     data["job"]["template_path"] = str(config.job.template_path)
+    data["tests"] = config.tests.registry.to_dict()
     return data
+
+
+def encode_config_snapshot(config: CvalConfig) -> str:
+    """Encode the exact effective runtime inputs as a deterministic JSON snapshot."""
+
+    template_path = config.job.template_path.expanduser().resolve()
+    try:
+        template_value = template_path.relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        template_value = str(template_path)
+    data = {
+        "cluster": asdict(config.cluster),
+        "scheduling": asdict(config.scheduling),
+        "job": asdict(config.job) | {"template_path": template_value},
+        "policy": asdict(config.policy),
+        "monitoring": asdict(config.monitoring),
+        "storage": asdict(config.storage),
+        "runtime": asdict(config.runtime),
+        "tests": {
+            test.id: {
+                "enabled": test.enabled,
+                "config_path": test.config_path,
+            }
+            for test in config.tests.registry.tests
+        },
+        "test_definitions": config.tests.registry.to_dict(),
+        "job_template": asdict(config.job_template),
+        "baseline": asdict(config.baseline),
+    }
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(payload).decode("ascii")
+
+
+def load_config_snapshot(
+    payload: str,
+    *,
+    repo_root: Path | None = None,
+) -> CvalConfig:
+    """Decode and validate one renderer-generated effective configuration snapshot."""
+
+    try:
+        raw = base64.b64decode(payload, validate=True)
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid c-val effective configuration snapshot") from exc
+    if not isinstance(data, dict):
+        raise ValueError("c-val effective configuration snapshot must be an object")
+    allowed = {
+        "cluster",
+        "scheduling",
+        "job",
+        "policy",
+        "monitoring",
+        "storage",
+        "runtime",
+        "tests",
+        "test_definitions",
+        "job_template",
+        "baseline",
+    }
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(
+            "Unknown effective configuration snapshot section(s): "
+            f"{', '.join(unknown)}"
+        )
+    expected_definitions = data.pop("test_definitions", None)
+    if not isinstance(expected_definitions, dict):
+        raise ValueError(
+            "c-val effective configuration snapshot lacks complete test_definitions"
+        )
+    config = _build_config(
+        data,
+        repo_root=repo_root,
+        include_test_defaults=False,
+    )
+    actual_definitions_json = json.dumps(
+        config.tests.registry.to_dict(), sort_keys=True, separators=(",", ":")
+    )
+    expected_definitions_json = json.dumps(
+        expected_definitions, sort_keys=True, separators=(",", ":")
+    )
+    if actual_definitions_json != expected_definitions_json:
+        raise ValueError(
+            "Effective test descriptors do not match the immutable configuration snapshot"
+        )
+    return config
 
 
 def _config_path(path: Path | str | None) -> Path:
@@ -243,7 +348,12 @@ def _config_path(path: Path | str | None) -> Path:
     return DEFAULT_CONFIG_PATH
 
 
-def _build_config(data: dict[str, Any]) -> CvalConfig:
+def _build_config(
+    data: dict[str, Any],
+    *,
+    repo_root: Path | None = None,
+    include_test_defaults: bool = True,
+) -> CvalConfig:
     defaults = default_config()
     cluster = _section(data, "cluster")
     scheduling = _section(data, "scheduling")
@@ -253,9 +363,20 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
     storage = _section(data, "storage")
     runtime = _section(data, "runtime")
     tests = _section(data, "tests")
-    storage_test = _section(tests, "storage")
-    nccl_test = _section(tests, "nccl")
-    dltest = _section(tests, "dltest")
+    test_registry = load_test_registry(
+        tests,
+        repo_root=repo_root or REPO_ROOT,
+        include_defaults=include_test_defaults,
+    )
+    storage_registration = test_registry.get("storage")
+    nccl_registration = test_registry.get("nccl")
+    dltest_registration = test_registry.get("dltest")
+    storage_test = (
+        storage_registration.definition.settings if storage_registration else {}
+    )
+    nccl_test = nccl_registration.definition.settings if nccl_registration else {}
+    dltest = dltest_registration.definition.settings if dltest_registration else {}
+    dl_health_aggregation = _section(dict(dltest), "health_aggregation")
     job_template = _section(data, "job_template")
     baseline = _section(data, "baseline")
 
@@ -307,6 +428,21 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
         ),
         storage=StorageConfig(
             validation_db_path=_str(storage, "validation_db_path", defaults.storage.validation_db_path),
+            run_history_enabled=_strict_config_bool(
+                storage,
+                "run_history_enabled",
+                defaults.storage.run_history_enabled,
+            ),
+            per_test_ingestion_enabled=_strict_config_bool(
+                storage,
+                "per_test_ingestion_enabled",
+                defaults.storage.per_test_ingestion_enabled,
+            ),
+            run_history_db_path=_str(
+                storage,
+                "run_history_db_path",
+                defaults.storage.run_history_db_path,
+            ),
             storage_db_path=_str(storage, "storage_db_path", defaults.storage.storage_db_path),
             nccl_db_path=_str(storage, "nccl_db_path", defaults.storage.nccl_db_path),
             dl_numerical_db_path=_str(
@@ -343,13 +479,13 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
         ),
         tests=TestsConfig(
             storage=StorageTestConfig(
-                enabled=_bool(storage_test, "enabled", defaults.tests.storage.enabled),
+                enabled=bool(storage_registration and storage_registration.enabled),
                 install_fio=_bool(
                     storage_test, "install_fio", defaults.tests.storage.install_fio
                 ),
             ),
             nccl=NcclTestConfig(
-                enabled=_bool(nccl_test, "enabled", defaults.tests.nccl.enabled),
+                enabled=bool(nccl_registration and nccl_registration.enabled),
                 gpu_count=_int(nccl_test, "gpu_count", defaults.tests.nccl.gpu_count),
                 iterations=_int(nccl_test, "iterations", defaults.tests.nccl.iterations),
                 data_size_gb=_int(
@@ -358,12 +494,12 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 ibbw_enabled=_bool(
                     nccl_test, "ibbw_enabled", defaults.tests.nccl.ibbw_enabled
                 ),
-                ibbw_start_device=_int(
+                ibbw_start_device=_optional_int_value(
                     nccl_test,
                     "ibbw_start_device",
                     defaults.tests.nccl.ibbw_start_device,
                 ),
-                ibbw_end_device=_int(
+                ibbw_end_device=_optional_int_value(
                     nccl_test,
                     "ibbw_end_device",
                     defaults.tests.nccl.ibbw_end_device,
@@ -378,11 +514,12 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 debug=_str(nccl_test, "debug", defaults.tests.nccl.debug),
             ),
             dltest=DlTestConfig(
-                enabled=_bool(dltest, "enabled", defaults.tests.dltest.enabled),
+                enabled=bool(dltest_registration and dltest_registration.enabled),
                 gpu_count=_int(dltest, "gpu_count", defaults.tests.dltest.gpu_count),
                 test_plan=_str(dltest, "test_plan", defaults.tests.dltest.test_plan),
                 iterations=_int(dltest, "iterations", defaults.tests.dltest.iterations),
             ),
+            registry=test_registry,
         ),
         job_template=JobTemplateConfig(
             namespace=_str(job_template, "namespace", defaults.job_template.namespace),
@@ -429,19 +566,54 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
                 baseline, "baseline_root_path", defaults.baseline.baseline_root_path
             ),
             nccl_peer_tolerance_pct=_float(
-                baseline, "nccl_peer_tolerance_pct", defaults.baseline.nccl_peer_tolerance_pct
+                baseline,
+                "nccl_peer_tolerance_pct",
+                _health_metric_tolerance(
+                    test_registry,
+                    "nccl",
+                    "busbw",
+                    defaults.baseline.nccl_peer_tolerance_pct,
+                ),
             ),
             storage_peer_tolerance_pct=_float(
-                baseline, "storage_peer_tolerance_pct", defaults.baseline.storage_peer_tolerance_pct
+                baseline,
+                "storage_peer_tolerance_pct",
+                _health_metric_tolerance(
+                    test_registry,
+                    "storage",
+                    "storage_performance",
+                    defaults.baseline.storage_peer_tolerance_pct,
+                ),
             ),
             dl_compute_tolerance_pct=_float(
-                baseline, "dl_compute_tolerance_pct", defaults.baseline.dl_compute_tolerance_pct
+                baseline,
+                "dl_compute_tolerance_pct",
+                _health_metric_tolerance(
+                    test_registry,
+                    "dltest",
+                    "compute_performance",
+                    defaults.baseline.dl_compute_tolerance_pct,
+                ),
             ),
             dl_numerical_tolerance_pct=_float(
-                baseline, "dl_numerical_tolerance_pct", defaults.baseline.dl_numerical_tolerance_pct
+                baseline,
+                "dl_numerical_tolerance_pct",
+                _health_metric_tolerance(
+                    test_registry,
+                    "dltest",
+                    "numerical_correctness",
+                    defaults.baseline.dl_numerical_tolerance_pct,
+                ),
             ),
             dl_overlap_tolerance_pct=_float(
-                baseline, "dl_overlap_tolerance_pct", defaults.baseline.dl_overlap_tolerance_pct
+                baseline,
+                "dl_overlap_tolerance_pct",
+                _health_metric_tolerance(
+                    test_registry,
+                    "dltest",
+                    "overlap_performance",
+                    defaults.baseline.dl_overlap_tolerance_pct,
+                ),
             ),
             robust_z_threshold=_float(
                 baseline, "robust_z_threshold", defaults.baseline.robust_z_threshold
@@ -451,17 +623,29 @@ def _build_config(data: dict[str, Any]) -> CvalConfig:
             dl_degraded_metric_fraction=_float(
                 baseline,
                 "dl_degraded_metric_fraction",
-                defaults.baseline.dl_degraded_metric_fraction,
+                _float(
+                    dl_health_aggregation,
+                    "degraded_metric_fraction",
+                    defaults.baseline.dl_degraded_metric_fraction,
+                ),
             ),
             dl_min_degraded_metrics=_int(
                 baseline,
                 "dl_min_degraded_metrics",
-                defaults.baseline.dl_min_degraded_metrics,
+                _int(
+                    dl_health_aggregation,
+                    "min_degraded_metrics",
+                    defaults.baseline.dl_min_degraded_metrics,
+                ),
             ),
             dl_degraded_severity_pct=_float(
                 baseline,
                 "dl_degraded_severity_pct",
-                defaults.baseline.dl_degraded_severity_pct,
+                _float(
+                    dl_health_aggregation,
+                    "degraded_severity_pct",
+                    defaults.baseline.dl_degraded_severity_pct,
+                ),
             ),
             build_interval_seconds=_int(
                 baseline,
@@ -483,7 +667,7 @@ def _validate_config(config: CvalConfig) -> None:
     """Reject invalid test settings before rendering or submitting jobs."""
 
     tests = config.tests
-    if not any((tests.storage.enabled, tests.nccl.enabled, tests.dltest.enabled)):
+    if not tests.registry.enabled:
         raise ValueError("At least one test must be enabled under [tests.*]")
     if tests.nccl.gpu_count <= 0 or tests.dltest.gpu_count <= 0:
         raise ValueError("NCCL and DL GPU counts must be positive")
@@ -491,25 +675,92 @@ def _validate_config(config: CvalConfig) -> None:
         raise ValueError("NCCL and DL iterations must be positive")
     if tests.nccl.data_size_gb <= 0:
         raise ValueError("NCCL data_size_gb must be positive")
-    if tests.nccl.ibbw_start_device < 0:
-        raise ValueError("NCCL ibbw_start_device must be non-negative")
-    if tests.nccl.ibbw_end_device < tests.nccl.ibbw_start_device:
-        raise ValueError("NCCL ibbw_end_device must be >= ibbw_start_device")
+    start_device = tests.nccl.ibbw_start_device
+    end_device = tests.nccl.ibbw_end_device
+    if (start_device is None) != (end_device is None):
+        raise ValueError("NCCL IBBW device override requires both start and end")
+    if start_device is not None and end_device is not None:
+        if start_device < 0:
+            raise ValueError("NCCL ibbw_start_device must be non-negative")
+        if end_device < start_device:
+            raise ValueError("NCCL ibbw_end_device must be >= ibbw_start_device")
     if not tests.nccl.net.strip() or not tests.nccl.debug.strip():
         raise ValueError("NCCL net and debug values must not be empty")
     if not tests.dltest.test_plan.strip():
         raise ValueError("DL test_plan must not be empty")
+    baseline = config.baseline
+    non_negative_values = {
+        "nccl_peer_tolerance_pct": baseline.nccl_peer_tolerance_pct,
+        "storage_peer_tolerance_pct": baseline.storage_peer_tolerance_pct,
+        "dl_compute_tolerance_pct": baseline.dl_compute_tolerance_pct,
+        "dl_numerical_tolerance_pct": baseline.dl_numerical_tolerance_pct,
+        "dl_overlap_tolerance_pct": baseline.dl_overlap_tolerance_pct,
+        "dl_degraded_severity_pct": baseline.dl_degraded_severity_pct,
+    }
+    for name, value in non_negative_values.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"baseline.{name} must be finite and non-negative")
+    if not math.isfinite(baseline.robust_z_threshold) or baseline.robust_z_threshold <= 0:
+        raise ValueError("baseline.robust_z_threshold must be finite and positive")
+    if (
+        not math.isfinite(baseline.dl_degraded_metric_fraction)
+        or not 0 <= baseline.dl_degraded_metric_fraction <= 1
+    ):
+        raise ValueError("baseline.dl_degraded_metric_fraction must be in [0,1]")
+    for name, value in {
+        "min_samples": baseline.min_samples,
+        "window_days": baseline.window_days,
+        "dl_min_degraded_metrics": baseline.dl_min_degraded_metrics,
+        "build_interval_seconds": baseline.build_interval_seconds,
+        "classify_interval_seconds": baseline.classify_interval_seconds,
+    }.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"baseline.{name} must be a positive integer")
     try:
         reserved_gpus = int(config.job_template.gpu_count)
+        reserved_rdma = int(config.job_template.rdma_count)
     except ValueError as exc:
-        raise ValueError("job_template.gpu_count must be an integer") from exc
-    required_gpus = max(
-        tests.nccl.gpu_count if tests.nccl.enabled else 0,
-        tests.dltest.gpu_count if tests.dltest.enabled else 0,
+        raise ValueError("job_template GPU/RDMA counts must be integers") from exc
+    reserved_quantities = {
+        "cpu": parse_resource_quantity(config.job_template.cpu),
+        "memory": parse_resource_quantity(config.job_template.memory),
+        "shared_memory": parse_resource_quantity(config.job_template.shared_memory_size),
+    }
+    for registered_test in tests.registry.enabled:
+        requirements = registered_test.definition.requirements
+        if reserved_gpus < requirements.gpu_count:
+            raise ValueError(
+                f"job_template.gpu_count does not cover enabled test "
+                f"{registered_test.id!r} requirement ({requirements.gpu_count})"
+            )
+        if reserved_rdma < requirements.rdma_count:
+            raise ValueError(
+                f"job_template.rdma_count does not cover enabled test "
+                f"{registered_test.id!r} requirement ({requirements.rdma_count})"
+            )
+        required_quantities = {
+            "cpu": parse_resource_quantity(requirements.cpu),
+            "memory": parse_resource_quantity(requirements.memory),
+            "shared_memory": parse_resource_quantity(requirements.shared_memory),
+        }
+        for resource_name, required in required_quantities.items():
+            if reserved_quantities[resource_name] < required:
+                raise ValueError(
+                    f"job_template {resource_name} does not cover enabled test "
+                    f"{registered_test.id!r} requirement"
+                )
+        if registered_test.definition.metadata.timeout_seconds > config.monitoring.timeout_seconds:
+            raise ValueError(
+                f"Enabled test {registered_test.id!r} timeout exceeds "
+                "monitoring.timeout_seconds"
+            )
+    sequential_timeout = sum(
+        test.definition.metadata.timeout_seconds for test in tests.registry.enabled
     )
-    if reserved_gpus < required_gpus:
+    if config.monitoring.timeout_seconds < sequential_timeout + 300:
         raise ValueError(
-            "job_template.gpu_count must cover each enabled GPU test's gpu_count"
+            "monitoring.timeout_seconds must cover enabled sequential test "
+            "timeouts plus 300 seconds of ingestion grace"
         )
 
 
@@ -525,11 +776,33 @@ def _str(section: dict[str, Any], key: str, default: str) -> str:
 
 
 def _int(section: dict[str, Any], key: str, default: int) -> int:
-    return int(section.get(key, default))
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _optional_int_value(
+    section: Mapping[str, Any],
+    key: str,
+    default: int | None,
+) -> int | None:
+    value = section.get(key, default)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    return value
 
 
 def _float(section: dict[str, Any], key: str, default: float) -> float:
-    return float(section.get(key, default))
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{key} must be a number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{key} must be finite")
+    return result
 
 
 def _bool(section: dict[str, Any], key: str, default: bool) -> bool:
@@ -539,6 +812,17 @@ def _bool(section: dict[str, Any], key: str, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _strict_config_bool(
+    section: dict[str, Any],
+    key: str,
+    default: bool,
+) -> bool:
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Config value {key!r} must be a TOML boolean")
+    return value
 
 
 def _str_tuple(section: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -556,3 +840,23 @@ def _repo_path(section: dict[str, Any], key: str, default: Path) -> Path:
         return default
     path = Path(str(value)).expanduser()
     return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _health_metric_tolerance(
+    registry: ValidationTestRegistry,
+    test_id: str,
+    source: str,
+    default: float,
+) -> float:
+    """Read one compatibility tolerance from a test-owned health descriptor."""
+
+    registered = registry.get(test_id)
+    if registered is None:
+        return default
+    health = registered.definition.health
+    if health is None:
+        return default
+    for metric in health.metrics:
+        if metric.source == source:
+            return metric.tolerance_pct
+    return default

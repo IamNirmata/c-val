@@ -15,7 +15,25 @@ c-val 2.0 is the safe orchestration layer around the existing c-val GPU cluster 
 - [Hermes Integration](hermes-integration.md): safe Hermes operating model for c-val.
 - [Design Decisions](design-decisions.md): why the implementation is shaped this way.
 - [Troubleshooting](troubleshooting.md): common failure modes and read-only triage.
-- [c-val 2.0 Implementation Notes](cval-2.0.md): current implementation status.
+- [c-val 2.0 Implementation Notes](cval-2.0.md): historical first-refactor slice; use this index and the modular tracker for current status.
+
+## Modular Framework Design and Incremental Implementation
+
+- [Modular Validation Contract](modular-validation-contract.md): repository-local test registry, directory/config contract, adapter protocol, path rules, compatibility map, and synthetic plugin acceptance test.
+- [Structured Result Schema v2](result-schema-v2.md): dynamic per-test result envelope, progress events, validation invariants, and v1 compatibility.
+- [Modular Database Schema Design](database-schema-v3.md): run history, per-test result/health databases, lifecycle, concurrency, and additive migration boundaries.
+- [Node Run History](run-history.md): implemented U6 schema, idempotent ingestion, read-only reporting, and approval-gated production activation.
+- [U8 Health Engine Design Report](u8-health-engine-design-report.md): stable classes, deterministic formulas, exact provenance/schema, lifecycle, adapter boundary, tests, and operational non-activation.
+- [Implementation Tracker](todo/cval-update.md): approval-gated U0–U12 execution backlog.
+
+U2 configuration composition, U3 per-test boundaries, U4 generic job context,
+U5 generic execution/result v2/canonical logs, U6 normalized run history, U7
+canonical per-test raw/metric ingestion, and the U8 versioned health-class
+engine are implemented and validated locally.
+U6/U7 production writes remain independently default-off and unapproved.
+U8 remains library/storage code only: no live health DB, evaluator, automatic
+activation, migration, or deployment is authorized. U9 evaluator integration
+and later cutover work remain proposed tracker items.
 
 ## Repository Shape
 
@@ -48,9 +66,12 @@ Read-only and dry-run commands are the default. Real Kubernetes job creation req
 --submit --confirm submit
 ```
 
-No c-val 2.0 command deletes jobs automatically. Cleanup remains explicit and approval-gated.
+Read-only commands such as `jobs --watch` never delete jobs. The separately
+started `cval-live` service automatically prunes stale `Pending` jobs matching
+its configured namespace and shared job-name prefix. Other cleanup remains
+explicit and approval-gated.
 
-## Validated State
+## Historical Validated v1 State
 
 The current c-val 2.0 flow has been tested with a pinned one-node run:
 

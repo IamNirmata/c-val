@@ -63,7 +63,9 @@ python -m cval.cli run \
 - Read-only commands are the default for discovery, status, job phase checks, and monitoring.
 - Planning and rendering are dry-run by default.
 - Kubernetes job creation requires `--submit --confirm submit`.
-- No command deletes or cancels jobs automatically.
+- Read-only commands, including `jobs --watch`, never delete or cancel jobs.
+  The separately started `cval-live` service automatically prunes stale
+  `Pending` jobs matching its configured namespace and shared job-name prefix.
 - Runtime jobs should pin `CVAL_GIT_REF` to a commit or tag for reproducibility.
 
 ## Documentation
@@ -76,6 +78,9 @@ Start with [docs/README.md](docs/README.md), then use:
 - [docs/cli-reference.md](docs/cli-reference.md)
 - [docs/operations-runbook.md](docs/operations-runbook.md)
 - [docs/result-schema.md](docs/result-schema.md)
+- [docs/result-schema-v2.md](docs/result-schema-v2.md)
+- [docs/modular-validation-contract.md](docs/modular-validation-contract.md)
+- [docs/run-history.md](docs/run-history.md)
 - [docs/baselines.md](docs/baselines.md)
 - [docs/dl-test.md](docs/dl-test.md)
 - [docs/hermes-integration.md](docs/hermes-integration.md)
@@ -86,8 +91,7 @@ Start with [docs/README.md](docs/README.md), then use:
 Before pushing changes, run:
 
 ```bash
-bash -n validation-tests/0-env.sh validation-tests/run-test.sh validation-tests/db-update.sh \
-  validation-tests/dltest/dltest.sh validation-tests/storage/storage.sh
+find scripts validation-tests -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 python -m unittest discover -s tests -p 'test_*.py'
 python -m compileall -q cval tests skills/c-val-hpc-engineer/scripts
 ```

@@ -1,0 +1,63 @@
+schema_version = "cval.test.v1"
+
+[test]
+id = "nccl"
+display_name = "NCCL and HCA health"
+description = "Single-node all-reduce and InfiniBand HCA transmit-bandwidth validation."
+order = 20
+entrypoint = "run-test.sh"
+setup = "setup.sh"
+timeout_seconds = 1200
+continue_on_failure = true
+
+[requirements]
+cpu = "8"
+memory = "32Gi"
+gpu_count = 8
+rdma_count = 1
+shared_memory = "16Gi"
+read_sysfs = true
+
+[settings]
+gpu_count = 8
+iterations = 20
+data_size_gb = 8
+ibbw_enabled = true
+net = "IB"
+p2p_disable = true
+shm_disable = true
+debug = "INFO"
+
+[artifacts]
+results_db_path = "validation_tests/nccl/nccl_results.db"
+health_classes_db_path = "validation_tests/nccl/nccl_health_classes.db"
+summary_filename = "summary.json"
+
+[plugin]
+adapter = "plugin.py"
+api_version = "cval.plugin.v1"
+capabilities = ["config", "ingest", "health"]
+
+[health]
+enabled = true
+policy_version = "nccl.health.v1"
+strategy = "declarative"
+min_samples = 8
+min_new_results = 10
+target_class_count = 5
+combination_factors = ["image_name", "cuda_version", "pytorch_version", "iterations", "data_size_gb"]
+auto_activate = false
+
+[[health.metrics]]
+name = "busbw"
+source = "busbw"
+direction = "low_bad"
+units = "GB/s"
+tolerance_pct = 5.0
+
+[[health.metrics]]
+name = "latency"
+source = "latency"
+direction = "high_bad"
+units = "ms"
+tolerance_pct = 5.0

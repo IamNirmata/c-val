@@ -167,7 +167,10 @@ cval baseline classify --test-type dltest-overlap --store-results
 
 DL verdicts use three config knobs to avoid false positives from a few noisy
 metrics: `dl_degraded_metric_fraction`, `dl_min_degraded_metrics`, and
-`dl_degraded_severity_pct`.
+`dl_degraded_severity_pct`. Their test-owned keys are
+`degraded_metric_fraction`, `min_degraded_metrics`, and
+`degraded_severity_pct` under `[settings.health_aggregation]` in
+`validation-tests/dltest/test_config.toml`.
 
 ---
 
@@ -176,13 +179,13 @@ metrics: `dl_degraded_metric_fraction`, `dl_min_degraded_metrics`, and
 ```bash
 # Rebuild the 4 DL metric DBs from rank JSON (run where the PVC is mounted)
 python -m cval.cli db-rebuild-dltest-metrics \
-  --results-root /data/continuous_validation/dltest \
+  --results-root /data/continuous_validation/validation_tests/dltest/runs \
   --output-dir   /data/continuous_validation/metadata \
   --output json
 ```
 
 Source of truth:
-`/data/continuous_validation/dltest/<node>/dltest-<node>-<ts>/workdir/test_plans/<plan>/runs/*.json`
+`/data/continuous_validation/validation_tests/dltest/runs/<node>/<run-id>/artifacts/workdir/test_plans/<plan>/runs/*.json`
 
 ---
 

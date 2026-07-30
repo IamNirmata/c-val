@@ -10,14 +10,59 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from typing import Any
+
+import yaml
+from yaml.constructor import ConstructorError
+from yaml.resolver import BaseResolver
 
 from cval.config import CvalConfig, JobTemplateConfig, load_config
 from cval.models import RenderedJob
+from cval.validation.runtime import build_runtime_environment, encode_runtime_environment
 
 
 NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 MAX_VOLCANO_NAME_PART_LENGTH = 63
 VOLCANO_TASK_POD_SUFFIX = "-server-0"
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects every duplicate semantic mapping key."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def default_template_path() -> Path:
@@ -67,6 +112,8 @@ def render_validation_job(
     resolved_image_name = config.job.image_name or _image_name_from_container(
         template_config.container_image
     )
+    if template_config.gpu_resource_name == template_config.rdma_resource_name:
+        raise ValueError("GPU and RDMA resource names must be distinct YAML keys")
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)
     job_name = make_job_name(
         node_name,
@@ -79,6 +126,7 @@ def render_validation_job(
         "nodename-placeholder",
         "time-placeholder",
         "jobname-placeholder",
+        "runtime-environment-b64-placeholder",
     ]
     # These placeholders are required by the legacy template and core scheduler logic.
     missing = [
@@ -88,6 +136,7 @@ def render_validation_job(
     ]
     if missing:
         raise ValueError(f"Template is missing placeholder(s): {', '.join(missing)}")
+    _validate_runtime_bootstrap(template_text)
 
     yaml_text = template_text.replace("nodename-placeholder", node_name)
     yaml_text = yaml_text.replace("time-placeholder", str(rendered_timestamp))
@@ -105,6 +154,7 @@ def render_validation_job(
         **runtime_replacements,
     }
     for placeholder, value in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        _validate_substitution_value(placeholder, value)
         yaml_text = yaml_text.replace(placeholder, value)
 
     # Refuse partially rendered manifests; a placeholder in submitted YAML is dangerous.
@@ -115,6 +165,12 @@ def render_validation_job(
     remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
+    _validate_semantic_runtime_manifest(
+        yaml_text,
+        expected_runtime_environment=runtime_replacements[
+            "runtime-environment-b64-placeholder"
+        ],
+    )
 
     return RenderedJob(
         job_name=job_name,
@@ -122,6 +178,308 @@ def render_validation_job(
         timestamp=rendered_timestamp,
         yaml_text=yaml_text,
     )
+
+
+def _validate_runtime_bootstrap(template_text: str) -> None:
+    """Require the ordered executable safety bootstrap in the Bash args block."""
+
+    _validate_semantic_runtime_manifest(template_text)
+    lines = template_text.splitlines()
+    task_sections = [
+        index
+        for index, line in enumerate(lines)
+        if re.match(r"^\s*tasks\s*:", line)
+    ]
+    if len(task_sections) != 1 or lines[task_sections[0]].strip() != "tasks:":
+        raise ValueError(
+            "Template must contain exactly one block-style Volcano tasks section"
+        )
+    tasks_index = task_sections[0]
+    tasks_indent = len(lines[tasks_index]) - len(lines[tasks_index].lstrip())
+    task_entries: list[str] = []
+    for line in lines[tasks_index + 1 :]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= tasks_indent:
+            break
+        if indent == tasks_indent + 2 and line.strip().startswith("-"):
+            task_entries.append(line.strip())
+    if task_entries != ["- name: server"]:
+        raise ValueError("Template must contain exactly one Volcano task named server")
+    container_sections = [
+        line
+        for line in lines
+        if re.match(r"^\s*containers\s*:", line)
+    ]
+    if len(container_sections) != 1 or container_sections[0].strip() != "containers:":
+        raise ValueError(
+            "Template must contain exactly one block-style task containers section"
+        )
+    if any(re.match(r"^\s*initContainers\s*:", line) for line in lines):
+        raise ValueError("Template must not contain init containers")
+    runtime_env_occurrences = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == "- name: CVAL_RUNTIME_ENV_B64"
+    ]
+    if len(runtime_env_occurrences) != 1:
+        raise ValueError(
+            "Template must contain exactly one CVAL_RUNTIME_ENV_B64 environment entry"
+        )
+    env_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip() == "- name: CVAL_RUNTIME_ENV_B64"
+        ),
+        None,
+    )
+    if env_index is None or not any(
+        line.strip() == 'value: "runtime-environment-b64-placeholder"'
+        for line in lines[env_index + 1 : env_index + 4]
+    ):
+        raise ValueError("Template must transport CVAL_RUNTIME_ENV_B64")
+
+    env_parent_index = next(
+        (
+            index
+            for index in range(env_index, -1, -1)
+            if lines[index].strip() in {"env:", "- env:"}
+        ),
+        None,
+    )
+    if env_parent_index is None:
+        raise ValueError("CVAL_RUNTIME_ENV_B64 must belong to a container env block")
+    env_parent_indent = len(lines[env_parent_index]) - len(
+        lines[env_parent_index].lstrip()
+    )
+    container_indent = (
+        env_parent_indent
+        if lines[env_parent_index].strip() == "- env:"
+        else env_parent_indent - 2
+    )
+    container_start = next(
+        (
+            index
+            for index in range(env_parent_index, -1, -1)
+            if lines[index].lstrip().startswith("-")
+            and len(lines[index]) - len(lines[index].lstrip()) == container_indent
+        ),
+        None,
+    )
+    if container_start is None:
+        raise ValueError("Could not identify the runtime workload container")
+    if lines[container_start].strip() != "- name: server":
+        raise ValueError("CVAL runtime bootstrap must belong to the server container")
+    containers_index = next(
+        (
+            index
+            for index in range(container_start, -1, -1)
+            if lines[index].strip() == "containers:"
+            and len(lines[index]) - len(lines[index].lstrip()) == container_indent - 2
+        ),
+        None,
+    )
+    if containers_index is None:
+        raise ValueError("The server runtime must belong to the task containers block")
+    container_end = len(lines)
+    for index in range(env_index + 1, len(lines)):
+        stripped = lines[index].strip()
+        indent = len(lines[index]) - len(lines[index].lstrip())
+        if stripped.startswith("- name:") and indent == container_indent:
+            container_end = index
+            break
+    containers_end = len(lines)
+    containers_indent = container_indent - 2
+    for index in range(containers_index + 1, len(lines)):
+        if not lines[index].strip():
+            continue
+        indent = len(lines[index]) - len(lines[index].lstrip())
+        if indent <= containers_indent:
+            containers_end = index
+            break
+    workload_containers = [
+        line.strip()
+        for line in lines[containers_index + 1 : containers_end]
+        if len(line) - len(line.lstrip()) == container_indent
+        and line.strip().startswith("-")
+    ]
+    if workload_containers != ["- name: server"]:
+        raise ValueError(
+            "Template must contain exactly one task workload container named server"
+        )
+    bootstrap_markers = (
+        "python3 -m cval.validation.path_preflight",
+        "run_child bash run-test.sh",
+        "run_child bash db-update.sh",
+    )
+    for marker in bootstrap_markers:
+        occurrences = [
+            index
+            for index, line in enumerate(lines)
+            if not line.strip().startswith("#") and marker in line
+        ]
+        if len(occurrences) != 1 or not (
+            container_start <= occurrences[0] < container_end
+        ):
+            raise ValueError(
+                f"Runtime bootstrap marker must appear exactly once in server: {marker}"
+            )
+    container_lines = lines[container_start:container_end]
+    if not any(
+        line.strip() == 'command: ["/bin/bash", "-lc"]'
+        for line in container_lines
+    ):
+        raise ValueError(
+            "The CVAL_RUNTIME_ENV_B64 workload container must use /bin/bash -lc"
+        )
+
+    script_lines: list[str] | None = None
+    for index, line in enumerate(container_lines[:-1]):
+        if line.strip() != "args:":
+            continue
+        for item_index in range(index + 1, min(index + 4, len(container_lines))):
+            if container_lines[item_index].strip() != "- |":
+                continue
+            base_indent = len(container_lines[item_index]) - len(
+                container_lines[item_index].lstrip()
+            )
+            collected: list[str] = []
+            for script_line in container_lines[item_index + 1 :]:
+                indent = len(script_line) - len(script_line.lstrip())
+                if script_line.strip() and indent <= base_indent:
+                    break
+                stripped = script_line.strip()
+                if stripped and not stripped.startswith("#"):
+                    collected.append(stripped)
+            script_lines = collected
+            break
+        if script_lines is not None:
+            break
+    if script_lines is None:
+        raise ValueError("Template must contain one executable Bash args block")
+
+    ordered_contract: tuple[tuple[str, str], ...] = (
+        ('git clone "$CVAL_GIT_REPO" "$CVAL_REPO_DIR"', "exact"),
+        ('git checkout "$CVAL_GIT_REF"', "exact"),
+        ('printf \'%s\' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env', "exact"),
+        ("source /tmp/cval-runtime.env", "exact"),
+        ("python3 -m cval.validation.path_preflight", "prefix"),
+        ('--test-registry-json "$CVAL_TEST_REGISTRY_JSON"', "contains"),
+        ('mkdir -p "$CVAL_JOB_LOG_DIR"', "exact"),
+        ("(set -o noclobber;", "prefix"),
+        ("exec > >(", "prefix"),
+        ("run_child bash run-test.sh", "exact"),
+        ("source 0-env.sh", "exact"),
+        ("run_child bash db-update.sh", "exact"),
+    )
+    cursor = 0
+    missing: list[str] = []
+    for token, mode in ordered_contract:
+        match = next(
+            (
+                index
+                for index in range(cursor, len(script_lines))
+                if (
+                    token in script_lines[index]
+                    if mode == "contains"
+                    else script_lines[index].startswith(token)
+                    if mode == "prefix"
+                    else script_lines[index] == token
+                )
+            ),
+            None,
+        )
+        if match is None:
+            missing.append(token)
+            continue
+        cursor = match + 1
+    if missing:
+        raise ValueError(
+            "Template is missing ordered executable runtime contract line(s): "
+            f"{', '.join(missing)}"
+        )
+
+
+def _validate_semantic_runtime_manifest(
+    template_text: str,
+    *,
+    expected_runtime_environment: str = "runtime-environment-b64-placeholder",
+) -> None:
+    """Validate decoded YAML keys and the actual Volcano workload structure."""
+
+    try:
+        manifest = yaml.load(template_text, Loader=_UniqueKeySafeLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Template must be valid duplicate-free YAML: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("Template must contain one YAML mapping document")
+
+    structural_counts = {"tasks": 0, "containers": 0, "initContainers": 0}
+
+    def count_structural_keys(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if isinstance(key, str) and key in structural_counts:
+                    structural_counts[key] += 1
+                count_structural_keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                count_structural_keys(child)
+
+    count_structural_keys(manifest)
+    if structural_counts["tasks"] != 1:
+        raise ValueError("Template must contain exactly one semantic Volcano tasks key")
+    if structural_counts["initContainers"]:
+        raise ValueError("Template must not contain init containers")
+
+    spec = manifest.get("spec")
+    tasks = spec.get("tasks") if isinstance(spec, dict) else None
+    if not isinstance(tasks, list) or len(tasks) != 1:
+        raise ValueError("Template must contain exactly one Volcano task named server")
+    task = tasks[0]
+    if not isinstance(task, dict) or task.get("name") != "server":
+        raise ValueError("Template must contain exactly one Volcano task named server")
+    if structural_counts["containers"] != 1:
+        raise ValueError("Template must contain exactly one semantic containers key")
+    template = task.get("template")
+    pod_spec = template.get("spec") if isinstance(template, dict) else None
+    containers = pod_spec.get("containers") if isinstance(pod_spec, dict) else None
+    if not isinstance(containers, list) or len(containers) != 1:
+        raise ValueError(
+            "Template must contain exactly one task workload container named server"
+        )
+    container = containers[0]
+    if not isinstance(container, dict) or container.get("name") != "server":
+        raise ValueError(
+            "Template must contain exactly one task workload container named server"
+        )
+    if container.get("command") != ["/bin/bash", "-lc"]:
+        raise ValueError(
+            "The CVAL_RUNTIME_ENV_B64 workload container must use /bin/bash -lc"
+        )
+    environment = container.get("env")
+    if not isinstance(environment, list):
+        raise ValueError("The server container must contain an env list")
+    runtime_entries = [
+        entry
+        for entry in environment
+        if isinstance(entry, dict) and entry.get("name") == "CVAL_RUNTIME_ENV_B64"
+    ]
+    if (
+        len(runtime_entries) != 1
+        or runtime_entries[0].get("value") != expected_runtime_environment
+    ):
+        raise ValueError("Template must transport exactly one CVAL_RUNTIME_ENV_B64")
+    args = container.get("args")
+    if (
+        not isinstance(args, list)
+        or len(args) != 1
+        or not isinstance(args[0], str)
+        or not args[0].strip()
+    ):
+        raise ValueError("Template must contain one executable Bash args block")
 
 
 def render_validation_job_from_file(
@@ -221,38 +579,10 @@ def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
 def _runtime_replacements(config: CvalConfig) -> dict[str, str]:
     """Return validation-runtime placeholder replacements from config."""
 
-    storage = config.tests.storage
-    nccl = config.tests.nccl
-    dltest = config.tests.dltest
     return {
         "runtime-repo-dir-placeholder": config.runtime.repo_dir,
         "runtime-validation-root-placeholder": config.runtime.validation_root,
-        "runtime-validation-tests-dir-placeholder": config.runtime.validation_tests_dir,
-        "runtime-dl-unit-test-dir-placeholder": config.runtime.dl_unit_test_dir,
-        "storage-validation-db-path-placeholder": config.storage.validation_db_path,
-        "storage-storage-db-path-placeholder": config.storage.storage_db_path,
-        "storage-nccl-db-path-placeholder": config.storage.nccl_db_path,
-        "test-storage-enabled-placeholder": _shell_bool(storage.enabled),
-        "test-storage-install-fio-placeholder": _shell_bool(storage.install_fio),
-        "test-nccl-enabled-placeholder": _shell_bool(nccl.enabled),
-        "test-nccl-gpu-count-placeholder": str(nccl.gpu_count),
-        "test-nccl-iterations-placeholder": str(nccl.iterations),
-        "test-nccl-data-size-gb-placeholder": str(nccl.data_size_gb),
-        "test-nccl-ibbw-enabled-placeholder": _shell_bool(nccl.ibbw_enabled),
-        "test-nccl-ibbw-start-device-placeholder": str(nccl.ibbw_start_device),
-        "test-nccl-ibbw-end-device-placeholder": str(nccl.ibbw_end_device),
-        "test-nccl-net-placeholder": nccl.net,
-        "test-nccl-p2p-disable-placeholder": _shell_bool(nccl.p2p_disable),
-        "test-nccl-shm-disable-placeholder": _shell_bool(nccl.shm_disable),
-        "test-nccl-debug-placeholder": nccl.debug,
-        "test-dltest-enabled-placeholder": _shell_bool(dltest.enabled),
-        "test-dltest-gpu-count-placeholder": str(dltest.gpu_count),
-        "test-dltest-plan-placeholder": dltest.test_plan,
-        "test-dltest-iterations-placeholder": str(dltest.iterations),
+        "runtime-environment-b64-placeholder": encode_runtime_environment(
+            build_runtime_environment(config)
+        ),
     }
-
-
-def _shell_bool(value: bool) -> str:
-    """Render a TOML boolean as a shell-friendly lowercase value."""
-
-    return "true" if value else "false"

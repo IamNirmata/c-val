@@ -7,22 +7,27 @@ import io
 import json
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from cval.config import CvalConfig, JobTemplateConfig
+from cval.config import CvalConfig, JobTemplateConfig, load_config
 from cval.k8s.client import CommandResult
 from cval.k8s.discovery import describe_node_from_outputs
 from cval.orchestrator.validate import (
     build_validation_report,
     degraded_metrics_from_verdict,
     finalize_download_zip,
+    log_signals_db_updated,
     parse_test_progress,
     raw_results_from_log,
+    render_test_progress_line,
     render_validation_report,
     run_node_validation,
+    _run_pod_cval,
     _parse_classify_verdict,
 )
+from cval.validation.registry import ValidationTestRegistry
 
 
 STORAGE_DONE = "Storage test is complete. Log file: x Summary file: y"
@@ -50,6 +55,40 @@ class TestParseProgress(unittest.TestCase):
     def test_empty_log(self):
         self.assertEqual(parse_test_progress(""), {})
 
+    def test_structured_events_support_dynamic_test_ids(self):
+        started = {
+            "schema_version": "cval.event.v1",
+            "event": "test_started",
+            "run_id": "node-a-123",
+            "test": "smoke",
+            "timestamp": "2026-07-28T16:00:00Z",
+            "status": "incomplete",
+            "message": "",
+        }
+        finished = started | {
+            "event": "test_finished",
+            "timestamp": "2026-07-28T16:00:01Z",
+            "status": "pass",
+        }
+        text = "\n".join(
+            f"CVAL_EVENT {json.dumps(event)}" for event in (started, finished)
+        )
+
+        self.assertEqual(parse_test_progress(text), {"smoke": "pass"})
+
+    def test_malformed_structured_event_is_ignored(self):
+        self.assertEqual(parse_test_progress("CVAL_EVENT {not-json}"), {})
+
+    def test_dynamic_progress_line_uses_registry_order(self):
+        line = render_test_progress_line(
+            12.0,
+            "Running",
+            ["storage", "smoke"],
+            {"storage": "pass", "smoke": "running"},
+        )
+
+        self.assertIn("storage=PASS smoke=RUNNING", line)
+
 
 class TestRawResults(unittest.TestCase):
     def test_raw_results_from_final_line(self):
@@ -71,6 +110,71 @@ class TestRawResults(unittest.TestCase):
 
     def test_missing_line(self):
         self.assertEqual(raw_results_from_log("nothing here"), {})
+
+    def test_raw_results_from_structured_events(self):
+        events = [
+            {
+                "schema_version": "cval.event.v1",
+                "event": "test_finished",
+                "run_id": "node-a-123",
+                "test": "smoke",
+                "timestamp": "2026-07-28T16:00:01Z",
+                "status": "pass",
+                "message": "",
+            },
+            {
+                "schema_version": "cval.event.v1",
+                "event": "run_finished",
+                "run_id": "node-a-123",
+                "test": None,
+                "timestamp": "2026-07-28T16:00:01Z",
+                "status": "pass",
+                "overall": "pass",
+                "message": "",
+            },
+        ]
+        text = "\n".join(f"CVAL_EVENT {json.dumps(event)}" for event in events)
+
+        self.assertEqual(
+            raw_results_from_log(text, enabled_tests={"smoke"}),
+            {"smoke": "pass", "all": "pass"},
+        )
+
+    def test_structured_ingestion_failure_overrides_legacy_marker(self):
+        event = {
+            "schema_version": "cval.event.v1",
+            "event": "ingestion_finished",
+            "run_id": "node-a-123",
+            "test": None,
+            "timestamp": "2026-07-28T16:00:01Z",
+            "status": "fail",
+            "message": "write failed",
+        }
+        text = "Main DB update completed.\nCVAL_EVENT " + json.dumps(event)
+
+        self.assertFalse(log_signals_db_updated(text))
+
+
+class TestPodCvalCommand(unittest.TestCase):
+    def test_explicit_timeout_is_forwarded(self):
+        calls = []
+
+        class Client:
+            def run(self, args, check=True, input_text=None, timeout=None):
+                calls.append((args, check, timeout))
+                return CommandResult(args=args, stdout="", stderr="", returncode=0)
+
+        _run_pod_cval(
+            Client(),
+            "gcr-admin",
+            "pvc-pod",
+            "/tmp/c-val",
+            "/tmp/c-val/config/cval.toml",
+            ["tests", "validate"],
+            timeout=321,
+        )
+
+        self.assertEqual(calls[0][2], 321)
 
 
 class TestDegradedMetrics(unittest.TestCase):
@@ -177,6 +281,33 @@ class TestBuildAndRenderReport(unittest.TestCase):
             dry_run=True,
         )
         self.assertIn("DRY RUN", render_validation_report(report))
+
+    def test_completed_job_with_failed_raw_result_is_not_ok(self):
+        report = build_validation_report(
+            node="node-x",
+            timestamp=123,
+            job_name="cval-node-x-123",
+            job_phase="Completed",
+            schedulability={},
+            raw_results={"storage": "pass", "nccl": "fail", "all": "fail"},
+            verdicts={"storage": None, "nccl": None, "dltest": None},
+        )
+
+        self.assertFalse(report["ok"])
+
+    def test_completed_job_without_successful_ingestion_is_not_ok(self):
+        report = build_validation_report(
+            node="node-x",
+            timestamp=123,
+            job_name="cval-node-x-123",
+            job_phase="Completed",
+            schedulability={},
+            raw_results={"storage": "pass", "nccl": "pass", "all": "pass"},
+            verdicts={"storage": None, "nccl": None, "dltest": None},
+            ingestion_complete=False,
+        )
+
+        self.assertFalse(report["ok"])
 
 
 class TestDescribeNode(unittest.TestCase):
@@ -332,7 +463,21 @@ class FakeValidateClient:
             phase = "Running" if candidate.endswith("-server-0") else "Pending"
             return self._result(json.dumps({"status": {"phase": phase}}))
         if "exec" in joined and "db-rebuild-dltest-metrics" in joined:
-            return self._result(json.dumps({"runs": 1, "rank_files": 8}))
+            return self._result(
+                json.dumps(
+                    {
+                        "runs": 1,
+                        "rank_files": 8,
+                        "generation_id": "generation-1",
+                        "db_paths": {
+                            "numerical_correctness": "/data/continuous_validation/metadata/dltest_numerical_correctness.db",
+                            "compute_performance": "/data/continuous_validation/metadata/dltest_compute_performance.db",
+                            "collective_performance": "/data/continuous_validation/metadata/dltest_collective_performance.db",
+                            "overlap_performance": "/data/continuous_validation/metadata/dltest_overlap_performance.db",
+                        },
+                    }
+                )
+            )
         if "exec" in joined and "baseline classify" in joined:
             test = args[args.index("--test-type") + 1]
             verdict = {"node": "node-x", "test_type": test, "status": "normal", "n_compared": 5, "n_degraded": 0, "metrics": []}
@@ -394,7 +539,8 @@ class TestRunNodeValidation(unittest.TestCase):
         report = run_node_validation(
             "node-x",
             client=client,
-            poll_interval=0.0,
+            timestamp=123,
+            poll_interval=0.001,
             verbose=False,
             clock=lambda: next(ticks),
             sleeper=lambda _s: None,
@@ -407,8 +553,94 @@ class TestRunNodeValidation(unittest.TestCase):
         self.assertEqual(report["health"], "degraded")
         # A job was created and classification ran for all three tests.
         self.assertTrue(any(" ".join(call).startswith("create -n") for call in client.calls))
+        self.assertTrue(
+            any("--tail=2000" in call for call in client.calls if call and call[0] == "logs")
+        )
         classify_calls = [c for c in client.calls if "baseline" in c and "classify" in c]
         self.assertEqual(len(classify_calls), 3)
+        dl_classify_call = next(
+            call
+            for call in classify_calls
+            if call[call.index("--test-type") + 1] == "dltest"
+        )
+        self.assertIn("flock", dl_classify_call)
+
+    def test_stale_status_rows_do_not_produce_success_or_classification(self):
+        client = FakeValidateClient()
+        ticks = iter(range(0, 100))
+
+        report = run_node_validation(
+            "node-x",
+            client=client,
+            timestamp=124,
+            poll_interval=0.001,
+            verbose=False,
+            clock=lambda: next(ticks),
+            sleeper=lambda _s: None,
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["fresh_status_complete"])
+        classify_calls = [
+            call for call in client.calls if "baseline" in call and "classify" in call
+        ]
+        self.assertEqual(classify_calls, [])
+        self.assertTrue(any("ignored stale" in note for note in report["notes"]))
+
+    def test_dynamic_test_does_not_require_legacy_status_row(self):
+        base = load_config()
+        storage = base.tests.registry.require("storage")
+        smoke = replace(
+            storage,
+            config_path="validation-tests/smoke/test_config.toml",
+            definition=replace(
+                storage.definition,
+                metadata=replace(
+                    storage.definition.metadata,
+                    id="smoke",
+                    display_name="Smoke",
+                    order=40,
+                ),
+                artifacts=replace(
+                    storage.definition.artifacts,
+                    results_db_path="validation_tests/smoke/smoke_results.db",
+                    health_classes_db_path="",
+                ),
+                settings={},
+                plugin=None,
+                health=None,
+            ),
+        )
+        registry = ValidationTestRegistry(base.tests.registry.tests + (smoke,))
+        config = replace(base, tests=replace(base.tests, registry=registry))
+        client = FakeValidateClient()
+        client.logs += "\nCVAL_EVENT " + json.dumps(
+            {
+                "schema_version": "cval.event.v1",
+                "event": "test_finished",
+                "run_id": "node-x-123",
+                "test": "smoke",
+                "timestamp": "2026-07-28T16:00:00Z",
+                "status": "pass",
+                "message": "",
+            },
+            separators=(",", ":"),
+        )
+        ticks = iter(range(0, 100))
+
+        report = run_node_validation(
+            "node-x",
+            config=config,
+            client=client,
+            timestamp=123,
+            poll_interval=0.001,
+            verbose=False,
+            clock=lambda: next(ticks),
+            sleeper=lambda _s: None,
+        )
+
+        self.assertTrue(report["fresh_status_complete"])
+        self.assertEqual(report["raw_results"]["smoke"], "pass")
 
 
 class TestFinalizeDownloadZip(unittest.TestCase):

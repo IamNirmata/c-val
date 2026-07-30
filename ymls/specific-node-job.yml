@@ -68,6 +68,8 @@ spec:
                       fieldPath: spec.nodeName
                 - name: GCRTIME
                   value: "time-placeholder"
+                - name: CVAL_RUN_ID
+                  value: "nodename-placeholder-time-placeholder"
                 - name: GCRRESULT1
                   value: fail
                 - name: GCRRESULT2
@@ -85,50 +87,10 @@ spec:
                   value: "runtime-repo-dir-placeholder"
                 - name: CVAL_VALIDATION_ROOT
                   value: "runtime-validation-root-placeholder"
-                - name: CVAL_VALIDATION_TESTS_DIR
-                  value: "runtime-validation-tests-dir-placeholder"
-                - name: CVAL_DL_UNIT_TEST_DIR
-                  value: "runtime-dl-unit-test-dir-placeholder"
-                - name: CVAL_VALIDATION_DB_PATH
-                  value: "storage-validation-db-path-placeholder"
-                - name: CVAL_STORAGE_DB_PATH
-                  value: "storage-storage-db-path-placeholder"
-                - name: CVAL_NCCL_DB_PATH
-                  value: "storage-nccl-db-path-placeholder"
-                - name: RUN_STORAGE
-                  value: "test-storage-enabled-placeholder"
-                - name: CVAL_STORAGE_INSTALL_FIO
-                  value: "test-storage-install-fio-placeholder"
-                - name: RUN_NCCL
-                  value: "test-nccl-enabled-placeholder"
-                - name: CVAL_NCCL_GPU_COUNT
-                  value: "test-nccl-gpu-count-placeholder"
-                - name: CVAL_NCCL_ITERATIONS
-                  value: "test-nccl-iterations-placeholder"
-                - name: CVAL_NCCL_DATA_SIZE_GB
-                  value: "test-nccl-data-size-gb-placeholder"
-                - name: CVAL_IBBW_ENABLED
-                  value: "test-nccl-ibbw-enabled-placeholder"
-                - name: CVAL_IBBW_START_DEVICE
-                  value: "test-nccl-ibbw-start-device-placeholder"
-                - name: CVAL_IBBW_END_DEVICE
-                  value: "test-nccl-ibbw-end-device-placeholder"
-                - name: CVAL_NCCL_NET
-                  value: "test-nccl-net-placeholder"
-                - name: CVAL_NCCL_P2P_DISABLE
-                  value: "test-nccl-p2p-disable-placeholder"
-                - name: CVAL_NCCL_SHM_DISABLE
-                  value: "test-nccl-shm-disable-placeholder"
-                - name: CVAL_NCCL_DEBUG
-                  value: "test-nccl-debug-placeholder"
-                - name: RUN_DLTEST
-                  value: "test-dltest-enabled-placeholder"
-                - name: CVAL_DL_GPU_COUNT
-                  value: "test-dltest-gpu-count-placeholder"
-                - name: CVAL_DL_TEST_PLAN
-                  value: "test-dltest-plan-placeholder"
-                - name: CVAL_DL_ITERATIONS
-                  value: "test-dltest-iterations-placeholder"
+                - name: CVAL_RUNTIME_ENV_B64
+                  # Registry plus current v1 compatibility exports. Base64 keeps
+                  # test settings out of this Kubernetes manifest structure.
+                  value: "runtime-environment-b64-placeholder"
               volumeMounts:
                 - name: dshm
                   mountPath: /dev/shm
@@ -143,6 +105,39 @@ spec:
               command: ["/bin/bash", "-lc"]
               args:
                 - |
+                  set -euo pipefail
+                  export CVAL_JOB_LOG_DIR="$CVAL_VALIDATION_ROOT/logs/job_logs/$GCRNODE/$CVAL_RUN_ID"
+                  export CVAL_RUN_MARKER="$CVAL_JOB_LOG_DIR/.run-active"
+                  on_job_exit() {
+                    rc=$?
+                    trap - EXIT
+                    if [[ $rc -eq 0 ]]; then
+                      rm -f -- "$CVAL_RUN_MARKER"
+                    fi
+                    exit "$rc"
+                  }
+                  trap on_job_exit EXIT
+                  active_pid=""
+                  on_job_signal() {
+                    if [[ -n "$active_pid" ]]; then
+                      kill -TERM "$active_pid" 2>/dev/null || true
+                      wait "$active_pid" 2>/dev/null || true
+                    fi
+                    exit 143
+                  }
+                  trap on_job_signal INT TERM
+                  run_child() {
+                    "$@" &
+                    active_pid=$!
+                    set +e
+                    wait "$active_pid"
+                    child_rc=$?
+                    set -e
+                    active_pid=""
+                    return "$child_rc"
+                  }
+                  export CVAL_EXTERNAL_GLOBAL_LOGGING=true
+                  export CVAL_RUN_MARKER_PREACQUIRED=true
                   echo "test started."
                   # The job clones c-val inside the container so the runtime code
                   # matches the explicitly supplied CVAL_GIT_REF.
@@ -150,10 +145,32 @@ spec:
                   cd "$CVAL_REPO_DIR"
                   git fetch --all --tags
                   git checkout "$CVAL_GIT_REF"
+                  # Decode a renderer-generated, shell-quoted export file. It is
+                  # data only: operators cannot supply arbitrary shell text.
+                  printf '%s' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env
+                  source /tmp/cval-runtime.env
+                  python3 -m cval.validation.path_preflight \
+                    --validation-root "$CVAL_VALIDATION_ROOT" \
+                    --node "$GCRNODE" \
+                    --run-id "$CVAL_RUN_ID" \
+                    --test-registry-json "$CVAL_TEST_REGISTRY_JSON"
+                  mkdir -p "$CVAL_JOB_LOG_DIR"
+                  if [[ -e "$CVAL_JOB_LOG_DIR/result.json" || -e "$CVAL_RUN_MARKER" ]]; then
+                    echo "Run evidence already exists for $CVAL_RUN_ID; refusing reuse" >&2
+                    exit 1
+                  fi
+                  (set -o noclobber; printf 'pod=%s\n' "${HOSTNAME:-unknown}" > "$CVAL_RUN_MARKER") || {
+                    echo "Could not reserve run ID $CVAL_RUN_ID" >&2
+                    exit 1
+                  }
+                  exec > >(tee -a "$CVAL_JOB_LOG_DIR/stdout.log" "$CVAL_JOB_LOG_DIR/job.log")
+                  exec 2> >(tee -a "$CVAL_JOB_LOG_DIR/stderr.log" "$CVAL_JOB_LOG_DIR/job.log" >&2)
                   cd "$CVAL_VALIDATION_TESTS_DIR"
+                  run_child bash run-test.sh
+                  # The generic runner validates node/run path segments before
+                  # this compatibility environment creates any directories.
                   source 0-env.sh
-                  bash run-test.sh
-                  bash db-update.sh
+                  run_child bash db-update.sh
                   echo "Completed."
               resources:
                 requests:

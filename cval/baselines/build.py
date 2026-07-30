@@ -24,6 +24,7 @@ from typing import Any
 from cval.baselines import stats
 from cval.config import CvalConfig, load_config
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
+from cval.storage.dltest_ingest import validate_dl_metric_generation
 
 BASELINE_SCHEMA_VERSION = "cval.baseline.v2"
 
@@ -264,6 +265,7 @@ def build_dl_baseline(
 
     config = config or load_config()
     db_paths = db_paths or _default_dl_db_paths(config)
+    initial_generation = validate_dl_metric_generation(db_paths)
     window_days = config.baseline.window_days if window_days is None else window_days
     min_samples = config.baseline.min_samples if min_samples is None else min_samples
 
@@ -311,6 +313,10 @@ def build_dl_baseline(
                 ).to_dict()
                 metric_stat["source_table"] = table
                 metrics[key] = metric_stat
+
+    final_generation = validate_dl_metric_generation(db_paths)
+    if final_generation != initial_generation:
+        raise RuntimeError("DL metric DB generation changed during baseline build")
 
     return _assemble_record(
         "dltest",

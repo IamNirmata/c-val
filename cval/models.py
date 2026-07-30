@@ -18,13 +18,6 @@ DL_COMPONENT_TEST_TYPES = {
     "dltest-overlap": "overlap_performance",
 }
 
-DL_COMPONENT_TO_TEST_TYPE = {
-    component: test_type
-    for test_type, component in DL_COMPONENT_TEST_TYPES.items()
-    if component is not None
-}
-
-
 def normalize_baseline_test_type(test_type: str) -> str:
     """Map component aliases to the logical baseline test type."""
 

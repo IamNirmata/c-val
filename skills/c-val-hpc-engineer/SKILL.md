@@ -88,7 +88,10 @@ Use only after explicit operator approval.
 
 ## Log Collection Workflow
 
-- Prefer c-val result artifacts under `/data/continuous_validation/results/<node>/`.
+- Prefer global results/logs under
+   `/data/continuous_validation/logs/job_logs/<node>/<run-id>/` and per-test
+   evidence under `logs/<test-id>/<node>/<run-id>/` plus
+   `validation_tests/<test-id>/runs/<node>/<run-id>/`.
 - Use `python -m cval.cli result --result-json <result.json>` to inspect structured result status.
 - Use the test-specific artifact paths from result JSON for logs and summaries.
 
@@ -101,6 +104,13 @@ Use only after explicit operator approval.
 5. Record whether the failure is storage, NCCL, DL correctness, scheduling, image/bootstrap, or DB ingestion.
 
 ## Baseline and Outlier Classification Workflow
+
+The commands in this section operate the existing compatibility baseline DBs
+under `baselines/`. U8 per-test health classes are implemented as local Python
+engine/storage APIs only and are not wired to these commands or loops. Do not
+create, migrate, activate, or assume live
+`validation_tests/<test>/<test>_health_classes.db` files; U9 and live activation
+require separate approval.
 
 - Start with `status` to identify stale or missing results.
 - Build a baseline from recent results (dry-run prints the robust metrics;
@@ -142,7 +152,7 @@ Use only after explicit operator approval.
 Before and after code changes, run:
 
 ```bash
-bash -n validation-tests/0-env.sh validation-tests/run-test.sh validation-tests/db-update.sh validation-tests/dltest/dltest.sh validation-tests/storage/storage.sh
+find scripts validation-tests -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
 python -m unittest discover -s tests -p 'test_*.py'
 python -m compileall -q cval tests
 ```
@@ -150,7 +160,16 @@ python -m compileall -q cval tests
 ## Known Pitfalls
 
 - The repository is named `c-val`, but the importable package is `cval`; do not treat this as a duplicate checkout.
-- Runtime jobs still clone c-val from GitHub; pinning image/code version remains future work.
+- Runtime jobs clone c-val and check out the explicit `CVAL_GIT_REF`; deploy
+   pinned commit IDs rather than a moving branch.
 - `run` dry-run does not submit resources. Real submission requires both `--submit` and `--confirm submit`.
 - `jobs --watch` is read-only and does not cancel timed-out jobs.
-- Result JSON uses schema `cval.results.v1`; keep `CVAL_RESULT_ENV_FILE` fallback until all in-pod code uses JSON directly.
+- New result JSON uses dynamic `cval.results.v2` and structured
+   `cval.event.v1`; historical v1 remains readable. The env file is only a
+   fixed storage/NCCL/DL ingestion compatibility projection. U7 canonical
+   per-test adapter writes are implemented but remain independently disabled by
+   default until live dual-write approval.
+- Never assume `validation_tests/<test>/<test>_results.db` exists live. The
+   parent framework owns adapter SQL transactions/receipts; repository adapters
+   run through spawned SQL RPC and must never receive the parent's raw SQLite
+   connection.

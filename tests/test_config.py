@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 from cval.config import config_to_dict, load_config
+from cval.validation.registry import load_test_registry, parse_resource_quantity
 
 
 class ConfigTests(unittest.TestCase):
@@ -14,14 +16,52 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.job.job_prefix, "cval")
         self.assertEqual(config.cluster.namespace, "gcr-admin")
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
+        self.assertEqual(
+            config.storage.run_history_db_path,
+            "/data/continuous_validation/metadata/node-run-history.db",
+        )
+        self.assertFalse(config.storage.run_history_enabled)
+        self.assertFalse(config.storage.per_test_ingestion_enabled)
+        self.assertEqual(
+            config.runtime.dl_results_root_path,
+            "/data/continuous_validation/validation_tests/dltest/runs",
+        )
         self.assertTrue(config.tests.storage.enabled)
         self.assertTrue(config.tests.nccl.enabled)
         self.assertTrue(config.tests.dltest.enabled)
         self.assertEqual(config.tests.nccl.gpu_count, 8)
-        self.assertEqual(config.tests.nccl.ibbw_start_device, 0)
-        self.assertEqual(config.tests.nccl.ibbw_end_device, 13)
+        self.assertIsNone(config.tests.nccl.ibbw_start_device)
+        self.assertIsNone(config.tests.nccl.ibbw_end_device)
         self.assertEqual(config.tests.dltest.iterations, 100)
+        self.assertEqual(config.baseline.nccl_peer_tolerance_pct, 5.0)
+        self.assertEqual(config.baseline.storage_peer_tolerance_pct, 10.0)
+        self.assertEqual(config.baseline.dl_compute_tolerance_pct, 3.0)
+        self.assertEqual(config.baseline.dl_numerical_tolerance_pct, 0.1)
+        self.assertEqual(config.baseline.dl_overlap_tolerance_pct, 20.0)
+        self.assertEqual(
+            [test.id for test in config.tests.registry.tests],
+            ["storage", "nccl", "dltest"],
+        )
+        self.assertEqual(
+            config.tests.registry.require("nccl").config_path,
+            "validation-tests/nccl/test_config.toml",
+        )
         self.assertTrue(str(config.job.template_path).endswith("ymls/specific-node-job.yml"))
+
+    def test_global_test_tables_only_register_and_activate(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        data = tomllib.loads(
+            (repo_root / "config" / "cval.toml").read_text(encoding="utf-8")
+        )
+
+        for test_id in ("storage", "nccl", "dltest"):
+            self.assertEqual(set(data["tests"][test_id]), {"enabled", "config_path"})
+            self.assertEqual(
+                data["tests"][test_id]["config_path"],
+                f"validation-tests/{test_id}/test_config.toml",
+            )
+
+        self.assertFalse(data["storage"]["per_test_ingestion_enabled"])
 
     def test_loads_partial_override_with_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -38,7 +78,6 @@ batch_size = 2
 validation_root = "/tmp/cval"
 
 [tests.dltest]
-iterations = 3
 enabled = false
 """,
                 encoding="utf-8",
@@ -49,7 +88,7 @@ enabled = false
         self.assertEqual(config.cluster.namespace, "staging")
         self.assertEqual(config.scheduling.batch_size, 2)
         self.assertEqual(config.runtime.validation_root, "/tmp/cval")
-        self.assertEqual(config.tests.dltest.iterations, 3)
+        self.assertEqual(config.tests.dltest.iterations, 100)
         self.assertFalse(config.tests.dltest.enabled)
         self.assertTrue(config.tests.storage.enabled)
         self.assertEqual(config.job.git_ref, "main")
@@ -71,10 +110,241 @@ enabled = false
             with self.assertRaisesRegex(ValueError, "At least one test"):
                 load_config(config_path)
 
+    def test_write_activation_gates_require_toml_booleans(self) -> None:
+        for key, value in (
+            ("run_history_enabled", "1"),
+            ("per_test_ingestion_enabled", "2"),
+            ("per_test_ingestion_enabled", '"yes"'),
+            ("per_test_ingestion_enabled", "[1]"),
+        ):
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "cval.toml"
+                config_path.write_text(
+                    f"[storage]\n{key} = {value}\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ValueError, "TOML boolean"):
+                    load_config(config_path)
+
     def test_config_to_dict_is_json_ready(self) -> None:
         data = config_to_dict(load_config())
 
         self.assertIsInstance(data["job"]["template_path"], str)
+        self.assertEqual(
+            data["tests"]["storage"]["config_path"],
+            "validation-tests/storage/test_config.toml",
+        )
+        self.assertTrue(data["tests"]["storage"]["settings"]["install_fio"])
+
+    def test_rejects_test_settings_in_global_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[tests.nccl]
+enabled = true
+iterations = 99
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "move test-specific settings"):
+                load_config(config_path)
+
+    def test_registry_loads_arbitrary_disabled_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_test_descriptor(root, "smoke", order=50)
+
+            registry = load_test_registry(
+                {
+                    "smoke": {
+                        "enabled": False,
+                        "config_path": "validation-tests/smoke/test_config.toml",
+                    }
+                },
+                repo_root=root,
+                include_defaults=False,
+                require_enabled=False,
+            )
+
+        self.assertEqual(len(registry.tests), 1)
+        self.assertEqual(registry.tests[0].id, "smoke")
+        self.assertFalse(registry.tests[0].enabled)
+
+    def test_registry_rejects_config_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaisesRegex(ValueError, "escapes its allowed root"):
+                load_test_registry(
+                    {
+                        "smoke": {
+                            "enabled": False,
+                            "config_path": "../outside/test_config.toml",
+                        }
+                    },
+                    repo_root=root,
+                    include_defaults=False,
+                    require_enabled=False,
+                )
+
+    def test_registry_rejects_missing_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(FileNotFoundError, "config_path file not found"):
+                load_test_registry(
+                    {
+                        "smoke": {
+                            "enabled": False,
+                            "config_path": "validation-tests/smoke/test_config.toml",
+                        }
+                    },
+                    repo_root=Path(tmpdir),
+                    include_defaults=False,
+                    require_enabled=False,
+                )
+
+    def test_registry_rejects_mismatched_test_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_test_descriptor(root, "actual", order=10, directory_id="expected")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                load_test_registry(
+                    {
+                        "expected": {
+                            "enabled": True,
+                            "config_path": "validation-tests/expected/test_config.toml",
+                        }
+                    },
+                    repo_root=root,
+                    include_defaults=False,
+                )
+
+    def test_registry_rejects_duplicate_config_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_test_descriptor(root, "first", order=10)
+            shared = "validation-tests/first/test_config.toml"
+            with self.assertRaisesRegex(ValueError, "use the same config_path"):
+                load_test_registry(
+                    {
+                        "first": {"enabled": True, "config_path": shared},
+                        "second": {"enabled": False, "config_path": shared},
+                    },
+                    repo_root=root,
+                    include_defaults=False,
+                )
+
+    def test_registry_rejects_duplicate_enabled_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_test_descriptor(root, "first", order=10)
+            self._write_test_descriptor(root, "second", order=10)
+            with self.assertRaisesRegex(ValueError, "unique execution order"):
+                load_test_registry(
+                    {
+                        test_id: {
+                            "enabled": True,
+                            "config_path": f"validation-tests/{test_id}/test_config.toml",
+                        }
+                        for test_id in ("first", "second")
+                    },
+                    repo_root=root,
+                    include_defaults=False,
+                )
+
+    def test_registry_rejects_missing_new_test_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "enabled is required"):
+                load_test_registry(
+                    {
+                        "smoke": {
+                            "config_path": "validation-tests/smoke/test_config.toml"
+                        }
+                    },
+                    repo_root=Path(tmpdir),
+                    include_defaults=False,
+                    require_enabled=False,
+                )
+
+    def test_resource_quantity_parser(self) -> None:
+        self.assertEqual(parse_resource_quantity("1500m"), parse_resource_quantity("1.5"))
+        self.assertEqual(parse_resource_quantity("1Gi"), 1024**3)
+        with self.assertRaisesRegex(ValueError, "Invalid Kubernetes resource quantity"):
+            parse_resource_quantity("many")
+
+    def test_config_rejects_shared_gpu_under_provisioning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[job_template]
+gpu_count = "4"
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "does not cover enabled test 'nccl'"):
+                load_config(config_path)
+
+    def test_config_rejects_monitoring_shorter_than_sequential_deadlines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[monitoring]
+timeout_seconds = 3000
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "sequential test timeouts"):
+                load_config(config_path)
+
+    def test_rejects_nonfinite_or_invalid_baseline_controls(self) -> None:
+        variants = (
+            "robust_z_threshold = nan",
+            "dl_degraded_metric_fraction = nan",
+            "dl_degraded_metric_fraction = 1.1",
+            "dl_degraded_severity_pct = inf",
+            "min_samples = 0",
+            "window_days = 0",
+            "build_interval_seconds = 0",
+        )
+        for value in variants:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "cval.toml"
+                config_path.write_text(f"[baseline]\n{value}\n", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_config(config_path)
+
+    @staticmethod
+    def _write_test_descriptor(
+        root: Path,
+        test_id: str,
+        *,
+        order: int,
+        directory_id: str | None = None,
+    ) -> None:
+        directory_id = directory_id or test_id
+        test_dir = root / "validation-tests" / directory_id
+        test_dir.mkdir(parents=True)
+        (test_dir / "setup.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        (test_dir / "run-test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        (test_dir / "test_config.toml").write_text(
+            f"""
+schema_version = "cval.test.v1"
+
+[test]
+id = "{test_id}"
+display_name = "{test_id.title()}"
+order = {order}
+entrypoint = "run-test.sh"
+setup = "setup.sh"
+timeout_seconds = 30
+
+[artifacts]
+results_db_path = "validation_tests/{test_id}/{test_id}_results.db"
+""",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

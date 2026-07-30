@@ -1,0 +1,49 @@
+schema_version = "cval.test.v1"
+
+[test]
+id = "storage"
+display_name = "Storage FIO"
+description = "PVC/NFS storage correctness and performance validation."
+order = 10
+entrypoint = "run-test.sh"
+setup = "setup.sh"
+timeout_seconds = 1800
+continue_on_failure = true
+
+[requirements]
+cpu = "1"
+memory = "1Gi"
+gpu_count = 0
+rdma_count = 0
+shared_memory = "0"
+read_sysfs = false
+
+[settings]
+install_fio = true
+
+[artifacts]
+results_db_path = "validation_tests/storage/storage_results.db"
+health_classes_db_path = "validation_tests/storage/storage_health_classes.db"
+summary_filename = "summary.txt"
+
+[plugin]
+adapter = "plugin.py"
+api_version = "cval.plugin.v1"
+capabilities = ["config", "ingest", "health"]
+
+[health]
+enabled = true
+policy_version = "storage.health.v1"
+strategy = "declarative"
+min_samples = 8
+min_new_results = 10
+target_class_count = 5
+combination_factors = ["image_name", "cuda_version", "pytorch_version"]
+auto_activate = false
+
+[[health.metrics]]
+name = "storage-performance"
+source = "storage_performance"
+direction = "low_bad"
+units = "mixed"
+tolerance_pct = 10.0

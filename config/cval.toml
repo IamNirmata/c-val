@@ -24,13 +24,20 @@ confirmation_phrase = "submit"
 
 [monitoring]
 # A full storage + NCCL + DL validation run takes well over 180s; give watch
-# mode an hour by default before declaring a timeout.
-timeout_seconds = 3600
+# mode enough time for every sequential test deadline plus ingestion grace.
+timeout_seconds = 6000
 poll_interval_seconds = 60
 pending_start_timeout_seconds = 480
 
 [storage]
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
+# U6 production writes remain disabled until backup/dry-run evidence and an
+# exact activation/deployment command receive separate approval.
+run_history_enabled = false
+run_history_db_path = "/data/continuous_validation/metadata/node-run-history.db"
+# U7 canonical per-test DB dual-writes are independently default-off. Enabling
+# them requires the separate backup/dry-run/live-write approval gate.
+per_test_ingestion_enabled = false
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"
 nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
 dl_numerical_db_path = "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
@@ -43,7 +50,7 @@ repo_dir = "/workspace/c-val"
 validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
-dl_results_root_path = "/data/continuous_validation/dltest"
+dl_results_root_path = "/data/continuous_validation/validation_tests/dltest/runs"
 
 # ---------------------------------------------------------------------------
 # Validation phases. Set enabled=false to skip a phase in new validation jobs.
@@ -52,28 +59,15 @@ dl_results_root_path = "/data/continuous_validation/dltest"
 
 [tests.storage]
 enabled = true
-# Install fio in the validation container before running the checked-in profiles.
-install_fio = true
+config_path = "validation-tests/storage/test_config.toml"
 
 [tests.nccl]
 enabled = true
-gpu_count = 8
-iterations = 20
-# This is Gi-elements per rank (BF16 consumes 2 bytes/element).
-data_size_gb = 8
-ibbw_enabled = true
-ibbw_start_device = 0
-ibbw_end_device = 13
-net = "IB"
-p2p_disable = true
-shm_disable = true
-debug = "INFO"
+config_path = "validation-tests/nccl/test_config.toml"
 
 [tests.dltest]
 enabled = true
-gpu_count = 8
-test_plan = "80gb-example"
-iterations = 100
+config_path = "validation-tests/dltest/test_config.toml"
 
 [job_template]
 # Kubernetes resources reserved by the validation pod. Keep gpu_count >= each
@@ -94,30 +88,15 @@ rdma_toleration_key = "rdma"
 gpu_toleration_key = "nvidia.com/gpu"
 
 [baseline]
-# Tolerance values for baseline and peer-comparison classification.
-# Baseline DBs are written here, separate from raw validation metadata.
+# Shared baseline lifecycle and cadence settings. Test-specific tolerances,
+# combination factors, and aggregation settings live in each test_config.toml.
 baseline_root_path = "/data/continuous_validation/baselines"
-# NCCL: compare against peer baseline with 5% tolerance
-nccl_peer_tolerance_pct = 5.0
-# Storage: compare against peer baseline with 10% tolerance
-storage_peer_tolerance_pct = 10.0
-# DL compute/collective tasks: tight baseline (3%)
-dl_compute_tolerance_pct = 3.0
-# DL numerical metrics: almost-exact (0.1%)
-dl_numerical_tolerance_pct = 0.1
-# DL overlap tasks: lenient baseline (20%) due to high variance
-dl_overlap_tolerance_pct = 20.0
 # Robust z-score cutoff for dynamic baselines (Iglewicz & Hoaglin: 3.5)
 robust_z_threshold = 3.5
 # Minimum clean samples before a metric baseline is trusted
 min_samples = 8
 # Rolling window (days) of recent runs used to build a baseline
 window_days = 30
-# DL verdict aggregation. Individual metrics can be outside their robust band,
-# but a node/component is degraded only when severe misses accumulate.
-dl_degraded_metric_fraction = 0.02
-dl_min_degraded_metrics = 10
-dl_degraded_severity_pct = 10.0
 # Background builder loop cadence (daily)
 build_interval_seconds = 86400
 # Background classifier loop cadence

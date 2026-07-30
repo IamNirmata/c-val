@@ -3,6 +3,7 @@
 import sqlite3
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -27,7 +28,7 @@ def _make_storage_db(path: Path, n_rows: int = 14) -> None:
     columns_ddl = ", ".join(f"{column} REAL" for column in STORAGE_METRIC_COLUMNS)
     insert_columns = ", ".join(STORAGE_METRIC_COLUMNS)
     placeholders = ", ".join("?" for _ in STORAGE_METRIC_COLUMNS)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             f"""
             CREATE TABLE storage_performance (
@@ -56,7 +57,7 @@ def _make_storage_db(path: Path, n_rows: int = 14) -> None:
 
 
 def _make_nccl_db(path: Path, n_rows: int = 12) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             """
             CREATE TABLE IB_HEALTH (
@@ -81,7 +82,7 @@ def _make_nccl_db(path: Path, n_rows: int = 12) -> None:
 
 
 def _make_dl_standard_db(path: Path, table: str, rows: list[dict]) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             f"""
             CREATE TABLE {table} (
@@ -412,7 +413,9 @@ class TestBaselineRootStorage(unittest.TestCase):
             count = store_classification_results(verdicts, classified_at=NOW, config=config)
 
             self.assertEqual(count, 2)
-            with sqlite3.connect(default_classification_db_path(config)) as connection:
+            with closing(
+                sqlite3.connect(default_classification_db_path(config))
+            ) as connection:
                 rows = connection.execute(
                     "SELECT node, status, passed FROM classification_results ORDER BY node"
                 ).fetchall()

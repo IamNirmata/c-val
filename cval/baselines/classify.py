@@ -35,9 +35,7 @@ from cval.models import (
     normalize_baseline_test_type,
 )
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
-
-NCCL_COLUMNS = ("busbw", "latency")
-
+from cval.storage.dltest_ingest import validate_dl_metric_generation
 
 def _median_by_column(
     columns: tuple[str, ...], rows: list[tuple[Any, ...]]
@@ -78,6 +76,7 @@ def _node_values_nccl(db_path: str | Path, node: str, window_days: int) -> dict[
 def _node_values_dl(
     db_paths: dict[str, str], node: str, window_days: int, component: str | None = None
 ) -> dict[str, float]:
+    initial_generation = validate_dl_metric_generation(db_paths)
     values: dict[str, float] = {}
     cutoff = _window_cutoff(window_days)
     for table, _direction, _tolerance_attr, keep_rank in _DL_DB_SPECS:
@@ -107,6 +106,9 @@ def _node_values_dl(
         for key, vals in series.items():
             if vals:
                 values[key] = stats.median(vals)
+    final_generation = validate_dl_metric_generation(db_paths)
+    if final_generation != initial_generation:
+        raise RuntimeError("DL metric DB generation changed during classification")
     return values
 
 

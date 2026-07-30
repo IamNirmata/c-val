@@ -49,7 +49,7 @@ The DL test validates layer and collective numerical consistency through output 
 Inspect the NCCL summary JSON:
 
 ```bash
-cat /data/continuous_validation/nccl/<node>/nccl-<node>-<ts>/nccl-summary-<node>-<ts>.json
+cat /data/continuous_validation/validation_tests/nccl/runs/<node>/<node>-<ts>/summary.json
 ```
 
 Important fields:
