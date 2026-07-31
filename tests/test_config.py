@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import tomllib
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from cval.config import config_to_dict, load_config
 from cval.health.models import HealthContext, SourceSnapshot
@@ -47,13 +49,15 @@ class ConfigTests(unittest.TestCase):
             config.runtime.dl_results_root_path,
             "/data/continuous_validation/validation_tests/dltest/runs",
         )
-        self.assertTrue(config.tests.storage.enabled)
-        self.assertTrue(config.tests.nccl.enabled)
-        self.assertTrue(config.tests.dltest.enabled)
-        self.assertEqual(config.tests.nccl.gpu_count, 8)
-        self.assertIsNone(config.tests.nccl.ibbw_start_device)
-        self.assertIsNone(config.tests.nccl.ibbw_end_device)
-        self.assertEqual(config.tests.dltest.iterations, 100)
+        self.assertTrue(config.tests.registry.require("storage").enabled)
+        self.assertTrue(config.tests.registry.require("nccl").enabled)
+        self.assertTrue(config.tests.registry.require("dltest").enabled)
+        nccl_settings = config.tests.registry.require("nccl").definition.settings
+        dltest_settings = config.tests.registry.require("dltest").definition.settings
+        self.assertEqual(nccl_settings["gpu_count"], 8)
+        self.assertIsNone(nccl_settings.get("ibbw_start_device"))
+        self.assertIsNone(nccl_settings.get("ibbw_end_device"))
+        self.assertEqual(dltest_settings["iterations"], 100)
         self.assertEqual(config.baseline.nccl_peer_tolerance_pct, 5.0)
         self.assertEqual(config.baseline.storage_peer_tolerance_pct, 10.0)
         self.assertEqual(config.baseline.dl_compute_tolerance_pct, 3.0)
@@ -109,10 +113,45 @@ enabled = false
         self.assertEqual(config.cluster.namespace, "staging")
         self.assertEqual(config.scheduling.batch_size, 2)
         self.assertEqual(config.runtime.validation_root, "/tmp/cval")
-        self.assertEqual(config.tests.dltest.iterations, 100)
-        self.assertFalse(config.tests.dltest.enabled)
-        self.assertTrue(config.tests.storage.enabled)
+        self.assertEqual(
+            config.tests.registry.require("dltest").definition.settings["iterations"],
+            100,
+        )
+        self.assertFalse(config.tests.registry.require("dltest").enabled)
+        self.assertTrue(config.tests.registry.require("storage").enabled)
         self.assertEqual(config.job.git_ref, "main")
+
+    def test_load_config_runs_plugin_config_validation_for_all_declared_tests(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        for nccl_enabled in (True, False):
+            with self.subTest(nccl_enabled=nccl_enabled), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                shutil.copytree(repository / "validation-tests", root / "validation-tests")
+                descriptor = root / "validation-tests/nccl/test_config.toml"
+                text = descriptor.read_text(encoding="utf-8")
+                self.assertIn("iterations = 20", text)
+                descriptor.write_text(
+                    text.replace("iterations = 20", "iterations = 0", 1),
+                    encoding="utf-8",
+                )
+                config_path = root / "cval.toml"
+                config_path.write_text(
+                    f'''[tests.storage]
+enabled = true
+config_path = "validation-tests/storage/test_config.toml"
+[tests.nccl]
+enabled = {str(nccl_enabled).lower()}
+config_path = "validation-tests/nccl/test_config.toml"
+[tests.dltest]
+enabled = true
+config_path = "validation-tests/dltest/test_config.toml"
+''',
+                    encoding="utf-8",
+                )
+                with patch("cval.config.REPO_ROOT", root), self.assertRaisesRegex(
+                    RuntimeError, "invalid_iterations.*positive integer"
+                ):
+                    load_config(config_path)
 
     def test_rejects_all_tests_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

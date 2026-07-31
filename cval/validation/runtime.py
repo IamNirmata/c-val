@@ -15,6 +15,10 @@ import shlex
 from typing import TYPE_CHECKING
 
 from cval.config import REPO_ROOT, config_to_dict, encode_config_snapshot
+from cval.validation.compatibility import (
+    LEGACY_ENABLE_ENV,
+    LEGACY_RUNTIME_SETTING_DEFAULTS,
+)
 
 if TYPE_CHECKING:
     from cval.config import CvalConfig
@@ -28,11 +32,26 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
 
     from cval.validation.plugins import validate_registry_plugins
 
-    storage = config.tests.storage
-    nccl = config.tests.nccl
-    dltest = config.tests.dltest
     registry = config.tests.registry
     validate_registry_plugins(registry.enabled)
+    storage = registry.get("storage")
+    nccl = registry.get("nccl")
+    dltest = registry.get("dltest")
+    storage_settings = (
+        storage.definition.settings
+        if storage is not None
+        else LEGACY_RUNTIME_SETTING_DEFAULTS["storage"]
+    )
+    nccl_settings = (
+        nccl.definition.settings
+        if nccl is not None
+        else LEGACY_RUNTIME_SETTING_DEFAULTS["nccl"]
+    )
+    dltest_settings = (
+        dltest.definition.settings
+        if dltest is not None
+        else LEGACY_RUNTIME_SETTING_DEFAULTS["dltest"]
+    )
     registrations = {
         test.id: {
             "enabled": test.enabled,
@@ -65,27 +84,29 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         "CVAL_DL_COMPUTE_DB_PATH": config.storage.dl_compute_db_path,
         "CVAL_DL_COLLECTIVE_DB_PATH": config.storage.dl_collective_db_path,
         "CVAL_DL_OVERLAP_DB_PATH": config.storage.dl_overlap_db_path,
-        "RUN_STORAGE": _shell_bool(storage.enabled),
-        "CVAL_STORAGE_INSTALL_FIO": _shell_bool(storage.install_fio),
-        "RUN_NCCL": _shell_bool(nccl.enabled),
-        "CVAL_NCCL_GPU_COUNT": str(nccl.gpu_count),
-        "CVAL_NCCL_ITERATIONS": str(nccl.iterations),
-        "CVAL_NCCL_DATA_SIZE_GB": str(nccl.data_size_gb),
-        "CVAL_IBBW_ENABLED": _shell_bool(nccl.ibbw_enabled),
+        LEGACY_ENABLE_ENV["storage"]: _shell_bool(bool(storage and storage.enabled)),
+        "CVAL_STORAGE_INSTALL_FIO": _shell_bool(bool(storage_settings["install_fio"])),
+        LEGACY_ENABLE_ENV["nccl"]: _shell_bool(bool(nccl and nccl.enabled)),
+        "CVAL_NCCL_GPU_COUNT": str(nccl_settings["gpu_count"]),
+        "CVAL_NCCL_ITERATIONS": str(nccl_settings["iterations"]),
+        "CVAL_NCCL_DATA_SIZE_GB": str(nccl_settings["data_size_gb"]),
+        "CVAL_IBBW_ENABLED": _shell_bool(bool(nccl_settings["ibbw_enabled"])),
         "CVAL_IBBW_START_DEVICE": (
-            "" if nccl.ibbw_start_device is None else str(nccl.ibbw_start_device)
+            "" if nccl_settings.get("ibbw_start_device") is None
+            else str(nccl_settings["ibbw_start_device"])
         ),
         "CVAL_IBBW_END_DEVICE": (
-            "" if nccl.ibbw_end_device is None else str(nccl.ibbw_end_device)
+            "" if nccl_settings.get("ibbw_end_device") is None
+            else str(nccl_settings["ibbw_end_device"])
         ),
-        "CVAL_NCCL_NET": nccl.net,
-        "CVAL_NCCL_P2P_DISABLE": _shell_bool(nccl.p2p_disable),
-        "CVAL_NCCL_SHM_DISABLE": _shell_bool(nccl.shm_disable),
-        "CVAL_NCCL_DEBUG": nccl.debug,
-        "RUN_DLTEST": _shell_bool(dltest.enabled),
-        "CVAL_DL_GPU_COUNT": str(dltest.gpu_count),
-        "CVAL_DL_TEST_PLAN": dltest.test_plan,
-        "CVAL_DL_ITERATIONS": str(dltest.iterations),
+        "CVAL_NCCL_NET": str(nccl_settings["net"]),
+        "CVAL_NCCL_P2P_DISABLE": _shell_bool(bool(nccl_settings["p2p_disable"])),
+        "CVAL_NCCL_SHM_DISABLE": _shell_bool(bool(nccl_settings["shm_disable"])),
+        "CVAL_NCCL_DEBUG": str(nccl_settings["debug"]),
+        LEGACY_ENABLE_ENV["dltest"]: _shell_bool(bool(dltest and dltest.enabled)),
+        "CVAL_DL_GPU_COUNT": str(dltest_settings["gpu_count"]),
+        "CVAL_DL_TEST_PLAN": str(dltest_settings["test_plan"]),
+        "CVAL_DL_ITERATIONS": str(dltest_settings["iterations"]),
     }
     _validate_environment(values)
     return values

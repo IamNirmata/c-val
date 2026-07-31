@@ -27,7 +27,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
         self.assertIn(
-            "{config,tests,nodes,validate,status,history,plan,run,jobs,result,results,"
+            "{config,tests,compatibility,nodes,validate,status,history,plan,run,jobs,result,results,"
             "classifications,health,baseline,overview}",
             help_text,
         )

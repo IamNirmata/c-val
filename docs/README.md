@@ -9,6 +9,7 @@ c-val 2.0 is the safe orchestration layer around the existing c-val GPU cluster 
 - [Workflow](workflow.md): end-to-end logical and process flow with diagrams.
 - [CLI Reference](cli-reference.md): operator commands and expected outputs.
 - [Operations Runbook](operations-runbook.md): safe daily operation and one-node validation flow.
+- [Operator Test Lifecycle](test-lifecycle.md): add/update/disable/remove rules, safe scaffold, compatibility approvals, and rollback.
 - [Result Schema](result-schema.md): structured result JSON and DB ingestion model.
 - [Baselines & Classification](baselines.md): dynamic robust baselines and node classification.
 - [DL Test](dl-test.md): how the deep learning unit test fits into c-val and how to read its output.
@@ -35,6 +36,11 @@ U9 derived writes are also independently default-off: no live health DB,
 evaluator service, automatic activation, migration, or deployment is
 authorized. U9 remains IN PROGRESS pending independent certification; U11 owns
 future live cutover.
+
+U12A safe local work adds a dry-run-first pass/fail test scaffold and an
+immutable compatibility inventory plus bounded explicit-copy audit. Fixed
+compatibility behavior remains intact and removals remain blocked on U11 live
+acceptance and the compatibility period.
 
 ## Repository Shape
 

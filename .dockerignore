@@ -10,12 +10,4 @@
 !deploy/cval-evaluator/wheelhouse/
 !deploy/cval-evaluator/wheelhouse/**
 !validation-tests/
-!validation-tests/storage/
-!validation-tests/storage/test_config.toml
-!validation-tests/storage/plugin.py
-!validation-tests/nccl/
-!validation-tests/nccl/test_config.toml
-!validation-tests/nccl/plugin.py
-!validation-tests/dltest/
-!validation-tests/dltest/test_config.toml
-!validation-tests/dltest/plugin.py
+!validation-tests/**

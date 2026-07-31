@@ -15,6 +15,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from cval.validation.compatibility import (
+    LEGACY_ENABLE_ENV,
+    LEGACY_RESULT_ENV,
+    LEGACY_RESULT_PROJECTION_KEYS,
+    LEGACY_TEST_IDS,
+)
+
 
 VALID_STATUSES = {"pass", "fail", "incomplete"}
 VALID_V2_PHASES = {
@@ -115,17 +122,8 @@ class ValidationResultV2:
 ValidationResultLike = ValidationResult | ValidationResultV2
 
 
-RESULT_ENV_KEYS = {
-    "storage": "GCRRESULT1",
-    "nccl": "GCRRESULT2",
-    "dltest": "GCRRESULT3",
-}
-
-RESULT_ENABLED_ENV_KEYS = {
-    "storage": "RUN_STORAGE",
-    "nccl": "RUN_NCCL",
-    "dltest": "RUN_DLTEST",
-}
+RESULT_ENV_KEYS = LEGACY_RESULT_ENV
+RESULT_ENABLED_ENV_KEYS = LEGACY_ENABLE_ENV
 
 
 def load_validation_result(path: Path) -> ValidationResultLike:
@@ -149,7 +147,7 @@ def parse_validation_result(payload: dict[str, Any]) -> ValidationResult:
         raise ValueError("c-val result payload must contain a tests object")
 
     tests: dict[str, TestResult] = {}
-    for name in ("storage", "nccl", "dltest"):
+    for name in LEGACY_TEST_IDS:
         raw = tests_raw.get(name)
         # All three validation layers are required so aggregate status is meaningful.
         if not isinstance(raw, dict):
@@ -337,30 +335,31 @@ def validation_result_to_env(result: ValidationResultLike) -> dict[str, str]:
             for test_name, env_key in RESULT_ENABLED_ENV_KEYS.items()
         }
     )
-    values["overall_result"] = result.overall
-    values["image_name"] = result.image_name
-    values["pytorch_version"] = result.pytorch_version
-    values["cuda_version"] = result.cuda_version
-    values["result_node"] = result.node
-    values["result_timestamp"] = str(result.timestamp)
-    values["result_run_id"] = (
+    keys = LEGACY_RESULT_PROJECTION_KEYS
+    values[keys["overall"]] = result.overall
+    values[keys["image_name"]] = result.image_name
+    values[keys["pytorch_version"]] = result.pytorch_version
+    values[keys["cuda_version"]] = result.cuda_version
+    values[keys["node"]] = result.node
+    values[keys["timestamp"]] = str(result.timestamp)
+    values[keys["run_id"]] = (
         result.run_id
         if isinstance(result, ValidationResultV2)
         else f"{result.node}-{result.timestamp}"
     )
-    values["result_schema_version"] = result.schema_version
-    values["result_global_config_digest"] = (
+    values[keys["schema_version"]] = result.schema_version
+    values[keys["global_config_digest"]] = (
         result.global_config_digest
         if isinstance(result, ValidationResultV2)
         else ""
     )
-    values["result_digest"] = validation_result_digest(result)
-    values["result_storage_artifacts"] = (
+    values[keys["digest"]] = validation_result_digest(result)
+    values[keys["storage_artifacts"]] = (
         result.tests["storage"].artifacts
         if isinstance(result, ValidationResultV2) and "storage" in result.tests
         else ""
     )
-    values["result_nccl_summary"] = (
+    values[keys["nccl_summary"]] = (
         result.tests["nccl"].summary
         if isinstance(result, ValidationResultV2) and "nccl" in result.tests
         else ""

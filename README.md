@@ -1,5 +1,10 @@
 # c-val
 
+For adding, updating, disabling, or proposing removal of a validation test, use
+the dry-run-first scaffold and approval rules in
+[docs/test-lifecycle.md](docs/test-lifecycle.md). U12A compatibility removals
+remain blocked on U11 live acceptance and the compatibility period.
+
 c-val is a dry-run-first continuous validation framework for GPU clusters. It discovers schedulable free GPU nodes, prioritizes stale or never-tested nodes, renders Volcano validation jobs, gates real submission behind explicit approval, monitors jobs read-only, and ingests deterministic storage, NCCL, and DL test results into SQLite metadata. It also builds robust statistical baselines (median/MAD) from result history, classifies nodes as normal, degraded, or improved, and exports both raw pass/fail status and baseline health verdicts.
 
 ## Why `c-val` and `cval` Both Exist

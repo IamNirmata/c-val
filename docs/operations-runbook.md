@@ -169,6 +169,30 @@ shadow criteria, apply, cutover, and rollback commands are separately reviewed.
 The detailed phase plan, risks, and non-destructive rollback are in
 [U11 evaluator rollout preparation](u11-evaluator-rollout.md).
 
+### U12A test lifecycle and compatibility evidence
+
+Scaffold is dry-run-first and local. It neither edits global config nor creates
+a plugin or health policy. Apply uses exact owner modes, same-parent complete
+tree staging, fsync durability, and atomic no-overwrite publication; a failure
+or race leaves no partial scaffold:
+
+```bash
+python -m cval.cli tests scaffold <id> --order <N> --output json
+python -m cval.cli tests scaffold <id> --order <N> \
+  --apply --confirm scaffold
+```
+
+Keep the printed stanza disabled through review and offline acceptance. Use
+`compatibility inventory` for the source catalog and `compatibility audit` only
+against explicitly copied regular files. Neither command may inspect the live
+cluster/PVC or write state. Audit inputs must have no symlink ancestor, be
+current-user-owned and not group/world writable; FIFO/device and unstable files
+fail, while binary/decoding/unsupported formats are explicitly unscannable.
+Treat `internal-current-protocol` observations as required supervisor/ingestion
+controls, not legacy removal candidates. Every compatibility removal remains
+blocked; do not delete wrappers, readers, DBs, logs, or historical artifacts. Follow
+[Operator Test Lifecycle](test-lifecycle.md).
+
 Build a baseline from recent results, review it, then promote it to active:
 
 ```bash

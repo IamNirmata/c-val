@@ -117,47 +117,9 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
-class StorageTestConfig:
-    """Storage/FIO phase controls."""
-
-    enabled: bool = True
-    install_fio: bool = True
-
-
-@dataclass(frozen=True)
-class NcclTestConfig:
-    """NCCL all-reduce and HCA monitoring controls."""
-
-    enabled: bool = True
-    gpu_count: int = 8
-    iterations: int = 20
-    data_size_gb: int = 8
-    ibbw_enabled: bool = True
-    ibbw_start_device: int | None = None
-    ibbw_end_device: int | None = None
-    net: str = "IB"
-    p2p_disable: bool = True
-    shm_disable: bool = True
-    debug: str = "INFO"
-
-
-@dataclass(frozen=True)
-class DlTestConfig:
-    """Deep-learning unit-test phase controls."""
-
-    enabled: bool = True
-    gpu_count: int = 8
-    test_plan: str = "80gb-example"
-    iterations: int = 100
-
-
-@dataclass(frozen=True)
 class TestsConfig:
-    """Dynamic registry plus compatibility views for current consumers."""
+    """Dynamic repository-local validation test registry."""
 
-    storage: StorageTestConfig = field(default_factory=StorageTestConfig)
-    nccl: NcclTestConfig = field(default_factory=NcclTestConfig)
-    dltest: DlTestConfig = field(default_factory=DlTestConfig)
     registry: ValidationTestRegistry = field(default_factory=ValidationTestRegistry)
 
 
@@ -242,19 +204,23 @@ def default_config() -> CvalConfig:
     return CvalConfig()
 
 
-def load_config(path: Path | str | None = None) -> CvalConfig:
+def load_config(
+    path: Path | str | None = None,
+    *,
+    validate_plugins: bool = True,
+) -> CvalConfig:
     """Load c-val config from TOML, falling back to built-in defaults."""
 
     config_path = _config_path(path)
     if not config_path.exists():
         if path is not None or os.environ.get("CVAL_CONFIG"):
             raise FileNotFoundError(f"c-val config file not found: {config_path}")
-        return _build_config({})
+        return _build_config({}, validate_plugins=validate_plugins)
 
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("c-val config must be a TOML table")
-    return _build_config(data)
+    return _build_config(data, validate_plugins=validate_plugins)
 
 
 def config_to_dict(config: CvalConfig) -> dict[str, Any]:
@@ -378,6 +344,7 @@ def _build_config(
     *,
     repo_root: Path | None = None,
     include_test_defaults: bool = True,
+    validate_plugins: bool = True,
 ) -> CvalConfig:
     defaults = default_config()
     cluster = _section(data, "cluster")
@@ -393,13 +360,7 @@ def _build_config(
         repo_root=repo_root or REPO_ROOT,
         include_defaults=include_test_defaults,
     )
-    storage_registration = test_registry.get("storage")
-    nccl_registration = test_registry.get("nccl")
     dltest_registration = test_registry.get("dltest")
-    storage_test = (
-        storage_registration.definition.settings if storage_registration else {}
-    )
-    nccl_test = nccl_registration.definition.settings if nccl_registration else {}
     dltest = dltest_registration.definition.settings if dltest_registration else {}
     dl_health_aggregation = _section(dict(dltest), "health_aggregation")
     job_template = _section(data, "job_template")
@@ -513,50 +474,7 @@ def _build_config(
                 defaults.runtime.dl_results_root_path,
             ),
         ),
-        tests=TestsConfig(
-            storage=StorageTestConfig(
-                enabled=bool(storage_registration and storage_registration.enabled),
-                install_fio=_bool(
-                    storage_test, "install_fio", defaults.tests.storage.install_fio
-                ),
-            ),
-            nccl=NcclTestConfig(
-                enabled=bool(nccl_registration and nccl_registration.enabled),
-                gpu_count=_int(nccl_test, "gpu_count", defaults.tests.nccl.gpu_count),
-                iterations=_int(nccl_test, "iterations", defaults.tests.nccl.iterations),
-                data_size_gb=_int(
-                    nccl_test, "data_size_gb", defaults.tests.nccl.data_size_gb
-                ),
-                ibbw_enabled=_bool(
-                    nccl_test, "ibbw_enabled", defaults.tests.nccl.ibbw_enabled
-                ),
-                ibbw_start_device=_optional_int_value(
-                    nccl_test,
-                    "ibbw_start_device",
-                    defaults.tests.nccl.ibbw_start_device,
-                ),
-                ibbw_end_device=_optional_int_value(
-                    nccl_test,
-                    "ibbw_end_device",
-                    defaults.tests.nccl.ibbw_end_device,
-                ),
-                net=_str(nccl_test, "net", defaults.tests.nccl.net),
-                p2p_disable=_bool(
-                    nccl_test, "p2p_disable", defaults.tests.nccl.p2p_disable
-                ),
-                shm_disable=_bool(
-                    nccl_test, "shm_disable", defaults.tests.nccl.shm_disable
-                ),
-                debug=_str(nccl_test, "debug", defaults.tests.nccl.debug),
-            ),
-            dltest=DlTestConfig(
-                enabled=bool(dltest_registration and dltest_registration.enabled),
-                gpu_count=_int(dltest, "gpu_count", defaults.tests.dltest.gpu_count),
-                test_plan=_str(dltest, "test_plan", defaults.tests.dltest.test_plan),
-                iterations=_int(dltest, "iterations", defaults.tests.dltest.iterations),
-            ),
-            registry=test_registry,
-        ),
+        tests=TestsConfig(registry=test_registry),
         job_template=JobTemplateConfig(
             namespace=_str(job_template, "namespace", defaults.job_template.namespace),
             queue=_str(job_template, "queue", defaults.job_template.queue),
@@ -717,11 +635,11 @@ def _build_config(
             ),
         ),
     )
-    _validate_config(config)
+    _validate_config(config, validate_plugins=validate_plugins)
     return config
 
 
-def _validate_config(config: CvalConfig) -> None:
+def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> None:
     """Reject invalid test settings before rendering or submitting jobs."""
 
     tests = config.tests
@@ -730,25 +648,6 @@ def _validate_config(config: CvalConfig) -> None:
     # Reject reserved/colliding operator-facing names during config loading,
     # before argparse or a background loop can observe an ambiguous catalog.
     build_operational_target_catalog(tests.registry)
-    if tests.nccl.gpu_count <= 0 or tests.dltest.gpu_count <= 0:
-        raise ValueError("NCCL and DL GPU counts must be positive")
-    if tests.nccl.iterations <= 0 or tests.dltest.iterations <= 0:
-        raise ValueError("NCCL and DL iterations must be positive")
-    if tests.nccl.data_size_gb <= 0:
-        raise ValueError("NCCL data_size_gb must be positive")
-    start_device = tests.nccl.ibbw_start_device
-    end_device = tests.nccl.ibbw_end_device
-    if (start_device is None) != (end_device is None):
-        raise ValueError("NCCL IBBW device override requires both start and end")
-    if start_device is not None and end_device is not None:
-        if start_device < 0:
-            raise ValueError("NCCL ibbw_start_device must be non-negative")
-        if end_device < start_device:
-            raise ValueError("NCCL ibbw_end_device must be >= ibbw_start_device")
-    if not tests.nccl.net.strip() or not tests.nccl.debug.strip():
-        raise ValueError("NCCL net and debug values must not be empty")
-    if not tests.dltest.test_plan.strip():
-        raise ValueError("DL test_plan must not be empty")
     baseline = config.baseline
     non_negative_values = {
         "nccl_peer_tolerance_pct": baseline.nccl_peer_tolerance_pct,
@@ -846,6 +745,14 @@ def _validate_config(config: CvalConfig) -> None:
             "timeouts plus 300 seconds of ingestion grace"
         )
 
+    # Import lazily to avoid the plugins module's TYPE_CHECKING-only config
+    # dependency becoming a runtime cycle. Validate disabled declarations too:
+    # enabling a test must never reveal a previously hidden invalid adapter.
+    if validate_plugins:
+        from cval.validation.plugins import validate_registry_plugins
+
+        validate_registry_plugins(tests.registry.tests)
+
 
 def _section(data: Mapping[str, Any], name: str) -> dict[str, Any]:
     value = data.get(name, {})
@@ -877,19 +784,6 @@ def _int(section: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
-def _optional_int_value(
-    section: Mapping[str, Any],
-    key: str,
-    default: int | None,
-) -> int | None:
-    value = section.get(key, default)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{key} must be an integer")
-    return value
-
-
 def _float(section: dict[str, Any], key: str, default: float) -> float:
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -898,15 +792,6 @@ def _float(section: dict[str, Any], key: str, default: float) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{key} must be finite")
     return result
-
-
-def _bool(section: dict[str, Any], key: str, default: bool) -> bool:
-    value = section.get(key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 def _strict_config_bool(

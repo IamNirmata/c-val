@@ -335,18 +335,19 @@ valid_status "$overall_result" || {
 }
 if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
         expected_job_log_dir="$CVAL_VALIDATION_ROOT/logs/job_logs/$GCRNODE/$CVAL_RUN_ID"
-        if [[ "$CVAL_JOB_LOG_DIR" != "$expected_job_log_dir" || \
-                    "$CVAL_RESULT_JSON_FILE" != "$expected_job_log_dir/result.json" ]]; then
+    canonical_job_log_dir="${CVAL_CANONICAL_JOB_LOG_DIR:-$CVAL_JOB_LOG_DIR}"
+    if [[ "$canonical_job_log_dir" != "$expected_job_log_dir" || \
+            "${CVAL_CANONICAL_RESULT_JSON_FILE:-$canonical_job_log_dir/result.json}" != "$expected_job_log_dir/result.json" ]]; then
                 echo "Runtime global evidence paths do not match the canonical v2 run" >&2
                 exit 1
         fi
         if [[ -n "$result_storage_artifacts" && \
-                    "$STORAGE_OUTPUT_DIR" != "$result_storage_artifacts" ]]; then
+            "${CVAL_CANONICAL_STORAGE_OUTPUT_DIR:-$STORAGE_OUTPUT_DIR}" != "$result_storage_artifacts" ]]; then
                 echo "STORAGE_OUTPUT_DIR does not match the validated v2 result" >&2
                 exit 1
         fi
         if [[ -n "$result_nccl_summary" && \
-                    "${NCCL_SUMMARY_FILE:-}" != "$result_nccl_summary" ]]; then
+            "${CVAL_CANONICAL_NCCL_SUMMARY_FILE:-${NCCL_SUMMARY_FILE:-}}" != "$result_nccl_summary" ]]; then
                 echo "NCCL_SUMMARY_FILE does not match the validated v2 result" >&2
                 exit 1
         fi

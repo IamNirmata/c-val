@@ -56,6 +56,8 @@ flowchart TB
 | `cval.jobs.monitor` | Read-only job phase polling and timeout classification. |
 | `cval.validation.results` | Parse and validate structured result JSON. |
 | `cval.validation.registry` | Compose and validate explicit repository-local test descriptors. |
+| `cval.validation.scaffold` | Dry-run-first, no-overwrite creation of disabled pass/fail-only test templates. |
+| `cval.validation.compatibility` | Immutable legacy registrations, env/result projection, markers, aliases, separately classified current supervisor/ingestion protocol names, surface inventory, and bounded copied-input audit. |
 | `cval.validation.operational_targets` | Build the immutable enabled/capability-derived compatibility target catalog and central DL alias overlay. |
 | `cval.validation.operations` | Re-resolve targets and dispatch compatibility baseline/classification/export hooks with strict return contracts. |
 | `cval.validation.runtime` | Build the generic registry/config runtime context and compatibility payload. |
@@ -160,6 +162,31 @@ blocked on live U7/PVC ownership facts, an approved image digest, backup/restore
 evidence, Kubernetes facts, shadow acceptance, and explicit apply/cutover
 approval.
 
+U12A removes fixed test configuration views and makes targeted raw reporting
+registry ordered and classification capability driven. Compatibility behavior
+is retained. The evaluator builder assembles descriptors and declared adapters
+from a no-follow, identity-checked copy of the global registry instead of
+listing built-ins in the Dockerfile. It validates the full plugin API/config
+contract before destination mutation and atomically publishes one staged
+catalog tree without overwrite.
+Removal remains blocked on U11 live acceptance and the compatibility period.
+The U12 inventory does not misclassify descriptor-anchored supervisor controls
+or canonical ingestion path guards as legacy cleanup candidates: they are
+reported separately as `internal-current-protocol`. Token scanning treats path
+separators as boundaries while rejecting names embedded in larger identifiers.
+
+Validation-job startup is descriptor anchored. After the pinned checkout and
+runtime-payload decode, one Python supervisor opens the absolute validation root
+component by component with `O_NOFOLLOW|O_DIRECTORY`, creates global and
+enabled-test run descendants with `mkdirat`/`openat`, applies exact `0700`
+run-directory and `0600` evidence-file modes, and retains every final directory
+descriptor. The generic runner and compatibility ingestion receive
+`/proc/self/fd/<fd>` paths and inherited descriptors; the shell template does
+not reopen PVC paths with `mkdir`, redirection, or `tee`. The supervisor owns
+global logging, child process groups, signal forwarding, atomic `.run-active`
+reservation, and root-to-final identity revalidation between stages. Result
+JSON continues to expose the unchanged canonical `/data/...` paths.
+
 The four `metadata/dltest_*` DBs hold raw tall DL metric rows. The
 `baselines/*-baselines.db` files hold versioned dynamic baselines. The
 `baselines/classification-results.db` file holds derived baseline decisions; raw
@@ -179,7 +206,8 @@ after checking out the pinned Git ref.
 ## Design Boundary
 
 The orchestrator answers: what should run, where, and how safely. The top-level
-in-pod runner owns phase order, aggregate state, and stable progress markers;
+in-pod supervisor owns secure path reservation and process lifetime, while the
+generic runner owns phase order, aggregate state, and stable progress markers;
 each registered test directory owns its `setup.sh`, canonical `run-test.sh`,
 documentation, settings, and workload assets. Compatibility wrappers preserve
 the old storage/NCCL/DL paths for pinned jobs. This boundary keeps the agent

@@ -4,6 +4,9 @@
 > `cval.results.v2` under the canonical global job-log directory. This v1
 > reader remains supported for historical artifacts and pinned old jobs. See
 > [Structured Result Schema v2](result-schema-v2.md).
+> The generic v2 runner also writes a separate fixed `result.env` compatibility
+> projection for current storage/NCCL/DL ingestion consumers. Those
+> `GCRRESULT*`/`RUN_*` fields are not members of the dynamic v2 JSON schema.
 
 c-val 2.0 historically wrote one structured result JSON per node validation run.
 

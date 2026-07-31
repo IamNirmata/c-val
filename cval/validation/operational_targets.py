@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from cval.validation.compatibility import COMPATIBILITY_ALIAS_ROWS
 from cval.validation.registry import TEST_ID_PATTERN, ValidationTestRegistry
 
 BASELINE_BUILD = "baseline-build"
@@ -50,22 +51,15 @@ RESERVED_TARGET_NAMES = frozenset({"all", "overall"})
 
 # owner, alias, component, refresh group.  Keep this as the one compatibility
 # overlay; models, exporters, the CLI, and loops must not maintain copies.
-_COMPATIBILITY_ALIAS_ROWS = (
-    ("dltest", "dltest-numerical", "numerical_correctness", "dltest"),
-    ("dltest", "dltest-compute", "compute_performance", "dltest"),
-    ("dltest", "dltest-collective", "collective_performance", "dltest"),
-    ("dltest", "dltest-overlap", "overlap_performance", "dltest"),
-)
-
 COMPATIBILITY_TARGET_ALIASES = MappingProxyType(
-    {alias: owner for owner, alias, _component, _refresh in _COMPATIBILITY_ALIAS_ROWS}
+    {alias: owner for owner, alias, _component, _refresh in COMPATIBILITY_ALIAS_ROWS}
 )
 DL_COMPONENT_TEST_TYPES = MappingProxyType(
     {
         "dltest": None,
         **{
             alias: component
-            for owner, alias, component, _refresh in _COMPATIBILITY_ALIAS_ROWS
+            for owner, alias, component, _refresh in COMPATIBILITY_ALIAS_ROWS
             if owner == "dltest"
         },
     }
@@ -173,7 +167,7 @@ def build_operational_target_catalog(
             + ", ".join(reserved)
         )
 
-    alias_names = {alias for _owner, alias, _component, _refresh in _COMPATIBILITY_ALIAS_ROWS}
+    alias_names = {alias for _owner, alias, _component, _refresh in COMPATIBILITY_ALIAS_ROWS}
     alias_collisions = sorted(set(registered_names) & alias_names)
     if alias_collisions:
         raise ValueError(
@@ -206,7 +200,7 @@ def build_operational_target_catalog(
         )
         targets.append(canonical)
 
-        for owner, alias, component, alias_refresh_group in _COMPATIBILITY_ALIAS_ROWS:
+        for owner, alias, component, alias_refresh_group in COMPATIBILITY_ALIAS_ROWS:
             if owner != registered.id:
                 continue
             alias_operations = operations & _ALIAS_OPERATIONS

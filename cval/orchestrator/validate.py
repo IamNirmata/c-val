@@ -32,20 +32,26 @@ from cval.k8s.discovery import NodeStatus, describe_node
 from cval.models import PlannedJob, QueueCandidate, WorkflowPlan
 from cval.policy import ExecutionPolicy
 from cval.storage.status import get_latest_status_rows, resolve_status_pod
+from cval.validation.compatibility import (
+    LEGACY_DB_UPDATE_DONE_MARKER,
+    LEGACY_DONE_MARKERS,
+    LEGACY_FINAL_RESULT_PREFIX,
+    LEGACY_RUNNING_MARKERS,
+    LEGACY_SKIPPED_MARKERS,
+    LEGACY_TEST_IDS,
+)
+from cval.validation.operational_targets import (
+    BASELINE_CLASSIFY,
+    build_operational_target_catalog,
+)
 
 # In-pod run-test.sh log markers that signal each phase finished.
-_TEST_DONE_MARKERS = {
-    "storage": ("Storage test is complete.", "Storage test FAILED."),
-    "nccl": ("NCCL test is complete.", "NCCL test FAILED."),
-}
-_DLTEST_RUNNING_MARKER = "Running DL Test..."
-_DB_UPDATE_DONE_MARKER = "Main DB update completed."
 _FINAL_RESULT_RE = re.compile(
-    r"Final c-val test results:\s*storage=(\w+)\s+nccl=(\w+)\s+dltest=(\w+)"
+    re.escape(LEGACY_FINAL_RESULT_PREFIX)
+    + "".join(rf"\s*{re.escape(test_id)}=(\w+)" for test_id in LEGACY_TEST_IDS)
 )
 _CVAL_EVENT_RE = re.compile(r"^CVAL_EVENT\s+(\{.*\})$", re.MULTILINE)
 
-REPORT_TEST_TYPES = ("storage", "nccl", "dltest")
 SUCCESS_PHASES = frozenset({"Completed", "Succeeded"})
 
 
@@ -65,20 +71,28 @@ def parse_test_progress(log_text: str) -> dict[str, str]:
     if not log_text:
         return progress
 
-    for test, (done_marker, fail_marker) in _TEST_DONE_MARKERS.items():
+    for test, (done_marker, fail_marker) in LEGACY_DONE_MARKERS.items():
         if done_marker in log_text:
             progress[test] = "pass"
         elif fail_marker in log_text:
             progress[test] = "fail"
 
-    if _DLTEST_RUNNING_MARKER in log_text and "dltest" not in progress:
-        progress["dltest"] = "running"
+    for test, running_marker in LEGACY_RUNNING_MARKERS.items():
+        if running_marker in log_text and test not in progress:
+            progress[test] = "running"
+
+    for test, skipped_marker in LEGACY_SKIPPED_MARKERS.items():
+        if skipped_marker in log_text:
+            progress[test] = "incomplete"
 
     match = _FINAL_RESULT_RE.search(log_text)
     if match:
-        progress["storage"] = _normalize_result(match.group(1))
-        progress["nccl"] = _normalize_result(match.group(2))
-        progress["dltest"] = _normalize_result(match.group(3))
+        progress.update(
+            {
+                test_id: _normalize_result(value)
+                for test_id, value in zip(LEGACY_TEST_IDS, match.groups(), strict=True)
+            }
+        )
 
     for event in _structured_progress_events(log_text):
         test = event.get("test")
@@ -102,6 +116,9 @@ def raw_results_from_log(
     """Extract per-test results and aggregate across enabled phases."""
 
     results: dict[str, str] = {}
+    for test, skipped_marker in LEGACY_SKIPPED_MARKERS.items():
+        if skipped_marker in (log_text or ""):
+            results[test] = "incomplete"
     for event in _structured_progress_events(log_text or ""):
         test = event.get("test")
         event_name = event.get("event")
@@ -120,14 +137,13 @@ def raw_results_from_log(
     if match:
         results.update(
             {
-                "storage": _normalize_result(match.group(1)),
-                "nccl": _normalize_result(match.group(2)),
-                "dltest": _normalize_result(match.group(3)),
+                test_id: _normalize_result(value)
+                for test_id, value in zip(LEGACY_TEST_IDS, match.groups(), strict=True)
             }
         )
     if not results:
         return {}
-    enabled = enabled_tests if enabled_tests is not None else set(REPORT_TEST_TYPES)
+    enabled = enabled_tests if enabled_tests is not None else set(LEGACY_TEST_IDS)
     if "all" in results:
         return results
     if not enabled:
@@ -163,7 +179,7 @@ def log_signals_db_updated(log_text: str) -> bool:
     ]
     if ingestion_events:
         return ingestion_events[-1].get("status") == "pass"
-    return bool(log_text) and _DB_UPDATE_DONE_MARKER in log_text
+    return bool(log_text) and LEGACY_DB_UPDATE_DONE_MARKER in log_text
 
 
 def render_test_progress_line(
@@ -220,11 +236,19 @@ def build_validation_report(
     ingestion_complete: bool = True,
     fresh_status_complete: bool = True,
     notes: list[str] | None = None,
+    test_ids: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Assemble the structured single-node validation report."""
 
+    report_tests = tuple(
+        test_ids
+        if test_ids is not None
+        else dict.fromkeys(
+            [test for test in raw_results if test != "all"] + list(verdicts)
+        )
+    )
     classification: dict[str, Any] = {}
-    for test in REPORT_TEST_TYPES:
+    for test in report_tests:
         verdict = verdicts.get(test)
         if verdict is None:
             classification[test] = {
@@ -249,7 +273,7 @@ def build_validation_report(
 
     raw_overall = raw_results.get("all")
     if not raw_overall:
-        phase_tests = [raw_results.get(t) for t in REPORT_TEST_TYPES]
+        phase_tests = [raw_results.get(t) for t in report_tests]
         if phase_tests and all(v == "pass" for v in phase_tests):
             raw_overall = "pass"
         elif any(v == "fail" for v in phase_tests):
@@ -257,7 +281,7 @@ def build_validation_report(
         else:
             raw_overall = "unknown"
 
-    statuses = [classification[t]["status"] for t in REPORT_TEST_TYPES]
+    statuses = [classification[t]["status"] for t in report_tests]
     if "degraded" in statuses:
         health = "degraded"
     elif "improved" in statuses:
@@ -286,6 +310,7 @@ def build_validation_report(
         "fresh_status_complete": fresh_status_complete,
         "schedulability": schedulability,
         "raw_results": raw_results,
+        "test_order": list(report_tests),
         "raw_overall": raw_overall,
         "health": health,
         "classification": classification,
@@ -334,7 +359,10 @@ def render_validation_report(report: dict[str, Any]) -> str:
     lines.append(f"{'TEST':<10} {'RAW':<8} {'VERDICT':<10} {'BAD':>5} {'BAD%':>7} {'WORST':>9}")
     raw = report.get("raw_results", {})
     classification = report.get("classification", {})
-    for test in REPORT_TEST_TYPES:
+    report_tests = report.get("test_order") or [
+        test for test in raw if test != "all"
+    ]
+    for test in report_tests:
         verdict = classification.get(test, {})
         lines.append(
             f"{test:<10} {raw.get(test, '-'):<8} {verdict.get('status', 'unknown'):<10} "
@@ -364,7 +392,7 @@ def render_validation_report(report: dict[str, Any]) -> str:
 
     # Degraded metric detail per test.
     any_degraded = False
-    for test in REPORT_TEST_TYPES:
+    for test in report_tests:
         degraded = (classification.get(test, {}) or {}).get("degraded_metrics", [])
         if not degraded:
             continue
@@ -680,6 +708,13 @@ def run_node_validation(
     notes: list[str] = []
     enabled_test_order = [test.id for test in config.tests.registry.enabled]
     enabled_tests = set(enabled_test_order)
+    classification_test_order = [
+        target.name
+        for target in build_operational_target_catalog(
+            config.tests.registry
+        ).for_operation(BASELINE_CLASSIFY)
+        if not target.alias
+    ]
     disabled_tests = [
         test.id for test in config.tests.registry.tests if not test.enabled
     ]
@@ -737,7 +772,8 @@ def run_node_validation(
             job_phase="DryRun",
             schedulability=schedulability,
             raw_results={},
-            verdicts={t: None for t in REPORT_TEST_TYPES},
+            verdicts={test: None for test in enabled_test_order},
+            test_ids=enabled_test_order,
             dry_run=True,
             notes=notes,
         )
@@ -854,10 +890,12 @@ def run_node_validation(
     except Exception as exc:  # noqa: BLE001
         notes.append(f"could not read validation.db status: {_first_line(str(exc))}")
 
-    verdicts: dict[str, dict[str, Any] | None] = {t: None for t in REPORT_TEST_TYPES}
+    verdicts: dict[str, dict[str, Any] | None] = {
+        test: None for test in enabled_test_order
+    }
 
     # 6. Classify only a successful, fully ingested run with fresh DB rows.
-    compatibility_status_tests = enabled_tests & {"storage", "nccl", "dltest"}
+    compatibility_status_tests = enabled_tests & set(LEGACY_TEST_IDS)
     required_fresh_tests = compatibility_status_tests | {"all"}
     fresh_rows_complete = required_fresh_tests.issubset(fresh_status_tests)
     fresh_rows_match = all(
@@ -877,13 +915,14 @@ def run_node_validation(
             repo, pod_config = _pod_repo_paths(pod_repo_dir, pod_config_path)
             emit(f"classifying results on PVC pod {pvc_pod} ...")
 
-            dl_refresh_ok = not config.tests.dltest.enabled
+            dltest_enabled = config.tests.registry.require("dltest").enabled
+            dl_refresh_ok = not dltest_enabled
             dl_lock_file = (
                 f"{config.baseline.baseline_root_path.rstrip('/')}/"
                 ".dl-metric-refresh.lock"
             )
             if (
-                config.tests.dltest.enabled
+                dltest_enabled
                 and raw_results.get("dltest") == "pass"
                 and "dltest" in fresh_status_tests
                 and not skip_dl_rebuild
@@ -932,10 +971,10 @@ def run_node_validation(
                     note = "DL metric refresh did not confirm this exact run; DL classification skipped"
                     notes.append(note)
                     emit(f"  {note}")
-            elif config.tests.dltest.enabled and skip_dl_rebuild:
+            elif dltest_enabled and skip_dl_rebuild:
                 notes.append("DL metric refresh explicitly skipped; DL classification skipped")
 
-            for test in REPORT_TEST_TYPES:
+            for test in classification_test_order:
                 if test not in enabled_tests:
                     emit(f"  skipping {test} classification (test disabled) ...")
                     continue
@@ -994,6 +1033,7 @@ def run_node_validation(
         schedulability=schedulability,
         raw_results=raw_results,
         verdicts=verdicts,
+        test_ids=enabled_test_order,
         interrupted=interrupted,
         ingestion_complete=ingestion_complete,
         fresh_status_complete=fresh_rows_complete and fresh_rows_match,

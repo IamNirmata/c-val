@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.config import load_config
+from cval.config import StorageConfig
 from cval.storage.paths import safe_writable_file_path
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
@@ -27,10 +27,10 @@ from cval.storage.write_provenance import (
 )
 
 VALID_STATUSES = {"pass", "fail", "incomplete"}
-_CONFIG = load_config()
-DEFAULT_VALIDATION_DB_PATH = _CONFIG.storage.validation_db_path
-DEFAULT_STORAGE_DB_PATH = _CONFIG.storage.storage_db_path
-DEFAULT_NCCL_DB_PATH = _CONFIG.storage.nccl_db_path
+_STORAGE_DEFAULTS = StorageConfig()
+DEFAULT_VALIDATION_DB_PATH = _STORAGE_DEFAULTS.validation_db_path
+DEFAULT_STORAGE_DB_PATH = _STORAGE_DEFAULTS.storage_db_path
+DEFAULT_NCCL_DB_PATH = _STORAGE_DEFAULTS.nccl_db_path
 
 NCCL_HEALTH_TABLE = "IB_HEALTH"
 NCCL_IB_PORT_COLUMNS = tuple(f"mlx5_{index}" for index in range(14))
@@ -642,7 +642,9 @@ def add_validation_run_results(
 ) -> int:
     """Atomically append the current fixed compatibility rows for one run."""
 
-    required_tests = ("storage", "nccl", "dltest", "all")
+    from cval.validation.compatibility import LEGACY_STATUS_TEST_IDS
+
+    required_tests = LEGACY_STATUS_TEST_IDS
     if set(results) != set(required_tests):
         raise ValueError(
             "results must contain exactly storage, nccl, dltest, and all"

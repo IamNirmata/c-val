@@ -1079,13 +1079,7 @@ capabilities = ["ingest"]
                     nccl_db_path=str(root / "metadata/test-nccl.db"),
                 ),
                 runtime=replace(base.runtime, validation_root=str(root)),
-                tests=replace(
-                    base.tests,
-                    storage=replace(base.tests.storage, enabled=False),
-                    nccl=replace(base.tests.nccl, enabled=False),
-                    dltest=replace(base.tests.dltest, enabled=False),
-                    registry=registry,
-                ),
+                tests=replace(base.tests, registry=registry),
             )
             registered = registry.require("smoke")
             state = test_result("smoke", order=40)

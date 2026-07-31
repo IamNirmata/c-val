@@ -334,11 +334,11 @@ enabled = true
         self.assertNotIn("test-dltest-", template)
         self.assertIn("runtime-environment-b64-placeholder", template)
         self.assertIn("set -euo pipefail", template)
-        self.assertIn("CVAL_RUN_MARKER_PREACQUIRED=true", template)
-        self.assertIn("CVAL_EXTERNAL_GLOBAL_LOGGING=true", template)
-        self.assertIn("set -o noclobber", template)
-        self.assertIn('tee -a "$CVAL_JOB_LOG_DIR/stdout.log"', template)
-        self.assertIn('tee -a "$CVAL_JOB_LOG_DIR/stderr.log"', template)
+        self.assertIn("cval.validation.supervisor", template)
+        self.assertNotIn("cval.validation.path_preflight", template)
+        self.assertNotIn("mkdir -p", template)
+        self.assertNotIn("tee -a", template)
+        self.assertNotIn("set -o noclobber", template)
         for environment_name in (
             "RUN_STORAGE",
             "RUN_NCCL",

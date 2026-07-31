@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import stat
 import sys
 import threading
 import time
@@ -17,6 +18,17 @@ from typing import Any, Mapping, TextIO
 from zoneinfo import ZoneInfo
 
 from cval.config import CvalConfig, REPO_ROOT, load_config, load_config_snapshot
+from cval.validation.compatibility import (
+    LEGACY_DONE_MARKERS,
+    LEGACY_ENABLE_ENV,
+    LEGACY_FINAL_RESULT_PREFIX,
+    LEGACY_RESULT_ENV,
+    LEGACY_RESULT_PROJECTION_KEYS,
+    LEGACY_RUNNING_MARKERS,
+    LEGACY_SKIPPED_MARKERS,
+    LEGACY_TEST_EVIDENCE_ENV,
+    LEGACY_TEST_IDS,
+)
 from cval.validation.execution import RunLogger, RunPaths, TestPaths, utc_now
 from cval.validation.registry import (
     RegisteredValidationTest,
@@ -32,16 +44,6 @@ LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 TEST_RESULT_SCHEMA_VERSION = "cval.test-result.v1"
 DIGEST_PREFIX = "sha256:"
 PATH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
-LEGACY_ENABLE_ENV = {
-    "storage": "RUN_STORAGE",
-    "nccl": "RUN_NCCL",
-    "dltest": "RUN_DLTEST",
-}
-LEGACY_RESULT_ENV = {
-    "storage": "GCRRESULT1",
-    "nccl": "GCRRESULT2",
-    "dltest": "GCRRESULT3",
-}
 
 
 def run_validation_tests(
@@ -83,13 +85,19 @@ def run_validation_tests(
     marker_preacquired = _is_enabled(
         runtime_env.get("CVAL_RUN_MARKER_PREACQUIRED", "false")
     )
-    run_paths = _run_paths(validation_root, node, run_id)
-    _preflight_registry_paths(
-        validation_root,
-        node,
-        run_id,
-        registry,
+    secure_layout = _load_secure_layout(runtime_env, validation_root, registry)
+    run_paths = (
+        _secure_run_paths(secure_layout)
+        if secure_layout is not None
+        else _run_paths(validation_root, node, run_id)
     )
+    if secure_layout is None:
+        _preflight_registry_paths(
+            validation_root,
+            node,
+            run_id,
+            registry,
+        )
     runtime_env.update(
         {
             "CVAL_JOB_LOG_DIR": str(run_paths.log_dir),
@@ -101,6 +109,7 @@ def run_validation_tests(
         run_paths,
         allow_external_logs=external_logging,
         marker_preacquired=marker_preacquired,
+        secure_precreated=secure_layout is not None,
     )
     logger = RunLogger(
         run_paths,
@@ -108,6 +117,7 @@ def run_validation_tests(
         stdout=stdout,
         stderr=stderr,
         write_global_files=not external_logging,
+        pass_fds=_secure_pass_fds(runtime_env),
     )
     result = _initial_result(
         config=config,
@@ -137,6 +147,7 @@ def run_validation_tests(
             run_paths=run_paths,
             logger=logger,
             runtime_env=runtime_env,
+            secure_layout=secure_layout,
         )
     except KeyboardInterrupt:
         logger.emit(
@@ -189,6 +200,7 @@ def _execute_registry(
     run_paths: RunPaths,
     logger: RunLogger,
     runtime_env: dict[str, str],
+    secure_layout: Mapping[str, Any] | None,
 ) -> None:
     for registered_test in registry.tests:
         if not registered_test.enabled:
@@ -198,16 +210,16 @@ def _execute_registry(
                 status="incomplete",
                 message="disabled by config",
             )
-            compatibility_skip = {
-                "storage": "Storage test SKIPPED (disabled by config).",
-                "nccl": "NCCL test SKIPPED (disabled by config).",
-                "dltest": "DL Test SKIPPED (disabled by config).",
-            }.get(registered_test.id)
+            compatibility_skip = LEGACY_SKIPPED_MARKERS.get(registered_test.id)
             if compatibility_skip:
                 logger.message(compatibility_skip)
             continue
-        test_paths = _test_paths(validation_root, node, run_id, registered_test)
-        _prepare_test_paths(test_paths)
+        test_paths = (
+            _secure_test_paths(secure_layout, registered_test)
+            if secure_layout is not None
+            else _test_paths(validation_root, node, run_id, registered_test)
+        )
+        _prepare_test_paths(test_paths, secure_precreated=secure_layout is not None)
         _run_one_test(
             registered_test,
             test_paths=test_paths,
@@ -266,12 +278,6 @@ def _run_one_test(
         {
             "phase": "setup",
             "started_at": utc_now(),
-            "stdout": str(test_paths.stdout),
-            "stderr": str(test_paths.stderr),
-            "log": str(test_paths.events),
-            "summary": str(test_paths.summary),
-            "result": str(test_paths.result),
-            "artifacts": str(test_paths.artifacts),
         }
     )
     _write_state(result, run_paths)
@@ -342,8 +348,9 @@ def _run_one_test(
             test_paths=test_paths,
             status="incomplete",
         )
-        if test_id == "dltest":
-            logger.message("Running DL Test...", test_paths=test_paths)
+        running_marker = LEGACY_RUNNING_MARKERS.get(test_id)
+        if running_marker:
+            logger.message(running_marker, test_paths=test_paths)
         entrypoint = (
             registered_test.test_dir / registered_test.definition.metadata.entrypoint
         )
@@ -651,31 +658,18 @@ def _test_environment(
             "CVAL_TEST_SUMMARY_FILE": str(test_paths.summary),
         }
     )
-    if registered_test.id == "storage":
-        environment.update(
-            {
-                "STORAGE_OUTPUT_DIR": str(test_paths.artifacts),
-                "STORAGE_LOG_FILE": str(test_paths.stdout),
-                "STORAGE_SUMMARY_FILE": str(test_paths.summary),
-            }
+    aliases = LEGACY_TEST_EVIDENCE_ENV.get(registered_test.id)
+    if aliases is not None:
+        environment[aliases["artifacts"]] = str(test_paths.artifacts)
+        environment[aliases["summary"]] = str(test_paths.summary)
+        environment[aliases["log"]] = str(
+            test_paths.stdout
+            if registered_test.id == "storage"
+            else test_paths.workload_log
         )
-    elif registered_test.id == "nccl":
-        environment.update(
-            {
-                "NCCL_OUTPUT_DIR": str(test_paths.artifacts),
-                "NCCL_LOG_FILE": str(test_paths.workload_log),
-                "NCCL_SUMMARY_FILE": str(test_paths.summary),
-                "NCCL_IBBW_LOG_FILE": str(test_paths.artifacts / "ibbw.log"),
-            }
-        )
-    elif registered_test.id == "dltest":
-        environment.update(
-            {
-                "DLTEST_OUTPUT_DIR": str(test_paths.artifacts),
-                "DLTEST_LOG_FILE": str(test_paths.workload_log),
-                "DLTEST_SUMMARY_FILE": str(test_paths.summary),
-            }
-        )
+        ibbw_alias = aliases.get("ibbw_log")
+        if ibbw_alias:
+            environment[ibbw_alias] = str(test_paths.artifacts / "ibbw.log")
     return environment
 
 
@@ -762,19 +756,40 @@ def _prepare_run_paths(
     *,
     allow_external_logs: bool = False,
     marker_preacquired: bool = False,
+    secure_precreated: bool = False,
 ) -> None:
-    _require_below(paths.log_dir.parents[3], paths.log_dir, "global run log directory")
-    for path in (
-        paths.stdout,
-        paths.stderr,
-        paths.job_log,
-        paths.events,
-        paths.result,
-        paths.legacy_env,
-        paths.marker,
-        paths.log_dir / ".ingestion-result-digest",
-    ):
-        _require_below(paths.log_dir.parents[3], path, "global evidence file")
+    if not secure_precreated:
+        _require_below(paths.log_dir.parents[3], paths.log_dir, "global run log directory")
+        for path in (
+            paths.stdout,
+            paths.stderr,
+            paths.job_log,
+            paths.events,
+            paths.result,
+            paths.legacy_env,
+            paths.marker,
+            paths.log_dir / ".ingestion-result-digest",
+        ):
+            _require_below(paths.log_dir.parents[3], path, "global evidence file")
+    if secure_precreated:
+        expected_names = {
+            "stdout.log",
+            "stderr.log",
+            "job.log",
+            "events.jsonl",
+            "result.json",
+            "result.env",
+            ".run-active",
+        }
+        actual_names = {path.name for path in paths.log_dir.iterdir()}
+        if actual_names != expected_names:
+            raise FileExistsError("Secure run evidence reservation is incomplete or reused")
+        for path in paths.log_dir.iterdir():
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"Reserved global evidence is not regular: {path.name}")
+        if not marker_preacquired or not allow_external_logs:
+            raise ValueError("Secure run layout requires pre-acquired marker and logging")
+        return
     allowed_existing: set[Path] = set()
     if allow_external_logs:
         allowed_existing.update((paths.stdout, paths.stderr, paths.job_log))
@@ -823,7 +838,18 @@ def _create_run_marker(paths: RunPaths) -> None:
         os.fsync(handle.fileno())
 
 
-def _prepare_test_paths(paths: TestPaths) -> None:
+def _prepare_test_paths(paths: TestPaths, *, secure_precreated: bool = False) -> None:
+    if secure_precreated:
+        expected_logs = {"stdout.log", "stderr.log", "events.jsonl", "workload.log"}
+        if {path.name for path in paths.log_dir.iterdir()} != expected_logs:
+            raise FileExistsError("Secure per-test log reservation is incomplete or reused")
+        if {path.name for path in paths.run_dir.iterdir()} != {"artifacts"}:
+            raise FileExistsError("Secure per-test run reservation is incomplete or reused")
+        if any(path.is_symlink() or not path.is_file() for path in paths.log_dir.iterdir()):
+            raise ValueError("Secure per-test log reservation contains a non-regular file")
+        if not paths.artifacts.is_dir():
+            raise ValueError("Secure per-test artifacts reservation is not a directory")
+        return
     validation_root = paths.log_dir.parents[3]
     _require_below(validation_root, paths.log_dir, "test log directory")
     _require_below(validation_root, paths.run_dir, "test run directory")
@@ -894,10 +920,11 @@ def _write_legacy_env(result: dict[str, Any], path: Path) -> None:
         state = result["tests"].get(test_id)
         enabled = bool(state and state["enabled"])
         lines.append(f"{enabled_name}={str(enabled).lower()}")
-    lines.append(f"overall_result={result['overall']}")
-    lines.append(f"result_node={result['node']}")
-    lines.append(f"result_timestamp={result['timestamp']}")
-    lines.append(f"result_run_id={result['run_id']}")
+    keys = LEGACY_RESULT_PROJECTION_KEYS
+    lines.append(f"{keys['overall']}={result['overall']}")
+    lines.append(f"{keys['node']}={result['node']}")
+    lines.append(f"{keys['timestamp']}={result['timestamp']}")
+    lines.append(f"{keys['run_id']}={result['run_id']}")
     _atomic_write_text(path, "\n".join(lines) + "\n")
 
 
@@ -963,26 +990,126 @@ def _legacy_completion_message(
     paths: TestPaths,
     state: Mapping[str, Any],
 ) -> None:
-    if test_id == "storage":
-        prefix = (
-            "Storage test is complete." if status == "pass" else "Storage test FAILED."
-        )
-    elif test_id == "nccl":
-        prefix = "NCCL test is complete." if status == "pass" else "NCCL test FAILED."
-    else:
+    markers = LEGACY_DONE_MARKERS.get(test_id)
+    if markers is None:
         return
+    prefix = markers[0] if status == "pass" else markers[1]
     logger.message(
-        f"{prefix} Log file: {paths.stdout} Summary file: {state['summary']}",
+        f"{prefix} Log file: {state['stdout']} Summary file: {state['summary']}",
         test_paths=paths,
     )
 
 
+def _load_secure_layout(
+    environment: Mapping[str, str],
+    validation_root: Path,
+    registry: ValidationTestRegistry,
+) -> Mapping[str, Any] | None:
+    raw = environment.get("CVAL_SECURE_RUN_LAYOUT_JSON")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("CVAL_SECURE_RUN_LAYOUT_JSON is invalid JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "canonical_root",
+        "root_fd",
+        "run_dir_fd",
+        "tests",
+    }:
+        raise ValueError("Secure run layout has unexpected fields")
+    if payload["schema_version"] != "cval.secure-run-layout.v1":
+        raise ValueError("Unsupported secure run layout schema")
+    if payload["canonical_root"] != str(validation_root):
+        raise ValueError("Secure run layout canonical root mismatch")
+    tests = payload["tests"]
+    if not isinstance(tests, dict):
+        raise ValueError("Secure run layout tests must be an object")
+    expected = {test.id for test in registry.enabled}
+    if set(tests) != expected:
+        raise ValueError("Secure run layout does not match enabled registry tests")
+    for name in ("root_fd", "run_dir_fd"):
+        _require_directory_fd(payload[name], name)
+    for test_id, values in tests.items():
+        if not isinstance(values, dict) or set(values) != {
+            "log_dir_fd",
+            "run_dir_fd",
+            "artifacts_dir_fd",
+        }:
+            raise ValueError(f"Secure run layout for {test_id!r} is malformed")
+        for name, descriptor in values.items():
+            _require_directory_fd(descriptor, f"{test_id}.{name}")
+    return payload
+
+
+def _require_directory_fd(value: object, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Secure run layout descriptor {name} must be an integer")
+    try:
+        descriptor_stat = os.fstat(value)
+    except OSError as exc:
+        raise ValueError(f"Secure run layout descriptor {name} is not open") from exc
+    if not stat.S_ISDIR(descriptor_stat.st_mode):
+        raise ValueError(f"Secure run layout descriptor {name} is not a directory")
+
+
+def _secure_run_paths(layout: Mapping[str, Any]) -> RunPaths:
+    log_dir = Path(f"/proc/self/fd/{layout['run_dir_fd']}")
+    return RunPaths(
+        log_dir=log_dir,
+        stdout=log_dir / "stdout.log",
+        stderr=log_dir / "stderr.log",
+        job_log=log_dir / "job.log",
+        events=log_dir / "events.jsonl",
+        result=log_dir / "result.json",
+        legacy_env=log_dir / "result.env",
+        marker=log_dir / ".run-active",
+    )
+
+
+def _secure_test_paths(
+    layout: Mapping[str, Any], registered_test: RegisteredValidationTest
+) -> TestPaths:
+    values = layout["tests"][registered_test.id]
+    log_dir = Path(f"/proc/self/fd/{values['log_dir_fd']}")
+    run_dir = Path(f"/proc/self/fd/{values['run_dir_fd']}")
+    artifacts = Path(f"/proc/self/fd/{values['artifacts_dir_fd']}")
+    return TestPaths(
+        log_dir=log_dir,
+        stdout=log_dir / "stdout.log",
+        stderr=log_dir / "stderr.log",
+        events=log_dir / "events.jsonl",
+        run_dir=run_dir,
+        result=run_dir / "result.json",
+        summary=run_dir / registered_test.definition.artifacts.summary_filename,
+        artifacts=artifacts,
+        workload_log=log_dir / "workload.log",
+    )
+
+
+def _secure_pass_fds(environment: Mapping[str, str]) -> tuple[int, ...]:
+    raw = environment.get("CVAL_SECURE_RUN_FDS", "")
+    if not raw:
+        return ()
+    try:
+        descriptors = tuple(int(value) for value in raw.split(","))
+    except ValueError as exc:
+        raise ValueError("CVAL_SECURE_RUN_FDS must contain integers") from exc
+    if len(descriptors) != len(set(descriptors)):
+        raise ValueError("CVAL_SECURE_RUN_FDS contains duplicate descriptors")
+    for descriptor in descriptors:
+        _require_directory_fd(descriptor, "inherited")
+    return descriptors
+
+
 def _legacy_final_line(result: Mapping[str, Any]) -> str:
     values = []
-    for test_id in ("storage", "nccl", "dltest"):
+    for test_id in LEGACY_TEST_IDS:
         state = result["tests"].get(test_id)
         values.append(f"{test_id}={state['status'] if state else 'incomplete'}")
-    return "Final c-val test results: " + " ".join(values)
+    return LEGACY_FINAL_RESULT_PREFIX + " " + " ".join(values)
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -995,7 +1122,10 @@ def _atomic_write_text(path: Path, text: str) -> None:
         f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
     )
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())

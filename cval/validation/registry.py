@@ -19,6 +19,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from cval.validation.compatibility import DEFAULT_TEST_REGISTRATIONS
+
 
 TEST_SCHEMA_VERSION = "cval.test.v1"
 PLUGIN_API_VERSION = "cval.plugin.v1"
@@ -37,22 +39,6 @@ COMMON_HEALTH_COMBINATION_FACTORS = frozenset(
 ALLOWED_METRIC_DIRECTIONS = frozenset(
     {"low_bad", "high_bad", "two_sided", "absolute"}
 )
-
-DEFAULT_TEST_REGISTRATIONS: dict[str, dict[str, object]] = {
-    "storage": {
-        "enabled": True,
-        "config_path": "validation-tests/storage/test_config.toml",
-    },
-    "nccl": {
-        "enabled": True,
-        "config_path": "validation-tests/nccl/test_config.toml",
-    },
-    "dltest": {
-        "enabled": True,
-        "config_path": "validation-tests/dltest/test_config.toml",
-    },
-}
-
 
 class FrozenMapping(Mapping[str, Any]):
     """Pickle-safe immutable mapping used for descriptor-owned settings."""
@@ -145,6 +131,7 @@ class TestPlugin:
     adapter: str
     api_version: str
     capabilities: tuple[str, ...]
+    support_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -565,7 +552,11 @@ def _parse_plugin(
     if "plugin" not in data:
         return None
     raw = _required_table(data, "plugin", path)
-    _reject_unknown(raw, {"adapter", "api_version", "capabilities"}, f"{path} [plugin]")
+    _reject_unknown(
+        raw,
+        {"adapter", "api_version", "capabilities", "support_files"},
+        f"{path} [plugin]",
+    )
     adapter = _strict_str(raw.get("adapter"), "plugin.adapter")
     resolve_confined_path(
         path.parent,
@@ -584,7 +575,21 @@ def _parse_plugin(
     unknown = sorted(set(capabilities) - ALLOWED_PLUGIN_CAPABILITIES)
     if unknown:
         raise ValueError(f"Unknown plugin capabilities: {', '.join(unknown)}")
-    return TestPlugin(adapter, api_version, capabilities)
+    support_files = _strict_str_tuple(
+        raw.get("support_files", ()), "plugin.support_files"
+    )
+    if len(set(support_files)) != len(support_files):
+        raise ValueError("plugin.support_files must not contain duplicates")
+    if adapter in support_files:
+        raise ValueError("plugin.support_files must not repeat plugin.adapter")
+    for index, support_file in enumerate(support_files):
+        resolve_confined_path(
+            path.parent,
+            support_file,
+            field_name=f"plugin.support_files[{index}]",
+            require_file=True,
+        )
+    return TestPlugin(adapter, api_version, capabilities, support_files)
 
 
 def _parse_health(

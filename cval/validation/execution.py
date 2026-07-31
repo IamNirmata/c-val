@@ -68,12 +68,14 @@ class RunLogger:
         stdout: TextIO,
         stderr: TextIO,
         write_global_files: bool = True,
+        pass_fds: tuple[int, ...] = (),
     ) -> None:
         self.paths = paths
         self.run_id = run_id
         self.stdout = stdout
         self.stderr = stderr
         self.write_global_files = write_global_files
+        self.pass_fds = pass_fds
         self._lock = threading.Lock()
         self._process_lock = threading.RLock()
         self._active_process: subprocess.Popen[str] | None = None
@@ -163,6 +165,7 @@ class RunLogger:
             errors="replace",
             bufsize=1,
             start_new_session=True,
+            pass_fds=self.pass_fds,
         )
         assert process.stdout is not None
         assert process.stderr is not None

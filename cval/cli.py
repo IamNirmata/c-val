@@ -5,8 +5,8 @@ discovery commands, dry-run planning, approval-gated submission, read-only
 monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
-Public commands: config, tests, nodes, validate, status, history, plan, run, jobs, result,
-results, classifications, health, baseline, and overview.
+Public commands: config, tests, compatibility, nodes, validate, status, history,
+plan, run, jobs, result, results, classifications, health, baseline, and overview.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -23,6 +23,7 @@ from pathlib import Path
 
 from cval.config import (
     CvalConfig,
+    REPO_ROOT,
     config_to_dict,
     encode_config_snapshot,
     load_config,
@@ -78,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments, dispatch to a handler, and return a process code."""
 
     raw_argv = sys.argv[1:] if argv is None else argv
+    if _is_compatibility_command(raw_argv):
+        return _dispatch_compatibility_command(raw_argv)
     strict_json = any(command in raw_argv for command in _STRICT_JSON_COMMANDS)
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
@@ -93,15 +96,19 @@ def main(argv: list[str] | None = None) -> int:
         runtime_repo_root = os.environ.get("CVAL_TEST_REPO_ROOT") or os.environ.get(
             "CVAL_REPO_DIR"
         )
+        descriptor_only = _tests_descriptor_only_command(raw_argv)
         config = (
-            load_config(config_args.config)
+            load_config(
+                config_args.config,
+                validate_plugins=not descriptor_only,
+            )
             if config_args.config is not None or not snapshot
             else load_config_snapshot(
                 snapshot,
                 repo_root=Path(runtime_repo_root) if runtime_repo_root else None,
             )
         )
-    except (FileNotFoundError, OSError, ValueError) as exc:
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
         if strict_json:
             _print_strict_json({"ok": False, "error": _single_line_error(exc)})
             return 2
@@ -131,6 +138,68 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def _tests_descriptor_only_command(argv: list[str]) -> bool:
+    """Keep tests list/describe descriptor-only and free of adapter imports."""
+
+    try:
+        index = argv.index("tests")
+    except ValueError:
+        return False
+    return index + 1 < len(argv) and argv[index + 1] in {"list", "describe"}
+
+
+def _is_compatibility_command(argv: list[str]) -> bool:
+    """Recognize the config-independent command at the top-level position."""
+
+    index = 0
+    if index < len(argv) and argv[index] == "--config":
+        index += 2
+    elif index < len(argv) and argv[index].startswith("--config="):
+        index += 1
+    return index < len(argv) and argv[index] == "compatibility"
+
+
+def _dispatch_compatibility_command(argv: list[str]) -> int:
+    """Parse and run offline compatibility tools without loading configuration."""
+
+    parser = argparse.ArgumentParser(prog="cval")
+    parser.add_argument("--config", type=Path, help=argparse.SUPPRESS)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    _add_compatibility_parser(subparsers)
+    args = parser.parse_args(argv)
+    return args.handler(args)
+
+
+def _add_compatibility_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    compatibility = subparsers.add_parser(
+        "compatibility",
+        help="Inventory or offline-audit retained compatibility surfaces",
+    )
+    compatibility_sub = compatibility.add_subparsers(
+        dest="compatibility_command", required=True
+    )
+    compatibility_inventory = compatibility_sub.add_parser(
+        "inventory", help="Print the immutable compatibility surface catalog"
+    )
+    compatibility_inventory.add_argument(
+        "--output", choices=["table", "json"], default="table"
+    )
+    compatibility_inventory.set_defaults(handler=handle_compatibility_inventory)
+
+    compatibility_audit = compatibility_sub.add_parser(
+        "audit", help="Scan only explicitly named local copied files under fixed bounds"
+    )
+    compatibility_audit.add_argument(
+        "--input", type=Path, action="append", required=True, dest="inputs"
+    )
+    compatibility_audit.add_argument(
+        "--output", choices=["table", "json"], default="table"
+    )
+    compatibility_audit.set_defaults(handler=handle_compatibility_audit)
+
+
 def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     """Build the top-level parser and subcommands."""
 
@@ -149,8 +218,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         dest="command",
         required=True,
         metavar=(
-            "{config,tests,nodes,validate,status,history,plan,run,jobs,result,results,"
-            "classifications,health,baseline,overview}"
+            "{config,tests,compatibility,nodes,validate,status,history,plan,run,jobs,result,"
+            "results,classifications,health,baseline,overview}"
         ),
     )
 
@@ -182,6 +251,21 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     tests_validate.add_argument("--output", choices=["table", "json"], default="table")
     tests_validate.set_defaults(handler=handle_tests_validate)
+
+    tests_scaffold = tests_sub.add_parser(
+        "scaffold",
+        help="Plan or create a disabled pass/fail-only test scaffold",
+    )
+    tests_scaffold.add_argument("test_id")
+    tests_scaffold.add_argument("--order", type=int, required=True)
+    tests_scaffold.add_argument(
+        "--apply", action="store_true", help="Create files after the exact confirmation"
+    )
+    tests_scaffold.add_argument("--confirm")
+    tests_scaffold.add_argument("--output", choices=["table", "json"], default="table")
+    tests_scaffold.set_defaults(handler=handle_tests_scaffold)
+
+    _add_compatibility_parser(subparsers)
 
     # Machine-only catalog used by background loops. It is intentionally
     # omitted from public help and emits data, never shell assignments.
@@ -825,6 +909,83 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_tests_scaffold(args: argparse.Namespace) -> int:
+    """Plan or safely create one disabled pass/fail-only test directory."""
+
+    from cval.validation.scaffold import scaffold_validation_test
+
+    try:
+        payload = scaffold_validation_test(
+            args.test_id,
+            args.order,
+            repo_root=REPO_ROOT,
+            apply=args.apply,
+            confirmation=args.confirm,
+        )
+    except (FileExistsError, OSError, ValueError) as exc:
+        print(f"Scaffold error: {exc}", file=sys.stderr)
+        return 2
+    if args.output == "json":
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"Validation test scaffold ({payload['mode']}): {payload['test_id']}")
+    print(f"Target: {payload['target_dir']}")
+    print("Files: " + ", ".join(payload["files"]))
+    print("\nDisabled registry stanza:\n" + str(payload["registry_stanza"]))
+    print("\nNext steps:")
+    for step in payload["next_commands"]:
+        print(f"  - {step}")
+    return 0
+
+
+def handle_compatibility_inventory(args: argparse.Namespace) -> int:
+    """Print the central immutable compatibility inventory without I/O."""
+
+    from cval.validation.compatibility import compatibility_inventory
+
+    payload = compatibility_inventory()
+    if args.output == "json":
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(
+        f"Compatibility surfaces: {len(payload['surfaces'])} | "
+        "removal eligible: false"
+    )
+    print(f"{'SURFACE':<34} {'CATEGORY':<18} BLOCKERS")
+    for surface in payload["surfaces"]:
+        print(
+            f"{surface['surface_id']:<34} {surface['category']:<18} "
+            + ",".join(surface["blockers"])
+        )
+    return 0
+
+
+def handle_compatibility_audit(args: argparse.Namespace) -> int:
+    """Run the bounded, explicit-input-only offline compatibility audit."""
+
+    from cval.validation.compatibility import audit_compatibility_inputs
+
+    try:
+        payload = audit_compatibility_inputs(args.inputs)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Compatibility audit error: {exc}", file=sys.stderr)
+        return 2
+    if args.output == "json":
+        print(json.dumps(payload, indent=2))
+        return 0
+    observed = sum(1 for surface in payload["surfaces"] if surface["observed"])
+    print(
+        f"Offline compatibility audit: {len(payload['inputs'])} explicit inputs, "
+        f"{payload['total_bytes']} bytes, {observed} observed surfaces"
+    )
+    print("Removal eligible: false")
+    print("Global blockers: " + ", ".join(payload["global_blockers"]))
+    for surface in payload["surfaces"]:
+        marker = "observed" if surface["observed"] else "not-observed"
+        print(f"  {surface['surface_id']}: {marker}; " + ", ".join(surface["blockers"]))
+    return 0
+
+
 def handle_operational_targets(args: argparse.Namespace) -> int:
     """Emit enabled capability-derived targets for trusted local loops."""
 
@@ -1436,17 +1597,18 @@ def handle_db_add_run_results(args: argparse.Namespace) -> int:
 
     authorization = _compatibility_write_authorization(args)
     projected = validation_result_to_env(authorization.result)
-    expected_results = {
-        "storage": projected["GCRRESULT1"],
-        "nccl": projected["GCRRESULT2"],
-        "dltest": projected["GCRRESULT3"],
-        "all": projected["overall_result"],
-    }
+    from cval.validation.compatibility import (
+        LEGACY_AGGREGATE_TEST_ID,
+        LEGACY_TEST_PROJECTIONS,
+        project_legacy_statuses,
+    )
+
+    expected_results = project_legacy_statuses(projected)
     actual_results = {
-        "storage": args.storage_result,
-        "nccl": args.nccl_result,
-        "dltest": args.dltest_result,
-        "all": args.overall_result,
+        item.test_id: getattr(args, f"{item.test_id}_result")
+        for item in LEGACY_TEST_PROJECTIONS
+    } | {
+        LEGACY_AGGREGATE_TEST_ID: args.overall_result,
     }
     if actual_results != expected_results:
         raise ValueError("Compatibility status set does not match validated result")

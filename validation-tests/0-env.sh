@@ -36,31 +36,36 @@ export CVAL_PYTORCH_VERSION CVAL_CUDA_VERSION
 
 
 # Canonical global logs and per-test run roots on the shared validation PVC.
-export CVAL_JOB_LOG_DIR="$CVAL_VALIDATION_ROOT/logs/job_logs/$GCRNODE/$CVAL_RUN_ID"
-export STORAGE_RUN_DIR="$CVAL_VALIDATION_ROOT/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID"
-export NCCL_RUN_DIR="$CVAL_VALIDATION_ROOT/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID"
-export DLTEST_RUN_DIR="$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID"
+CVAL_JOB_LOG_DIR=${CVAL_JOB_LOG_DIR:-$CVAL_VALIDATION_ROOT/logs/job_logs/$GCRNODE/$CVAL_RUN_ID}
+STORAGE_RUN_DIR=${STORAGE_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID}
+NCCL_RUN_DIR=${NCCL_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID}
+DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
+export CVAL_JOB_LOG_DIR STORAGE_RUN_DIR NCCL_RUN_DIR DLTEST_RUN_DIR
 
 # Legacy output variable names now point at each canonical artifacts directory.
-export STORAGE_OUTPUT_DIR="$STORAGE_RUN_DIR/artifacts"
-export NCCL_OUTPUT_DIR="$NCCL_RUN_DIR/artifacts"
-export DLTEST_OUTPUT_DIR="$DLTEST_RUN_DIR/artifacts"
+STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$STORAGE_RUN_DIR/artifacts}
+NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$NCCL_RUN_DIR/artifacts}
+DLTEST_OUTPUT_DIR=${DLTEST_OUTPUT_DIR:-$DLTEST_RUN_DIR/artifacts}
+export STORAGE_OUTPUT_DIR NCCL_OUTPUT_DIR DLTEST_OUTPUT_DIR
 
 # Structured result artifacts bridge child shell test outcomes to db-update.sh.
-export CVAL_RESULT_DIR="$CVAL_JOB_LOG_DIR"
-export CVAL_RESULT_ENV_FILE="$CVAL_JOB_LOG_DIR/result.env"
-export CVAL_RESULT_JSON_FILE="$CVAL_JOB_LOG_DIR/result.json"
+CVAL_RESULT_DIR=${CVAL_RESULT_DIR:-$CVAL_JOB_LOG_DIR}
+CVAL_RESULT_ENV_FILE=${CVAL_RESULT_ENV_FILE:-$CVAL_JOB_LOG_DIR/result.env}
+CVAL_RESULT_JSON_FILE=${CVAL_RESULT_JSON_FILE:-$CVAL_JOB_LOG_DIR/result.json}
+export CVAL_RESULT_DIR CVAL_RESULT_ENV_FILE CVAL_RESULT_JSON_FILE
 
 # Log files capture raw command output for each validation phase.
-export STORAGE_LOG_FILE="$CVAL_VALIDATION_ROOT/logs/storage/$GCRNODE/$CVAL_RUN_ID/stdout.log"
-export NCCL_LOG_FILE="$CVAL_VALIDATION_ROOT/logs/nccl/$GCRNODE/$CVAL_RUN_ID/workload.log"
-export NCCL_IBBW_LOG_FILE="$NCCL_OUTPUT_DIR/ibbw-$GCRNODE-$GCRTIME.log"
-export DLTEST_LOG_FILE="$CVAL_VALIDATION_ROOT/logs/dltest/$GCRNODE/$CVAL_RUN_ID/workload.log"
+STORAGE_LOG_FILE=${STORAGE_LOG_FILE:-$CVAL_VALIDATION_ROOT/logs/storage/$GCRNODE/$CVAL_RUN_ID/stdout.log}
+NCCL_LOG_FILE=${NCCL_LOG_FILE:-$CVAL_VALIDATION_ROOT/logs/nccl/$GCRNODE/$CVAL_RUN_ID/workload.log}
+NCCL_IBBW_LOG_FILE=${NCCL_IBBW_LOG_FILE:-$NCCL_OUTPUT_DIR/ibbw-$GCRNODE-$GCRTIME.log}
+DLTEST_LOG_FILE=${DLTEST_LOG_FILE:-$CVAL_VALIDATION_ROOT/logs/dltest/$GCRNODE/$CVAL_RUN_ID/workload.log}
+export STORAGE_LOG_FILE NCCL_LOG_FILE NCCL_IBBW_LOG_FILE DLTEST_LOG_FILE
 
 # Summary files contain compact machine- or human-readable phase results.
-export NCCL_SUMMARY_FILE="$NCCL_RUN_DIR/summary.json"
-export STORAGE_SUMMARY_FILE="$STORAGE_RUN_DIR/summary.txt"
-export DLTEST_SUMMARY_FILE="$DLTEST_RUN_DIR/summary.json"
+NCCL_SUMMARY_FILE=${NCCL_SUMMARY_FILE:-$NCCL_RUN_DIR/summary.json}
+STORAGE_SUMMARY_FILE=${STORAGE_SUMMARY_FILE:-$STORAGE_RUN_DIR/summary.txt}
+DLTEST_SUMMARY_FILE=${DLTEST_SUMMARY_FILE:-$DLTEST_RUN_DIR/summary.json}
+export NCCL_SUMMARY_FILE STORAGE_SUMMARY_FILE DLTEST_SUMMARY_FILE
 
 # Default every phase to fail; tests must opt into pass after successful completion.
 export GCRRESULT1=fail

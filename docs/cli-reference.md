@@ -11,7 +11,8 @@ The public operator/Hermes CLI is intentionally small:
 
 ```text
 cval config
-cval tests list|describe|validate
+cval tests list|describe|validate|scaffold
+cval compatibility inventory|audit
 cval status
 cval history
 cval nodes
@@ -59,9 +60,50 @@ python -m cval.cli tests describe nccl --output table
 python -m cval.cli tests validate --output json
 ```
 
+Create no files while previewing a disabled pass/fail-only test scaffold:
+
+```bash
+python -m cval.cli tests scaffold <id> --order <N> --output json
+```
+
+Apply requires the exact gate below. It creates only a new
+`validation-tests/<id>/` directory and prints, but does not install, a disabled
+registry stanza. The complete exact-mode tree is staged beneath a retained
+no-follow parent descriptor, fsynced, and atomically renamed without overwrite;
+errors and publication races roll back staging:
+
+```bash
+python -m cval.cli tests scaffold <id> --order <N> \
+  --apply --confirm scaffold
+```
+
+`compatibility inventory` is a source-only read of the immutable U12 catalog.
+`compatibility audit` reads only repeated explicit local `--input` regular
+files owned by the current user. Ancestors use no-follow, directory,
+close-on-exec, nonblocking descriptors only for traversal and identity checks;
+leaf reads additionally require `O_NOATIME`. Stable metadata checks and fixed
+count/per-file/total bounds apply. Binary, invalidly encoded, malformed
+structured, and unsupported files are `unscannable`, not negative evidence.
+There is no Kubernetes, PVC, network, discovery, or write path:
+
+```bash
+python -m cval.cli compatibility inventory --output json
+python -m cval.cli compatibility audit --input /copy/job.log --output json
+```
+
+Both reports keep `removal_eligible=false` while U11 live acceptance and the
+compatibility period are open. Legacy compatibility observations and current
+descriptor-supervisor/canonical-path protocol observations are separate; the
+latter are explicitly not legacy removal candidates. Path separators are token
+boundaries, but embedded identifier near misses remain rejected. See
+[Operator Test Lifecycle](test-lifecycle.md).
+
 Configuration loading validates IDs, schemas, repository-confined paths,
-entrypoint/setup files, unique enabled order, and shared resource coverage. An
+entrypoint/setup files, unique enabled order, shared resource coverage, every
+declared plugin API, and every plugin config hook, including disabled tests. An
 invalid registry returns exit code `2` with a concise configuration error.
+`tests list` and `tests describe` intentionally remain descriptor-only and do
+not import adapters; `tests validate` performs full plugin validation.
 
 ## `status`
 

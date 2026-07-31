@@ -37,12 +37,13 @@ RUN test "${#BUILD_COMMIT}" -eq 40 \
     && printf '%s\n' "${BUILD_COMMIT}" > /workspace/c-val/cval/evaluator/BUILD_COMMIT
 
 COPY config/cval.toml /app/config/cval.toml
-COPY validation-tests/storage/test_config.toml /workspace/c-val/validation-tests/storage/test_config.toml
-COPY validation-tests/storage/plugin.py /workspace/c-val/validation-tests/storage/plugin.py
-COPY validation-tests/nccl/test_config.toml /workspace/c-val/validation-tests/nccl/test_config.toml
-COPY validation-tests/nccl/plugin.py /workspace/c-val/validation-tests/nccl/plugin.py
-COPY validation-tests/dltest/test_config.toml /workspace/c-val/validation-tests/dltest/test_config.toml
-COPY validation-tests/dltest/plugin.py /workspace/c-val/validation-tests/dltest/plugin.py
+COPY config/cval.toml /catalog/config/cval.toml
+COPY validation-tests/ /catalog/validation-tests/
+
+RUN PYTHONPATH=/workspace/c-val python -m cval.evaluator.catalog \
+    --source-root /catalog \
+    --config /catalog/config/cval.toml \
+    --destination-root /workspace/c-val
 
 RUN find /workspace/c-val /app -type d -exec chmod 0555 {} + \
     && find /workspace/c-val /app -type f -exec chmod 0444 {} +

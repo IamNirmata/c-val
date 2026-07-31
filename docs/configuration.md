@@ -134,6 +134,12 @@ classify_interval_seconds = 300
 
 ## Test registry and switches
 
+Use `cval tests scaffold <id> --order N` to preview a fail-closed pass/fail
+test directory. Creation requires `--apply --confirm scaffold`; it never edits
+this file. Add the printed stanza with `enabled = false`, validate and render
+offline, then enable only in a separate approved change. See
+[Operator Test Lifecycle](test-lifecycle.md).
+
 Each test is explicitly registered and can be independently enabled or disabled:
 
 ```toml
@@ -164,6 +170,11 @@ placeholders. A disabled phase is not executed and does not write metric
 rows. Its structured result is `status="incomplete", enabled=false`; aggregate
 status is computed from enabled phases only. At least one test must remain
 enabled. Background baseline loops also consume the composed activation state.
+
+The Python configuration tree exposes only the dynamic registry. Fixed
+storage/NCCL/DL runtime defaults, environment/result slots, and marker names
+live only in the immutable compatibility catalog; they are not parallel test
+configuration dataclasses and do not constrain a fourth test.
 
 ## Per-test configuration
 
@@ -321,6 +332,12 @@ python -m cval.cli tests list
 python -m cval.cli tests describe nccl
 python -m cval.cli tests validate --output json
 ```
+
+Normal effective configuration loading and `tests validate` fail fast on every
+declared plugin API and `config` hook, including disabled registrations. This
+prevents a later enablement from revealing a latent invalid setting such as
+`iterations = 0`. `tests list` and `tests describe` are deliberate
+descriptor-only inspection paths and do not import plugin modules.
 
 Dry-run a job to confirm configured defaults:
 

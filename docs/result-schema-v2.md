@@ -14,6 +14,12 @@
 
 A compatibility copy or pointer may temporarily remain under the current `results/<node>/` path during migration.
 
+The in-pod supervisor may hand the runner `/proc/self/fd/<fd>` paths backed by
+retained directory descriptors for all physical writes. Those implementation
+paths are never serialized. Every path in this schema remains the canonical
+validation-root path shown below, preserving readers and exact compatibility
+projections while eliminating pathname-reopen TOCTOU for run evidence.
+
 ## Example
 
 ```json
@@ -323,7 +329,13 @@ Mapping for compatibility views:
 | No run ID | Deterministically synthesize `<node>-<timestamp>` for read-only compatibility. |
 | No digests/Git ref | Empty compatibility values; never presented as verified. |
 
-Compatibility parsing does not rewrite historical files. New v2 writers do not emit `GCRRESULT1`, `GCRRESULT2`, or `GCRRESULT3`; those remain only in the legacy v1 execution wrapper during the migration window.
+Compatibility parsing does not rewrite historical files. The v2 JSON envelope
+never contains `GCRRESULT1`, `GCRRESULT2`, or `GCRRESULT3`. The generic v2
+runner still emits those exact values in the separate `result.env`
+compatibility projection, and `cval result --output env` projects them for
+`db-update.sh` and pinned consumers during the compatibility window. Dynamic
+tests have no fixed `GCRRESULT*` slot; their authoritative status remains the
+v2 `tests` map and structured events.
 
 ## Database ingestion boundary
 

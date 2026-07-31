@@ -309,11 +309,7 @@ def _validate_runtime_bootstrap(template_text: str) -> None:
         raise ValueError(
             "Template must contain exactly one task workload container named server"
         )
-    bootstrap_markers = (
-        "python3 -m cval.validation.path_preflight",
-        "run_child bash run-test.sh",
-        "run_child bash db-update.sh",
-    )
+    bootstrap_markers = ("exec python3 -m cval.validation.supervisor",)
     for marker in bootstrap_markers:
         occurrences = [
             index
@@ -326,6 +322,19 @@ def _validate_runtime_bootstrap(template_text: str) -> None:
             raise ValueError(
                 f"Runtime bootstrap marker must appear exactly once in server: {marker}"
             )
+    forbidden_bootstrap = (
+        "cval.validation.path_preflight",
+        "mkdir -p \"$CVAL_JOB_LOG_DIR\"",
+        "tee -a \"$CVAL_JOB_LOG_DIR",
+        "run_child bash run-test.sh",
+        "run_child bash db-update.sh",
+    )
+    for marker in forbidden_bootstrap:
+        if any(
+            not line.strip().startswith("#") and marker in line
+            for line in lines[container_start:container_end]
+        ):
+            raise ValueError(f"Unsafe runtime bootstrap marker is forbidden: {marker}")
     container_lines = lines[container_start:container_end]
     if not any(
         line.strip() == 'command: ["/bin/bash", "-lc"]'
@@ -365,14 +374,7 @@ def _validate_runtime_bootstrap(template_text: str) -> None:
         ('git checkout "$CVAL_GIT_REF"', "exact"),
         ('printf \'%s\' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env', "exact"),
         ("source /tmp/cval-runtime.env", "exact"),
-        ("python3 -m cval.validation.path_preflight", "prefix"),
-        ('--test-registry-json "$CVAL_TEST_REGISTRY_JSON"', "contains"),
-        ('mkdir -p "$CVAL_JOB_LOG_DIR"', "exact"),
-        ("(set -o noclobber;", "prefix"),
-        ("exec > >(", "prefix"),
-        ("run_child bash run-test.sh", "exact"),
-        ("source 0-env.sh", "exact"),
-        ("run_child bash db-update.sh", "exact"),
+        ("exec python3 -m cval.validation.supervisor", "exact"),
     )
     cursor = 0
     missing: list[str] = []

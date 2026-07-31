@@ -251,12 +251,9 @@ def validate_compatibility_write(
         if expected_status != status:
             raise ValueError("Compatibility status does not match result evidence")
     elif operation == "validation-run":
-        expected = {
-            "storage": projected["GCRRESULT1"],
-            "nccl": projected["GCRRESULT2"],
-            "dltest": projected["GCRRESULT3"],
-            "all": projected["overall_result"],
-        }
+        from cval.validation.compatibility import project_legacy_statuses
+
+        expected = project_legacy_statuses(projected)
         if results != expected:
             raise ValueError("Compatibility status set does not match result evidence")
     elif operation in {"storage", "nccl"}:

@@ -7,6 +7,11 @@
 This document defines the locally implemented repository contract. It does not
 authorize production activation, database creation, migration, or deployment.
 
+U12A operators use the dry-run-first `cval tests scaffold <id> --order N`, keep
+its printed registry stanza disabled, and follow
+[Operator Test Lifecycle](test-lifecycle.md). The template is pass/fail-only;
+plugin/health capabilities are separate reviewed changes.
+
 ## Design principles
 
 1. Registration is explicit. A directory cannot activate itself.
@@ -19,6 +24,39 @@ authorize production activation, database creation, migration, or deployment.
 8. New contract versions are additive; old results remain readable.
 9. A new pass/fail-only test does not require Python adapter code.
 10. One failing plugin cannot change another plugin's files or results.
+11. Framework-owned run writes are anchored to retained directory descriptors,
+   never a pathname-only preflight followed by shell reopening.
+
+## Secure in-pod startup
+
+The rendered job performs only the pinned checkout and deterministic runtime
+payload decode before executing `cval.validation.supervisor`. The supervisor:
+
+1. requires the explicit non-empty runtime registry; there is no built-in test
+  fallback;
+2. opens every component of the absolute validation root with
+  `O_NOFOLLOW|O_DIRECTORY`;
+3. creates parents through `dir_fd`, exclusively reserves each final run
+  directory, and verifies the named entry matches the opened device/inode;
+4. reserves `.run-active` and all global logs/results with
+  `O_CREAT|O_EXCL|O_NOFOLLOW`, exact owner modes, and retained descriptors;
+5. precreates and retains each enabled test's final log, run, and artifacts
+  directories, then passes `/proc/self/fd/<fd>` paths plus inherited fds to the
+  runner and compatibility ingestion;
+6. captures global stdout/stderr/job logs itself, supervises child process
+  groups, forwards termination, and leaves `.run-active` on every failure;
+7. reopens canonical names without following symlinks and compares every
+  retained directory identity before and after each child stage.
+
+An ancestor rename or symlink replacement cannot redirect framework writes to
+the replacement target: children continue through retained descriptors and the
+next identity check fails closed. Canonical paths in `cval.results.v2` remain
+unchanged for compatibility. The trust boundary still treats the pinned,
+reviewed repository setup/workload scripts and adapters as trusted code running
+under the pod UID; this mechanism is not a sandbox against a malicious workload
+that intentionally attacks its own descriptors. Config-authorized compatibility
+database destinations are governed by the existing write-provenance controls,
+not reclassified as run-evidence paths by U12A.
 
 ## Terminology
 
@@ -226,8 +264,10 @@ Optional. Omit it for a pass/fail-only test with no custom ingestion, health, or
 | `adapter` | String | Yes | — | Relative Python file inside the test directory. |
 | `api_version` | String | Yes | — | Exactly `cval.plugin.v1`. |
 | `capabilities` | Array of strings | Yes | — | Unique values from `config`, `ingest`, `health`, `baseline`, `export`. |
+| `support_files` | Array of strings | No | `[]` | Unique confined regular files imported or read by the adapter; must not repeat `adapter`. Evaluator packaging copies no undeclared test-local support. |
 
-The adapter is imported only from its validated repository-confined path.
+The adapter and declared support are loaded only from validated
+repository-confined paths.
 Import failure, API drift, capability drift, or invalid adapter-owned config is
 a configuration error before submission.
 
@@ -630,13 +670,13 @@ Acceptance assertions:
 
 | Current surface | Target surface | Migration rule |
 | --- | --- | --- |
-| `[tests.storage]` includes `install_fio` | `storage/test_config.toml [settings]` | Registry provides temporary compatibility property/env value. |
-| `[tests.nccl]` includes workload settings | `nccl/test_config.toml [settings]` | Preserve values exactly during U2. |
-| `[tests.dltest]` includes plan/iterations | `dltest/test_config.toml [settings]` | Preserve values exactly during U2. |
-| Fixed `TestsConfig` dataclass attributes | Mapping-like typed `TestRegistry` | Compatibility access remains until consumers are migrated. |
+| Storage `install_fio` | `storage/test_config.toml [settings]` | Runtime compatibility env is derived from the registry descriptor. |
+| NCCL workload settings | `nccl/test_config.toml [settings]` | Runtime compatibility env preserves values exactly. |
+| DL plan/iterations | `dltest/test_config.toml [settings]` | Runtime compatibility env preserves values exactly. |
+| Fixed `TestsConfig` dataclass attributes | Typed `ValidationTestRegistry` | Removed in U12A; consumers use registry helpers/catalog defaults. |
 | Test-specific YAML environment placeholders | Generic config/runtime context | Removed in U4; encoded compatibility exports remain while pinned v1 jobs and compatibility consumers are supported. |
 | Top-level monolithic `run-test.sh` | Generic runner plus per-test entrypoints | Existing path remains a temporary wrapper. |
-| `GCRRESULT1/2/3` and `RUN_*` | Dynamic test map in `cval.results.v2` | Retain only for v1 jobs during compatibility period. |
+| `GCRRESULT1/2/3` and `RUN_*` | Dynamic test map in `cval.results.v2` | Retained in the separate env projection for current/pinned consumers; never fields in v2 JSON. |
 | `cval.results.v1` fixed tests | `cval.results.v2` arbitrary test IDs | v1 parser remains read-only; no historical rewrite. |
 | Hard-coded progress markers | `CVAL_EVENT` JSON lines | Parse old markers while pinned v1 jobs may run. |
 | `validation.db` row per fixed test | Node run history plus per-test result DBs | Default-off dual-write is implemented; do not activate, delete, or rewrite old DBs without separate approval. |

@@ -16,7 +16,7 @@ def preflight_run_paths(
     node: str,
     run_id: str,
     *,
-    registry_json: str = "",
+    registry_json: str,
 ) -> None:
     """Reject unsafe identities and symlinked ancestors before the first PVC write."""
 
@@ -72,7 +72,7 @@ def _reject_symlinked_ancestors(root: Path, path: Path) -> None:
 
 def _registry_test_ids(payload: str) -> tuple[str, ...]:
     if not payload:
-        return ("storage", "nccl", "dltest")
+        raise ValueError("runtime test registry is required")
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -92,7 +92,7 @@ def main() -> int:
     parser.add_argument("--validation-root", required=True)
     parser.add_argument("--node", required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--test-registry-json", default="")
+    parser.add_argument("--test-registry-json", required=True)
     args = parser.parse_args()
     preflight_run_paths(
         args.validation_root,

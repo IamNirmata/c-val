@@ -94,6 +94,11 @@ Use only after explicit operator approval.
    `validation_tests/<test-id>/runs/<node>/<run-id>/`.
 - Use `python -m cval.cli result --result-json <result.json>` to inspect structured result status.
 - Use the test-specific artifact paths from result JSON for logs and summaries.
+- Job startup is owned by the descriptor-anchored Python supervisor. It retains
+   validation-root/run directory fds, reserves owner-only evidence atomically,
+   and passes `/proc/self/fd/<fd>` paths to the generic runner and compatibility
+   ingestion while keeping canonical `/data/...` paths in result JSON. Do not
+   reintroduce shell `mkdir`, redirection, or `tee` for canonical run evidence.
 
 ## Failure Triage Workflow
 
@@ -236,3 +241,24 @@ python -m compileall -q cval tests
    parent framework owns adapter SQL transactions/receipts; repository adapters
    run through spawned SQL RPC and must never receive the parent's raw SQLite
    connection.
+
+## U12A test lifecycle and compatibility audit
+
+Preview a pass/fail-only test with `cval tests scaffold <id> --order N`.
+Creation requires exact `--apply --confirm scaffold`, creates only a new test
+directory, and prints a disabled stanza; it does not edit global config or add
+plugin/health behavior. Apply is no-follow, same-parent staged, exact-mode,
+fsynced, atomic-no-replace, and rollback-on-failure. Follow
+`docs/test-lifecycle.md` before enabling.
+
+`cval compatibility inventory` reads the immutable source catalog.
+`cval compatibility audit --input <copied-file>` reads only explicitly named
+local regular files under fixed bounds. It performs no Kubernetes/PVC/network
+discovery and writes nothing. Inputs require safe lexical ancestors/current
+ownership/mode and stable identity; binary/decoding/unsupported inputs are
+unscannable rather than absence evidence. Path separators bound catalog tokens
+without allowing embedded identifier near misses. The report separates current
+supervisor/canonical-ingestion protocol names from legacy compatibility
+surfaces; current protocol is not a cleanup candidate. Treat every removal as
+blocked until U11 live acceptance and the compatibility period close; never
+delete historical data.

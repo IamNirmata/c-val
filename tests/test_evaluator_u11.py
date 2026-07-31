@@ -1550,15 +1550,26 @@ class EvaluatorManifestAndCliTests(unittest.TestCase):
         self.assertIn("USER 65532:65532", dockerfile)
         self.assertIn("/workspace/c-val/cval/evaluator/BUILD_COMMIT", dockerfile)
         self.assertIn("COPY config/cval.toml /app/config/cval.toml", dockerfile)
-        for test_id in ("storage", "nccl", "dltest"):
-            self.assertIn(
-                f"validation-tests/{test_id}/test_config.toml",
-                dockerfile,
-            )
-            self.assertIn(f"validation-tests/{test_id}/plugin.py", dockerfile)
+        self.assertIn("COPY validation-tests/ /catalog/validation-tests/", dockerfile)
+        self.assertIn(
+            "PYTHONPATH=/workspace/c-val python -m cval.evaluator.catalog",
+            dockerfile,
+        )
+        exact_catalog_command = """RUN PYTHONPATH=/workspace/c-val python -m cval.evaluator.catalog \\
+    --source-root /catalog \\
+    --config /catalog/config/cval.toml \\
+    --destination-root /workspace/c-val"""
+        self.assertEqual(dockerfile.count(exact_catalog_command), 1)
+        self.assertNotIn("COPY validation-tests/storage/test_config.toml", dockerfile)
+        self.assertIn(
+            "find /workspace/c-val /app -type f -exec chmod 0444 {} +",
+            dockerfile,
+        )
         runtime_stage = dockerfile.split(" AS evaluator", 1)[1].lower()
         for forbidden in (" run ", "pip", "git", "curl", "wget", "apt", "apk"):
             self.assertNotIn(forbidden, runtime_stage)
+        self.assertNotIn("cval.validation.runner", runtime_stage)
+        self.assertIn('entrypoint ["/usr/bin/python3", "-m", "cval.cli"]', runtime_stage)
         lock = (DEPLOY_ROOT / "requirements-evaluator.lock").read_text(encoding="utf-8")
         requirements = [line for line in lock.splitlines() if line and not line.startswith("#")]
         self.assertEqual(requirements, ["PyYAML==6.0.2"])

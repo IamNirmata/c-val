@@ -5,6 +5,22 @@ locally audited and validated preparation only. It does not authorize Kubernetes
 PVC reads or writes, database creation/migration, image publication, CronJob
 activation, compatibility cutover, or deployment.
 
+U12A changes only local image catalog assembly: `.dockerignore` admits the
+complete `validation-tests/**` tree so future registrations and declared
+support files cannot be omitted by a fixed built-in allowlist. The Dockerfile
+copies that tree only into its builder stage, sets `PYTHONPATH=/workspace/c-val`
+for the already installed `pip --target` package, strictly loads the copied
+registry and every declared plugin API/config hook from a bounded
+descriptor-anchored source snapshot, then publishes only each registered
+descriptor, adapter, declared support file, setup, and entrypoint. Unregistered
+and unrelated workload assets never reach the final stage. Destination
+assembly uses no-follow lexical ancestors, same-parent staging, fsync, and
+atomic no-replace publication. Assembly is offline and performs no runtime
+discovery. A malformed descriptor or adapter, source/destination ancestor race,
+or copy failure fails the image build and transactional cleanup leaves no
+partial catalog. This closes no U11
+live blocker and authorizes no image publication or deployment.
+
 ## Local architecture
 
 `cval-evaluator` is a one-shot process, not a daemon. Every invocation performs:
@@ -57,8 +73,11 @@ closed. The PVC claim and both pinned base-image defaults in the checked-in
 recipe installs only a prebuilt `cval` wheel and an exact `PyYAML==6.0.2` wheel
 from a local wheelhouse with `--no-index`, verifies the dependency wheel against
 the supplied SHA-256, injects the exact non-placeholder `BUILD_COMMIT`, sets the
-OCI revision label, and copies only the installed tree, config, and three
-descriptor/plugin pairs into a distroless non-root UID/GID 65532 final image.
+OCI revision label, and copies only the installed tree, config, and the exact
+registry-selected descriptor/plugin catalog into a distroless non-root UID/GID
+65532 final image. The builder command is tested from outside the checkout
+against a staged `pip --target` tree, including synthetic-registry success and
+malformed-plugin failure.
 The final stage has no shell, Git, pip, package manager, Kubernetes client,
 compiler, GPU/RDMA runtime, or runtime network requirement. The manifest reads
 `/app/config/cval.toml`; the image contains that exact path, while the installed

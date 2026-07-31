@@ -7,6 +7,9 @@ from pathlib import Path
 from cval.validation.path_preflight import preflight_run_paths
 
 
+REGISTRY = '{"storage":{"enabled":true}}'
+
+
 class RunPathPreflightTests(unittest.TestCase):
     def test_rejects_symlinked_global_log_ancestor_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -17,7 +20,9 @@ class RunPathPreflightTests(unittest.TestCase):
             (root / "logs").symlink_to(outside, target_is_directory=True)
 
             with self.assertRaisesRegex(ValueError, "symlink"):
-                preflight_run_paths(root, "node-a", "node-a-123")
+                preflight_run_paths(
+                    root, "node-a", "node-a-123", registry_json=REGISTRY
+                )
 
             self.assertEqual(list(outside.iterdir()), [])
 
@@ -25,7 +30,9 @@ class RunPathPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "data"
 
-            preflight_run_paths(root, "node-a", "node-a-123")
+            preflight_run_paths(
+                root, "node-a", "node-a-123", registry_json=REGISTRY
+            )
 
             self.assertFalse(root.exists())
 
@@ -59,9 +66,21 @@ class RunPathPreflightTests(unittest.TestCase):
             (log_dir / "stdout.log").symlink_to(outside)
 
             with self.assertRaisesRegex(ValueError, "symlink"):
-                preflight_run_paths(root, "node-a", "node-a-123")
+                preflight_run_paths(
+                    root, "node-a", "node-a-123", registry_json=REGISTRY
+                )
 
             self.assertFalse(outside.exists())
+
+    def test_rejects_missing_runtime_registry_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "registry is required"):
+                preflight_run_paths(
+                    Path(tmpdir) / "data",
+                    "node-a",
+                    "node-a-123",
+                    registry_json="",
+                )
 
 
 if __name__ == "__main__":

@@ -1336,7 +1336,10 @@ Current 2026-07-31 audit validation evidence:
 
 ## U12 — Compatibility cleanup and framework documentation
 
-**Status:** `PROPOSED`  
+**Status:** `BLOCKED` — U12A safe local guide/scaffold/catalog/static cleanup
+independently certified READY 2026-07-30; every removal remains blocked on U11
+live acceptance, copied-input zero-use evidence, explicit approval, and the
+agreed compatibility period.
 **Risk:** Medium to high; removal of old surfaces.  
 **Depends on:** U11 and an agreed compatibility period.
 
@@ -1355,6 +1358,152 @@ Acceptance criteria:
 - Removing a test does not delete historical results.
 - Full validation cadence passes.
 - Deployment and rollback documentation is complete.
+
+### U12A safe local delivery (2026-07-30)
+
+Delivered locally:
+
+- Complete operator lifecycle guide for add, update, disable, rollback, and
+  future removal, including capability-specific and live approval boundaries.
+- `tests scaffold <id> --order N`: dry-run by default; exact
+  `--apply --confirm scaffold`; descriptor-anchored root/order checks including
+  compatibility defaults; complete same-parent staging; exact `0700` directory,
+  `0755` shell, and `0600` document/config modes; file/directory fsync; atomic
+  no-replace publication; race-safe rollback with no overwrite;
+  pass/fail-only README/config/setup/run/tests files; no config/plugin/health
+  mutation; disabled stanza and next steps in table/JSON output.
+- One immutable compatibility catalog containing retained default
+  registrations, legacy environment/result projections, log markers, wrappers,
+  CLI/DB surfaces, DL aliases, and historical readers.
+- Read-only `compatibility inventory` and deterministic bounded
+  `compatibility audit` over repeated explicit local copied regular files only.
+  Audit bounds are 64 files, 8 MiB each, and 32 MiB total; lexical ancestors
+  are no-follow/directory/nonblocking/close-on-exec and used only for traversal
+  plus `fstat` identity, while leaf evidence reads additionally require
+  no-atime. Current-owner/mode/regular-file metadata and before/after
+  device/inode/size/mtime/ctime identity are checked, and there is no
+  Kubernetes/PVC/network/discovery/write path. Matching is token-boundary and
+  structured-format aware; binary/decoding/malformed/unsupported inputs are
+  unscannable and never negative evidence.
+- Removed fixed storage/NCCL/DL config dataclasses and their duplicate
+  validation. Runtime consumers now read registry descriptors plus the central
+  immutable compatibility defaults. Path preflight no longer has a built-in
+  test-list fallback.
+- Targeted raw reports use registry order and baseline classification uses
+  canonical capability-derived targets. The exact legacy marker parser remains.
+- Evaluator image catalog assembly follows the copied registry and packages
+  only registered descriptors/declared adapters instead of explicit built-in
+  Dockerfile copies.
+- Validation-job startup now uses one Python supervisor with root-to-leaf
+  `openat`/`dir_fd` creation, `O_NOFOLLOW|O_DIRECTORY`, exact owner modes,
+  atomic global evidence reservation, retained run/test descriptors,
+  `/proc/self/fd` child paths, process-group/signal supervision, and identity
+  checks between runner and ingestion. The job shell no longer performs PVC
+  path preflight followed by `mkdir`, redirection, or `tee` reopening.
+- Adversarial tests replace a run-evidence ancestor before creation, during
+  descriptor traversal, and from inside an end-to-end synthetic runner. Every
+  case fails closed and the replacement target receives no write; canonical
+  result paths and compatibility behavior remain unchanged.
+- Evaluator catalog assembly now resolves the installed builder package through
+  explicit `PYTHONPATH`, snapshots sources through retained no-follow
+  descriptors, validates every registry/plugin API/config hook before mutating
+  the destination, then uses same-parent staging, fsync, and atomic no-replace,
+  and is exercised from outside the checkout against a staged `pip --target`
+  tree for synthetic success and malformed-plugin failure.
+- Documentation, result projection wording, workspace instructions, framework
+  agent, baseline/in-pod skills, and repository operator skill are synchronized.
+
+Preserved exactly by design:
+
+- Compatibility producers/consumers/wrappers, hidden ingestion CLI, current
+  compatibility DB readers/writers, default registrations, four DL aliases,
+  fixed env/result/marker values, byte-parity fixtures, and all historical v1/
+  DL/SQLite readers. No historical data was changed or removed.
+
+Local evidence includes scaffold safety and complete disabled-load/render/
+runner/v2/run-history/U7 flow, audit determinism/bounds/no-write behavior,
+fixed-name static allowlist, fourth pass/fail-only targeted reporting,
+synthetic registry-driven evaluator packaging, built-in byte parity, and
+historical v1 tests.
+
+Prior 2026-07-31 pre-remediation validation evidence (superseded; rerun below
+before local acceptance):
+
+- `144` focused U12 secure-startup/runner/config/render/catalog/evaluator/script
+  tests passed with warnings treated as errors.
+- `683` full unit tests passed with warnings treated as errors.
+- Recursive Bash syntax checks passed for `scripts/` and `validation-tests/`.
+- Python compilation passed for `cval`, `tests`, and repository operator skill
+  scripts.
+- Registry/plugin validation reported 3 registered, 3 enabled, and 3 loaded.
+- One explicit-node offline workflow render passed without live discovery.
+- Both suspended U11 Kustomize variants rendered locally and retained the
+  fail-closed image placeholder.
+- `git diff --check` and editor diagnostics passed.
+- The local c-val change set contains 42 files; five matching workspace
+  `.github` instruction/agent/skill files were synchronized separately.
+- No Kubernetes API, live PVC/DB, network research, archive, commit, push,
+  deploy, pod update, loop restart, compatibility cutover, or historical-data
+  deletion was performed.
+
+Post-first-audit remediation evidence on 2026-07-31:
+
+- `182` focused U12 secure-startup/runner/config/CLI/render/catalog/evaluator/
+  script tests passed with warnings treated as errors.
+- `701` full unit tests passed with warnings treated as errors.
+- Recursive Bash syntax checks passed for every shell file under `scripts/`
+  and `validation-tests/`; Python compilation passed for `cval`, `tests`, and
+  repository operator-skill scripts.
+- Effective registry plus full plugin API/config validation reported 3
+  registered, 3 enabled, and 3 loaded plugins. Enabled and disabled invalid
+  plugin settings are covered by fail-fast regressions; descriptor-only
+  list/describe behavior is separately covered.
+- One valid explicit-node offline workflow rendered with
+  `submitted=false`; no discovery or submission occurred.
+- Both U11 Kustomize variants rendered locally, remained `suspend: true`, and
+  retained the fail-closed image placeholder.
+- `git diff --check` and editor diagnostics passed; no build/egg-info artifact
+  exists. The local c-val worktree contains 46 changed/untracked paths.
+- No Kubernetes API, live PVC/DB, archive, commit, push, deploy, image
+  publication, pod update, loop restart, compatibility cutover, or historical
+  deletion was performed.
+
+Final U12A P2 remediation evidence on 2026-07-31:
+
+- Path separators are token boundaries while larger-identifier near misses
+  remain rejected. Absolute and relative wrapper, metadata DB, DL summary, and
+  historical DL-root paths have positive/negative regression fixtures.
+- Exact fixed supervisor controls and canonical ingestion path guards are in
+  the immutable `internal-current-protocol` catalog. Independent live-object
+  supervisor, rendered-template, and `db-update.sh` fixtures derive the
+  expected set and assert exact equality. Audit reports keep current protocol
+  separate from legacy compatibility observations and removal eligibility.
+- The compatibility CLI/DB surface includes the hidden DL metric rebuild hook
+  and all four exact DL metric DB filenames. Independent parser-registration
+  and `StorageConfig` fixtures require exact catalog equality; positive command/
+  path observations and embedded prefix/suffix/sidecar near misses exercise the
+  audit boundaries.
+- Metadata tests use explicit nanosecond timestamps, file/parent fsync, and
+  stable-stat sampling. Inode/size/mtime/ctime are always compared; atime is
+  asserted only after an `O_NOATIME` open/`fstat` repeated-read capability
+  probe. Mocked `EPERM` independently proves there is no fallback open.
+- The `41`-test focused U12A suite passed with warnings treated as errors on
+  each of 10 consecutive runs. The full `713`-test suite passed with warnings
+  treated as errors.
+- Recursive Bash syntax, Python compilation, registry/plugin validation
+  (3 registered, 3 enabled, 3 loaded), one explicit-node offline dry-run render
+  (`submitted=false`), and `git diff --check` passed.
+- No Kubernetes API, live PVC/DB, archive, commit, push, deploy, image
+  publication, pod update, loop restart, compatibility cutover, historical
+  deletion, or removal was performed.
+
+Still blocked:
+
+- Removing any preserved compatibility surface or historical reader.
+- Declaring U12 complete before U11 live acceptance and the compatibility
+  period are independently accepted.
+- Any live Kubernetes/PVC/DB access, image publication, commit, push, deploy,
+  pod update, loop restart, compatibility cutover, or historical-data deletion.
 
 ---
 

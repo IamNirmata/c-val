@@ -345,13 +345,36 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
         raise PluginLoadError(f"Could not create import spec for adapter: {adapter_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    previous_bytecode = sys.dont_write_bytecode
+    previous_modules = frozenset(sys.modules)
+    support_root = str(registered_test.test_dir)
+    sys.path.insert(0, support_root)
+    sys.dont_write_bytecode = True
     try:
         spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001 - adapter import boundary
-        sys.modules.pop(module_name, None)
+    except BaseException as exc:  # noqa: BLE001 - fail-closed adapter boundary
         raise PluginLoadError(
             f"Could not import adapter for {registered_test.id!r}: {exc}"
         ) from exc
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
+        try:
+            sys.path.remove(support_root)
+        except ValueError:
+            pass
+        sys.modules.pop(module_name, None)
+        for imported_name in set(sys.modules) - previous_modules:
+            imported = sys.modules.get(imported_name)
+            imported_file = getattr(imported, "__file__", None)
+            if not imported_file:
+                continue
+            try:
+                Path(imported_file).resolve().relative_to(
+                    registered_test.test_dir.resolve()
+                )
+            except (OSError, ValueError):
+                continue
+            sys.modules.pop(imported_name, None)
 
     if getattr(module, "CVAL_PLUGIN_API", None) != PLUGIN_API_VERSION:
         raise PluginLoadError(
@@ -437,7 +460,12 @@ def validate_registry_plugins(
         declaration = registered_test.definition.plugin
         assert declaration is not None
         if "config" in declaration.capabilities:
-            issues = plugin.validate_config(registered_test.definition)
+            try:
+                issues = plugin.validate_config(registered_test.definition)
+            except BaseException as exc:  # noqa: BLE001 - fail-closed hook boundary
+                raise PluginLoadError(
+                    f"Adapter {registered_test.id!r} validate_config failed: {exc}"
+                ) from exc
             if not isinstance(issues, tuple) or not all(
                 isinstance(issue, ConfigIssue) for issue in issues
             ):
@@ -453,7 +481,12 @@ def validate_registry_plugins(
         if "health" in declaration.capabilities:
             from cval.health.engine import validate_metric_specs
 
-            specs = plugin.metric_specs(registered_test.definition)
+            try:
+                specs = plugin.metric_specs(registered_test.definition)
+            except BaseException as exc:  # noqa: BLE001 - fail-closed hook boundary
+                raise PluginLoadError(
+                    f"Adapter {registered_test.id!r} metric_specs failed: {exc}"
+                ) from exc
             if not isinstance(specs, tuple):
                 raise PluginLoadError(
                     f"Adapter {registered_test.id!r} metric_specs must return a tuple"

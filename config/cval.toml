@@ -1,5 +1,5 @@
 # c-val operator configuration.
-# Test switches and benchmark parameters live together under [tests.*].
+# Global [tests.*] tables register/enable tests; benchmark settings stay in each test_config.toml.
 
 [cluster]
 namespace = "gcr-admin"
