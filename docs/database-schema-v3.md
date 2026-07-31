@@ -1,7 +1,7 @@
 # Modular Database Schema Design
 
 **Design version:** c-val modular schema v3  
-**Implementation status:** U6 node run history, U7 common per-test results plus storage/NCCL/DL metric adapters, and the U8 versioned health-class engine are implemented and locally validated. U8 is library/storage code only: no evaluator service, live health database, migration, activation, or deployment is authorized. U6/U7 production writes remain default-off.  
+**Implementation status:** U6 node run history, U7 common per-test results plus storage/NCCL/DL metric adapters, U8 versioned health classes, and the local dry-run-first U9 evaluator are implemented. U7 schema v2 adds append-only classification history only during evaluator apply; ordinary ingestion accepts exact v1/v2 without auto-migration. No live health database, migration, activation, background service, or deployment is authorized. U6/U7/U9 production writes remain independently default-off.
 **Migration rule:** Additive only. Existing databases remain readable until a separately approved compatibility cleanup.
 
 This document defines ownership, relationships, target tables, idempotency, and migration boundaries for node run history, per-test raw results, and per-test health classes.
@@ -85,11 +85,16 @@ erDiagram
     }
     CLASSIFICATION_HISTORY {
         integer classification_id PK
-        text run_id
+        text classification_key UK
+        integer result_id
+        text run_id FK
         text baseline_id
+        text baseline_identity UK
         integer health_class_numerical
         text health_class_name
+        text dnr_reason
         integer classified_at
+        text metric_verdicts_json
         text details_json
     }
 
@@ -387,25 +392,45 @@ mutation or `INSERT OR REPLACE` collision fails; removing or changing a trigger
 fails the schema manifest. Writer connections enable recursive triggers as a
 second replacement-defense layer.
 
-## `classification_history` (U9 target; not implemented by U8)
+## `classification_history` (U9 implemented locally; U7 schema v2)
 
-The following is the approved design direction for U9, not an existing U7/U8
-table or authorized live write surface. Derived verdict history will be
-append-only:
+Evaluator apply performs the only v1→v2 migration by adding this table,
+indexes, exact immutable triggers, and migration row
+`(2, 'append-only-classification-history', applied_at)` in one transaction.
+Dry-run does not migrate. Ordinary U7 ingestion validates and writes exact v1
+or v2 without adding this table.
 
 ```sql
 CREATE TABLE classification_history (
-    classification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    classification_id INTEGER PRIMARY KEY AUTOINCREMENT
+        CHECK (classification_id > 0),
+    classification_key TEXT NOT NULL UNIQUE,
+    result_id INTEGER NOT NULL CHECK (result_id > 0),
     run_id TEXT NOT NULL,
-    baseline_id TEXT NOT NULL,
-    combination_key TEXT NOT NULL,
+    baseline_id TEXT,
+    baseline_identity TEXT NOT NULL,
+    target_digest TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    combination_key TEXT NOT NULL DEFAULT '',
     health_class_name TEXT NOT NULL,
     health_class_numerical INTEGER NOT NULL
         CHECK (health_class_numerical BETWEEN 0 AND 5),
-    classified_at INTEGER NOT NULL,
+    dnr_reason TEXT,
+    classified_at INTEGER NOT NULL CHECK (classified_at >= 0),
     evaluator_version TEXT NOT NULL,
+    metric_verdicts_json TEXT NOT NULL DEFAULT '[]',
     details_json TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (run_id, baseline_id)
+    UNIQUE (run_id, baseline_identity),
+    FOREIGN KEY (run_id) REFERENCES test_results(run_id) ON DELETE RESTRICT,
+    CHECK ((health_class_numerical = 5) = (dnr_reason IS NOT NULL)),
+    CHECK (health_class_name = CASE health_class_numerical
+        WHEN 0 THEN 'Excellent'
+        WHEN 1 THEN 'Nominal'
+        WHEN 2 THEN 'Underperforming'
+        WHEN 3 THEN 'Very Bad'
+        WHEN 4 THEN 'Terrible'
+        WHEN 5 THEN 'DNR'
+    END)
 );
 
 CREATE INDEX idx_classification_history_run
@@ -414,7 +439,31 @@ CREATE INDEX idx_classification_history_baseline
     ON classification_history(baseline_id, health_class_numerical);
 ```
 
-Reclassification against a different baseline appends a row. Repeating the same `(run_id, baseline_id)` is idempotent.
+`classification_key` is a SHA-256 identity over `run_id` and a versioned
+`baseline_identity`. That `ht1:` identity binds test/config/health policy,
+evaluator, adapter schema, combination/category, and baseline (if present).
+`target_digest` additionally binds exact raw result and receipt evidence;
+`evidence_digest` binds the complete class/DNR, metrics, and details. Exact
+retries are idempotent; changed evidence for the same target conflicts; a new
+baseline, policy, config, adapter, or evaluator target appends. DNR reasons are
+restricted to stable `DnrReason` values and details are exactly
+`{"dnr_reason":"<value>"}`. `metric_verdicts_json` and `details_json` are
+strict canonical JSON. Conflict INSERT, UPDATE, DELETE, hidden-rowid collision,
+and `INSERT OR REPLACE` are rejected by exact DDL-validated triggers.
+
+History writes validate strict SQLite types and the owning
+`test_results(result_id, run_id)` identity, then commit the entire per-test
+batch or roll it back. They never mutate `test_results.health_class_name`,
+`health_class_numerical`, `health_baseline_id`, `evaluated_at`, or `updated_at`.
+Routine schema validation checks the exact structural manifest without scanning
+history content. Evaluator matching uses bounded result pages and batched exact
+lookups backed by `UNIQUE (run_id, baseline_identity)`; history appends use
+bounded owner/key/target batches and return one `stored` or `idempotent` outcome
+per input record. The separate
+`audit_classification_history_integrity()` API streams bounded
+`classification_id` keyset pages joined once to `test_results`, validating all
+typed evidence and owner identities without `fetchall()` over the full table or
+an owner N+1 query.
 
 ---
 
@@ -755,7 +804,20 @@ For multi-metric tests, the adapter/core aggregation policy must be versioned an
 - Never attempt a transaction spanning multiple SQLite files.
 - Commit raw test result before health evaluation; evaluator work is retryable.
 - Use unique keys for idempotency.
-- Read-only commands open `mode=ro` and create nothing.
+- U9 read preflight copies a checkpointed main DB image into shared memory
+    without opening SQLite on the source; adapters read that same snapshot. It
+    requires absent WAL/SHM sidecars and never deletes or creates them.
+- U9 history-append revalidation reads the catalog from the already-open U7
+    `BEGIN IMMEDIATE` connection and serializes adapter evidence from that same
+    transaction into memory. It never snapshots or reopens the U7 source while
+    its WAL write reservation is active.
+- Eligible candidate revalidation likewise projects the selected-result guard's
+    active U7 transaction. The complete catalog rebuild and adapter observation
+    load use that projection, including for checkpointed-WAL apply.
+- U7 migration/history and U8 candidate/activation writers bind a file identity
+    captured before SQLite open and assert it immediately before commit (or an
+    exact retry return). In-transaction rename/replacement fails closed and
+    rolls back without writing the replacement file.
 - Back up live databases before an approved migration.
 
 ## Write ordering across database files
@@ -771,8 +833,11 @@ Because SQLite cannot atomically commit across independent files, use recoverabl
     adapter metric transaction. Adapter failure does not undo compatibility
     status or another test's result.
 6. Build/activate baselines separately.
-7. Append classification history and update any latest-health cache in one
-    future evaluator transaction.
+7. U9 preflights all reads/builds first, then performs U7 migration, U8
+    candidate persistence, and U7 history as short per-file transactions.
+    Cross-file commits are not atomic and stage-aware reports preserve every
+    completed durable effect for safe retry. U9 never updates latest-health
+    cache columns.
 
 Every step can be retried from durable earlier evidence.
 

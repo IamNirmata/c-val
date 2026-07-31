@@ -27,7 +27,7 @@ class CliTests(unittest.TestCase):
         help_text = output.getvalue()
         self.assertIn(
             "{config,tests,nodes,validate,status,history,plan,run,jobs,result,results,"
-            "classifications,baseline,overview}",
+            "classifications,health,baseline,overview}",
             help_text,
         )
         self.assertNotIn("prioritize", help_text)

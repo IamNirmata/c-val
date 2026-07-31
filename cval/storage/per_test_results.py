@@ -4,22 +4,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from cval.validation.plugins import IngestionConflictError, IngestionReceipt
+from cval.health.models import ClassificationHistoryRecord, DnrReason
 from cval.validation.registry import (
     RegisteredValidationTest,
     validation_test_config_digest,
 )
 from cval.storage.paths import safe_writable_file_path
+from cval.storage.sqlite_uri import (
+    SQLiteFileIdentity,
+    assert_sqlite_file_identity,
+    connect_sqlite_file,
+)
 from cval.health.combination import (
     resolve_environment_combination,
     valid_combination_key,
@@ -27,7 +35,9 @@ from cval.health.combination import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+INITIAL_SCHEMA_VERSION = 1
+CLASSIFICATION_HISTORY_MIGRATION = "append-only-classification-history"
 PLUGIN_API_VERSION = "cval.plugin.v1"
 VALID_STATUSES = frozenset({"pass", "fail", "incomplete"})
 COMMON_RESULT_TABLES = frozenset(
@@ -36,6 +46,7 @@ COMMON_RESULT_TABLES = frozenset(
         "test_results",
         "metric_ingestion_receipts",
         "adapter_schema_versions",
+        "classification_history",
     }
 )
 COMMON_IMMUTABLE_KEY_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
@@ -44,6 +55,13 @@ COMMON_IMMUTABLE_KEY_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
     "metric_ingestion_receipts": (("run_id",),),
     "adapter_schema_versions": (("test_id",),),
 }
+CLASSIFICATION_HISTORY_KEY_GROUPS = (
+    ("classification_id",),
+    ("classification_key",),
+    ("run_id", "baseline_identity"),
+)
+_SQLITE_BATCH_ROWS = 128
+_HISTORY_AUDIT_PAGE_SIZE = 256
 _ACTIVE_METRIC_SESSION: ContextVar[
     tuple[Path, "AdapterSQLiteConnection"] | None
 ] = (
@@ -189,6 +207,49 @@ class PerTestResultRecord:
     combination_key: str = ""
 
 
+@dataclass(frozen=True)
+class SelectedResultEvidence:
+    """Exact U7 row and optional receipt selected by one evaluator preflight."""
+
+    result_id: int
+    run_id: str
+    completed_timestamp: int | None
+    status: str
+    result_digest: str
+    raw_result_digest: str
+    test_config_digest: str
+    combination_key: str
+    receipt_test_id: str | None
+    receipt_adapter_api_version: str | None
+    receipt_evidence_digest: str | None
+    receipt_inserted_count: int | None
+    receipt_updated_count: int | None
+    receipt_metric_names_json: str | None
+    receipt_created_at: int | None
+
+
+class ClassificationHistoryStoreStatus(str, Enum):
+    """Durable outcome for one requested append-only history record."""
+
+    STORED = "stored"
+    IDEMPOTENT = "idempotent"
+
+
+@dataclass(frozen=True)
+class ClassificationHistoryStoreResult:
+    """Ordered per-record outcomes from one atomic history transaction."""
+
+    outcomes: tuple[ClassificationHistoryStoreStatus, ...]
+
+    @property
+    def inserted(self) -> int:
+        return self.outcomes.count(ClassificationHistoryStoreStatus.STORED)
+
+    @property
+    def idempotent(self) -> int:
+        return self.outcomes.count(ClassificationHistoryStoreStatus.IDEMPOTENT)
+
+
 _RAW_RESULT_COLUMNS = (
     "test_id",
     "node",
@@ -277,7 +338,7 @@ def write_per_test_result(
     path = safe_writable_file_path(path)
     now = int(time.time()) if now is None else int(now)
     with closing(
-        sqlite3.connect(f"file:{path}?mode=rwc", uri=True, timeout=30)
+        connect_sqlite_file(path, mode="rwc", timeout=30)
     ) as connection:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA recursive_triggers=ON")
@@ -332,7 +393,7 @@ def framework_metric_ingestion_session(
     if not path.is_file():
         raise FileNotFoundError(f"Per-test result DB is not initialized: {path}")
     with closing(
-        sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=30)
+        connect_sqlite_file(path, mode="rw", timeout=30)
     ) as connection:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA recursive_triggers=ON")
@@ -388,7 +449,7 @@ def metric_ingestion_transaction(
     if not path.is_file():
         raise FileNotFoundError(f"Per-test result DB is not initialized: {path}")
     with closing(
-        sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=30)
+        connect_sqlite_file(path, mode="rw", timeout=30)
     ) as connection:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA recursive_triggers=ON")
@@ -820,15 +881,14 @@ def _validate_sql_identifier(value: str) -> None:
 def validate_common_only_result_database(db_path: str | Path) -> None:
     path = safe_writable_file_path(db_path)
     with closing(
-        sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        connect_sqlite_file(path, mode="ro", timeout=30)
     ) as connection:
-        _assert_supported_schema(connection, allow_empty=False)
-        _validate_schema_shape(connection)
+        validate_common_result_connection(connection)
         require_database_tables(connection, COMMON_RESULT_TABLES)
         require_database_views(
             connection,
             set(),
-            immutable_tables=COMMON_IMMUTABLE_KEY_GROUPS,
+            immutable_tables=common_immutable_key_groups(connection),
         )
 
 
@@ -841,6 +901,55 @@ def validate_common_result_connection(connection: Any) -> None:
 
     _assert_supported_schema(connection, allow_empty=False)
     _validate_schema_shape(connection)
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise RuntimeError(
+            "Per-test result database PRAGMA foreign_key_check returned a violation"
+        )
+
+
+def audit_classification_history_integrity(
+    db_path: str | Path,
+    *,
+    page_size: int = _HISTORY_AUDIT_PAGE_SIZE,
+) -> int:
+    """Stream and validate every U9 history row with its joined U7 owner.
+
+    Routine schema validation deliberately checks only the exact structural
+    manifest. This explicit audit performs the potentially large content scan
+    in bounded primary-key pages and returns the number of validated rows.
+    """
+
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size <= 0:
+        raise ValueError("classification history audit page_size must be positive")
+    path = safe_writable_file_path(db_path)
+    with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN")
+        _assert_supported_schema(connection, allow_empty=False)
+        _validate_schema_shape(connection)
+        if _schema_version_from_migrations(connection) != SCHEMA_VERSION:
+            return 0
+        return _audit_classification_history_rows(connection, page_size=page_size)
+
+
+def common_result_schema_version(connection: Any) -> int:
+    """Return the exact supported common schema version after validation."""
+
+    _assert_supported_schema(connection, allow_empty=False)
+    _validate_schema_shape(connection)
+    return _schema_version_from_migrations(connection)
+
+
+def common_immutable_key_groups(
+    connection: Any,
+) -> dict[str, tuple[tuple[str, ...], ...]]:
+    """Return exact common immutable tables for this validated v1/v2 DB."""
+
+    groups = dict(COMMON_IMMUTABLE_KEY_GROUPS)
+    if common_result_schema_version(connection) == SCHEMA_VERSION:
+        groups["classification_history"] = CLASSIFICATION_HISTORY_KEY_GROUPS
+    return groups
 
 
 @dataclass(frozen=True)
@@ -1357,6 +1466,589 @@ def _record_values(record: PerTestResultRecord) -> tuple[Any, ...]:
     )
 
 
+def _prepare_classification_history_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS classification_history (
+            classification_id INTEGER PRIMARY KEY AUTOINCREMENT
+                CHECK (classification_id > 0),
+            classification_key TEXT NOT NULL UNIQUE,
+            result_id INTEGER NOT NULL CHECK (result_id > 0),
+            run_id TEXT NOT NULL,
+            baseline_id TEXT,
+            baseline_identity TEXT NOT NULL,
+            target_digest TEXT NOT NULL,
+            evidence_digest TEXT NOT NULL,
+            combination_key TEXT NOT NULL DEFAULT '',
+            health_class_name TEXT NOT NULL,
+            health_class_numerical INTEGER NOT NULL
+                CHECK (health_class_numerical BETWEEN 0 AND 5),
+            dnr_reason TEXT,
+            classified_at INTEGER NOT NULL CHECK (classified_at >= 0),
+            evaluator_version TEXT NOT NULL,
+            metric_verdicts_json TEXT NOT NULL DEFAULT '[]',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE (run_id, baseline_identity),
+            FOREIGN KEY (run_id) REFERENCES test_results(run_id) ON DELETE RESTRICT,
+            CHECK ((health_class_numerical = 5) = (dnr_reason IS NOT NULL)),
+            CHECK (health_class_name = CASE health_class_numerical
+                WHEN 0 THEN 'Excellent'
+                WHEN 1 THEN 'Nominal'
+                WHEN 2 THEN 'Underperforming'
+                WHEN 3 THEN 'Very Bad'
+                WHEN 4 THEN 'Terrible'
+                WHEN 5 THEN 'DNR'
+            END)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_classification_history_run "
+        "ON classification_history(run_id, classified_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_classification_history_baseline "
+        "ON classification_history(baseline_id, health_class_numerical)"
+    )
+    prepare_immutable_table_triggers(
+        connection,
+        "classification_history",
+        CLASSIFICATION_HISTORY_KEY_GROUPS,
+    )
+
+
+def migrate_per_test_results_to_v2(
+    db_path: str | Path,
+    *,
+    expected_identity: SQLiteFileIdentity | None = None,
+    expected_results: tuple[SelectedResultEvidence, ...] = (),
+    pre_write_check: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
+) -> bool:
+    """Apply only the exact additive classification-history migration."""
+
+    path = safe_writable_file_path(db_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Per-test result DB is not initialized: {path}")
+    identity = expected_identity or SQLiteFileIdentity.capture(path)
+    with closing(
+        connect_sqlite_file(
+            path,
+            mode="rw",
+            timeout=30,
+            expected_identity=identity,
+        )
+    ) as connection:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA recursive_triggers=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        _assert_supported_schema(connection, allow_empty=False)
+        _validate_schema_shape(connection)
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _assert_supported_schema(connection, allow_empty=False)
+            _validate_schema_shape(connection)
+            _revalidate_selected_results(connection, expected_results)
+            if pre_write_check is not None:
+                pre_write_check(connection)
+            assert_sqlite_file_identity(identity)
+            if _schema_version_from_migrations(connection) == SCHEMA_VERSION:
+                connection.rollback()
+                assert_sqlite_file_identity(identity)
+                if lock_guard is not None:
+                    lock_guard()
+                return False
+            _prepare_classification_history_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                (SCHEMA_VERSION, CLASSIFICATION_HISTORY_MIGRATION, int(time.time())),
+            )
+            _assert_supported_schema(connection, allow_empty=False)
+            _validate_schema_shape(connection)
+            assert_sqlite_file_identity(identity)
+            if lock_guard is not None:
+                lock_guard()
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def store_classification_history(
+    records: tuple[ClassificationHistoryRecord, ...],
+    *,
+    db_path: str | Path,
+    expected_identity: SQLiteFileIdentity | None = None,
+    expected_results: tuple[SelectedResultEvidence, ...] = (),
+    pre_write_check: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
+) -> ClassificationHistoryStoreResult:
+    """Append one exact batch and return its ordered per-record outcomes."""
+
+    if not isinstance(records, tuple):
+        raise TypeError("Classification history records must be a tuple")
+    for record in records:
+        _validate_classification_history_record(record)
+    path = safe_writable_file_path(db_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Per-test result DB is not initialized: {path}")
+    identity = expected_identity or SQLiteFileIdentity.capture(path)
+    outcomes: list[ClassificationHistoryStoreStatus] = []
+    with closing(
+        connect_sqlite_file(
+            path,
+            mode="rw",
+            timeout=30,
+            expected_identity=identity,
+        )
+    ) as connection:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA recursive_triggers=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        _assert_supported_schema(connection, allow_empty=False)
+        _validate_schema_shape(connection)
+        if _schema_version_from_migrations(connection) != SCHEMA_VERSION:
+            raise RuntimeError("Classification history requires per-test schema v2")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _assert_supported_schema(connection, allow_empty=False)
+            _validate_schema_shape(connection)
+            _revalidate_selected_results(connection, expected_results)
+            if pre_write_check is not None:
+                pre_write_check(connection)
+            assert_sqlite_file_identity(identity)
+            for start in range(0, len(records), _SQLITE_BATCH_ROWS):
+                batch = records[start : start + _SQLITE_BATCH_ROWS]
+                _validate_classification_history_owners(connection, batch)
+                existing_by_key = _classification_history_by_key(connection, batch)
+                existing_by_target = _classification_history_by_target(
+                    connection,
+                    batch,
+                )
+                pending_by_key: dict[str, tuple[Any, ...]] = {}
+                pending_by_target: dict[tuple[str, str], str] = {}
+                pending_values: list[tuple[Any, ...]] = []
+                for record in batch:
+                    values = _classification_history_values(record)
+                    existing = existing_by_key.get(record.classification_key)
+                    if existing is not None:
+                        if existing != values:
+                            raise IngestionConflictError(
+                                "Classification key already has different verdict evidence"
+                            )
+                        outcomes.append(ClassificationHistoryStoreStatus.IDEMPOTENT)
+                        continue
+                    pending = pending_by_key.get(record.classification_key)
+                    if pending is not None:
+                        if pending != values:
+                            raise IngestionConflictError(
+                                "Classification batch key has different verdict evidence"
+                            )
+                        outcomes.append(ClassificationHistoryStoreStatus.IDEMPOTENT)
+                        continue
+                    target = (record.run_id, record.baseline_identity)
+                    if target in existing_by_target:
+                        raise IngestionConflictError(
+                            "Run/baseline identity already has different verdict evidence"
+                        )
+                    if target in pending_by_target:
+                        raise IngestionConflictError(
+                            "Classification batch repeats a run/baseline identity"
+                        )
+                    pending_by_key[record.classification_key] = values
+                    pending_by_target[target] = record.classification_key
+                    pending_values.append((record.classification_key, *values))
+                    outcomes.append(ClassificationHistoryStoreStatus.STORED)
+                connection.executemany(
+                    "INSERT INTO classification_history ("
+                    "classification_key, result_id, run_id, baseline_id, "
+                    "baseline_identity, target_digest, evidence_digest, "
+                    "combination_key, health_class_name, "
+                    "health_class_numerical, dnr_reason, classified_at, "
+                    "evaluator_version, metric_verdicts_json, details_json"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    pending_values,
+                )
+            _validate_schema_shape(connection)
+            assert_sqlite_file_identity(identity)
+            if lock_guard is not None:
+                lock_guard()
+            connection.commit()
+            return ClassificationHistoryStoreResult(tuple(outcomes))
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def _validate_classification_history_owners(
+    connection: sqlite3.Connection,
+    records: tuple[ClassificationHistoryRecord, ...],
+) -> None:
+    if not records:
+        return
+    placeholders = ", ".join("?" for _ in records)
+    owners = {
+        str(row[0]): int(row[1])
+        for row in connection.execute(
+            "SELECT run_id, result_id FROM test_results "
+            f"WHERE run_id IN ({placeholders})",
+            tuple(record.run_id for record in records),
+        ).fetchall()
+    }
+    if any(owners.get(record.run_id) != record.result_id for record in records):
+        raise IngestionConflictError(
+            "Classification history result/run identity is invalid"
+        )
+
+
+def _classification_history_by_key(
+    connection: sqlite3.Connection,
+    records: tuple[ClassificationHistoryRecord, ...],
+) -> dict[str, tuple[Any, ...]]:
+    if not records:
+        return {}
+    placeholders = ", ".join("?" for _ in records)
+    rows = connection.execute(
+        "SELECT classification_key, result_id, run_id, baseline_id, "
+        "baseline_identity, target_digest, evidence_digest, combination_key, "
+        "health_class_name, health_class_numerical, dnr_reason, classified_at, "
+        "evaluator_version, metric_verdicts_json, details_json "
+        "FROM classification_history "
+        f"WHERE classification_key IN ({placeholders})",
+        tuple(record.classification_key for record in records),
+    ).fetchall()
+    return {str(row[0]): tuple(row[1:]) for row in rows}
+
+
+def _classification_history_by_target(
+    connection: sqlite3.Connection,
+    records: tuple[ClassificationHistoryRecord, ...],
+) -> dict[tuple[str, str], str]:
+    if not records:
+        return {}
+    values_sql = ", ".join("(?, ?)" for _ in records)
+    parameters = tuple(
+        value
+        for record in records
+        for value in (record.run_id, record.baseline_identity)
+    )
+    rows = connection.execute(
+        "WITH selected(run_id, baseline_identity) AS (VALUES "
+        f"{values_sql}) "
+        "SELECT history.run_id, history.baseline_identity, "
+        "history.classification_key FROM selected "
+        "JOIN classification_history AS history "
+        "ON history.run_id=selected.run_id "
+        "AND history.baseline_identity=selected.baseline_identity",
+        parameters,
+    ).fetchall()
+    return {(str(row[0]), str(row[1])): str(row[2]) for row in rows}
+
+
+def _revalidate_selected_results(
+    connection: sqlite3.Connection,
+    expected_results: tuple[SelectedResultEvidence, ...],
+) -> None:
+    """Bind selected U9 evidence to the same U7 rows immediately before writes."""
+
+    if not isinstance(expected_results, tuple):
+        raise TypeError("Selected U7 evidence must be a tuple")
+    if not expected_results:
+        return
+    by_run: dict[str, SelectedResultEvidence] = {}
+    for source in expected_results:
+        if not isinstance(source, SelectedResultEvidence) or source.run_id in by_run:
+            raise ValueError(
+                "Selected U7 evidence must contain unique SelectedResultEvidence rows"
+            )
+        by_run[source.run_id] = source
+    sorted_runs = tuple(sorted(by_run))
+    seen: set[str] = set()
+    for start in range(0, len(sorted_runs), _SQLITE_BATCH_ROWS):
+        run_ids = sorted_runs[start : start + _SQLITE_BATCH_ROWS]
+        placeholders = ", ".join("?" for _ in run_ids)
+        rows = connection.execute(
+            "SELECT tr.result_id,tr.run_id,tr.completed_timestamp,tr.status,"
+            "tr.result_digest,tr.raw_result_json,tr.test_config_digest,"
+            "tr.combination_key,mr.test_id,mr.adapter_api_version,"
+            "mr.evidence_digest,mr.inserted_count,mr.updated_count,"
+            "mr.metric_names_json,mr.created_at "
+            "FROM test_results tr LEFT JOIN metric_ingestion_receipts mr "
+            "ON mr.run_id=tr.run_id "
+            f"WHERE tr.run_id IN ({placeholders}) ORDER BY tr.run_id",
+            run_ids,
+        ).fetchall()
+        if len(rows) != len(run_ids):
+            raise IngestionConflictError(
+                "Selected U7 evidence changed before evaluator write"
+            )
+        for row in rows:
+            source = by_run.get(row[1])
+            raw_digest = (
+                "sha256:" + hashlib.sha256(row[5].encode("utf-8")).hexdigest()
+                if isinstance(row[5], str)
+                else ""
+            )
+            if (
+                source is None
+                or row[1] in seen
+                or row[0] != source.result_id
+                or row[2] != source.completed_timestamp
+                or row[3] != source.status
+                or row[4] != source.result_digest
+                or raw_digest != source.raw_result_digest
+                or row[6] != source.test_config_digest
+                or row[7] != source.combination_key
+                or tuple(row[8:])
+                != (
+                    source.receipt_test_id,
+                    source.receipt_adapter_api_version,
+                    source.receipt_evidence_digest,
+                    source.receipt_inserted_count,
+                    source.receipt_updated_count,
+                    source.receipt_metric_names_json,
+                    source.receipt_created_at,
+                )
+            ):
+                raise IngestionConflictError(
+                    "Selected U7 raw/receipt evidence changed before evaluator write"
+                )
+            seen.add(row[1])
+    if seen != set(by_run):
+        raise IngestionConflictError("Selected U7 evidence changed before evaluator write")
+
+
+def revalidate_selected_result_evidence(
+    db_path: str | Path,
+    *,
+    expected_identity: SQLiteFileIdentity,
+    expected_results: tuple[SelectedResultEvidence, ...],
+) -> None:
+    """Revalidate selected U7 evidence without opening SQLite on the source file."""
+
+    from cval.storage.sqlite_snapshot import immutable_sqlite_snapshot
+
+    path = safe_writable_file_path(db_path)
+    with immutable_sqlite_snapshot(path) as snapshot:
+        if snapshot.source_identity != expected_identity:
+            raise RuntimeError(
+                "SQLite database path/device/inode changed since evaluator preflight"
+            )
+        with closing(snapshot.connect()) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            _assert_supported_schema(connection, allow_empty=False)
+            _validate_schema_shape(connection)
+            _revalidate_selected_results(connection, expected_results)
+
+
+@contextmanager
+def selected_result_evidence_guard(
+    db_path: str | Path,
+    *,
+    expected_identity: SQLiteFileIdentity,
+    expected_results: tuple[SelectedResultEvidence, ...],
+) -> Iterator[sqlite3.Connection]:
+    """Hold a U7 write reservation while a candidate consumes selected evidence."""
+
+    path = safe_writable_file_path(db_path)
+    assert_sqlite_file_identity(expected_identity)
+    with closing(
+        connect_sqlite_file(
+            path,
+            mode="rw",
+            timeout=30,
+            expected_identity=expected_identity,
+        )
+    ) as connection:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA recursive_triggers=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _assert_supported_schema(connection, allow_empty=False)
+            _validate_schema_shape(connection)
+            _revalidate_selected_results(connection, expected_results)
+            assert_sqlite_file_identity(expected_identity)
+            yield connection
+        finally:
+            try:
+                assert_sqlite_file_identity(expected_identity)
+            finally:
+                connection.rollback()
+
+
+def _classification_history_values(
+    record: ClassificationHistoryRecord,
+) -> tuple[Any, ...]:
+    return (
+        record.result_id,
+        record.run_id,
+        record.baseline_id,
+        record.baseline_identity,
+        record.target_digest,
+        record.evidence_digest,
+        record.combination_key,
+        record.health_class_name,
+        record.health_class_numerical,
+        record.dnr_reason,
+        record.classified_at,
+        record.evaluator_version,
+        record.metric_verdicts_json,
+        record.details_json,
+    )
+
+
+def _validate_classification_history_record(
+    record: ClassificationHistoryRecord,
+) -> None:
+    if not isinstance(record, ClassificationHistoryRecord):
+        raise TypeError("Expected ClassificationHistoryRecord")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", record.classification_key):
+        raise ValueError("classification_key must be a SHA-256 digest")
+    if (
+        isinstance(record.result_id, bool)
+        or not isinstance(record.result_id, int)
+        or record.result_id <= 0
+        or not isinstance(record.run_id, str)
+        or not record.run_id
+    ):
+        raise ValueError("Classification result identity is invalid")
+    if record.baseline_id is not None and not re.fullmatch(
+        r"hb1:[0-9a-f]{64}", record.baseline_id
+    ):
+        raise ValueError("Classification baseline_id is invalid")
+    if not re.fullmatch(r"ht1:[0-9a-f]{64}", record.baseline_identity):
+        raise ValueError("Classification baseline identity is invalid")
+    for field_name, value in (
+        ("target_digest", record.target_digest),
+        ("evidence_digest", record.evidence_digest),
+    ):
+        if not isinstance(value, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", value
+        ):
+            raise ValueError(f"Classification {field_name} is invalid")
+    if record.evidence_digest != _classification_evidence_digest(record):
+        raise ValueError(
+            "Classification evidence_digest does not match canonical verdict evidence"
+        )
+    if record.classification_key != _classification_identity_digest(
+        record.run_id,
+        record.baseline_identity,
+    ):
+        raise ValueError("classification_key does not match run/baseline identity")
+    if not valid_combination_key(record.combination_key):
+        raise ValueError("Classification combination key is invalid")
+    names = ("Excellent", "Nominal", "Underperforming", "Very Bad", "Terrible", "DNR")
+    allowed_dnr_reasons = {reason.value for reason in DnrReason}
+    if (
+        isinstance(record.health_class_numerical, bool)
+        or not isinstance(record.health_class_numerical, int)
+        or not 0 <= record.health_class_numerical <= 5
+        or record.health_class_name != names[record.health_class_numerical]
+        or (record.health_class_numerical == 5) != (record.dnr_reason is not None)
+        or (
+            record.dnr_reason is not None
+            and record.dnr_reason not in allowed_dnr_reasons
+        )
+        or (record.health_class_numerical < 5 and record.baseline_id is None)
+    ):
+        raise ValueError("Classification class/DNR semantics are invalid")
+    if (
+        isinstance(record.classified_at, bool)
+        or not isinstance(record.classified_at, int)
+        or record.classified_at < 0
+        or not isinstance(record.evaluator_version, str)
+        or not record.evaluator_version
+    ):
+        raise ValueError("Classification evaluator metadata is invalid")
+    parsed: dict[str, Any] = {}
+    for field_name, value, expected_type in (
+        ("metric_verdicts_json", record.metric_verdicts_json, list),
+        ("details_json", record.details_json, dict),
+    ):
+        try:
+            payload = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Classification {field_name} is invalid") from exc
+        if not isinstance(payload, expected_type) or json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ) != value:
+            raise ValueError(f"Classification {field_name} must be canonical JSON")
+        parsed[field_name] = payload
+    metric_names = ("Excellent", "Nominal", "Underperforming", "Very Bad", "Terrible")
+    metrics = parsed["metric_verdicts_json"]
+    if record.health_class_numerical == 5:
+        if metrics or parsed["details_json"] != {"dnr_reason": record.dnr_reason}:
+            raise ValueError("DNR classification evidence is invalid")
+    elif not metrics or not isinstance(parsed["details_json"].get("aggregation"), str):
+        raise ValueError("Evaluated classification evidence is incomplete")
+    for metric in metrics:
+        if not isinstance(metric, dict) or set(metric) != {
+            "class_code",
+            "class_name",
+            "metric_name",
+            "pct_diff",
+            "severity_pct",
+            "source",
+            "value",
+        }:
+            raise ValueError("Classification metric verdict shape is invalid")
+        code = metric["class_code"]
+        if (
+            isinstance(code, bool)
+            or not isinstance(code, int)
+            or not 0 <= code <= 4
+            or metric["class_name"] != metric_names[code]
+            or not isinstance(metric["source"], str)
+            or not metric["source"]
+            or not isinstance(metric["metric_name"], str)
+            or not metric["metric_name"]
+        ):
+            raise ValueError("Classification metric verdict identity is invalid")
+        for name in ("pct_diff", "severity_pct", "value"):
+            value = metric[name]
+            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+                raise ValueError("Classification metric verdict values must be finite")
+        if metric["severity_pct"] < 0:
+            raise ValueError("Classification metric severity must be non-negative")
+
+
+def _classification_identity_digest(run_id: str, baseline_identity: str) -> str:
+    payload = json.dumps(
+        {"run_id": run_id, "baseline_identity": baseline_identity},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _classification_evidence_digest(record: ClassificationHistoryRecord) -> str:
+    payload = json.dumps(
+        {
+            "target_digest": record.target_digest,
+            "baseline_id": record.baseline_id,
+            "combination_key": record.combination_key,
+            "health_class_name": record.health_class_name,
+            "health_class_numerical": record.health_class_numerical,
+            "dnr_reason": record.dnr_reason,
+            "evaluator_version": record.evaluator_version,
+            "metric_verdicts_json": record.metric_verdicts_json,
+            "details_json": record.details_json,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def _prepare_schema(
     connection: sqlite3.Connection,
     *,
@@ -1449,13 +2141,13 @@ def _prepare_schema(
     )
     migration = connection.execute(
         "SELECT version FROM schema_migrations WHERE version=?",
-        (SCHEMA_VERSION,),
+        (INITIAL_SCHEMA_VERSION,),
     ).fetchone()
     if migration is None:
         connection.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) "
             "VALUES (?, ?, ?)",
-            (SCHEMA_VERSION, "initial-per-test-results", int(time.time())),
+            (INITIAL_SCHEMA_VERSION, "initial-per-test-results", int(time.time())),
         )
     for table_name, key_groups in sorted(COMMON_IMMUTABLE_KEY_GROUPS.items()):
         prepare_immutable_table_triggers(connection, table_name, key_groups)
@@ -1463,16 +2155,21 @@ def _prepare_schema(
         _validate_schema_shape(connection)
 
 
-@lru_cache(maxsize=1)
-def _common_table_sql_manifest() -> dict[str, str]:
+@lru_cache(maxsize=2)
+def _common_table_sql_manifest(
+    schema_version: int = INITIAL_SCHEMA_VERSION,
+) -> dict[str, str]:
     with closing(sqlite3.connect(":memory:")) as connection:
         _prepare_schema(connection, validate=False)
+        if schema_version == SCHEMA_VERSION:
+            _prepare_classification_history_schema(connection)
         return {
             str(row[0]): str(row[1])
             for row in connection.execute(
                 "SELECT name, sql FROM sqlite_master WHERE type='table' "
                 "AND name IN ('schema_migrations','test_results',"
-                "'metric_ingestion_receipts','adapter_schema_versions')"
+                "'metric_ingestion_receipts','adapter_schema_versions',"
+                "'classification_history')"
             )
         }
 
@@ -1496,8 +2193,12 @@ def _assert_supported_schema(
     versions = connection.execute(
         "SELECT version, name FROM schema_migrations ORDER BY version"
     ).fetchall()
-    expected = [(SCHEMA_VERSION, "initial-per-test-results")]
-    if versions != expected:
+    expected_v1 = [(INITIAL_SCHEMA_VERSION, "initial-per-test-results")]
+    expected_v2 = [
+        *expected_v1,
+        (SCHEMA_VERSION, CLASSIFICATION_HISTORY_MIGRATION),
+    ]
+    if versions not in (expected_v1, expected_v2):
         raise RuntimeError(
             f"Unsupported per-test result schema migration manifest: {versions}"
         )
@@ -1513,6 +2214,7 @@ def _database_is_empty(connection: sqlite3.Connection) -> bool:
 
 
 def _validate_schema_shape(connection: sqlite3.Connection) -> None:
+    schema_version = _schema_version_from_migrations(connection)
     tables = {
         str(row[0])
         for row in connection.execute(
@@ -1525,6 +2227,12 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
         "metric_ingestion_receipts",
         "adapter_schema_versions",
     }
+    if schema_version == SCHEMA_VERSION:
+        required_tables.add("classification_history")
+    elif "classification_history" in tables:
+        raise RuntimeError(
+            "Per-test schema v1 contains an unversioned classification_history table"
+        )
     missing_tables = sorted(required_tables - tables)
     if missing_tables:
         raise RuntimeError(
@@ -1555,12 +2263,33 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
         },
         "adapter_schema_versions": {"test_id", "version", "applied_at"},
     }
+    if schema_version == SCHEMA_VERSION:
+        manifests["classification_history"] = {
+            "classification_id",
+            "classification_key",
+            "result_id",
+            "run_id",
+            "baseline_id",
+            "baseline_identity",
+            "target_digest",
+            "evidence_digest",
+            "combination_key",
+            "health_class_name",
+            "health_class_numerical",
+            "dnr_reason",
+            "classified_at",
+            "evaluator_version",
+            "metric_verdicts_json",
+            "details_json",
+        }
     primary_keys = {
         "schema_migrations": ("version",),
         "test_results": ("result_id",),
         "metric_ingestion_receipts": ("run_id",),
         "adapter_schema_versions": ("test_id",),
     }
+    if schema_version == SCHEMA_VERSION:
+        primary_keys["classification_history"] = ("classification_id",)
     column_specs = {
         "schema_migrations": {
             "version": ("INTEGER", False, None, 1),
@@ -1610,6 +2339,25 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
             "applied_at": ("INTEGER", True, None, 0),
         },
     }
+    if schema_version == SCHEMA_VERSION:
+        column_specs["classification_history"] = {
+            "classification_id": ("INTEGER", False, None, 1),
+            "classification_key": ("TEXT", True, None, 0),
+            "result_id": ("INTEGER", True, None, 0),
+            "run_id": ("TEXT", True, None, 0),
+            "baseline_id": ("TEXT", False, None, 0),
+            "baseline_identity": ("TEXT", True, None, 0),
+            "target_digest": ("TEXT", True, None, 0),
+            "evidence_digest": ("TEXT", True, None, 0),
+            "combination_key": ("TEXT", True, "''", 0),
+            "health_class_name": ("TEXT", True, None, 0),
+            "health_class_numerical": ("INTEGER", True, None, 0),
+            "dnr_reason": ("TEXT", False, None, 0),
+            "classified_at": ("INTEGER", True, None, 0),
+            "evaluator_version": ("TEXT", True, None, 0),
+            "metric_verdicts_json": ("TEXT", True, "'[]'", 0),
+            "details_json": ("TEXT", True, "'{}'", 0),
+        }
     constraint_fragments = {
         "schema_migrations": (),
         "test_results": (
@@ -1629,6 +2377,17 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
         ),
         "adapter_schema_versions": ("CHECK (VERSION > 0)",),
     }
+    if schema_version == SCHEMA_VERSION:
+        constraint_fragments["classification_history"] = (
+            "CLASSIFICATION_KEY TEXT NOT NULL UNIQUE",
+            "CHECK (CLASSIFICATION_ID > 0)",
+            "CHECK (RESULT_ID > 0)",
+            "CHECK (HEALTH_CLASS_NUMERICAL BETWEEN 0 AND 5)",
+            "CHECK (CLASSIFIED_AT >= 0)",
+            "UNIQUE (RUN_ID, BASELINE_IDENTITY)",
+            "FOREIGN KEY (RUN_ID) REFERENCES TEST_RESULTS(RUN_ID) ON DELETE RESTRICT",
+            "CHECK ((HEALTH_CLASS_NUMERICAL = 5) = (DNR_REASON IS NOT NULL))",
+        )
     table_indexes = {
         "schema_migrations": set(),
         "test_results": {
@@ -1639,18 +2398,30 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
         "metric_ingestion_receipts": set(),
         "adapter_schema_versions": set(),
     }
+    if schema_version == SCHEMA_VERSION:
+        table_indexes["classification_history"] = {
+            "idx_classification_history_run",
+            "idx_classification_history_baseline",
+        }
     implicit_indexes = {
         "schema_migrations": set(),
         "test_results": {("u", ("run_id",), ("BINARY",))},
         "metric_ingestion_receipts": {("pk", ("run_id",), ("BINARY",))},
         "adapter_schema_versions": {("pk", ("test_id",), ("BINARY",))},
     }
+    if schema_version == SCHEMA_VERSION:
+        implicit_indexes["classification_history"] = {
+            ("u", ("classification_key",), ("BINARY",)),
+            ("u", ("run_id", "baseline_identity"), ("BINARY", "BINARY")),
+        }
     constraint_counts = {
         "schema_migrations": (0, 0),
         "test_results": (7, 0),
         "metric_ingestion_receipts": (2, 1),
         "adapter_schema_versions": (1, 0),
     }
+    if schema_version == SCHEMA_VERSION:
+        constraint_counts["classification_history"] = (6, 1)
     for table_name, required_columns in manifests.items():
         validate_table_manifest(
             connection,
@@ -1662,12 +2433,16 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
             constraint_counts=constraint_counts[table_name],
             allowed_indexes=table_indexes[table_name],
             implicit_indexes=implicit_indexes[table_name],
-            immutable_key_groups=COMMON_IMMUTABLE_KEY_GROUPS[table_name],
+            immutable_key_groups=(
+                CLASSIFICATION_HISTORY_KEY_GROUPS
+                if table_name == "classification_history"
+                else COMMON_IMMUTABLE_KEY_GROUPS[table_name]
+            ),
         )
         require_exact_table_sql(
             connection,
             table_name,
-            _common_table_sql_manifest()[table_name],
+            _common_table_sql_manifest(schema_version)[table_name],
         )
     require_schema_objects(
         connection,
@@ -1698,6 +2473,28 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
             ),
         },
     )
+    if schema_version == SCHEMA_VERSION:
+        require_schema_objects(
+            connection,
+            indexes={
+                "idx_classification_history_run": (
+                    "classification_history",
+                    ("run_id", "classified_at"),
+                    (False, True),
+                    ("BINARY", "BINARY"),
+                    False,
+                    "",
+                ),
+                "idx_classification_history_baseline": (
+                    "classification_history",
+                    ("baseline_id", "health_class_numerical"),
+                    (False, False),
+                    ("BINARY", "BINARY"),
+                    False,
+                    "",
+                ),
+            },
+        )
     if not _has_unique_index(connection, "test_results", ("run_id",)):
         raise RuntimeError("Per-test test_results.run_id lacks a unique constraint")
     foreign_keys = {
@@ -1717,6 +2514,106 @@ def _validate_schema_shape(connection: sqlite3.Connection) -> None:
         ("test_results", "run_id", "run_id", "NO ACTION", "RESTRICT", "NONE")
     }:
         raise RuntimeError("Metric receipt foreign key manifest is invalid")
+    if schema_version == SCHEMA_VERSION:
+        history_foreign_keys = {
+            (
+                str(row[2]),
+                str(row[3]),
+                str(row[4]),
+                str(row[5]).upper(),
+                str(row[6]).upper(),
+                str(row[7]).upper(),
+            )
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(classification_history)"
+            )
+        }
+        if history_foreign_keys != {
+            ("test_results", "run_id", "run_id", "NO ACTION", "RESTRICT", "NONE")
+        }:
+            raise RuntimeError("Classification history foreign key manifest is invalid")
+
+
+def _audit_classification_history_rows(
+    connection: Any,
+    *,
+    page_size: int,
+) -> int:
+    last_id = 0
+    audited = 0
+    while True:
+        rows = connection.execute(
+            "SELECT history.classification_id, history.classification_key, "
+            "history.result_id, history.run_id, history.baseline_id, "
+            "history.baseline_identity, history.target_digest, "
+            "history.evidence_digest, history.combination_key, "
+            "history.health_class_name, history.health_class_numerical, "
+            "history.dnr_reason, history.classified_at, "
+            "history.evaluator_version, history.metric_verdicts_json, "
+            "history.details_json, owner.result_id "
+            "FROM classification_history AS history "
+            "LEFT JOIN test_results AS owner ON owner.run_id=history.run_id "
+            "WHERE history.classification_id > ? "
+            "ORDER BY history.classification_id LIMIT ?",
+            (last_id, page_size),
+        ).fetchall()
+        if not rows:
+            return audited
+        if len(rows) > page_size:
+            raise RuntimeError("Classification history audit page exceeded its bound")
+        for row in rows:
+            classification_id = row[0]
+            if (
+                isinstance(classification_id, bool)
+                or not isinstance(classification_id, int)
+                or classification_id <= last_id
+            ):
+                raise RuntimeError(
+                    "Classification history contains an invalid row ID"
+                )
+            record = ClassificationHistoryRecord(
+                classification_key=row[1],
+                result_id=row[2],
+                run_id=row[3],
+                baseline_id=row[4],
+                baseline_identity=row[5],
+                target_digest=row[6],
+                evidence_digest=row[7],
+                combination_key=row[8],
+                health_class_name=row[9],
+                health_class_numerical=row[10],
+                dnr_reason=row[11],
+                classified_at=row[12],
+                evaluator_version=row[13],
+                metric_verdicts_json=row[14],
+                details_json=row[15],
+            )
+            try:
+                _validate_classification_history_record(record)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Classification history contains invalid typed evidence"
+                ) from exc
+            if row[16] != record.result_id:
+                raise RuntimeError("Classification history owner identity is invalid")
+            last_id = classification_id
+            audited += 1
+
+
+def _schema_version_from_migrations(connection: Any) -> int:
+    versions = connection.execute(
+        "SELECT version, name FROM schema_migrations ORDER BY version"
+    ).fetchall()
+    if versions == [(INITIAL_SCHEMA_VERSION, "initial-per-test-results")]:
+        return INITIAL_SCHEMA_VERSION
+    if versions == [
+        (INITIAL_SCHEMA_VERSION, "initial-per-test-results"),
+        (SCHEMA_VERSION, CLASSIFICATION_HISTORY_MIGRATION),
+    ]:
+        return SCHEMA_VERSION
+    raise RuntimeError(
+        f"Unsupported per-test result schema migration manifest: {versions}"
+    )
 
 
 def _has_unique_index(

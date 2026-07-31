@@ -277,6 +277,33 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
         self.assertEqual(dl_common, ("pass", None, None))
         self.assertTrue(all(count > 0 for count in dl_counts.values()))
 
+    def test_reserved_uri_root_supports_two_successive_ingestions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "validation %?# root"
+            config = self._config(root, enabled=True)
+            result_path = self._write_builtin_result(root, config)
+
+            first = _ingest(result_path, config)
+            second = _ingest(result_path, config)
+            counts = {}
+            for test_id in ("storage", "nccl", "dltest"):
+                db_path = root / f"validation_tests/{test_id}/{test_id}_results.db"
+                with closing(sqlite3.connect(db_path)) as connection:
+                    counts[test_id] = connection.execute(
+                        "SELECT COUNT(*) FROM test_results"
+                    ).fetchone()[0]
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        self.assertEqual(counts, {"storage": 1, "nccl": 1, "dltest": 1})
+        self.assertTrue(
+            all(
+                outcome.receipt is not None
+                and outcome.receipt.message == "idempotent retry"
+                for outcome in second.outcomes
+            )
+        )
+
     def test_builtin_common_rows_store_canonical_health_combination_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

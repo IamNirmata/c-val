@@ -22,6 +22,8 @@ cval jobs
 cval result
 cval results
 cval classifications
+cval health evaluate
+cval health activate
 ```
 
 The `baseline` command group (build, classify, activate, show, list) is also a
@@ -85,6 +87,43 @@ python -m cval.cli history --run-id <run-id> --output json
 ```
 
 See [Node Run History](run-history.md) for schema and activation safety.
+
+## `health`
+
+Run the registry-driven U8 evaluator locally or against an explicitly supplied
+PVC copy. These commands do not use Kubernetes.
+
+```bash
+# Side-effect-free: missing canonical U7 DBs are structured skips.
+python -m cval.cli health evaluate --output json
+
+# Derived writes: requires config gate plus exact confirmation.
+python -m cval.cli health evaluate --apply --confirm evaluate --output json
+
+# Candidate activation is always separate and dry-run first.
+python -m cval.cli health activate <test-id> <hb1:baseline-id> --output json
+python -m cval.cli health activate <test-id> <hb1:baseline-id> \
+  --apply --confirm activate --output json
+```
+
+`health evaluate` selects only enabled tests declaring both `health` and
+`ingest`. It validates each existing U7 common+adapter schema in one query-only
+in-memory snapshot copied without opening SQLite on the source, invokes adapter
+observation APIs against that same snapshot, builds candidates from the full
+current-config source catalog without activating them, and classifies an
+oldest-pending page bounded by `max_classifications_per_test`. JSON/table output
+reports selected/deferred/backlog/remaining/truncation, migration state,
+candidate/history inserted and idempotent counts, the failing stage, and
+partial durable writes from an earlier cross-DB stage. Routine classification
+catalog work uses bounded primary-key result pages plus one indexed exact-target
+history lookup per page; it never loads the complete history table. One test
+error does not block later tests. Apply may perform only the exact additive U7
+v1→v2 migration, U8 candidate persistence, and append-only classification
+history. It never updates `test_results.health_*` cache columns.
+
+Deferred passing rows retain their bounded action rows and reasons. Their full
+count is included in `classification_remaining`, so zero actionable backlog
+does not imply that deferred work has drained.
 
 ## Hidden in-pod ingestion hooks
 

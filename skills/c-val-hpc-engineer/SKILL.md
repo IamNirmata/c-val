@@ -106,11 +106,36 @@ Use only after explicit operator approval.
 ## Baseline and Outlier Classification Workflow
 
 The commands in this section operate the existing compatibility baseline DBs
-under `baselines/`. U8 per-test health classes are implemented as local Python
-engine/storage APIs only and are not wired to these commands or loops. Do not
-create, migrate, activate, or assume live
-`validation_tests/<test>/<test>_health_classes.db` files; U9 and live activation
-require separate approval.
+under `baselines/`. U9 now exposes local dry-run `health evaluate` and
+`health activate` over U8, but they are not wired to compatibility loops or a
+live service. Do not create, migrate, activate, or assume live
+`validation_tests/<test>/<test>_health_classes.db` files. Apply requires the
+independent evaluator gate and exact confirmation; live rollout is U11.
+Dry-run requires checkpointed canonical copies with absent WAL/SHM sidecars;
+it reads one in-memory snapshot shared with adapters and never deletes or
+creates source sidecars. Review candidate-source completeness plus
+classification selected/backlog/remaining/truncation, migration,
+candidate/history counts, and partial durable writes. Routine catalogs use
+bounded result keyset pages and indexed exact-target history batches; a separate
+streamed joined audit handles full history integrity. On apply errors, inspect
+the reported stage and partial-write facts: U7 migration/history and U8
+candidate transactions are individually atomic but cross-database commits are
+not. History precommit revalidation uses the already-open U7 write transaction
+for its catalog and an in-memory connection projection for adapter evidence; it
+does not reopen a WAL source after `BEGIN IMMEDIATE`.
+Eligible candidate rebuilds use the selected-result guard's active U7
+transaction projection for both the complete catalog and adapter observations.
+Review the separate deferred count and bounded reasons: deferred rows remain in
+`classification_remaining` even after all actionable history is stored. U7/U8
+writers reject DB, activation-key, and evaluator-lock path replacement at
+commit and exact-retry boundaries. The held lock is a callable identity guard;
+its canonical inode, owner-only `0600` mode, and single-link state must remain
+valid for the complete apply operation.
+
+```bash
+python -m cval.cli health evaluate --output json
+python -m cval.cli health activate <test-id> <candidate-id> --output json
+```
 
 - Start with `status` to identify stale or missing results.
 - Build a baseline from recent results (dry-run prints the robust metrics;

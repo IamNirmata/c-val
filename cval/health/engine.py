@@ -1536,6 +1536,10 @@ def validate_health_verdict(
     if code is HealthClassCode.DNR:
         if not isinstance(verdict.dnr_reason, DnrReason) or verdict.metrics:
             raise ValueError("DNR verdict requires a reason and no metric verdicts")
+        if verdict.details_json != _canonical_json(
+            {"dnr_reason": verdict.dnr_reason.value}
+        ):
+            raise ValueError("DNR verdict details must use the canonical reason payload")
     elif verdict.dnr_reason is not None or not verdict.metrics:
         raise ValueError("Evaluated health verdict requires metrics and no DNR reason")
     for metric in verdict.metrics:

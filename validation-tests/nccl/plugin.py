@@ -19,9 +19,10 @@ from cval.storage.ingest import (
     prepare_nccl_health_schema,
     timestamp_to_los_angeles,
 )
+from cval.storage.sqlite_snapshot import health_read_connection
 from cval.storage.per_test_results import (
-    COMMON_IMMUTABLE_KEY_GROUPS,
     COMMON_RESULT_TABLES,
+    common_immutable_key_groups,
     canonical_payload_digest,
     existing_metric_ingestion_receipt,
     metric_ingestion_transaction,
@@ -79,7 +80,7 @@ def _validate_nccl_schema(connection, allow_missing: bool) -> bool:
         connection,
         {"LATEST_NODE_STATUS", "NODE_RANKING"} if table_exists else set(),
         immutable_tables={
-            **COMMON_IMMUTABLE_KEY_GROUPS,
+            **common_immutable_key_groups(connection),
             **(
                 {NCCL_HEALTH_TABLE: NCCL_IMMUTABLE_KEY_GROUPS}
                 if table_exists
@@ -228,13 +229,7 @@ class NcclIngestionPlugin:
         validate_source_snapshot(context.source_snapshot)
         result_ids = context.source_snapshot.result_ids
         placeholders = ", ".join("?" for _ in result_ids)
-        with closing(
-            sqlite3.connect(
-                f"file:{context.result_db_path}?mode=ro",
-                uri=True,
-                timeout=30,
-            )
-        ) as connection:
+        with health_read_connection(context.result_db_path) as connection:
             validate_common_result_connection(connection)
             _validate_nccl_schema(connection, False)
             metadata = validate_health_read_metadata(

@@ -30,9 +30,11 @@ flowchart TB
     ResultJson --> Ingestion["Registry-driven ingestion dispatcher"]
     Ingestion --> Adapter["Spawned test adapter + SQL RPC"]
     Adapter --> PerTestDB[(Canonical per-test SQLite DB)]
-    PerTestDB -. "future U9 orchestration; not live" .-> HealthAdapter["Read-only health observations"]
-    HealthAdapter -.-> HealthEngine["cval.health pure engine"]
-    HealthEngine -.-> HealthDB[(Per-test health-class DB)]
+    PerTestDB --> Evaluator["cval.health.evaluator (dry-run default)"]
+    Evaluator --> HealthAdapter["Read-only canonical health observations"]
+    HealthAdapter --> HealthEngine["cval.health pure engine"]
+    HealthEngine --> HealthDB[(Per-test health-class DB)]
+    Evaluator --> History[(Append-only U7 classification_history)]
 ```
 
 ## Package Responsibilities
@@ -63,6 +65,7 @@ flowchart TB
 | `cval.health.combination` | Build canonical comparable-environment JSON/SHA-256 identities. |
 | `cval.health.engine` | Validate observations/provenance, build content-addressed robust candidates, apply normalized class bands, enforce DNR, and validate custom aggregation. |
 | `cval.health.storage` | Exact per-test SQLite schema, immutable evidence, candidate lifecycle, snapshot-consistent reads, and transactional activation. |
+| `cval.health.evaluator` | Registry enumeration, bounded source catalogs, authoritative candidate triggers, classification history, per-test locking, dry-run reports, and deliberate activation. It imports no Kubernetes modules. |
 | `cval.health.sqlite_values` | Reject coercive/non-finite SQLite scalars at health adapter read boundaries. |
 | `cval.baselines.stats` | Robust statistics kernels (median, MAD, percentiles, modified z-score, bootstrap). |
 | `cval.baselines.build` | Build dynamic baselines from result DBs per stratum. |
@@ -107,11 +110,20 @@ The three canonical per-test DB paths are implemented but
 write surfaces until a separately approved dual-write activation. Likewise,
 `metadata/node-run-history.db` remains independently default-off.
 
-U8 health candidate construction, classification, and exact per-test health DB
-persistence are implemented as callable Python modules. No CLI/evaluator cycle
-invokes them in production, all built-in descriptors keep `auto_activate=false`,
-and no health DB is assumed to exist. U9 orchestration, classification-history
-writes, live migration, and deployment remain separate approval-gated work.
+U9 now wires U8 through a local/PVC-copy evaluator. `health evaluate` is
+dry-run by default, enumerates only enabled registry tests with both `health`
+and `ingest`, treats a missing U7 DB as a structured skip, and isolates each
+test. Apply requires the independent `health_evaluator.write_enabled=true`
+gate and exact confirmation. It additively migrates a validated U7 v1 DB to v2,
+stores candidates and append-only verdict history, and never updates the
+nullable latest-health cache columns. All built-ins remain
+`auto_activate=false`; activation is a separate deliberate command. No live DB,
+background service, Kubernetes manifest, or deployment is authorized by U9.
+Routine evaluator catalogs scan bounded `test_results` primary-key pages and
+batch current-target probes through the unique history target index. Full
+history content validation is a separate streamed joined integrity audit, not a
+routine schema/evaluator scan. Atomic history persistence retains a per-record
+`stored`/`idempotent` outcome when exact concurrent appends race preflight.
 
 The four `metadata/dltest_*` DBs hold raw tall DL metric rows. The
 `baselines/*-baselines.db` files hold versioned dynamic baselines. The

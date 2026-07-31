@@ -1,7 +1,7 @@
 # c-val Modular Framework Update Tracker
 
 **Created:** 2026-07-28  
-**Status:** Active — U0–U8 implemented and accepted locally; U9 remains proposed  
+**Status:** Active — U0–U8 implemented and accepted locally; U9 implementation is in progress
 **Source draft:** `docs/todo/cval-3.md`  
 **Goal:** Make c-val modular, deterministic, easier to extend, and safer to operate without breaking current validation, ingestion, baseline, or classification behavior.
 
@@ -411,7 +411,9 @@ Each test declares factors such as:
 
 A candidate is generated when `min_new_results` qualifying results have arrived and the total clean sample count satisfies `min_samples`.
 
-Automatic candidate generation is allowed. Automatic activation defaults to `false` for rollout because activation redefines normal. A future test may set `auto_activate=true` only after quality gates and rollback behavior are validated and approved.
+Automatic candidate generation is allowed. `cval.test.v1` rejects
+`auto_activate=true` because activation redefines normal; a future descriptor
+schema would need an explicitly implemented, quality-gated, approved contract.
 
 ## 10. Evaluator architecture
 
@@ -426,7 +428,9 @@ Target responsibilities:
 3. Build versioned candidate health classes.
 4. Activate according to the configured and approved policy.
 5. Evaluate pending test results against the active compatible baseline.
-6. Persist append-only classification history and update nullable latest-assignment columns.
+6. Persist append-only classification history. U9 deliberately does not update
+  nullable latest-assignment cache columns; a later cutover may propose that
+  only with separate compatibility evidence.
 7. Emit structured logs and cycle summaries.
 
 The current `gcr-admin-pvc-access` workload is not renamed in place during development. The target `cval-evaluator` workload is introduced and validated separately, followed by an explicitly approved cutover. This avoids breaking live PVC access and current background loops.
@@ -933,7 +937,7 @@ Validation evidence:
 
 ## U9 — Implement modular evaluator service
 
-**Status:** `PROPOSED`  
+**Status:** `DONE` — accepted locally 2026-07-30; no live DB migration/write, write-gate enablement, activation, or deployment authorized
 **Risk:** High; derived database writes and background processing.  
 **Depends on:** U8.
 
@@ -952,6 +956,192 @@ Acceptance criteria:
 - Repeated cycles are idempotent.
 - One broken test adapter does not corrupt other test results.
 - Writes use transactions and bounded lock waits.
+
+Implemented locally during the current `IN PROGRESS` stage:
+
+- Independent strict `[health_evaluator]` config, default-off write gate,
+  bounded catalog size, and bounded owner-only per-test lock.
+- Public `cval.health.evaluator` cycle/report API plus `health evaluate` and
+  deliberate `health activate`; both are dry-run-first and apply requires the
+  gate plus exact operation-specific confirmation.
+- Registry enumeration of enabled `health`+`ingest` tests, canonical confined
+  U7/U8 paths, side-effect-free missing-DB skips, exact common+adapter schema
+  reads, query-only catalog snapshots, canonical source/receipt provenance, and
+  one-test failure isolation.
+- Authoritative immutable-chain cursor, typed candidate persistence result, and
+  read-only activation preflight. Advisory `health_build_state` is not used for
+  correctness; built-ins remain `auto_activate=false`.
+- Exact additive U7 schema v2 migration only during evaluator apply. Ordinary
+  ingestion accepts exact v1/v2 without migrating. Append-only classification
+  history supports no-baseline DNR, canonical metric/details evidence,
+  idempotent same-baseline retries, new-baseline reevaluation, strict types,
+  rollback, and exact conflict INSERT/UPDATE/DELETE/REPLACE guards.
+- Raw fail/incomplete and missing combination/no active baseline DNR behavior;
+  pass-without-receipt/config-drift deferral; bounded classification; no update
+  of the U7 nullable latest-health cache.
+- Local tests cover gates, dry-run side effects, candidates, classes/DNR,
+  migration/history integrity, locking, rollback, isolation, fourth-test
+  enumeration, activation, path safety, and cache immutability.
+
+Independent U9 audit remediation implemented locally on 2026-07-30:
+
+- Replaced source `mode=ro` evaluator/adapter reads with one checkpointed-main
+  in-memory snapshot. WAL-header normalization happens only in memory; absent
+  source WAL/SHM sidecars and unchanged source atime/mtime/ctime are
+  regression-tested. Linux reads require `O_NOATIME` and fail closed when the
+  process does not own the source or lacks equivalent permission.
+- Candidate catalogs are complete cumulative current-config sets per
+  combination. Only oldest-pending classification targets are page-bounded;
+  reports expose backlog, remaining work, and truncation so baseline
+  reevaluation drains over repeated cycles without starving older rows.
+- Common schema validates first. Wholly absent adapter state permits raw
+  fail/incomplete DNR history while passing rows defer; partial adapter schema
+  or version state still fails closed.
+- Versioned target identity now binds test/config/health policy/evaluator,
+  adapter, combination/category, and baseline. Target/evidence digests make
+  exact retries idempotent, changed same-target evidence a conflict, and
+  version/policy/baseline changes append. A bounded existing-target page is
+  reclassified and its canonical verdict digest compared before history
+  idempotency is reported; identity-only prefiltering is not used.
+- `cval.test.v1` rejects `auto_activate=true` rather than silently ignoring it.
+- All possible reads/plugin/build/classification validation runs before any
+  migration or persistence. Stage-aware reports preserve migration, candidate,
+  and history effects on later failures and explicitly state that cross-DB
+  commits are non-atomic.
+- History work uses indexed per-selected-target lookups rather than loading the
+  full history table. DNR reasons are restricted to stable `DnrReason` values
+  and exact canonical details.
+- Added audit-probe regressions for WAL/SHM/mtime behavior, full candidates,
+  paging/backlog drain, absent/partial adapters, idempotency conflicts/version
+  append, automatic activation rejection, preflight ordering, partial writes,
+  bounded history lookups, and DNR reason/detail enforcement.
+
+Second U9 audit blockers 1–6 remediated locally on 2026-07-30:
+
+- Activation keys are read only through strict owner/mode/length-checked
+  `O_NOATIME|O_NOFOLLOW` descriptors; key reads preserve atime and reject
+  symlinks or non-owner-only mode.
+- U7/U8/evaluator filesystem opens use one percent-encoded SQLite URI helper
+  that asserts `PRAGMA database_list` resolves to the exact intended canonical
+  path and device/inode, including filenames containing `?`, `#`, `%`, or
+  spaces.
+- The evaluator captures complete selected U7 raw and absent/present receipt
+  evidence plus source inode. Migration/history revalidate it under
+  `BEGIN IMMEDIATE`; candidate persistence holds the same U7 reservation for
+  the complete store operation.
+- Active baselines and their U8 generation are read coherently from one
+  immutable snapshot. The complete current U8 generation is revalidated after
+  evaluator-owned candidate stores and immediately before U7 history append;
+  a changed active generation aborts classification.
+- Adapter initialization is absent only when metric tables, adapter version,
+  and receipts are all absent. Any partial combination, including orphan
+  receipts, fails closed; every optional receipt row is type/manifest checked.
+- First health DB/key creation is staged and atomically linked into final names.
+  Failures remove staging and any pair members published by that operation;
+  evaluator reports expose final DB/key presence and whether first-creation
+  cleanup completed rather than claiming a stored candidate.
+- Reproducer coverage was added for every blocker, including inode/evidence and
+  U8-generation races, reserved URI characters, no-atime/no-follow keys,
+  receipt-only adapter state, and failed first-create cleanup/reporting.
+
+Remaining second-audit P2/P3 findings remediated locally on 2026-07-30:
+
+- Routine schema/evaluator paths no longer load all `classification_history`
+  rows or issue owner/target N+1 queries. Structural schema validation remains
+  constant-memory; result catalogs use bounded primary-key keyset pages with one
+  indexed exact `(run_id, baseline_identity)` history lookup per page; history
+  stores use bounded owner/key/target batches.
+- Full classification-history content integrity is a separate explicit audit
+  that streams bounded `classification_id` keyset pages joined to
+  `test_results`, preserving typed evidence and owner checks without an
+  unbounded fetch or owner N+1.
+- History persistence returns ordered per-record `stored`/`idempotent`
+  outcomes. Exact concurrent appends preserve mixed action labels instead of
+  relabeling every planned record as stored.
+- Human-readable cycle output now includes selected/backlog/remaining/
+  truncation, migration state, candidate action/insert/idempotent counts,
+  history insert/idempotent counts, and partial durable writes.
+- Large-history, indexed query-plan, bounded page-count, mixed race-outcome,
+  streamed-integrity-audit, and table-output regressions were added.
+
+Final three U9 audit blockers remediated locally on 2026-07-30:
+
+- Classification-history precommit revalidation now reads the U7 catalog from
+  the already-open `BEGIN IMMEDIATE` connection and projects adapter evidence
+  from that transaction into memory. It no longer snapshots/reopens the U7
+  source while WAL/SHM sidecars are live; checkpointed-WAL migration plus
+  history append is regression-tested through sidecar cleanup.
+- The remaining per-test ingestion preflight raw SQLite URI was replaced by the
+  percent-encoding helper with exact `main` path/inode binding. Two successive
+  built-in ingestions under a validation root containing `%`, `?`, and `#` are
+  regression-tested.
+- SQLite source-change identity no longer includes atime, which is not content
+  identity. Source reads still require `O_NOATIME|O_NOFOLLOW`, and explicit
+  source DB plus activation-key atime preservation tests remain. Repeated
+  corrupt-plugin and existing-key dry-run stress runs are included in local
+  validation.
+
+Final U9 audit closure blockers remediated locally on 2026-07-30:
+
+- Eligible candidate apply now yields the selected-result guard's active U7
+  transaction and projects that connection for the complete catalog/source
+  rebuild plus adapter observations. A 10-source eligible checkpointed-WAL
+  apply stores the candidate, completes U7 migration/history, and leaves no
+  WAL/SHM/journal or staging sidecars.
+- U7 migration/history and U8 candidate/activation writes capture their
+  expected SQLite identity before open and assert it immediately before every
+  commit or exact retry return. U8 exposes a precommit callback so evaluator
+  candidate persistence revalidates U7 identity immediately before U8 commit.
+  In-transaction rename/replacement regressions prove rollback, unchanged
+  replacement content, and no false success.
+- Deferred passing rows are retained as bounded catalog/action entries with
+  reasons. Reports and table/JSON totals expose `deferred_count`, and
+  `classification_remaining` continues to include deferred work after the
+  actionable backlog is stored.
+
+Last two U9 P2 races remediated locally on 2026-07-30:
+
+- Activation-key loads now return bytes bound to the exact canonical
+  path/device/inode/mode/size identity. Candidate and activation transactions
+  revalidate that identity, current key bytes, and immutable DB-owner digest
+  binding beside the SQLite identity immediately before every commit and exact
+  retry return. Transaction-open unlink/replacement, mode, and size regressions
+  prove rollback/no false success and restored DB/key readability.
+- The per-test evaluator lock captures canonical path/device/inode/link-count
+  identity and revalidates its owner-only regular `0600` single-link state while
+  acquiring and immediately before completion/unlock. The yielded callable
+  guard is also invoked by U7 migration/history and U8 candidate/activation
+  transactions at commit/retry boundaries. An unlink/recreate split-lock
+  regression proves the stale cycle reports a lock error and cannot commit.
+
+Final two U9 P2 publication/reporting blockers remediated locally on 2026-07-30:
+
+- First-create U8 staging now carries the evaluator lock guard through canonical
+  publication. The guard is revalidated immediately before and after the DB
+  hardlink, activation-key hardlink, and directory fsync. Failure removes only
+  identity-matching published artifacts and durably fsyncs cleanup. A staged-
+  commit/pre-publication split-lock regression lets a competitor acquire the
+  replacement lock and proves that the stale cycle returns failure with no
+  canonical DB, key, or staging artifacts.
+- Evaluator apply retains its stage-aware `TestEvaluationReport` across lock
+  context teardown. A final guard failure reports `lock-finalization`, preserves
+  source schema, migration/candidate/history facts, completed stages, and the
+  operation error, and derives partial-write/atomicity state from durable work.
+  A migration-committed split-lock regression proves the v2 migration remains
+  reported as a partial durable write without a false successful cycle.
+
+Status remains `IN PROGRESS` until independent certification and operator
+acceptance. No live DB operation, Kubernetes access, deployment, background
+service, commit, or push is authorized by this implementation.
+
+Current local validation evidence:
+
+- Recursive Bash syntax checks passed for `scripts/` and `validation-tests/`.
+- `569` unit tests passed with warnings treated as errors, preserving all prior
+  U0–U8 tests and covering the final U9 audit closure regressions above.
+- Python compilation passed for `cval`, `tests`, and operator scripts.
+- No Kubernetes, live PVC/DB, archive, commit, push, or deployment access was
+  performed.
 
 ## U10 — Modularize baselines, exports, and background loops
 

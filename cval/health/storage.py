@@ -12,10 +12,12 @@ import secrets
 import sqlite3
 import stat
 import time
-from contextlib import closing
+import uuid
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from cval.health.combination import validate_environment_combination
 from cval.health.engine import (
@@ -27,9 +29,13 @@ from cval.health.engine import (
     validate_stored_baseline,
 )
 from cval.health.models import (
+    ActivationPreflight,
     BaselineLifecycle,
+    CandidateStoreOutcome,
+    CandidateStoreStatus,
     EnvironmentCombination,
     HealthBuildState,
+    HealthChainCursor,
     HealthCandidate,
     HealthContext,
     HEALTH_CLASS_DEFINITIONS,
@@ -46,12 +52,72 @@ from cval.health.models import (
     ThresholdBand,
 )
 from cval.storage.paths import safe_writable_file_path
+from cval.storage.sqlite_snapshot import (
+    immutable_snapshot_connection,
+    read_regular_file_without_atime,
+    sqlite_connection_source_path,
+)
+from cval.storage.sqlite_uri import SQLiteFileIdentity, connect_sqlite_file
+from cval.storage.sqlite_uri import assert_sqlite_file_identity
 from cval.validation.registry import ValidationTestDefinition
+from cval.validation.registry import RegisteredValidationTest
 
 
 HEALTH_SCHEMA_VERSION = 1
 _MIGRATION_NAME = "initial-versioned-health-engine"
 _ACTIVATION_KEY_BYTES = 32
+
+
+@dataclass(frozen=True)
+class HealthDatabaseGeneration:
+    """Exact U8 file generation and active-baseline classification state."""
+
+    path: Path
+    present: bool
+    identity: SQLiteFileIdentity | None
+    active_digest: str
+    content_digest: str
+
+
+@dataclass(frozen=True)
+class ActivationKeyValue:
+    """Activation-key bytes bound to one canonical filesystem identity."""
+
+    bytes: bytes
+    path: Path
+    device: int
+    inode: int
+    mode: int
+    size: int
+
+
+def resolve_health_db_path(
+    validation_root: str | Path,
+    registered_test: RegisteredValidationTest,
+) -> Path:
+    """Resolve the descriptor's canonical, test-owned health database path."""
+
+    root = Path(validation_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("runtime.validation_root must be an absolute path")
+    relative = Path(registered_test.definition.artifacts.health_classes_db_path)
+    if not relative.parts:
+        raise ValueError(f"Validation test {registered_test.id!r} has no health DB path")
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("artifacts.health_classes_db_path must be a confined relative path")
+    expected_owner = Path("validation_tests") / registered_test.id
+    try:
+        relative.relative_to(expected_owner)
+    except ValueError as exc:
+        raise ValueError(
+            f"Health DB for {registered_test.id!r} must stay under {expected_owner}"
+        ) from exc
+    target = root / relative
+    return safe_writable_file_path(
+        target,
+        allowed_root=root / expected_owner,
+        description="health database",
+    )
 
 
 def _activation_key_path(db_path: Path) -> Path:
@@ -62,7 +128,11 @@ def _activation_key_path(db_path: Path) -> Path:
     )
 
 
-def _load_activation_key(db_path: Path, *, create: bool = False) -> bytes:
+def _load_activation_key(
+    db_path: Path,
+    *,
+    create: bool = False,
+) -> ActivationKeyValue:
     key_path = _activation_key_path(db_path)
     if create and not key_path.exists():
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -86,15 +156,237 @@ def _load_activation_key(db_path: Path, *, create: bool = False) -> bytes:
                 os.fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
-    if not key_path.is_file() or key_path.is_symlink():
-        raise RuntimeError("Health activation key is missing or unsafe")
-    mode = stat.S_IMODE(key_path.stat().st_mode)
-    if mode & 0o077:
-        raise RuntimeError("Health activation key permissions must be owner-only")
-    key = key_path.read_bytes()
-    if len(key) != _ACTIVATION_KEY_BYTES:
-        raise RuntimeError("Health activation key has an invalid length")
-    return key
+    return _read_activation_key_value(key_path)
+
+
+def _read_activation_key_value(key_path: Path) -> ActivationKeyValue:
+    """Read one key and capture the exact canonical inode that supplied it."""
+
+    try:
+        canonical = key_path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError("Health activation key is missing or unsafe") from exc
+    if canonical != key_path:
+        raise RuntimeError("Health activation key path is not canonical")
+    before = os.lstat(canonical)
+    key_bytes = read_regular_file_without_atime(
+        canonical,
+        expected_mode=0o600,
+        expected_size=_ACTIVATION_KEY_BYTES,
+        description="health activation key",
+    )
+    try:
+        after = os.lstat(canonical)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Health activation key changed while its identity was captured"
+        ) from exc
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        stat.S_IMODE(before.st_mode),
+        before.st_size,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        stat.S_IMODE(after.st_mode),
+        after.st_size,
+    )
+    if before_identity != after_identity:
+        raise RuntimeError(
+            "Health activation key changed while its identity was captured"
+        )
+    return ActivationKeyValue(
+        bytes=key_bytes,
+        path=canonical,
+        device=after.st_dev,
+        inode=after.st_ino,
+        mode=stat.S_IMODE(after.st_mode),
+        size=after.st_size,
+    )
+
+
+def _assert_activation_key_identity(key: ActivationKeyValue) -> None:
+    """Fail closed if the key pathname, metadata, or bytes changed."""
+
+    try:
+        current = _read_activation_key_value(key.path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "Health activation key path/device/inode/mode/size/content changed "
+            "since transaction open"
+        ) from exc
+    if current != key:
+        raise RuntimeError(
+            "Health activation key path/device/inode/mode/size/content changed "
+            "since transaction open"
+        )
+
+
+def _assert_activation_key_binding(
+    connection: sqlite3.Connection,
+    key: ActivationKeyValue,
+) -> None:
+    """Revalidate one transaction's immutable key-to-owner binding."""
+
+    rows = connection.execute(
+        "SELECT activation_key_digest FROM health_database_owner ORDER BY id"
+    ).fetchall()
+    if len(rows) != 1 or not hmac.compare_digest(
+        _nonempty_db_string(rows[0][0], "health activation key digest"),
+        _activation_key_digest(key.bytes),
+    ):
+        raise RuntimeError("Health database activation key binding changed")
+    _assert_activation_key_identity(key)
+
+
+def _assert_health_write_guards(
+    connection: sqlite3.Connection,
+    database_identity: SQLiteFileIdentity,
+    activation_key: ActivationKeyValue,
+    lock_guard: Callable[[], None] | None,
+) -> None:
+    """Assert all path bindings immediately before commit or retry success."""
+
+    assert_sqlite_file_identity(database_identity)
+    _assert_activation_key_binding(connection, activation_key)
+    if lock_guard is not None:
+        lock_guard()
+
+
+@contextmanager
+def _health_database_write_target(
+    path: Path,
+    *,
+    expected_identity: SQLiteFileIdentity | None,
+    lock_guard: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
+):
+    """Stage and atomically publish the first health DB/key as one owned pair."""
+
+    if expected_identity is not None:
+        assert_sqlite_file_identity(expected_identity)
+        yield path
+        return
+    if path.exists() or path.is_symlink():
+        raise RuntimeError("Health database appeared after writer preflight")
+    suffix = uuid.uuid4().hex
+    staging = path.with_name(f".{path.name}.{suffix}.staging")
+    staging_key = _activation_key_path(staging)
+    final_key = _activation_key_path(path)
+    published_db = False
+    published_key = False
+    database_identity: tuple[int, int] | None = None
+    key_identity: tuple[int, int] | None = None
+    try:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        descriptor = os.open(staging, flags, 0o600)
+        os.close(descriptor)
+        yield staging
+        if not staging.is_file() or not staging_key.is_file():
+            raise RuntimeError("Staged health database/key pair is incomplete")
+        database_metadata = os.lstat(staging)
+        key_metadata = os.lstat(staging_key)
+        database_identity = (database_metadata.st_dev, database_metadata.st_ino)
+        key_identity = (key_metadata.st_dev, key_metadata.st_ino)
+        if pre_publish is not None:
+            pre_publish()
+        _assert_publication_lock(lock_guard)
+        os.link(staging, path, follow_symlinks=False)
+        published_db = True
+        _assert_publication_lock(lock_guard)
+        _assert_publication_lock(lock_guard)
+        os.link(staging_key, final_key, follow_symlinks=False)
+        published_key = True
+        _assert_publication_lock(lock_guard)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            _assert_publication_lock(lock_guard)
+            os.fsync(directory_descriptor)
+            _assert_publication_lock(lock_guard)
+        finally:
+            os.close(directory_descriptor)
+        staging.unlink()
+        staging_key.unlink()
+    except Exception:
+        cleanup_changed = False
+        if published_key and key_identity is not None:
+            cleanup_changed = (
+                _unlink_if_identity(final_key, key_identity) or cleanup_changed
+            )
+        if published_db and database_identity is not None:
+            cleanup_changed = _unlink_if_identity(path, database_identity) or cleanup_changed
+        if cleanup_changed:
+            _fsync_directory(path.parent)
+        raise
+    finally:
+        for artifact in (
+            staging_key,
+            staging,
+            staging.with_name(f"{staging.name}-journal"),
+            staging.with_name(f"{staging.name}-wal"),
+            staging.with_name(f"{staging.name}-shm"),
+        ):
+            try:
+                artifact.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _assert_publication_lock(lock_guard: Callable[[], None] | None) -> None:
+    if lock_guard is not None:
+        lock_guard()
+
+
+def _unlink_if_identity(published: Path, expected: tuple[int, int]) -> bool:
+    try:
+        published_stat = os.lstat(published)
+    except FileNotFoundError:
+        return False
+    if (published_stat.st_dev, published_stat.st_ino) == expected:
+        published.unlink()
+        try:
+            remaining = os.lstat(published)
+        except FileNotFoundError:
+            return True
+        if (remaining.st_dev, remaining.st_ino) == expected:
+            raise RuntimeError(
+                "Published health artifact rollback did not remove its inode"
+            )
+        return True
+    return False
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _health_database_write_connection(
+    path: Path,
+    expected_identity: SQLiteFileIdentity | None,
+):
+    """Open one U8 writer bound to an identity captured before SQLite open."""
+
+    identity = expected_identity or SQLiteFileIdentity.capture(path)
+    with closing(
+        connect_sqlite_file(
+            path,
+            mode="rwc",
+            timeout=30,
+            expected_identity=identity,
+        )
+    ) as connection:
+        yield connection, identity
 
 
 def _activation_key_digest(key: bytes) -> str:
@@ -102,6 +394,9 @@ def _activation_key_digest(key: bytes) -> str:
 
 
 def _connection_database_path(connection: sqlite3.Connection) -> Path:
+    snapshot_path = sqlite_connection_source_path(connection)
+    if snapshot_path is not None:
+        return safe_writable_file_path(snapshot_path, description="health database")
     rows = connection.execute("PRAGMA database_list").fetchall()
     main = next((row for row in rows if row[1] == "main"), None)
     if main is None or not isinstance(main[2], str) or not main[2]:
@@ -143,6 +438,10 @@ def store_candidate_from_plugin(
     *,
     db_path: str | Path,
     now: int | None = None,
+    pre_commit: Callable[[sqlite3.Connection], None] | None = None,
+    transaction_open: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
 ) -> HealthCandidate:
     """Load canonical adapter observations, build, and persist one candidate."""
 
@@ -153,8 +452,74 @@ def store_candidate_from_plugin(
         db_path=db_path,
         now=now,
         robust_z_threshold=context.robust_z_threshold,
+        pre_commit=pre_commit,
+        transaction_open=transaction_open,
+        lock_guard=lock_guard,
+        pre_publish=pre_publish,
     )
     return candidate
+
+
+def persist_candidate_from_plugin(
+    plugin: Any,
+    context: HealthContext,
+    *,
+    db_path: str | Path,
+    now: int | None = None,
+    pre_commit: Callable[[sqlite3.Connection], None] | None = None,
+    transaction_open: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
+) -> CandidateStoreOutcome:
+    """Build through the canonical plugin hook and return a typed store outcome."""
+
+    candidate = build_candidate_from_plugin(plugin, context)
+    stored = _store_candidate(
+        candidate,
+        context.definition,
+        db_path=db_path,
+        now=now,
+        robust_z_threshold=context.robust_z_threshold,
+        pre_commit=pre_commit,
+        transaction_open=transaction_open,
+        lock_guard=lock_guard,
+        pre_publish=pre_publish,
+    )
+    return CandidateStoreOutcome(
+        CandidateStoreStatus.STORED if stored else CandidateStoreStatus.EXISTS,
+        candidate,
+    )
+
+
+def persist_candidate(
+    candidate: HealthCandidate,
+    definition: ValidationTestDefinition,
+    *,
+    db_path: str | Path,
+    now: int | None = None,
+    robust_z_threshold: float | None = None,
+    pre_commit: Callable[[sqlite3.Connection], None] | None = None,
+    transaction_open: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
+) -> CandidateStoreOutcome:
+    """Persist a candidate whose adapter/build preflight already completed."""
+
+    stored = _store_candidate(
+        candidate,
+        definition,
+        db_path=db_path,
+        now=now,
+        robust_z_threshold=robust_z_threshold,
+        pre_commit=pre_commit,
+        transaction_open=transaction_open,
+        lock_guard=lock_guard,
+        pre_publish=pre_publish,
+    )
+    return CandidateStoreOutcome(
+        CandidateStoreStatus.STORED if stored else CandidateStoreStatus.EXISTS,
+        candidate,
+    )
 
 
 def _store_candidate(
@@ -164,6 +529,10 @@ def _store_candidate(
     db_path: str | Path,
     now: int | None = None,
     robust_z_threshold: float | None = None,
+    pre_commit: Callable[[sqlite3.Connection], None] | None = None,
+    transaction_open: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
+    pre_publish: Callable[[], None] | None = None,
 ) -> bool:
     """Store one immutable candidate; return false for an exact content retry."""
 
@@ -210,19 +579,30 @@ def _store_candidate(
             )
     path.parent.mkdir(parents=True, exist_ok=True)
     path = safe_writable_file_path(path, description="health database")
+    expected_identity = SQLiteFileIdentity.capture(path) if path.exists() else None
 
-    with closing(sqlite3.connect(f"file:{path}?mode=rwc", uri=True, timeout=30)) as connection:
+    with _health_database_write_target(
+        path,
+        expected_identity=expected_identity,
+        lock_guard=lock_guard,
+        pre_publish=pre_publish,
+    ) as write_path, _health_database_write_connection(
+        write_path,
+        expected_identity,
+    ) as (connection, transaction_identity):
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA recursive_triggers=ON")
         connection.execute("PRAGMA foreign_keys=ON")
         database_was_empty = _database_is_empty(connection)
-        activation_key = _load_activation_key(path, create=database_was_empty)
-        activation_key_digest = _activation_key_digest(activation_key)
+        activation_key = _load_activation_key(write_path, create=database_was_empty)
+        activation_key_digest = _activation_key_digest(activation_key.bytes)
         if not database_was_empty:
             _validate_schema(connection)
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            if transaction_open is not None:
+                transaction_open(connection)
             _prepare_schema(connection)
             _validate_schema(connection)
             owner = connection.execute(
@@ -264,6 +644,12 @@ def _store_candidate(
                 )
                 _validate_candidate_trigger_state(connection, existing, definition)
                 connection.rollback()
+                _assert_health_write_guards(
+                    connection,
+                    transaction_identity,
+                    activation_key,
+                    lock_guard,
+                )
                 return False
             digest_collision = connection.execute(
                 "SELECT baseline_id FROM health_baselines WHERE payload_digest=?",
@@ -544,6 +930,14 @@ def _store_candidate(
                 or reloaded.updated_at != timestamp
             ):
                 raise RuntimeError("Stored health candidate failed durable round-trip validation")
+            if pre_commit is not None:
+                pre_commit(connection)
+            _assert_health_write_guards(
+                connection,
+                transaction_identity,
+                activation_key,
+                lock_guard,
+            )
             connection.commit()
             return True
         except Exception:
@@ -558,6 +952,9 @@ def activate_candidate(
     db_path: str | Path,
     now: int | None = None,
     robust_z_threshold: float | None = None,
+    pre_commit: Callable[[sqlite3.Connection], None] | None = None,
+    transaction_open: Callable[[sqlite3.Connection], None] | None = None,
+    lock_guard: Callable[[], None] | None = None,
 ) -> bool:
     """Activate a quality-approved candidate and atomically supersede its parent."""
 
@@ -569,7 +966,15 @@ def activate_candidate(
     path = safe_writable_file_path(db_path, description="health database")
     if not path.is_file():
         raise FileNotFoundError(f"Health database not found: {path}")
-    with closing(sqlite3.connect(f"file:{path}?mode=rw", uri=True, timeout=30)) as connection:
+    expected_identity = SQLiteFileIdentity.capture(path)
+    with closing(
+        connect_sqlite_file(
+            path,
+            mode="rw",
+            timeout=30,
+            expected_identity=expected_identity,
+        )
+    ) as connection:
         activation_key = _load_activation_key(path)
         connection.create_function("cval_activation_authorized", 0, lambda: 1)
         connection.execute("PRAGMA busy_timeout=30000")
@@ -579,6 +984,8 @@ def activate_candidate(
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            if transaction_open is not None:
+                transaction_open(connection)
             _validate_schema(connection)
             stored = _load_stored_from_connection(connection, baseline_id)
             if stored is None:
@@ -591,6 +998,12 @@ def activate_candidate(
             if stored.lifecycle is BaselineLifecycle.ACTIVE:
                 _validate_candidate_trigger_state(connection, stored, definition)
                 connection.rollback()
+                _assert_health_write_guards(
+                    connection,
+                    expected_identity,
+                    activation_key,
+                    lock_guard,
+                )
                 return False
             if stored.lifecycle is not BaselineLifecycle.CANDIDATE:
                 raise ValueError("Only candidate health baselines may be activated")
@@ -647,7 +1060,7 @@ def activate_candidate(
                         stored.candidate,
                         timestamp,
                         report,
-                        activation_key,
+                        activation_key.bytes,
                     ),
                 ),
             )
@@ -716,6 +1129,14 @@ def activate_candidate(
                     definition,
                     robust_z_threshold=robust_z_threshold,
                 )
+            if pre_commit is not None:
+                pre_commit(connection)
+            _assert_health_write_guards(
+                connection,
+                expected_identity,
+                activation_key,
+                lock_guard,
+            )
             connection.commit()
             return True
         except Exception:
@@ -732,7 +1153,7 @@ def load_baseline(
     path = safe_writable_file_path(db_path, description="health database")
     if not path.is_file():
         return None
-    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)) as connection:
+    with immutable_snapshot_connection(path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         _begin_read_snapshot(connection)
         _validate_schema(connection)
@@ -751,7 +1172,7 @@ def get_active_baseline(
     path = safe_writable_file_path(db_path, description="health database")
     if not path.is_file():
         return None
-    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)) as connection:
+    with immutable_snapshot_connection(path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         _begin_read_snapshot(connection)
         _validate_schema(connection)
@@ -782,14 +1203,34 @@ def list_baselines(
     test_id: str | None = None,
     combination_key: str | None = None,
 ) -> list[StoredHealthBaseline]:
+    stored, _generation = load_baselines_generation(
+        db_path=db_path,
+        test_id=test_id,
+        combination_key=combination_key,
+    )
+    return stored
+
+
+def load_baselines_generation(
+    *,
+    db_path: str | Path,
+    test_id: str | None = None,
+    combination_key: str | None = None,
+) -> tuple[list[StoredHealthBaseline], HealthDatabaseGeneration]:
+    """Read selected baselines and one coherent active U8 generation."""
+
     if test_id is not None:
         _require_test_id(test_id)
     if combination_key is not None:
         _require_digest(combination_key, "combination_key")
     path = safe_writable_file_path(db_path, description="health database")
     if not path.is_file():
-        return []
-    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)) as connection:
+        if _activation_key_path(path).exists():
+            raise RuntimeError("Health activation key exists without its database")
+        digest = _active_generation_digest(test_id or "", ())
+        return [], HealthDatabaseGeneration(path, False, None, digest, digest)
+    identity = SQLiteFileIdentity.capture(path)
+    with immutable_snapshot_connection(path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         _begin_read_snapshot(connection)
         _validate_schema(connection)
@@ -808,7 +1249,7 @@ def list_baselines(
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC, baseline_id"
-        return [
+        stored_items = [
             stored
             for row in connection.execute(query, params)
             if (
@@ -819,6 +1260,88 @@ def list_baselines(
             )
             is not None
         ]
+        active_items = tuple(
+            stored
+            for stored in stored_items
+            if stored.lifecycle is BaselineLifecycle.ACTIVE
+        )
+        generation = HealthDatabaseGeneration(
+            path,
+            True,
+            identity,
+            _active_generation_digest(owner, active_items),
+            _baseline_generation_digest(owner, tuple(stored_items)),
+        )
+        assert_sqlite_file_identity(identity)
+        return stored_items, generation
+
+
+def assert_health_database_generation(expected: HealthDatabaseGeneration) -> None:
+    """Fail closed if U8 identity or active classification evidence changed."""
+
+    _stored, current = load_baselines_generation(db_path=expected.path)
+    if current != expected:
+        raise RuntimeError("Health database generation changed before history commit")
+
+
+def _active_generation_digest(
+    _owner: str,
+    active: tuple[StoredHealthBaseline, ...],
+) -> str:
+    payload = {
+        "active": [
+            {
+                "candidate": _candidate_payload(stored.candidate),
+                "updated_at": stored.updated_at,
+                "activated_at": stored.activated_at,
+                "quality_json": _quality_json(stored.quality),
+            }
+            for stored in sorted(
+                active,
+                key=lambda value: (
+                    value.candidate.combination.key,
+                    value.candidate.baseline_id,
+                ),
+            )
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _baseline_generation_digest(
+    owner: str,
+    stored_items: tuple[StoredHealthBaseline, ...],
+) -> str:
+    payload = {
+        "owner": owner,
+        "baselines": [
+            {
+                "candidate": _candidate_payload(stored.candidate),
+                "lifecycle": stored.lifecycle.value,
+                "updated_at": stored.updated_at,
+                "activated_at": stored.activated_at,
+                "superseded_at": stored.superseded_at,
+                "quality_json": _quality_json(stored.quality),
+            }
+            for stored in sorted(
+                stored_items,
+                key=lambda value: value.candidate.baseline_id,
+            )
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def load_build_state(
@@ -832,7 +1355,7 @@ def load_build_state(
     path = safe_writable_file_path(db_path, description="health database")
     if not path.is_file():
         return None
-    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)) as connection:
+    with immutable_snapshot_connection(path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         _begin_read_snapshot(connection)
         _validate_schema(connection)
@@ -887,6 +1410,113 @@ def load_build_state(
                     )
                 )
             ),
+        )
+
+
+def get_chain_cursor(
+    test_id: str,
+    combination_key: str,
+    *,
+    db_path: str | Path,
+) -> HealthChainCursor:
+    """Read the authoritative immutable candidate-chain tail in one snapshot."""
+
+    _require_test_id(test_id)
+    _require_digest(combination_key, "combination_key")
+    path = safe_writable_file_path(db_path, description="health database")
+    if not path.is_file():
+        return HealthChainCursor(test_id, combination_key, None, None, ())
+    with immutable_snapshot_connection(path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _begin_read_snapshot(connection)
+        _validate_schema(connection)
+        _require_health_db_owner(connection, test_id)
+        latest_id = _latest_candidate_id_from_chain(
+            connection,
+            test_id,
+            combination_key,
+        )
+        active_row = connection.execute(
+            "SELECT baseline_id FROM health_baselines "
+            "WHERE test_id=? AND combination_key=? AND lifecycle_state='active'",
+            (test_id, combination_key),
+        ).fetchone()
+        active_id = (
+            _nonempty_db_string(active_row[0], "active baseline_id")
+            if active_row is not None
+            else None
+        )
+        source_ids = tuple(
+            sorted(
+                _baseline_source_ids(
+                    connection,
+                    latest_id,
+                    expected_test_id=test_id,
+                    expected_combination_key=combination_key,
+                )
+            )
+        )
+        return HealthChainCursor(
+            test_id,
+            combination_key,
+            latest_id,
+            active_id,
+            source_ids,
+        )
+
+
+def preflight_activation(
+    baseline_id: str,
+    definition: ValidationTestDefinition,
+    *,
+    db_path: str | Path,
+    robust_z_threshold: float | None = None,
+) -> ActivationPreflight:
+    """Recompute activation readiness and parent identity without writing."""
+
+    _require_baseline_id(baseline_id)
+    path = safe_writable_file_path(db_path, description="health database")
+    if not path.is_file():
+        raise FileNotFoundError(f"Health database not found: {path}")
+    with immutable_snapshot_connection(path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _begin_read_snapshot(connection)
+        _validate_schema(connection)
+        _require_health_db_owner(connection, definition.metadata.id)
+        stored = _load_stored_from_connection(connection, baseline_id)
+        if stored is None:
+            raise KeyError(f"Health candidate not found: {baseline_id}")
+        report = validate_stored_baseline(
+            stored,
+            definition,
+            robust_z_threshold=robust_z_threshold,
+        )
+        _validate_candidate_trigger_state(connection, stored, definition)
+        active_row = connection.execute(
+            "SELECT baseline_id FROM health_baselines "
+            "WHERE test_id=? AND combination_key=? AND lifecycle_state='active'",
+            (stored.candidate.test_id, stored.candidate.combination.key),
+        ).fetchone()
+        active_id = (
+            _nonempty_db_string(active_row[0], "active baseline_id")
+            if active_row is not None
+            else None
+        )
+        already_active = stored.lifecycle is BaselineLifecycle.ACTIVE
+        if not already_active and stored.lifecycle is not BaselineLifecycle.CANDIDATE:
+            raise ValueError("Only candidate health baselines may be activated")
+        if not already_active and stored.candidate.parent_baseline_id != active_id:
+            raise ValueError(
+                "Health candidate lifecycle parent does not match the current active baseline"
+            )
+        return ActivationPreflight(
+            baseline_id=baseline_id,
+            test_id=stored.candidate.test_id,
+            combination_key=stored.candidate.combination.key,
+            lifecycle=stored.lifecycle,
+            activation_ready=report.activation_ready,
+            already_active=already_active,
+            current_active_baseline_id=active_id,
         )
 
 
@@ -1213,7 +1843,7 @@ def _validate_activation_evidence(
             stored.candidate,
             stored.activated_at,
             stored.quality,
-            _load_activation_key(_connection_database_path(connection)),
+            _load_activation_key(_connection_database_path(connection)).bytes,
         ),
     )
     actual = (
@@ -2178,7 +2808,7 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
         key = _load_activation_key(_connection_database_path(connection))
         if not hmac.compare_digest(
             owners[0][2],
-            _activation_key_digest(key),
+            _activation_key_digest(key.bytes),
         ):
             raise RuntimeError("Health activation key does not match its owner")
     if connection.execute("PRAGMA foreign_key_check").fetchall():

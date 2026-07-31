@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import unittest
 from contextlib import closing
@@ -15,6 +17,7 @@ from cval.health.engine import (
     _candidate_identity,
     metric_specs_from_definition,
 )
+from cval.health.evaluator import HealthEvaluatorLockError, evaluator_test_lock
 from cval.health.models import (
     BaselineLifecycle,
     HealthContext,
@@ -25,9 +28,12 @@ from cval.health.models import (
 from cval.health.storage import (
     activate_candidate,
     get_active_baseline,
+    get_chain_cursor,
     list_baselines,
     load_baseline,
     load_build_state,
+    persist_candidate_from_plugin,
+    preflight_activation,
     _store_candidate as store_candidate,
     store_candidate_from_plugin,
 )
@@ -112,6 +118,47 @@ def candidate(
 
 
 class HealthStorageTests(unittest.TestCase):
+    def test_typed_store_outcome_authoritative_cursor_and_activation_preflight(self) -> None:
+        test_definition, built = candidate()
+
+        class Plugin:
+            health_policy_version = "smoke.health.v1"
+
+            def metric_specs(self, active_definition):
+                return metric_specs_from_definition(active_definition)
+
+            def load_observations(self, _context):
+                return built.observations
+
+        context = HealthContext(
+            definition=test_definition,
+            result_db_path=Path("/tmp/unused.db"),
+            combination=built.combination,
+            source_snapshot=built.source_snapshot,
+            created_at=built.created_at,
+        )
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            first = persist_candidate_from_plugin(Plugin(), context, db_path=path, now=150)
+            second = persist_candidate_from_plugin(Plugin(), context, db_path=path, now=160)
+            cursor = get_chain_cursor(
+                "smoke",
+                built.combination.key,
+                db_path=path,
+            )
+            readiness = preflight_activation(
+                built.baseline_id,
+                test_definition,
+                db_path=path,
+            )
+
+        self.assertTrue(first.stored)
+        self.assertFalse(second.stored)
+        self.assertEqual(cursor.latest_candidate_id, built.baseline_id)
+        self.assertIsNone(cursor.active_baseline_id)
+        self.assertEqual(cursor.latest_source_result_ids, (1, 2, 3))
+        self.assertTrue(readiness.activation_ready)
+        self.assertFalse(readiness.already_active)
     def test_public_store_loads_plugin_observations_and_binds_activation_key(self) -> None:
         test_definition, built = candidate()
 
@@ -145,6 +192,91 @@ class HealthStorageTests(unittest.TestCase):
             key_path.unlink()
             with self.assertRaisesRegex(RuntimeError, "activation key"):
                 load_baseline(stored.baseline_id, db_path=path)
+
+    def test_activation_key_read_is_noatime_nofollow_and_exact_owner_mode(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            store_candidate(built, test_definition, db_path=path, now=150)
+            key_path = path.with_name(f"{path.name}.activation.key")
+            metadata = key_path.stat()
+            os.utime(
+                key_path,
+                ns=(1_000_000_000, metadata.st_mtime_ns),
+            )
+            before_atime = key_path.stat().st_atime_ns
+            self.assertIsNotNone(load_baseline(built.baseline_id, db_path=path))
+            self.assertEqual(key_path.stat().st_atime_ns, before_atime)
+
+            key_path.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "permissions"):
+                load_baseline(built.baseline_id, db_path=path)
+            key_path.chmod(0o600)
+            real_key = path.with_name("outside.key")
+            key_path.rename(real_key)
+            key_path.symlink_to(real_key)
+            with self.assertRaisesRegex((ValueError, RuntimeError), "symlink|unsafe"):
+                load_baseline(built.baseline_id, db_path=path)
+
+    def test_activation_key_value_detects_mode_size_unlink_and_replacement(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            store_candidate(built, test_definition, db_path=path, now=150)
+            key_path = path.with_name(f"{path.name}.activation.key")
+            captured = health_storage._load_activation_key(path)
+            self.assertEqual(captured.bytes, key_path.read_bytes())
+            self.assertEqual(captured.path, key_path)
+            self.assertEqual(captured.mode, 0o600)
+            self.assertEqual(captured.size, 32)
+
+            key_path.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                health_storage._assert_activation_key_identity(captured)
+            key_path.chmod(0o600)
+
+            key_path.write_bytes(captured.bytes + b"x")
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                health_storage._assert_activation_key_identity(captured)
+            key_path.write_bytes(captured.bytes)
+
+            displaced = key_path.with_name("displaced.key")
+            key_path.rename(displaced)
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                health_storage._assert_activation_key_identity(captured)
+            key_path.write_bytes(captured.bytes)
+            key_path.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                health_storage._assert_activation_key_identity(captured)
+            key_path.unlink()
+            displaced.rename(key_path)
+            health_storage._assert_activation_key_identity(captured)
+
+    def test_reserved_sqlite_path_roundtrips_and_failed_first_create_cleans_staging(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health ?#% literal.db"
+            with patch(
+                "cval.health.storage._prepare_schema",
+                side_effect=RuntimeError("first-create probe"),
+            ), self.assertRaisesRegex(RuntimeError, "first-create probe"):
+                store_candidate(built, test_definition, db_path=path, now=150)
+            key_path = path.with_name(f"{path.name}.activation.key")
+            self.assertFalse(path.exists())
+            self.assertFalse(key_path.exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.staging*")), [])
+
+            self.assertTrue(
+                store_candidate(built, test_definition, db_path=path, now=150)
+            )
+            self.assertEqual(
+                load_baseline(built.baseline_id, db_path=path).candidate.baseline_id,
+                built.baseline_id,
+            )
+            self.assertEqual(
+                {item.name for item in path.parent.iterdir()},
+                {path.name, key_path.name},
+            )
 
     def test_rejected_initial_trigger_creates_no_database_or_key(self) -> None:
         test_definition, built = candidate(count=3, min_new_results=4)
@@ -286,6 +418,319 @@ class HealthStorageTests(unittest.TestCase):
         self.assertEqual(state.last_candidate_id, built.baseline_id)
         self.assertEqual(state.candidate_source_result_ids, (1, 2, 3))
         self.assertEqual(state.new_result_count, 3)
+
+    def test_candidate_store_rejects_path_replacement_inside_transaction(self) -> None:
+        test_definition, first = candidate(value=100.0, count=3)
+        _definition, second = candidate(value=101.0, count=5, created_at=200)
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "health.db"
+            displaced = root / "displaced.db"
+            replacement = root / "replacement.db"
+            store_candidate(first, test_definition, db_path=path, now=150)
+            shutil.copy2(path, replacement)
+            replacement_bytes = replacement.read_bytes()
+
+            def replace_path(connection: sqlite3.Connection) -> None:
+                self.assertTrue(connection.in_transaction)
+                path.rename(displaced)
+                shutil.copy2(replacement, path)
+
+            with self.assertRaisesRegex(RuntimeError, "path/device/inode changed"):
+                store_candidate(
+                    second,
+                    test_definition,
+                    db_path=path,
+                    now=250,
+                    pre_commit=replace_path,
+                )
+
+            self.assertEqual(path.read_bytes(), replacement_bytes)
+            for db_path in (path, displaced):
+                with closing(sqlite3.connect(db_path)) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT baseline_id FROM health_baselines"
+                        ).fetchall(),
+                        [(first.baseline_id,)],
+                    )
+
+    def test_activation_rejects_path_replacement_inside_transaction(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "health.db"
+            displaced = root / "displaced.db"
+            replacement = root / "replacement.db"
+            store_candidate(built, test_definition, db_path=path, now=150)
+            shutil.copy2(path, replacement)
+            replacement_bytes = replacement.read_bytes()
+
+            def replace_path(connection: sqlite3.Connection) -> None:
+                self.assertTrue(connection.in_transaction)
+                path.rename(displaced)
+                shutil.copy2(replacement, path)
+
+            with self.assertRaisesRegex(RuntimeError, "path/device/inode changed"):
+                activate_candidate(
+                    built.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=200,
+                    pre_commit=replace_path,
+                )
+
+            self.assertEqual(path.read_bytes(), replacement_bytes)
+            for db_path in (path, displaced):
+                with closing(sqlite3.connect(db_path)) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT lifecycle_state FROM health_baselines"
+                        ).fetchall(),
+                        [("candidate",)],
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM health_activation_evidence"
+                        ).fetchone(),
+                        (0,),
+                    )
+
+    def test_candidate_rejects_activation_key_replacement_on_write_and_retry(self) -> None:
+        test_definition, first = candidate(value=100.0, count=3)
+        _definition, second = candidate(value=101.0, count=5, created_at=200)
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "health.db"
+            key_path = path.with_name(f"{path.name}.activation.key")
+            displaced_key = root / "displaced.key"
+            store_candidate(first, test_definition, db_path=path, now=150)
+
+            def replace_key(connection: sqlite3.Connection) -> None:
+                self.assertTrue(connection.in_transaction)
+                key_bytes = key_path.read_bytes()
+                key_path.rename(displaced_key)
+                key_path.write_bytes(key_bytes)
+                key_path.chmod(0o600)
+
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                store_candidate(
+                    second,
+                    test_definition,
+                    db_path=path,
+                    now=250,
+                    transaction_open=replace_key,
+                )
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT baseline_id FROM health_baselines ORDER BY baseline_id"
+                    ).fetchall(),
+                    [(first.baseline_id,)],
+                )
+            key_path.unlink()
+            displaced_key.rename(key_path)
+            self.assertEqual(
+                load_baseline(first.baseline_id, db_path=path).candidate.baseline_id,
+                first.baseline_id,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                store_candidate(
+                    replace(first, created_at=999),
+                    test_definition,
+                    db_path=path,
+                    now=1000,
+                    transaction_open=replace_key,
+                )
+            key_path.unlink()
+            displaced_key.rename(key_path)
+            self.assertEqual(len(list_baselines(db_path=path)), 1)
+
+    def test_activation_rejects_activation_key_replacement_on_write_and_retry(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "health.db"
+            key_path = path.with_name(f"{path.name}.activation.key")
+            displaced_key = root / "displaced.key"
+            store_candidate(built, test_definition, db_path=path, now=150)
+
+            def replace_key(connection: sqlite3.Connection) -> None:
+                self.assertTrue(connection.in_transaction)
+                key_bytes = key_path.read_bytes()
+                key_path.rename(displaced_key)
+                key_path.write_bytes(key_bytes)
+                key_path.chmod(0o600)
+
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                activate_candidate(
+                    built.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=200,
+                    transaction_open=replace_key,
+                )
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT lifecycle_state FROM health_baselines"
+                    ).fetchone(),
+                    ("candidate",),
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM health_activation_evidence"
+                    ).fetchone(),
+                    (0,),
+                )
+            key_path.unlink()
+            displaced_key.rename(key_path)
+            self.assertEqual(
+                load_baseline(built.baseline_id, db_path=path).lifecycle,
+                BaselineLifecycle.CANDIDATE,
+            )
+
+            self.assertTrue(
+                activate_candidate(
+                    built.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=200,
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "activation key.*changed"):
+                activate_candidate(
+                    built.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=250,
+                    transaction_open=replace_key,
+                )
+            key_path.unlink()
+            displaced_key.rename(key_path)
+            loaded = load_baseline(built.baseline_id, db_path=path)
+            self.assertEqual(loaded.lifecycle, BaselineLifecycle.ACTIVE)
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM health_activation_evidence"
+                    ).fetchone(),
+                    (1,),
+                )
+
+    def test_health_write_lock_guard_blocks_commits_and_exact_retries(self) -> None:
+        test_definition, first = candidate(value=100.0, count=3)
+        _definition, second = candidate(value=101.0, count=5, created_at=200)
+
+        def reject_lock() -> None:
+            raise RuntimeError("lock guard probe")
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            store_candidate(first, test_definition, db_path=path, now=150)
+            with self.assertRaisesRegex(RuntimeError, "lock guard probe"):
+                store_candidate(
+                    second,
+                    test_definition,
+                    db_path=path,
+                    now=250,
+                    lock_guard=reject_lock,
+                )
+            with self.assertRaisesRegex(RuntimeError, "lock guard probe"):
+                store_candidate(
+                    replace(first, created_at=999),
+                    test_definition,
+                    db_path=path,
+                    now=1000,
+                    lock_guard=reject_lock,
+                )
+            self.assertEqual(len(list_baselines(db_path=path)), 1)
+
+            with self.assertRaisesRegex(RuntimeError, "lock guard probe"):
+                activate_candidate(
+                    first.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=200,
+                    lock_guard=reject_lock,
+                )
+            self.assertEqual(
+                load_baseline(first.baseline_id, db_path=path).lifecycle,
+                BaselineLifecycle.CANDIDATE,
+            )
+            self.assertTrue(
+                activate_candidate(
+                    first.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=200,
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "lock guard probe"):
+                activate_candidate(
+                    first.baseline_id,
+                    test_definition,
+                    db_path=path,
+                    now=250,
+                    lock_guard=reject_lock,
+                )
+            self.assertEqual(
+                load_baseline(first.baseline_id, db_path=path).lifecycle,
+                BaselineLifecycle.ACTIVE,
+            )
+
+    def test_split_lock_before_first_publication_leaves_no_canonical_pair(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            result_path = root / "result.db"
+            result_path.touch()
+            health_path = root / "health.db"
+            key_path = health_path.with_name(f"{health_path.name}.activation.key")
+            first_lock = evaluator_test_lock(result_path, timeout_seconds=1)
+            first_guard = first_lock.__enter__()
+            competitor_lock = None
+            competitor_guard = None
+
+            def split_after_staged_commit() -> None:
+                nonlocal competitor_lock, competitor_guard
+                first_guard.path.unlink()
+                replacement = os.open(
+                    first_guard.path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                os.close(replacement)
+                competitor_lock = evaluator_test_lock(result_path, timeout_seconds=1)
+                competitor_guard = competitor_lock.__enter__()
+                competitor_guard()
+
+            try:
+                with self.assertRaisesRegex(
+                    HealthEvaluatorLockError,
+                    "lock.*changed",
+                ):
+                    store_candidate(
+                        built,
+                        test_definition,
+                        db_path=health_path,
+                        now=150,
+                        lock_guard=first_guard,
+                        pre_publish=split_after_staged_commit,
+                    )
+                self.assertIsNotNone(competitor_guard)
+                self.assertFalse(health_path.exists())
+                self.assertFalse(key_path.exists())
+                self.assertEqual(
+                    list(root.glob(f".{health_path.name}.*.staging*")),
+                    [],
+                )
+            finally:
+                if competitor_lock is not None:
+                    competitor_lock.__exit__(None, None, None)
+                with self.assertRaises(HealthEvaluatorLockError):
+                    first_lock.__exit__(None, None, None)
 
     def test_candidate_storage_never_silently_activates(self) -> None:
         test_definition, built = candidate()

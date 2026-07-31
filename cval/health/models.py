@@ -58,6 +58,13 @@ class BaselineLifecycle(StrEnum):
     SUPERSEDED = "superseded"
 
 
+class CandidateStoreStatus(StrEnum):
+    """Typed result of an authoritative candidate persistence attempt."""
+
+    STORED = "stored"
+    EXISTS = "exists"
+
+
 @dataclass(frozen=True)
 class EnvironmentCombination:
     """Canonical comparable-environment identity."""
@@ -272,7 +279,7 @@ class HealthContext:
     """Immutable read context for repository health adapter hooks."""
 
     definition: Any
-    result_db_path: Path
+    result_db_path: str | Path
     combination: EnvironmentCombination | None
     source_snapshot: SourceSnapshot
     parent_baseline_id: str | None = None
@@ -304,3 +311,60 @@ class HealthBuildState:
     last_built_at: int | None
     last_error: str
     candidate_source_result_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class HealthChainCursor:
+    """Authoritative immutable-chain tail for one test/environment combination."""
+
+    test_id: str
+    combination_key: str
+    latest_candidate_id: str | None
+    active_baseline_id: str | None
+    latest_source_result_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class CandidateStoreOutcome:
+    """Candidate plus whether this transaction inserted it or found an exact retry."""
+
+    status: CandidateStoreStatus
+    candidate: HealthCandidate
+
+    @property
+    def stored(self) -> bool:
+        return self.status is CandidateStoreStatus.STORED
+
+
+@dataclass(frozen=True)
+class ActivationPreflight:
+    """Side-effect-free readiness result for deliberate manual activation."""
+
+    baseline_id: str
+    test_id: str
+    combination_key: str
+    lifecycle: BaselineLifecycle
+    activation_ready: bool
+    already_active: bool
+    current_active_baseline_id: str | None
+
+
+@dataclass(frozen=True)
+class ClassificationHistoryRecord:
+    """One immutable U9 verdict persisted in a canonical U7 result database."""
+
+    classification_key: str
+    result_id: int
+    run_id: str
+    baseline_id: str | None
+    baseline_identity: str
+    target_digest: str
+    evidence_digest: str
+    combination_key: str
+    health_class_name: str
+    health_class_numerical: int
+    dnr_reason: str | None
+    classified_at: int
+    evaluator_version: str
+    metric_verdicts_json: str
+    details_json: str

@@ -236,7 +236,7 @@ Required when the adapter declares `health`; otherwise it may be omitted or set 
 | `min_new_results` | Integer | Yes | — | Positive trigger count for a new candidate. |
 | `target_class_count` | Integer | No | `5` | Exactly 5 in v1; DNR is code 5 and has no metric threshold. |
 | `combination_factors` | Array of strings | Yes | — | Non-empty, unique, and supported by the adapter/result schema. |
-| `auto_activate` | Boolean | No | `false` | Defaults false; true requires test-specific quality gates and deployment approval. |
+| `auto_activate` | Boolean | No | `false` | `cval.test.v1` accepts only false; activation is deliberate and approval-gated. |
 | `robust_z_threshold` | Float | No | Global default | Positive. |
 
 Recommended initial combination factors include `image_name`, `cuda_version`, and `pytorch_version`, plus workload parameters that materially affect results.
@@ -454,6 +454,25 @@ Isolation and failure rules:
   adapter schema without invoking metric ingestion.
 - Adapter errors never convert a raw failed test to pass.
 - A health adapter failure leaves the latest raw result unevaluated.
+- U9 enumerates only enabled tests with both `health` and `ingest`; one test
+  error cannot stop another. It copies each checkpointed canonical U7 main
+  image into one query-only in-memory catalog snapshot without opening SQLite
+  on the source during dry-run.
+- Candidate construction/classification always invokes the plugin's canonical
+  `load_observations()` API. Callers cannot supply observations to the public
+  evaluator.
+- Passing rows without a durable receipt are deferred. Raw fail/incomplete,
+  missing combinations, and absent active baselines are deterministic DNR.
+- Apply uses an owner-only bounded per-test lock and exact v1→v2 migration.
+  Classification history is immutable; U7 latest-health cache columns are not
+  updated. The final history revalidation uses the already-open U7 write
+  transaction for the catalog and an in-memory projection of that connection
+  for plugin evidence; it does not reopen the canonical WAL source after
+  `BEGIN IMMEDIATE`.
+- Routine classification uses bounded primary-key result pages and one indexed
+  exact-target history lookup per page. Full history validation is a separate
+  streamed owner-joined audit. History stores return ordered per-record
+  `stored`/`idempotent` outcomes so exact races do not relabel a mixed batch.
 
 `storage.per_test_ingestion_enabled` is an independent production write gate.
 It defaults to `false`; deploying U7 code alone cannot create canonical
@@ -487,6 +506,10 @@ Resolution algorithm:
 3. Normalize path components.
 4. Require the result below `validation_tests/<test-id>/`.
 5. Reject symlink escape when parent paths exist.
+
+The U9 evaluator applies the same algorithm to both canonical result and health
+DB paths. Missing canonical U7 DBs are dry-run skips; no alternate or discovered
+database is accepted.
 
 ### Assigned run paths
 

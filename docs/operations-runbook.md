@@ -101,6 +101,42 @@ result: storage=pass, nccl=pass, dltest=pass, overall=pass
 
 ## Baselines and Node Classification
 
+### Local U9 evaluator preflight (not a live activation procedure)
+
+U9 has no background service or Kubernetes manifest. First run only against a
+local fixture or separately prepared PVC copy:
+
+```bash
+python -m cval.cli --config <local-copy-config.toml> \
+  health evaluate --output json
+python -m cval.cli --config <local-copy-config.toml> \
+  health activate <test-id> <candidate-id> --output json
+```
+
+Confirm `mode=dry-run`, per-test schema/catalog results, candidate IDs, DNR
+reasons, candidate source counts, classification selected/backlog/remaining/
+truncation, migration state, candidate/history counts, and
+`partial_durable_writes=false`. Confirm that no `.health-evaluator.lock`, health
+DB/key, migration, history row, `-wal`, or `-shm` appeared and no source mtime
+changed. A source must be checkpointed with
+absent WAL/SHM sidecars; dry-run fails closed rather than deleting sidecars.
+On Linux, the evaluator uses `O_NOATIME|O_NOFOLLOW` and therefore must own the
+source DB (or have equivalent privilege); it fails closed instead of accepting
+an access-time mutation.
+Before any apply, back up each U7 DB and each existing
+U8 DB together with its owner-only `.activation.key`, enable only
+`[health_evaluator].write_enabled`, and obtain explicit write approval. Apply
+uses exact confirmations `evaluate` and `activate`. Never copy, print, or
+restore an activation key separately. Live rollout/scheduling belongs to U11.
+Apply preflights all source/plugin/build/classification reads before writing.
+Immediately before history append, U9 revalidates the catalog through the
+already-open U7 write transaction and gives adapters an in-memory projection of
+that connection. A checkpointed WAL-mode U7 DB therefore does not need to be
+reopened while the transaction's temporary WAL/SHM sidecars exist.
+The report remains stage-aware if a later operation fails: each SQLite file is
+transactional, but U7 migration/history and U8 candidate commits are explicitly
+cross-database non-atomic and must be retried from immutable evidence.
+
 Build a baseline from recent results, review it, then promote it to active:
 
 ```bash

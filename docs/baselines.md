@@ -9,7 +9,7 @@ c-val builds **baselines** from historical validation results and uses them to
 
 There are three layers:
 
-1. **U8 versioned health classes (implemented locally, not operationally
+1. **U8/U9 versioned health classes (implemented locally, not operationally
   activated)** — per-test, environment-combination candidates with stable
   classes 0–5, exact provenance/sample coverage, normalized threshold bands,
   and immutable SQLite evidence.
@@ -19,9 +19,9 @@ There are three layers:
 3. **Directory baselines (legacy)** — hand-authored `summary.json` references
    loaded from disk, for fixed golden references.
 
-The commands later in this document operate the compatibility dynamic-baseline
-system. U8 intentionally has no production evaluator/CLI wiring yet; U9 and any
-live per-test health DB activation require separate approval.
+The compatibility commands later in this document remain unchanged. U9 adds a
+separate dry-run-first `health` command group, but no live per-test health DB,
+migration, evaluator schedule, or activation is approved.
 
 ---
 
@@ -195,6 +195,51 @@ current parent in the same `(test_id, combination_key)`. Exact SQL triggers
 protect all correctness evidence and legal lifecycle transitions; the mutable
 build-state row is advisory only. See
 [U8 Health Engine Design Report](u8-health-engine-design-report.md).
+
+### U9 evaluator semantics
+
+The evaluator reconstructs candidate eligibility from the authoritative U8
+candidate chain, never from advisory `health_build_state`. Passing rows need an
+exact current config digest, canonical environment combination, adapter schema,
+and durable receipt. A pass without a receipt is deferred. Raw fail/incomplete,
+missing combination, or no active compatible baseline produce class 5 DNR.
+Wholly absent adapter state is accepted only when no selected passing row needs
+metrics, allowing raw fail/incomplete DNR history; partial adapter state remains
+an error. Plugin/schema failures are isolated per test.
+
+Candidate construction pages through every current-config passing source and
+is never truncated by the classification batch size. Classification selects
+the oldest pending targets, reports backlog/truncation, and drains successive
+pages; a new active baseline therefore eventually reevaluates the full history.
+Passing rows that cannot yet be evaluated are retained as a separately counted,
+bounded deferred page with their reasons. They remain included in
+`classification_remaining`; storing every actionable row therefore never
+misreports deferred work as drained.
+Result scans use bounded primary-key keyset pages. Each page resolves current
+history through one exact `(run_id, baseline_identity)` lookup backed by the
+table's unique index, rather than one query per result or a full-history load.
+
+Classification history is append-only in the canonical U7 DB. Its versioned
+target identity binds test/config/health-policy/evaluator, adapter version,
+combination/category, and active baseline (including baseline-less DNR).
+`target_digest` additionally binds raw result/receipt evidence;
+`evidence_digest` binds the complete verdict. Exact retries are idempotent,
+changed evidence for the same target conflicts, and version/policy/baseline
+changes append. When no pending backlog remains, a bounded existing-target page
+is reclassified and its recomputed evidence digest is compared before
+`history_idempotent` is reported; identity alone is never accepted as proof.
+If an exact target is appended after preflight, the atomic history store reports
+that record as `idempotent` while preserving `stored` for other records in the
+same batch; planned actions are never relabeled wholesale.
+Canonical metric verdicts, stable `DnrReason` values, and
+canonical DNR details are stored while nullable latest-health columns remain
+untouched.
+
+Eligible candidate apply holds the selected U7 `BEGIN IMMEDIATE` reservation
+and rebuilds both the complete source catalog and adapter observations from one
+in-memory projection of that exact connection. U7/U8 writers bind the file
+identity captured before open and recheck it immediately before commit, so an
+in-transaction path replacement rolls back rather than reporting success.
 
 ## Compatibility dynamic baseline records
 

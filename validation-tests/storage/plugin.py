@@ -10,9 +10,10 @@ from cval.health.engine import metric_specs_from_definition, validate_source_sna
 from cval.health.models import HealthContext, MetricObservation, MetricSpec
 from cval.health.sqlite_values import sqlite_integer, sqlite_number, sqlite_text
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS, parse_storage_metrics
+from cval.storage.sqlite_snapshot import health_read_connection
 from cval.storage.per_test_results import (
-    COMMON_IMMUTABLE_KEY_GROUPS,
     COMMON_RESULT_TABLES,
+    common_immutable_key_groups,
     canonical_payload_digest,
     existing_metric_ingestion_receipt,
     metric_ingestion_transaction,
@@ -87,7 +88,7 @@ def _validate_storage_schema(connection, allow_missing: bool) -> bool:
         connection,
         set(COMMON_RESULT_TABLES) | {"storage_performance"},
     )
-    immutable_tables = dict(COMMON_IMMUTABLE_KEY_GROUPS)
+    immutable_tables = common_immutable_key_groups(connection)
     if "storage_performance" in {
         str(row[0])
         for row in connection.execute(
@@ -181,13 +182,7 @@ class StorageIngestionPlugin:
         validate_source_snapshot(context.source_snapshot)
         result_ids = context.source_snapshot.result_ids
         placeholders = ", ".join("?" for _ in result_ids)
-        with closing(
-            sqlite3.connect(
-                f"file:{context.result_db_path}?mode=ro",
-                uri=True,
-                timeout=30,
-            )
-        ) as connection:
+        with health_read_connection(context.result_db_path) as connection:
             validate_common_result_connection(connection)
             _validate_storage_schema(connection, False)
             metadata = validate_health_read_metadata(

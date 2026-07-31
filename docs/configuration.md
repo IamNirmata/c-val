@@ -190,10 +190,10 @@ example `storage.health.v1`. The loaded plugin must export the identical
 sample identity, or custom aggregation becomes incompatible; the descriptor
 digest then prevents an old active candidate from being evaluated as current.
 
-`health.auto_activate=false` remains mandatory in all built-ins. It is not a
-general production feature flag: U8 has no live evaluator wiring, and setting it
-to true does not authorize health DB creation, migration, activation, or
-deployment. Those operations require the later U9 design and explicit approval.
+`cval.test.v1` rejects `health.auto_activate=true`; all built-ins remain false.
+U9 builds only candidates and never silently ignores an automatic-activation
+request. Activation is a separate named-candidate operation and still requires
+the evaluator write gate and exact confirmation.
 
 The loader validates that global shared job resources cover every enabled test.
 The current storage/NCCL/DL consumers receive compatibility dataclasses derived
@@ -241,6 +241,36 @@ The in-pod script compares these values with the immutable config snapshot.
 Environment text cannot override a false snapshot value. Enabling either gate,
 creating a live target, or migrating historical data requires a separate
 backup/dry-run/activation approval.
+
+## Health evaluator write gate
+
+U9 has an independent strict section:
+
+```toml
+[health_evaluator]
+write_enabled = false
+lock_timeout_seconds = 30
+max_classifications_per_test = 250
+```
+
+- `write_enabled` must be a TOML Boolean. It does not inherit from or enable
+  either U6/U7 ingestion gate.
+- `lock_timeout_seconds` and `max_classifications_per_test` must be positive integers;
+  unknown keys are rejected.
+- Dry-run creates no lock, migration, health DB, activation key, or history row.
+- Apply additionally requires `--apply --confirm evaluate`; manual activation
+  requires `--apply --confirm activate`.
+
+The max bounds only the oldest pending classifications selected per test/cycle.
+Candidate source catalogs always scan the complete cumulative current-config
+passing set per environment combination, so baseline triggers cannot be made
+impossible by this work bound. Reports expose selected, backlog, remaining, and
+truncated counts. Result/history matching is performed in fixed-size keyset
+pages using the `test_results` primary key and the unique
+`classification_history(run_id, baseline_identity)` index; the configured
+classification limit does not cause an unbounded history fetch. Apply holds one
+owner-only `0600`, no-symlink lock beside each canonical result DB for a bounded
+interval.
 
 The `[runtime]` `dl_results_root_path` points at remapped DL rank JSON artifacts
 (`dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json`). The

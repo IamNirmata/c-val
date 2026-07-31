@@ -95,6 +95,25 @@ api_version = "cval.plugin.v1"
                     capabilities='capabilities = ["ingest"]',
                 )
 
+    def test_cval_test_v1_rejects_auto_activate_true(self) -> None:
+        health = '''
+[health]
+enabled = true
+policy_version = "smoke.health.v1"
+min_samples = 3
+min_new_results = 1
+combination_factors = ["image_name"]
+auto_activate = true
+[[health.metrics]]
+name = "metric"
+source = "source"
+direction = "low_bad"
+tolerance_pct = 5.0
+'''
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "does not support.*auto_activate"):
+                self._write(Path(tmpdir), health=health)
+
     def test_health_capability_requires_enabled_health_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaisesRegex(ValueError, "requires enabled"):

@@ -6,7 +6,7 @@ monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
 Public commands: config, tests, nodes, validate, status, history, plan, run, jobs, result,
-results, classifications, baseline, and overview.
+results, classifications, health, baseline, and overview.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -120,7 +120,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         required=True,
         metavar=(
             "{config,tests,nodes,validate,status,history,plan,run,jobs,result,results,"
-            "classifications,baseline,overview}"
+            "classifications,health,baseline,overview}"
         ),
     )
 
@@ -362,6 +362,33 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Override classification-results DB path; defaults to baseline_root_path DB",
     )
     classifications.set_defaults(handler=handle_classifications)
+
+    health = subparsers.add_parser(
+        "health", help="Dry-run or apply registry-driven U8 health evaluation"
+    )
+    health_sub = health.add_subparsers(dest="health_command", required=True)
+
+    health_evaluate = health_sub.add_parser(
+        "evaluate", help="Evaluate enabled health+ingest tests (dry-run by default)"
+    )
+    health_evaluate.add_argument(
+        "--apply", action="store_true", help="Write candidates/history after safety gates"
+    )
+    health_evaluate.add_argument("--confirm")
+    health_evaluate.add_argument("--output", choices=["table", "json"], default="table")
+    health_evaluate.set_defaults(handler=handle_health_evaluate)
+
+    health_activate = health_sub.add_parser(
+        "activate", help="Preflight or deliberately activate one named candidate"
+    )
+    health_activate.add_argument("test_id")
+    health_activate.add_argument("baseline_id")
+    health_activate.add_argument(
+        "--apply", action="store_true", help="Perform activation after safety gates"
+    )
+    health_activate.add_argument("--confirm")
+    health_activate.add_argument("--output", choices=["table", "json"], default="table")
+    health_activate.set_defaults(handler=handle_health_activate)
 
     # In-pod ingestion commands; added without `help` so they stay out of --help.
     db_add_result = subparsers.add_parser("db-add-result")
@@ -980,6 +1007,89 @@ def handle_classifications(args: argparse.Namespace) -> int:
     selected = filter_classification_rows(rows, args.test)
     output_path = write_classifications_csv(rows, args.test, output_dir=args.output_dir)
     print(f"Wrote {len(selected)} {args.test} classification row(s) to {output_path}")
+    return 0
+
+
+def handle_health_evaluate(args: argparse.Namespace) -> int:
+    """Run one local/PVC-only evaluator cycle without Kubernetes access."""
+
+    from cval.health.evaluator import evaluate_health_cycle
+
+    try:
+        report = evaluate_health_cycle(
+            args.cval_config,
+            apply=args.apply,
+            confirmation=args.confirm,
+        )
+    except Exception as exc:  # noqa: BLE001 - public CLI safety boundary
+        message = " ".join((str(exc).strip() or exc.__class__.__name__).splitlines())
+        if args.output == "json":
+            print(json.dumps({"ok": False, "error": message}, indent=2))
+        else:
+            print(f"Health evaluator error: {message}", file=sys.stderr)
+        return 2
+    if args.output == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(
+            f"Health evaluator cycle: {report.mode} | tests={len(report.tests)} | "
+            f"ok={str(report.ok).lower()}"
+        )
+        for test in report.tests:
+            print(
+                f"  {test.test_id:<18} {test.status:<9} results={test.result_count:<4} "
+                f"candidate_sources={test.candidate_source_count:<4} "
+                f"classifications={test.classification_selected_count:<3} "
+                f"deferred={test.deferred_count:<4} "
+                f"backlog={test.classification_backlog:<4} "
+                f"remaining={test.classification_remaining:<4} "
+                f"truncated={str(test.classification_truncated).lower()}"
+            )
+            print(
+                f"    migrated_to_v2={str(test.migrated_to_v2).lower()} "
+                f"candidates={len(test.candidates)} "
+                f"candidate_inserted={test.candidates_inserted} "
+                f"candidate_idempotent={test.candidates_idempotent} "
+                f"history_inserted={test.history_inserted} "
+                f"history_idempotent={test.history_idempotent} "
+                f"partial_durable_writes={str(test.partial_writes).lower()}"
+            )
+            if test.error:
+                print(
+                    f"    stage={test.error_stage or 'unknown'} "
+                    f"atomicity={test.write_atomicity}: {test.error}"
+                )
+    return 0 if report.ok else 1
+
+
+def handle_health_activate(args: argparse.Namespace) -> int:
+    """Preflight or explicitly activate one U8 candidate."""
+
+    from cval.health.evaluator import activate_health_candidate
+
+    try:
+        report = activate_health_candidate(
+            args.cval_config,
+            args.test_id,
+            args.baseline_id,
+            apply=args.apply,
+            confirmation=args.confirm,
+        )
+    except Exception as exc:  # noqa: BLE001 - public CLI safety boundary
+        message = " ".join((str(exc).strip() or exc.__class__.__name__).splitlines())
+        if args.output == "json":
+            print(json.dumps({"ok": False, "error": message}, indent=2))
+        else:
+            print(f"Health activation error: {message}", file=sys.stderr)
+        return 2
+    if args.output == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(
+            f"Health activation {report.mode}: {report.baseline_id} | "
+            f"state={report.lifecycle} ready={str(report.activation_ready).lower()} "
+            f"activated={str(report.activated).lower()}"
+        )
     return 0
 
 

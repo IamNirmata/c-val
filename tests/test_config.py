@@ -22,6 +22,9 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertFalse(config.storage.run_history_enabled)
         self.assertFalse(config.storage.per_test_ingestion_enabled)
+        self.assertFalse(config.health_evaluator.write_enabled)
+        self.assertEqual(config.health_evaluator.lock_timeout_seconds, 30)
+        self.assertEqual(config.health_evaluator.max_classifications_per_test, 250)
         self.assertEqual(
             config.runtime.dl_results_root_path,
             "/data/continuous_validation/validation_tests/dltest/runs",
@@ -125,6 +128,24 @@ enabled = false
                 )
 
                 with self.assertRaisesRegex(ValueError, "TOML boolean"):
+                    load_config(config_path)
+
+    def test_health_evaluator_config_is_strict_and_positive(self) -> None:
+        variants = (
+            'write_enabled = "yes"',
+            "lock_timeout_seconds = true",
+            "lock_timeout_seconds = 0",
+            "max_classifications_per_test = 0",
+            "unknown = 1",
+        )
+        for value in variants:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "cval.toml"
+                config_path.write_text(
+                    f"[health_evaluator]\n{value}\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ValueError):
                     load_config(config_path)
 
     def test_config_to_dict_is_json_ready(self) -> None:

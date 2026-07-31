@@ -28,12 +28,13 @@ c-val 2.0 is the safe orchestration layer around the existing c-val GPU cluster 
 
 U2 configuration composition, U3 per-test boundaries, U4 generic job context,
 U5 generic execution/result v2/canonical logs, U6 normalized run history, U7
-canonical per-test raw/metric ingestion, and the U8 versioned health-class
-engine are implemented and validated locally.
+canonical per-test raw/metric ingestion, the U8 versioned health-class engine,
+and the U9 dry-run-first evaluator are implemented locally.
 U6/U7 production writes remain independently default-off and unapproved.
-U8 remains library/storage code only: no live health DB, evaluator, automatic
-activation, migration, or deployment is authorized. U9 evaluator integration
-and later cutover work remain proposed tracker items.
+U9 derived writes are also independently default-off: no live health DB,
+evaluator service, automatic activation, migration, or deployment is
+authorized. U9 remains IN PROGRESS pending independent certification; U11 owns
+future live cutover.
 
 ## Repository Shape
 

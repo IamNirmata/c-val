@@ -101,3 +101,13 @@ window_days = 30
 build_interval_seconds = 86400
 # Background classifier loop cadence
 classify_interval_seconds = 300
+
+[health_evaluator]
+# U9 is an independent derived-write surface. Dry-run remains available while
+# this gate is false; apply and activation additionally require exact CLI
+# confirmation. Enabling this does not enable U6/U7 ingestion writes.
+write_enabled = false
+lock_timeout_seconds = 30
+# Bounds only oldest-pending classification writes per cycle. Candidate source
+# catalogs remain complete and cumulative for every current combination.
+max_classifications_per_test = 250

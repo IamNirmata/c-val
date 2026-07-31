@@ -23,6 +23,7 @@ from cval.storage.per_test_results import (
     validate_common_result_connection,
 )
 from cval.storage.paths import safe_writable_file_path
+from cval.storage.sqlite_uri import connect_sqlite_file
 from cval.validation.plugins import (
     IngestionContext,
     IngestionDisabledError,
@@ -377,7 +378,7 @@ def _run_adapter_schema_preflight(
     child_pipe.close()
     try:
         with closing(
-            sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+            connect_sqlite_file(db_path, mode="ro", timeout=30)
         ) as connection:
             result = _serve_adapter_rpc(
                 process,
@@ -636,11 +637,7 @@ def _preflight_write_targets(
     for registered_test, context in prepared:
         if context.result_db_path.is_file():
             with closing(
-                sqlite3.connect(
-                    f"file:{context.result_db_path}?mode=ro",
-                    uri=True,
-                    timeout=30,
-                )
+                connect_sqlite_file(context.result_db_path, mode="ro", timeout=30)
             ) as connection:
                 validate_common_result_connection(connection)
             declaration = registered_test.definition.plugin
@@ -699,7 +696,7 @@ def _validate_adapter_receipt(
         ).fetchone()
     if connection is None:
         with closing(
-            sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+            connect_sqlite_file(path, mode="ro", timeout=30)
         ) as read_connection:
             row = load_row(read_connection)
     else:

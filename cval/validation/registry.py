@@ -612,6 +612,11 @@ def _parse_health(
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"health combination setting {factor!r} must be finite")
     auto_activate = _optional_bool(raw, "auto_activate", False)
+    if auto_activate:
+        raise ValueError(
+            "cval.test.v1 does not support health.auto_activate=true; "
+            "use deliberate, approval-gated activation"
+        )
     robust_z: float | None = None
     if "robust_z_threshold" in raw:
         robust_z = _strict_float(raw["robust_z_threshold"], "health.robust_z_threshold")

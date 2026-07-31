@@ -29,9 +29,10 @@ from cval.storage.dltest_ingest import (
     load_canonical_dl_run_metrics,
     prepare_canonical_dl_metric_tables,
 )
+from cval.storage.sqlite_snapshot import health_read_connection
 from cval.storage.per_test_results import (
-    COMMON_IMMUTABLE_KEY_GROUPS,
     COMMON_RESULT_TABLES,
+    common_immutable_key_groups,
     canonical_payload_digest,
     existing_metric_ingestion_receipt,
     metric_ingestion_transaction,
@@ -122,7 +123,7 @@ def _validate_dl_schema(connection, allow_missing: bool) -> bool:
         connection,
         set(),
         immutable_tables={
-            **COMMON_IMMUTABLE_KEY_GROUPS,
+            **common_immutable_key_groups(connection),
             **(
                 {
                     table_name: DL_IMMUTABLE_KEY_GROUPS
@@ -476,13 +477,7 @@ class DltestIngestionPlugin:
         result_ids = context.source_snapshot.result_ids
         placeholders = ", ".join("?" for _ in result_ids)
         observations = []
-        with closing(
-            sqlite3.connect(
-                f"file:{context.result_db_path}?mode=ro",
-                uri=True,
-                timeout=30,
-            )
-        ) as connection:
+        with health_read_connection(context.result_db_path) as connection:
             validate_common_result_connection(connection)
             _validate_dl_schema(connection, False)
             metadata = validate_health_read_metadata(

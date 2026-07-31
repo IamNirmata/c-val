@@ -207,6 +207,15 @@ class BaselineClassificationConfig:
 
 
 @dataclass(frozen=True)
+class HealthEvaluatorConfig:
+    """Independent safety and bounded-work controls for the U9 evaluator."""
+
+    write_enabled: bool = False
+    lock_timeout_seconds: int = 30
+    max_classifications_per_test: int = 250
+
+
+@dataclass(frozen=True)
 class CvalConfig:
     """Complete c-val configuration tree."""
 
@@ -220,6 +229,7 @@ class CvalConfig:
     tests: TestsConfig = field(default_factory=TestsConfig)
     job_template: JobTemplateConfig = field(default_factory=JobTemplateConfig)
     baseline: BaselineClassificationConfig = field(default_factory=BaselineClassificationConfig)
+    health_evaluator: HealthEvaluatorConfig = field(default_factory=HealthEvaluatorConfig)
 
 
 def default_config() -> CvalConfig:
@@ -278,6 +288,7 @@ def encode_config_snapshot(config: CvalConfig) -> str:
         "test_definitions": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
         "baseline": asdict(config.baseline),
+        "health_evaluator": asdict(config.health_evaluator),
     }
     payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(payload).decode("ascii")
@@ -309,6 +320,7 @@ def load_config_snapshot(
         "test_definitions",
         "job_template",
         "baseline",
+        "health_evaluator",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -379,6 +391,12 @@ def _build_config(
     dl_health_aggregation = _section(dict(dltest), "health_aggregation")
     job_template = _section(data, "job_template")
     baseline = _section(data, "baseline")
+    health_evaluator = _section(data, "health_evaluator")
+    _reject_section_keys(
+        health_evaluator,
+        {"write_enabled", "lock_timeout_seconds", "max_classifications_per_test"},
+        "health_evaluator",
+    )
 
     config = CvalConfig(
         cluster=ClusterConfig(
@@ -658,6 +676,23 @@ def _build_config(
                 defaults.baseline.classify_interval_seconds,
             ),
         ),
+        health_evaluator=HealthEvaluatorConfig(
+            write_enabled=_strict_config_bool(
+                health_evaluator,
+                "write_enabled",
+                defaults.health_evaluator.write_enabled,
+            ),
+            lock_timeout_seconds=_int(
+                health_evaluator,
+                "lock_timeout_seconds",
+                defaults.health_evaluator.lock_timeout_seconds,
+            ),
+            max_classifications_per_test=_int(
+                health_evaluator,
+                "max_classifications_per_test",
+                defaults.health_evaluator.max_classifications_per_test,
+            ),
+        ),
     )
     _validate_config(config)
     return config
@@ -716,6 +751,12 @@ def _validate_config(config: CvalConfig) -> None:
     }.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"baseline.{name} must be a positive integer")
+    for name, value in {
+        "lock_timeout_seconds": config.health_evaluator.lock_timeout_seconds,
+        "max_classifications_per_test": config.health_evaluator.max_classifications_per_test,
+    }.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"health_evaluator.{name} must be a positive integer")
     try:
         reserved_gpus = int(config.job_template.gpu_count)
         reserved_rdma = int(config.job_template.rdma_count)
@@ -769,6 +810,18 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Config section [{name}] must be a table")
     return value
+
+
+def _reject_section_keys(
+    section: Mapping[str, Any],
+    allowed: set[str],
+    name: str,
+) -> None:
+    unknown = sorted(set(section) - allowed)
+    if unknown:
+        raise ValueError(
+            f"Unknown value(s) under [{name}]: {', '.join(unknown)}"
+        )
 
 
 def _str(section: dict[str, Any], key: str, default: str) -> str:
