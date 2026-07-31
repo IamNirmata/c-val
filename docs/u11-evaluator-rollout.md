@@ -310,6 +310,40 @@ restore validation, deterministic parity, and no-side-effect dry-runs.
 
 ## Live blockers
 
+### Bounded read-only fact audit (2026-07-31)
+
+A bounded operator audit queried Kubernetes object metadata and used only
+`lstat`, bounded directory-name inventory, and mount metadata in the existing
+PVC access pod. It did not open a SQLite database, read an activation key or
+file payload, run evaluator preflight, create a lock/path, apply an object, or
+write the PVC.
+
+Confirmed facts:
+
+- the API server reports Kubernetes `v1.32.5+rke2r1`, namespace `gcr-admin` is
+  active, and the running `gcr-admin-pvc-access` pod mounts the claim name
+  `pvc-vast-gcr-admin` at `/data`;
+- `/data/continuous_validation` is an NFSv4 read-write mount path owned by
+  UID/GID `0:0` with mode `0755`, not the configured exact evaluator mode
+  `0700`;
+- `/data/continuous_validation/validation_tests` is absent, so every enabled
+  test's canonical U7 results DB, U8 health DB, and activation-key path is also
+  absent; and
+- the existing access pod uses its unrelated default ServiceAccount and does
+  not establish the future evaluator UID/GID, tokenless, Restricted, or
+  admission-policy facts.
+
+The audit identity was not authorized to read the PVC object, StorageClass,
+namespace NetworkPolicies, validating admission configuration, or evaluator
+CronJob/ServiceAccount/NetworkPolicy objects. API-resource discovery alone does
+not prove CNI or admission enforcement. Those facts therefore remain unknown,
+not negative evidence.
+
+Phase 0 cannot start from this state. Creating/activating U7, changing root
+ownership or mode, introducing an evaluator-owned subroot, or reading live DB
+contents are separate production-write/read approvals with backup and
+coexistence review. No such action was performed.
+
 U11 cannot be marked DONE until all of the following are independently verified
 and approved:
 

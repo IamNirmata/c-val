@@ -1334,10 +1334,28 @@ Current 2026-07-31 audit validation evidence:
 - No Kubernetes API, live PVC/DB, archive, commit, push, deploy, pod update, or
   loop restart was performed.
 
+Subsequent bounded read-only live fact audit on 2026-07-31:
+
+- Kubernetes reports server `v1.32.5+rke2r1`; namespace `gcr-admin` is active,
+  and the running PVC access pod declares claim `pvc-vast-gcr-admin` at
+  `/data`.
+- The mounted `/data/continuous_validation` root is NFSv4, read-write,
+  root-owned, and mode `0755`; evaluator preflight requires exact `0700` and a
+  separately verified evaluator UID/GID ownership model.
+- `validation_tests/` is absent, so all enabled tests' U7 results DBs and U8
+  DB/key units are absent. No DB or key content was opened.
+- Current RBAC denied PVC-object, StorageClass, NetworkPolicy, validating
+  admission, and evaluator-object inventory. Those facts remain unknown.
+- No lock/path/object was created, no evaluator preflight ran, and no PVC,
+  SQLite, Kubernetes, image, loop, or compatibility state was changed.
+
+This evidence confirms that U11 Phase 0 is blocked on live U7 activation plus
+a reviewed ownership/mode/coexistence plan; it does not authorize either.
+
 ## U12 — Compatibility cleanup and framework documentation
 
 **Status:** `BLOCKED` — U12A safe local guide/scaffold/catalog/static cleanup
-independently certified READY 2026-07-30; every removal remains blocked on U11
+independently certified READY 2026-07-31; every removal remains blocked on U11
 live acceptance, copied-input zero-use evidence, explicit approval, and the
 agreed compatibility period.
 **Risk:** Medium to high; removal of old surfaces.  
@@ -1359,7 +1377,7 @@ Acceptance criteria:
 - Full validation cadence passes.
 - Deployment and rollback documentation is complete.
 
-### U12A safe local delivery (2026-07-30)
+### U12A safe local delivery (2026-07-31)
 
 Delivered locally:
 
