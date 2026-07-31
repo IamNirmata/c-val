@@ -39,21 +39,28 @@ def canonical_sqlite_path(
     *,
     must_exist: bool,
 ) -> Path:
-    """Return one absolute canonical path without accepting a final symlink."""
+    """Return one absolute canonical path without accepting symlink traversal."""
 
-    if isinstance(path, str) and path.startswith("file:"):
+    raw_path = os.fspath(path)
+    if raw_path.startswith("file:"):
         raise ValueError("SQLite filesystem path must not be a URI")
-    value = Path(path).expanduser()
+    if "\x00" in raw_path:
+        raise ValueError("SQLite filesystem path must not contain NUL")
+    value = Path(raw_path).expanduser()
     if not value.is_absolute():
-        value = value.resolve(strict=False)
-    if value.is_symlink():
-        raise ValueError(f"SQLite database path must not be a symlink: {value}")
+        value = Path.cwd() / value
+    value = Path(*value.parts)
+    if any(part in {"", ".", ".."} for part in value.parts[1:]):
+        raise ValueError(f"SQLite database path is not lexical-canonical: {value}")
+    _reject_symlink_components(value)
     try:
         canonical = value.resolve(strict=must_exist)
     except FileNotFoundError:
         raise
     if not canonical.is_absolute():
         raise ValueError("SQLite database path must resolve to an absolute path")
+    if canonical != value:
+        raise ValueError(f"SQLite database path is not canonical: {value}")
     return canonical
 
 
@@ -164,11 +171,81 @@ def _assert_expected_identity(
         )
 
 
+def _reject_symlink_components(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(
+                f"SQLite database path must not traverse a symlink: {current}"
+            )
+
+
+_READONLY_SCRIPT_PRELUDE = r'''
+import os
+import sqlite3
+import stat
+from pathlib import Path
+from urllib.parse import quote
+
+def connect_sqlite_readonly(raw_path):
+    raw = os.fspath(raw_path)
+    if raw.startswith("file:") or "\x00" in raw:
+        raise ValueError("SQLite path must be a plain filesystem path")
+    intended = Path(raw).expanduser()
+    if not intended.is_absolute():
+        intended = Path.cwd() / intended
+    intended = Path(*intended.parts)
+    if any(part in {"", ".", ".."} for part in intended.parts[1:]):
+        raise ValueError("SQLite path is not lexical-canonical")
+    current = Path(intended.anchor)
+    for part in intended.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("SQLite path must not traverse a symlink")
+    canonical = intended.resolve(strict=True)
+    if canonical != intended:
+        raise ValueError("SQLite path is not canonical")
+    before = os.stat(canonical, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("SQLite database is not a regular file")
+    uri = "file:" + quote(str(canonical), safe="/") + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        mains = [
+            row for row in connection.execute("PRAGMA database_list").fetchall()
+            if len(row) >= 3 and row[1] == "main"
+        ]
+        if len(mains) != 1 or not isinstance(mains[0][2], str) or not mains[0][2]:
+            raise RuntimeError("SQLite connection has no unique filesystem main DB")
+        reported = Path(mains[0][2])
+        if not reported.is_absolute():
+            reported = Path.cwd() / reported
+        reported = Path(*reported.parts)
+        if reported != canonical:
+            raise RuntimeError("SQLite main path mismatch")
+        after = os.stat(canonical, follow_symlinks=False)
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError("SQLite database inode changed while opening")
+        return connection
+    except Exception:
+        connection.close()
+        raise
+'''.lstrip()
+
+
+def sqlite_readonly_script_prelude() -> str:
+    """Return the dependency-free safe opener used by injected pod scripts."""
+
+    return _READONLY_SCRIPT_PRELUDE
+
+
 __all__ = [
     "SQLiteFileIdentity",
     "assert_sqlite_connection_identity",
     "assert_sqlite_file_identity",
     "canonical_sqlite_path",
     "connect_sqlite_file",
+    "sqlite_readonly_script_prelude",
     "sqlite_file_uri",
 ]

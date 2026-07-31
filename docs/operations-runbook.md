@@ -176,6 +176,14 @@ so one noisy metric does not degrade an otherwise healthy node.
 
 ### Background Baseline Services
 
+The scripts enumerate enabled registry targets by capability on every cycle;
+they do not maintain storage/NCCL/DL enable variables. An environment value
+cannot re-enable a disabled registry test. `CVAL_BASELINE_CLASSIFY_TESTS`, when
+set, remains a strict allowlist over the catalog. DL aggregate/component targets
+share one lock and one freshness/rebuild decision per cycle. Failures are
+isolated per target and the cycle returns nonzero after all selected targets
+have been attempted.
+
 Run these where `/data/continuous_validation` is visible. The intended location
 is the `gcr-admin` PVC access pod, in a tmux session:
 
@@ -201,6 +209,11 @@ scripts/cval-baseline-classify.sh stop
 To start them inside the PVC pod, first exec into the running access pod and run
 the same commands from the c-val checkout. Do not paste credentials into docs or
 commands; use the kubeconfig already present on the operator machine.
+
+Code or local U10 test completion does **not** authorize restarting either live
+loop. A pod checkout update and restart remain separate ship/deploy actions.
+U10 also does not move compatibility readers from `metadata/`/`baselines/` to
+U7/U8/U9 databases.
 
 For DL tests, the scripts first rebuild the four DL metric DBs from rank JSON
 files under `/data/continuous_validation/validation_tests/dltest/runs`. To run

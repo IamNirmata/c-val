@@ -38,7 +38,9 @@ class IngestionProtocolTests(unittest.TestCase):
             self.assertEqual(plugin.plugin_id, test_id)
             self.assertEqual(
                 plugin.capabilities,
-                frozenset({"config", "ingest", "health"}),
+                frozenset(
+                    {"config", "ingest", "health", "baseline", "export"}
+                ),
             )
 
     def test_rejects_plugin_identity_mismatch(self) -> None:

@@ -188,6 +188,14 @@ Unknown requirement keys are rejected. The registry compares each enabled minimu
 
 An arbitrary TOML table owned by the test. The framework preserves TOML scalar, array, and table types and passes the resolved test config path to the test. Core code does not convert every setting into an environment variable.
 
+At registry construction, the complete settings tree is recursively frozen:
+tables become immutable mappings and arrays become tuples, including nested
+tables inside arrays. Every ingestion, health, compatibility baseline, and
+export context shares that frozen definition; a plugin cannot mutate nested
+descriptor settings or reach mutable descriptor state through `CvalConfig`.
+`registry.to_dict()`, config snapshots, digests, and `config_to_dict()` produce
+new mutable JSON-ready copies without weakening the plugin-facing objects.
+
 The test or adapter must reject unknown settings. Secrets are prohibited.
 
 ### `[artifacts]`
@@ -217,7 +225,7 @@ Optional. Omit it for a pass/fail-only test with no custom ingestion, health, or
 | --- | --- | --- | --- | --- |
 | `adapter` | String | Yes | — | Relative Python file inside the test directory. |
 | `api_version` | String | Yes | — | Exactly `cval.plugin.v1`. |
-| `capabilities` | Array of strings | Yes | — | Unique values from `config`, `ingest`, `health`, `export`. |
+| `capabilities` | Array of strings | Yes | — | Unique values from `config`, `ingest`, `health`, `baseline`, `export`. |
 
 The adapter is imported only from its validated repository-confined path.
 Import failure, API drift, capability drift, or invalid adapter-owned config is
@@ -335,7 +343,8 @@ health_policy_version: str  # required with the health capability
 ### Common value objects
 
 The framework supplies immutable value objects rather than internal managers
-or raw database connections:
+or raw database connections. Immutability is deep for descriptor/config
+mappings and arrays, not merely a frozen outer dataclass:
 
 - `TestDefinition`: validated test metadata and test-owned settings.
 - `RunContext`: run ID, node, versions, timestamps, and confined paths.
@@ -344,7 +353,12 @@ or raw database connections:
 - `HealthContext`: validated definition, read-only result DB path, canonical
   combination, exact source snapshot, lifecycle parent, evaluator/robust-z
   policy, raw status, and optional deterministic creation timestamp.
-- `ExportContext`: read-only result source and selected output destination.
+- `BaselineBuildContext` / `BaselineClassificationContext`: selected immutable
+  operational target, definition, compatibility source override, bounded
+  window, and build/classification options.
+- `ExportContext`: immutable selected target, status/classification tuples,
+  read-only source identifiers, and metric-inclusion policy. It has no output
+  path, writable DB handle, or Kubernetes client.
 
 Adapters must not receive a Kubernetes client.
 
@@ -413,14 +427,41 @@ Rules:
   positive adapter schema version, and durable receipt evidence.
 - Health operations write through framework-owned storage services.
 
+### `baseline` capability
+
+```text
+build_compatibility_baseline(context: BaselineBuildContext) -> dict
+classify_compatibility(context: BaselineClassificationContext,
+                       baseline: dict) -> tuple[dict, ...]
+```
+
+- This capability is for the operational compatibility baseline system, not
+  U8/U9 health candidates.
+- Hooks read the test's established compatibility metric source and return the
+  existing `cval.baseline.v2` / normal-degraded-improved contracts to core.
+- Core owns target resolution, baseline storage/activation, classification
+  result persistence, and strict exact-schema/type/identity/invariant validation
+  of returned records. Core repeats validation immediately before persistence.
+- Concurrent same-ID persistence uses conflict `INSERT` plus transactional
+  winner re-read. Exact evidence is idempotent without resetting lifecycle;
+  changed evidence conflicts.
+- DL verdict validation derives component and aggregate status/count/fraction/
+  worst-distance fields from exact metric reports, reconciles severity flags,
+  and requires identical top-level/component aggregation thresholds.
+- Built-ins continue to read `metadata/test-storage.db`,
+  `metadata/test-nccl.db`, and the four `metadata/dltest_*` DBs. Declaring this
+  capability does not cut any reader over to U7/U8/U9.
+
 ### `export` capability
 
 ```text
-export_rows(context: ExportContext) -> tuple[dict[str, scalar], ...]
+export_rows(context: ExportContext) -> ExportRows
 ```
 
 - Read-only.
-- Returns JSON/CSV-safe scalar values.
+- Returns immutable unique columns plus same-width string tuples. Core rejects
+  mutable, non-rectangular, non-string, duplicate-column, or unsafe-column
+  output.
 - Does not create the destination file directly; the framework owns output naming and writing.
 
 ### Adapter isolation and failure behavior
@@ -600,7 +641,7 @@ Acceptance assertions:
 | Hard-coded progress markers | `CVAL_EVENT` JSON lines | Parse old markers while pinned v1 jobs may run. |
 | `validation.db` row per fixed test | Node run history plus per-test result DBs | Default-off dual-write is implemented; do not activate, delete, or rewrite old DBs without separate approval. |
 | Fixed storage/NCCL/DL ingestion branches | Adapter capabilities | Storage, NCCL, and one-run DL adapters are implemented; compatibility writers remain the current production surface. |
-| Fixed baseline CLI choices | Registry health capabilities | Preserve aliases during compatibility period. |
+| Fixed baseline CLI choices | Enabled adapter `baseline` capabilities | Preserve aliases during compatibility period; this is separate from U8/U9 `health`. |
 | Global `classification-results.db` | Per-test health DB plus result cache/history | Keep old DB readable until reporting parity and approved cleanup. |
 
 ## Contract evolution

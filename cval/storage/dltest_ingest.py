@@ -726,10 +726,12 @@ def _rank_status_counts(payload: dict[str, Any]) -> dict[str, int]:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
+    from cval.storage.sqlite_uri import connect_sqlite_file
+
     db_path = safe_writable_file_path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db_path = safe_writable_file_path(db_path)
-    connection = sqlite3.connect(db_path)
+    connection = connect_sqlite_file(db_path, mode="rwc", timeout=30)
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=NORMAL")
     return connection
@@ -1067,13 +1069,15 @@ def _write_ingest_generation(
 def validate_dl_metric_generation(db_paths: dict[str, str | Path]) -> str | None:
     """Require all generation-aware DL DBs to expose one completed generation."""
 
+    from cval.storage.sqlite_uri import connect_sqlite_file
+
     generations: dict[str, str | None] = {}
     for component, raw_path in db_paths.items():
         path = Path(raw_path)
         if not path.is_file():
             generations[component] = None
             continue
-        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+        with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
             table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='cval_ingest_metadata'"

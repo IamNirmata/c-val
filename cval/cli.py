@@ -49,18 +49,17 @@ from cval.validation.results import (
     validation_result_to_env,
     validation_result_to_env_lines,
 )
-
-CLASSIFIABLE_TEST_CHOICES = [
-    "nccl",
-    "storage",
-    "dltest",
-    "dltest-numerical",
-    "dltest-compute",
-    "dltest-collective",
-    "dltest-overlap",
-]
-
-RESULT_TEST_CHOICES = ["overall", "all", *CLASSIFIABLE_TEST_CHOICES]
+from cval.validation.operational_targets import (
+    BASELINE_ACTIVATE,
+    BASELINE_BUILD,
+    BASELINE_CLASSIFY,
+    BASELINE_LIST,
+    BASELINE_SHOW,
+    CLASSIFICATIONS_EXPORT,
+    OPERATION_ORDER,
+    RESULTS_EXPORT,
+    build_operational_target_catalog,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,6 +108,10 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     """Build the top-level parser and subcommands."""
 
     active_config = config or load_config()
+    target_catalog = build_operational_target_catalog(active_config.tests.registry)
+    from cval.baselines.storage import validate_default_baseline_db_paths
+
+    validate_default_baseline_db_paths(active_config)
     parser = argparse.ArgumentParser(prog="cval", description="c-val orchestration CLI")
     parser.add_argument(
         "--config",
@@ -152,6 +155,13 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     tests_validate.add_argument("--output", choices=["table", "json"], default="table")
     tests_validate.set_defaults(handler=handle_tests_validate)
+
+    # Machine-only catalog used by background loops. It is intentionally
+    # omitted from public help and emits data, never shell assignments.
+    operational_targets = subparsers.add_parser("operational-targets")
+    operational_targets.add_argument("--operation", choices=OPERATION_ORDER, required=True)
+    operational_targets.add_argument("--output", choices=["tsv", "json"], default="tsv")
+    operational_targets.set_defaults(handler=handle_operational_targets)
 
     nodes = subparsers.add_parser("nodes", help="List schedulable GPU nodes and free capacity")
     nodes.add_argument(
@@ -315,7 +325,11 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "results",
         help="Export latest per-node results for one test to a local file",
     )
-    results.add_argument("--test", choices=RESULT_TEST_CHOICES, required=True)
+    results.add_argument(
+        "--test",
+        choices=["overall", "all", *target_catalog.names_for(RESULTS_EXPORT)],
+        required=True,
+    )
     results.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
     results.add_argument("--output-dir", type=Path, default=Path.cwd())
     results.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
@@ -351,7 +365,11 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "classifications",
         help="Export latest baseline classification verdicts to a local CSV",
     )
-    classifications.add_argument("--test", choices=["all", *CLASSIFIABLE_TEST_CHOICES], default="all")
+    classifications.add_argument(
+        "--test",
+        choices=["all", *target_catalog.names_for(CLASSIFICATIONS_EXPORT)],
+        default="all",
+    )
     classifications.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
     classifications.add_argument("--output-dir", type=Path, default=Path.cwd())
     classifications.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
@@ -494,7 +512,9 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_sub = baseline.add_subparsers(dest="baseline_command", required=True)
 
     baseline_list = baseline_sub.add_parser("list", help="List stored baselines")
-    baseline_list.add_argument("--test-type", choices=["nccl", "storage", "dltest"])
+    baseline_list.add_argument(
+        "--test-type", choices=target_catalog.names_for(BASELINE_LIST)
+    )
     baseline_list.add_argument(
         "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
     )
@@ -505,7 +525,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "build", help="Build a dynamic baseline from result DBs (robust stats)"
     )
     baseline_build.add_argument(
-        "--test-type", choices=["nccl", "storage", "dltest"], required=True
+        "--test-type", choices=target_catalog.names_for(BASELINE_BUILD), required=True
     )
     baseline_build.add_argument(
         "--window-days", type=int, default=active_config.baseline.window_days
@@ -535,7 +555,9 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "activate", help="Promote a stored baseline to active"
     )
     baseline_activate.add_argument("baseline_id")
-    baseline_activate.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_activate.add_argument(
+        "test_type", choices=target_catalog.names_for(BASELINE_ACTIVATE)
+    )
     baseline_activate.add_argument(
         "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
     )
@@ -543,7 +565,9 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     baseline_show = baseline_sub.add_parser("show", help="Show a stored baseline record")
     baseline_show.add_argument("baseline_id")
-    baseline_show.add_argument("test_type", choices=["nccl", "storage", "dltest"])
+    baseline_show.add_argument(
+        "test_type", choices=target_catalog.names_for(BASELINE_SHOW)
+    )
     baseline_show.add_argument(
         "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
     )
@@ -554,7 +578,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "classify", help="Classify nodes against the active baseline"
     )
     baseline_classify.add_argument(
-        "--test-type", choices=CLASSIFIABLE_TEST_CHOICES, required=True
+        "--test-type", choices=target_catalog.names_for(BASELINE_CLASSIFY), required=True
     )
     baseline_classify.add_argument(
         "--node", help="Classify one node; omit to classify all nodes in the window"
@@ -741,6 +765,31 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_operational_targets(args: argparse.Namespace) -> int:
+    """Emit enabled capability-derived targets for trusted local loops."""
+
+    catalog = build_operational_target_catalog(args.cval_config.tests.registry)
+    targets = catalog.for_operation(args.operation)
+    if args.output == "json":
+        print(json.dumps([target.to_dict() for target in targets], indent=2))
+        return 0
+    for target in targets:
+        print(
+            "\t".join(
+                (
+                    "cval.operational-target.v1",
+                    target.name,
+                    target.owner_test_id,
+                    target.baseline_test_type,
+                    target.status_test,
+                    str(target.alias).lower(),
+                    target.refresh_group or "-",
+                )
+            )
+        )
+    return 0
+
+
 def handle_status(args: argparse.Namespace) -> int:
     """Read latest validation status without mutating SQLite metadata."""
 
@@ -748,6 +797,7 @@ def handle_status(args: argparse.Namespace) -> int:
         pod=args.pod,
         namespace=args.namespace,
         db_path=args.db_path,
+        config=args.cval_config,
     )
     if args.output == "json":
         print(json.dumps([asdict(row) for row in rows], indent=2))
@@ -911,14 +961,14 @@ def handle_results(args: argparse.Namespace) -> int:
     from cval.storage.results_export import (
         latest_result_rows,
         write_latest_results_csv,
-        write_nccl_health_results_csv,
+        write_export_rows_csv,
     )
     from cval.storage.classification_status import get_latest_classification_rows
-    from cval.storage.metrics import (
-        get_latest_nccl_health_metrics,
-        get_latest_nccl_metrics,
-        get_latest_storage_metrics,
+    from cval.validation.operations import (
+        export_compatibility_rows,
+        resolve_operational_target,
     )
+    from cval.validation.plugins import ExportContext
 
     if args.result_type != "csv":
         raise ValueError("Only --type csv is currently supported")
@@ -927,6 +977,7 @@ def handle_results(args: argparse.Namespace) -> int:
         pod=args.pod,
         namespace=args.namespace,
         db_path=args.db_path,
+        config=args.cval_config,
     )
     classifications = []
     if not args.no_classification:
@@ -938,52 +989,60 @@ def handle_results(args: argparse.Namespace) -> int:
         )
 
     test = args.test.lower()
+    if test in {"overall", "all"}:
+        from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
 
-    # NCCL export mirrors IB_HEALTH: one wide row per node/run.
-    if test == "nccl":
-        selected = latest_result_rows(rows, args.test)
-        health_metrics = None
+        nccl_metrics = None
+        storage_metrics = None
         if not args.no_metrics:
-            health_metrics = get_latest_nccl_health_metrics(
-                pod=args.pod,
-                namespace=args.namespace,
-                db_path=args.nccl_db_path,
-            )
-        output_path = write_nccl_health_results_csv(
-            rows,
-            output_dir=args.output_dir,
-            health_metrics=health_metrics,
-            classifications=classifications,
-        )
-        print(f"Wrote {len(selected)} nccl IB_HEALTH row(s) to {output_path}")
-        return 0
-
-    nccl_metrics = None
-    storage_metrics = None
-    if not args.no_metrics:
-        if test in {"overall", "all"}:
             nccl_metrics = get_latest_nccl_metrics(
                 pod=args.pod,
                 namespace=args.namespace,
                 db_path=args.nccl_db_path,
+                config=args.cval_config,
             )
-        if test in {"storage", "overall", "all"}:
             storage_metrics = get_latest_storage_metrics(
                 pod=args.pod,
                 namespace=args.namespace,
                 db_path=args.storage_db_path,
+                config=args.cval_config,
             )
-
-    selected = latest_result_rows(rows, args.test)
-    output_path = write_latest_results_csv(
-        rows,
-        args.test,
-        output_dir=args.output_dir,
-        classifications=classifications,
-        nccl_metrics=nccl_metrics,
-        storage_metrics=storage_metrics,
-    )
-    print(f"Wrote {len(selected)} {args.test} latest result row(s) to {output_path}")
+        selected = latest_result_rows(rows, args.test)
+        output_path = write_latest_results_csv(
+            rows,
+            args.test,
+            output_dir=args.output_dir,
+            classifications=classifications,
+            nccl_metrics=nccl_metrics,
+            storage_metrics=storage_metrics,
+        )
+        output_label = f"{args.test} latest result"
+    else:
+        target = resolve_operational_target(args.cval_config, test, RESULTS_EXPORT)
+        registered = args.cval_config.tests.registry.require(target.owner_test_id)
+        context = ExportContext(
+            target=target,
+            definition=registered.definition,
+            config=args.cval_config,
+            status_rows=tuple(rows),
+            classification_rows=tuple(classifications),
+            pod=args.pod,
+            namespace=args.namespace,
+            source_db_paths=(
+                ("nccl", args.nccl_db_path),
+                ("storage", args.storage_db_path),
+            ),
+            include_metrics=not args.no_metrics,
+        )
+        export = export_compatibility_rows(args.cval_config, test, context)
+        output_path = write_export_rows_csv(
+            export,
+            target.name,
+            output_dir=args.output_dir,
+        )
+        selected = export.rows
+        output_label = export.row_label or f"{target.name} latest result"
+    print(f"Wrote {len(selected)} {output_label} row(s) to {output_path}")
     return 0
 
 
@@ -998,12 +1057,23 @@ def handle_classifications(args: argparse.Namespace) -> int:
     if args.result_type != "csv":
         raise ValueError("Only --type csv is currently supported")
 
+    catalog = build_operational_target_catalog(args.cval_config.tests.registry)
+    if args.test != "all":
+        from cval.validation.operations import resolve_operational_target
+
+        resolve_operational_target(
+            args.cval_config, args.test, CLASSIFICATIONS_EXPORT
+        )
+
     rows = get_latest_classification_rows(
         pod=args.pod,
         namespace=args.namespace,
         db_path=args.db_path,
         config=args.cval_config,
     )
+    if args.test == "all":
+        enabled_targets = set(catalog.names_for(CLASSIFICATIONS_EXPORT))
+        rows = [row for row in rows if row.test_type in enabled_targets]
     selected = filter_classification_rows(rows, args.test)
     output_path = write_classifications_csv(rows, args.test, output_dir=args.output_dir)
     print(f"Wrote {len(selected)} {args.test} classification row(s) to {output_path}")
@@ -1406,6 +1476,10 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
 def handle_baseline_list(args: argparse.Namespace) -> int:
     """List stored baselines in the validation DB."""
     from cval.baselines.storage import list_dynamic_baselines
+    from cval.validation.operations import resolve_operational_target
+
+    if args.test_type:
+        resolve_operational_target(args.cval_config, args.test_type, BASELINE_LIST)
 
     baselines = list_dynamic_baselines(
         test_type=args.test_type,
@@ -1440,29 +1514,26 @@ def handle_baseline_list(args: argparse.Namespace) -> int:
 
 def handle_baseline_build(args: argparse.Namespace) -> int:
     """Build a dynamic baseline from result DBs and optionally store/activate it."""
-    from cval.baselines.build import build_baseline
     from cval.baselines.storage import (
         activate_baseline,
         default_dynamic_baseline_db_paths,
         store_dynamic_baseline,
     )
+    from cval.validation.operations import build_compatibility_baseline
 
     config: CvalConfig = args.cval_config
-    kwargs: dict = {
-        "config": config,
-        "window_days": args.window_days,
-        "min_samples": args.min_samples,
-        "baseline_id": args.baseline_id,
-    }
-    if args.test_type in ("storage", "nccl"):
-        kwargs["db_path"] = args.source_db
-        kwargs["image_name"] = args.image_name
-        kwargs["node"] = args.node
-    else:
-        kwargs["test_plan"] = args.test_plan
-
     try:
-        record = build_baseline(args.test_type, **kwargs)
+        record = build_compatibility_baseline(
+            config,
+            args.test_type,
+            window_days=args.window_days,
+            min_samples=args.min_samples,
+            source_db=args.source_db,
+            image_name=args.image_name,
+            node=args.node,
+            test_plan=args.test_plan,
+            baseline_id=args.baseline_id,
+        )
     except FileNotFoundError as exc:
         print(f"Source DB not found: {exc}", file=sys.stderr)
         return 1
@@ -1509,6 +1580,11 @@ def handle_baseline_build(args: argparse.Namespace) -> int:
 def handle_baseline_activate(args: argparse.Namespace) -> int:
     """Promote a stored baseline to active and supersede the previous one."""
     from cval.baselines.storage import activate_baseline
+    from cval.validation.operations import resolve_operational_target
+
+    resolve_operational_target(
+        args.cval_config, args.test_type, BASELINE_ACTIVATE
+    )
 
     if not activate_baseline(
         args.baseline_id,
@@ -1528,6 +1604,9 @@ def handle_baseline_activate(args: argparse.Namespace) -> int:
 def handle_baseline_show(args: argparse.Namespace) -> int:
     """Print a stored baseline record and its per-metric acceptance bands."""
     from cval.baselines.storage import load_dynamic_baseline
+    from cval.validation.operations import resolve_operational_target
+
+    resolve_operational_target(args.cval_config, args.test_type, BASELINE_SHOW)
 
     record = load_dynamic_baseline(
         args.baseline_id,
@@ -1568,15 +1647,19 @@ def handle_baseline_show(args: argparse.Namespace) -> int:
 
 def handle_baseline_classify(args: argparse.Namespace) -> int:
     """Classify one or all nodes against the active (or named) baseline."""
-    from cval.baselines.classify import classify_node, classify_nodes
     from cval.baselines.storage import (
         default_classification_db_path,
         get_active_baseline,
         load_dynamic_baseline,
         store_classification_results,
     )
+    from cval.validation.operations import (
+        classify_compatibility_target,
+        resolve_operational_target,
+    )
 
     config: CvalConfig = args.cval_config
+    resolve_operational_target(config, args.test_type, BASELINE_CLASSIFY)
     if args.baseline_id:
         baseline = load_dynamic_baseline(
             args.baseline_id,
@@ -1594,25 +1677,14 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
         )
         return 1
 
-    if args.node:
-        verdicts = [
-            classify_node(
-                args.test_type,
-                args.node,
-                baseline,
-                config=config,
-                db_path=args.source_db,
-                window_days=args.window_days,
-            )
-        ]
-    else:
-        verdicts = classify_nodes(
-            args.test_type,
-            baseline,
-            config=config,
-            db_path=args.source_db,
-            window_days=args.window_days,
-        )
+    verdicts = classify_compatibility_target(
+        config,
+        args.test_type,
+        baseline,
+        node=args.node,
+        source_db=args.source_db,
+        window_days=args.window_days,
+    )
 
     stored_count = 0
     if args.store_results:
@@ -1770,6 +1842,7 @@ def _load_db_status(args: argparse.Namespace) -> dict[str, int]:
                 pod=args.status_pod,
                 namespace=args.status_namespace,
                 db_path=args.status_db_path,
+                config=args.cval_config,
             )
         )
     if args.db_status_tsv:

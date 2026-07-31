@@ -29,10 +29,15 @@ from cval.storage.per_test_results import (
     validate_health_read_metadata,
 )
 from cval.validation.plugins import (
+    BaselineBuildContext,
+    BaselineClassificationContext,
     ConfigIssue,
+    ExportContext,
+    ExportRows,
     IngestionConflictError,
     IngestionContext,
     IngestionReceipt,
+    export_rows_from_records,
     validate_ingestion_artifact_tree,
 )
 
@@ -155,7 +160,7 @@ def _validate_storage_schema(connection, allow_missing: bool) -> bool:
 class StorageIngestionPlugin:
     plugin_id = "storage"
     health_policy_version = "storage.health.v1"
-    capabilities = frozenset({"config", "ingest", "health"})
+    capabilities = frozenset({"config", "ingest", "health", "baseline", "export"})
 
     def validate_schema(self, connection, allow_missing: bool) -> bool:
         return _validate_storage_schema(connection, allow_missing)
@@ -172,6 +177,80 @@ class StorageIngestionPlugin:
 
     def metric_specs(self, definition) -> tuple[MetricSpec, ...]:
         return metric_specs_from_definition(definition)
+
+    def build_compatibility_baseline(self, context: BaselineBuildContext):
+        """Build from the established metadata/test-storage.db surface."""
+
+        from cval.baselines.build import build_storage_baseline
+
+        return build_storage_baseline(
+            config=context.config,
+            db_path=context.source_db,
+            window_days=context.window_days,
+            min_samples=context.min_samples,
+            image_name=context.image_name,
+            node=context.node,
+            baseline_id=context.baseline_id,
+        )
+
+    def classify_compatibility(
+        self,
+        context: BaselineClassificationContext,
+        baseline,
+    ) -> tuple[dict, ...]:
+        """Classify from the established metadata/test-storage.db surface."""
+
+        from cval.baselines.classify import classify_node, classify_nodes
+
+        if context.node:
+            verdicts = [
+                classify_node(
+                    context.target.name,
+                    context.node,
+                    baseline,
+                    config=context.config,
+                    db_path=context.source_db,
+                    window_days=context.window_days,
+                )
+            ]
+        else:
+            verdicts = classify_nodes(
+                context.target.name,
+                baseline,
+                config=context.config,
+                db_path=context.source_db,
+                window_days=context.window_days,
+            )
+        return tuple(verdicts)
+
+    def export_rows(self, context: ExportContext) -> ExportRows:
+        """Return the established storage result CSV projection."""
+
+        from cval.storage.metrics import get_latest_storage_metrics
+        from cval.storage.results_export import (
+            get_csv_columns,
+            latest_result_rows,
+            rows_to_csv_records,
+        )
+
+        metrics = None
+        if context.include_metrics:
+            metrics = get_latest_storage_metrics(
+                pod=context.pod,
+                namespace=context.namespace,
+                db_path=context.source_db_path("storage"),
+                config=context.config,
+            )
+        selected = latest_result_rows(list(context.status_rows), context.target.name)
+        records = rows_to_csv_records(
+            selected,
+            context.target.name,
+            list(context.classification_rows),
+            storage_metrics=metrics,
+        )
+        columns = get_csv_columns(context.target.name)
+        projected = ({column: record.get(column, "") for column in columns} for record in records)
+        return export_rows_from_records(columns, projected)
 
     def load_observations(
         self,

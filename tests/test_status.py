@@ -1,22 +1,33 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from cval.storage.status import (
+    get_latest_status_rows,
     latest_status_rows_to_node_map,
     latest_status_rows_to_tsv,
     parse_latest_status_rows_json,
     parse_latest_status_tsv,
     resolve_status_pod,
 )
+from cval.config import load_config
 from cval.k8s.client import CommandResult
+from cval.storage.metrics import (
+    get_latest_nccl_health_metrics,
+    get_latest_nccl_metrics,
+    get_latest_storage_metrics,
+)
 
 
 class FakeKubectlClient:
     def __init__(self, responses: dict[tuple[str, ...], CommandResult]) -> None:
         self.responses = responses
+        self.calls = []
 
     def run(self, args, check=True, input_text=None):
+        self.calls.append((tuple(args), input_text))
         result = self.responses.get(
             tuple(args),
             CommandResult(args=("kubectl", *args), stdout="", stderr="not found", returncode=1),
@@ -117,6 +128,65 @@ class StatusParsingTests(unittest.TestCase):
         self.assertEqual(
             resolve_status_pod(client, "gcr-admin", "gcr-admin-pvc-access"),
             "access-pod",
+        )
+
+    def test_status_and_metric_helpers_prefer_explicit_config(self) -> None:
+        base = load_config()
+        config = replace(
+            base,
+            cluster=replace(
+                base.cluster,
+                namespace="explicit-namespace",
+                pvc_access_pod="explicit-pod",
+            ),
+            storage=replace(
+                base.storage,
+                validation_db_path="/explicit/status ?#%.db",
+                nccl_db_path="/explicit/nccl ?#%.db",
+                storage_db_path="/explicit/storage ?#%.db",
+            ),
+        )
+        client = FakeKubectlClient({})
+        response = CommandResult(args=(), stdout="[]", stderr="", returncode=0)
+
+        def run(args, check=True, input_text=None):
+            client.calls.append((tuple(args), input_text))
+            return response
+
+        client.run = run  # type: ignore[method-assign]
+        with patch(
+            "cval.storage.status.resolve_status_pod",
+            return_value="resolved-explicit-pod",
+        ), patch(
+            "cval.storage.metrics.resolve_status_pod",
+            return_value="resolved-explicit-pod",
+        ), patch(
+            "cval.storage.status.load_config",
+            side_effect=AssertionError("ambient status config reload"),
+        ), patch(
+            "cval.storage.metrics.load_config",
+            side_effect=AssertionError("ambient metric config reload"),
+        ):
+            self.assertEqual(get_latest_status_rows(client=client, config=config), [])
+            self.assertEqual(get_latest_nccl_metrics(client=client, config=config), {})
+            self.assertEqual(get_latest_storage_metrics(client=client, config=config), {})
+            self.assertEqual(
+                get_latest_nccl_health_metrics(client=client, config=config), {}
+            )
+
+        commands = [call[0] for call in client.calls]
+        self.assertTrue(all("explicit-namespace" in command for command in commands))
+        self.assertEqual(
+            [command[-1] for command in commands],
+            [
+                "/explicit/status ?#%.db",
+                "/explicit/nccl ?#%.db",
+                "/explicit/storage ?#%.db",
+                "/explicit/nccl ?#%.db",
+            ],
+        )
+        self.assertTrue(
+            all("connect_sqlite_readonly" in (call[1] or "") for call in client.calls)
         )
 
 

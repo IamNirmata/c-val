@@ -17,6 +17,7 @@ from cval.config import load_config
 from cval.k8s.client import KubectlClient
 from cval.models import NcclHealthMetric, NcclMetrics, StorageMetrics
 from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
+from cval.storage.sqlite_uri import sqlite_readonly_script_prelude
 from cval.storage.status import resolve_status_pod
 
 logger = logging.getLogger(__name__)
@@ -36,13 +37,13 @@ STORAGE_METRIC_FIELDS = (
     "randwrite_bw",
 )
 
-_NCCL_FETCH_SCRIPT = """\
-import json, sqlite3, sys
-db_path = {db_path!r}
+_NCCL_FETCH_SCRIPT = sqlite_readonly_script_prelude() + """\
+import json, sys
+db_path = sys.argv[1]
 rows_out = []
 conn = None
 try:
-    conn = sqlite3.connect(f"file:{{db_path}}?mode=ro", uri=True)
+    conn = connect_sqlite_readonly(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT Node AS node, BUS_BW AS busbw, LATENCY AS latency "
@@ -52,52 +53,52 @@ try:
         "ORDER BY Node"
     ).fetchall()
     for row in rows:
-        rows_out.append({{"node": row["node"], "busbw": row["busbw"], "latency": row["latency"]}})
+        rows_out.append({"node": row["node"], "busbw": row["busbw"], "latency": row["latency"]})
 except Exception as exc:
-    print(f"nccl metrics error: {{exc}}", file=sys.stderr)
+    print(f"nccl metrics error: {exc}", file=sys.stderr)
 finally:
     if conn is not None:
         conn.close()
 print(json.dumps(rows_out))
 """
 
-_STORAGE_FETCH_SCRIPT = """\
-import json, sqlite3, sys
-db_path = {db_path!r}
-cols = {cols!r}
+_STORAGE_FETCH_SCRIPT = sqlite_readonly_script_prelude() + """\
+import json, sys
+db_path = sys.argv[1]
+cols = __CVAL_STORAGE_COLUMNS__
 rows_out = []
 conn = None
 try:
-    conn = sqlite3.connect(f"file:{{db_path}}?mode=ro", uri=True)
+    conn = connect_sqlite_readonly(db_path)
     conn.row_factory = sqlite3.Row
     col_list = ", ".join(cols)
     rows = conn.execute(
-        f"SELECT node, {{col_list}} FROM storage_performance "
+        f"SELECT node, {col_list} FROM storage_performance "
         "WHERE (node, timestamp) IN "
         "  (SELECT node, MAX(timestamp) FROM storage_performance GROUP BY node) "
         "ORDER BY node"
     ).fetchall()
     for row in rows:
-        entry = {{"node": row["node"]}}
+        entry = {"node": row["node"]}
         for col in cols:
             entry[col] = row[col]
         rows_out.append(entry)
 except Exception as exc:
-    print(f"storage metrics error: {{exc}}", file=sys.stderr)
+    print(f"storage metrics error: {exc}", file=sys.stderr)
 finally:
     if conn is not None:
         conn.close()
 print(json.dumps(rows_out))
 """
 
-_NCCL_HEALTH_FETCH_SCRIPT = """\
-import json, sqlite3, sys
-db_path = {db_path!r}
-port_columns = {port_columns!r}
+_NCCL_HEALTH_FETCH_SCRIPT = sqlite_readonly_script_prelude() + """\
+import json, sys
+db_path = sys.argv[1]
+port_columns = __CVAL_NCCL_PORT_COLUMNS__
 rows_out = []
 conn = None
 try:
-    conn = sqlite3.connect(f"file:{{db_path}}?mode=ro", uri=True)
+    conn = connect_sqlite_readonly(db_path)
     conn.row_factory = sqlite3.Row
     selected = ", ".join(port_columns)
     rows = conn.execute(
@@ -108,7 +109,7 @@ try:
         "ORDER BY Node"
     ).fetchall()
     for row in rows:
-        entry = {{
+        entry = {
             "node": row["Node"],
             "timestamp": row["timestamp"],
             "la_timestamp": row["la_timestamp"],
@@ -119,12 +120,12 @@ try:
             "samples": row["samples"],
             "bus_bw": row["BUS_BW"],
             "latency": row["LATENCY"],
-        }}
+        }
         for column in port_columns:
             entry[column] = row[column]
         rows_out.append(entry)
 except Exception as exc:
-    print(f"IB_HEALTH metrics error: {{exc}}", file=sys.stderr)
+    print(f"IB_HEALTH metrics error: {exc}", file=sys.stderr)
 finally:
     if conn is not None:
         conn.close()
@@ -137,21 +138,25 @@ def get_latest_nccl_metrics(
     pod: str | None = None,
     namespace: str | None = None,
     db_path: str | None = None,
+    config=None,
 ) -> dict[str, NcclMetrics]:
     """Return the latest NCCL busbw/latency per node from test-nccl.db.
 
     Returns an empty dict on any error so callers can proceed without metrics.
     """
-    config = load_config()
-    pod = pod or config.cluster.pvc_access_pod
-    namespace = namespace or config.cluster.namespace
-    db_path = db_path or config.storage.nccl_db_path
+    active_config = config or load_config()
+    pod = pod or active_config.cluster.pvc_access_pod
+    namespace = namespace or active_config.cluster.namespace
+    db_path = db_path or active_config.storage.nccl_db_path
     kubectl = client or KubectlClient()
     try:
         status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = _NCCL_FETCH_SCRIPT.format(db_path=str(db_path))
+        code = _NCCL_FETCH_SCRIPT
         result = kubectl.run(
-            ["exec", "-i", "-n", namespace, status_pod, "--", "python3", "-"],
+            [
+                "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
+                str(db_path),
+            ],
             input_text=code,
         )
         return _parse_nccl_json(result.stdout)
@@ -165,24 +170,27 @@ def get_latest_storage_metrics(
     pod: str | None = None,
     namespace: str | None = None,
     db_path: str | None = None,
+    config=None,
 ) -> dict[str, StorageMetrics]:
     """Return the latest FIO storage metrics per node from test-storage.db.
 
     Returns an empty dict on any error so callers can proceed without metrics.
     """
-    config = load_config()
-    pod = pod or config.cluster.pvc_access_pod
-    namespace = namespace or config.cluster.namespace
-    db_path = db_path or config.storage.storage_db_path
+    active_config = config or load_config()
+    pod = pod or active_config.cluster.pvc_access_pod
+    namespace = namespace or active_config.cluster.namespace
+    db_path = db_path or active_config.storage.storage_db_path
     kubectl = client or KubectlClient()
     try:
         status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = _STORAGE_FETCH_SCRIPT.format(
-            db_path=str(db_path),
-            cols=list(STORAGE_METRIC_FIELDS),
+        code = _STORAGE_FETCH_SCRIPT.replace(
+            "__CVAL_STORAGE_COLUMNS__", repr(list(STORAGE_METRIC_FIELDS))
         )
         result = kubectl.run(
-            ["exec", "-i", "-n", namespace, status_pod, "--", "python3", "-"],
+            [
+                "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
+                str(db_path),
+            ],
             input_text=code,
         )
         return _parse_storage_json(result.stdout)
@@ -253,23 +261,27 @@ def get_latest_nccl_health_metrics(
     pod: str | None = None,
     namespace: str | None = None,
     db_path: str | None = None,
+    config=None,
 ) -> dict[str, NcclHealthMetric]:
     """Return the latest consolidated ``IB_HEALTH`` row per node.
 
     Returns an empty dict on any error so callers can proceed without metrics.
     """
-    config = load_config()
-    pod = pod or config.cluster.pvc_access_pod
-    namespace = namespace or config.cluster.namespace
-    db_path = db_path or config.storage.nccl_db_path
+    active_config = config or load_config()
+    pod = pod or active_config.cluster.pvc_access_pod
+    namespace = namespace or active_config.cluster.namespace
+    db_path = db_path or active_config.storage.nccl_db_path
     kubectl = client or KubectlClient()
     try:
         status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = _NCCL_HEALTH_FETCH_SCRIPT.format(
-            db_path=str(db_path), port_columns=list(NCCL_IB_PORT_COLUMNS)
+        code = _NCCL_HEALTH_FETCH_SCRIPT.replace(
+            "__CVAL_NCCL_PORT_COLUMNS__", repr(list(NCCL_IB_PORT_COLUMNS))
         )
         result = kubectl.run(
-            ["exec", "-i", "-n", namespace, status_pod, "--", "python3", "-"],
+            [
+                "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
+                str(db_path),
+            ],
             input_text=code,
         )
         return _parse_nccl_health_json(result.stdout)

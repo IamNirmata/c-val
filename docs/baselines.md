@@ -19,9 +19,11 @@ There are three layers:
 3. **Directory baselines (legacy)** — hand-authored `summary.json` references
    loaded from disk, for fixed golden references.
 
-The compatibility commands later in this document remain unchanged. U9 adds a
-separate dry-run-first `health` command group, but no live per-test health DB,
-migration, evaluator schedule, or activation is approved.
+The compatibility command names, flags, built-in rows, and filenames later in
+this document remain unchanged. U10 derives their enabled target choices from
+the registry. U9 adds a separate dry-run-first `health` command group, but no
+live per-test health DB, migration, evaluator schedule, or activation is
+approved.
 
 ---
 
@@ -243,6 +245,35 @@ in-transaction path replacement rolls back rather than reporting success.
 
 ## Compatibility dynamic baseline records
 
+### Registry-derived operational targets (U10)
+
+The immutable `OperationalTarget` catalog is rebuilt in registry order. An
+enabled plugin's `baseline` capability exposes compatibility build, lifecycle,
+classification, and classification-export targets; its existing `export`
+capability exposes result export. A canonical plugin target therefore needs no
+core CLI name edit. Tests without a required capability do not appear for that
+operation, and disabled tests never appear.
+
+`dltest-numerical`, `dltest-compute`, `dltest-collective`, and
+`dltest-overlap` are one central compatibility overlay. They exist only while
+their `dltest` owner is enabled and eligible, and expose classify/result-export
+operations while the canonical `dltest` target owns baseline build/lifecycle.
+`all` and `overall` are reserved, and registry IDs colliding with either a
+reserved name or a DL alias are rejected during configuration loading.
+
+Built-in adapters keep the exact current sources and output contracts:
+
+- storage: `metadata/test-storage.db`;
+- NCCL: `metadata/test-nccl.db` / wide `IB_HEALTH` export;
+- DL: the four `metadata/dltest_*` DBs;
+- baselines and derived verdicts: `baselines/*.db` and
+  `baselines/classification-results.db`.
+
+There is explicitly **no U7/U8/U9 source cutover** in U10. A new canonical
+plugin gets the collision-free default `baselines/plugin-<test-id>-baselines.db`; reads do
+not create a missing DB, and storage occurs only when the existing `--store` or
+`--activate` path is requested.
+
 Baselines are immutable, versioned records in SQLite DBs under
 `/data/continuous_validation/baselines`, with a lifecycle status:
 
@@ -256,6 +287,18 @@ so different strata keep independent active baselines. New results are always
 classified against the single `active` baseline (or an explicit `--baseline-id`).
 Candidates are the default so a slowly degrading fleet cannot silently
 re-baseline itself.
+
+Compatibility baseline content is immutable. Persistence uses conflict-free
+`INSERT`; concurrent writers take a SQLite write reservation, use conflict
+`DO NOTHING`, and re-read and validate the winning row in the same transaction.
+An exact same-ID/content retry is idempotent and preserves the row's current
+lifecycle, while changed content or first-class identity columns under the same
+ID fail closed. Plugin baseline and verdict returns use exact schemas, finite
+JSON-safe scalar values, bound target/baseline identities, and validated
+count/fraction/distance invariants before dispatch and again before storage.
+DL validation independently derives all component and top-level statuses,
+counts, fractions, worst distances, and severity flags from the metric reports;
+component and aggregate thresholds must agree exactly.
 
 Default baseline DBs:
 
@@ -290,6 +333,7 @@ graded score columns such as `n_compared`, `n_degraded`,
   "stratum_key": "image=pytorch:26.05-py3",
   "window_days": 30,
   "created_at": 1781000000,
+  "timestamp": 1781000000,
   "n_samples": 42,
   "method": "robust_mad",
   "metrics": {
@@ -305,7 +349,8 @@ graded score columns such as `n_compared`, `n_degraded`,
       "ci_low": 478.0, "ci_high": 482.0,
       "deterministic": false,
       "lower_bound": 456.0, "upper_bound": null,
-      "method": "robust_mad"
+      "method": "robust_mad",
+      "source_table": "IB_HEALTH"
     }
   }
 }
@@ -412,6 +457,32 @@ scripts/cval-baseline-classify.sh run-once
 
 The builder cadence defaults to daily (`build_interval_seconds = 86400`). The
 classifier cadence defaults to five minutes (`classify_interval_seconds = 300`).
+Both loops enumerate enabled targets from the hidden read-only catalog output
+instead of fixed shell lists. `CVAL_BASELINE_CLASSIFY_TESTS` remains an
+allowlist and cannot re-enable a registry-disabled test. Targets sharing the DL
+refresh group take one shared lock and perform at most one refresh per cycle.
+One target failure does not skip later targets; the cycle exits nonzero after
+all eligible work is attempted.
+
+The loop TSV contract is versioned as `cval.operational-target.v1` with exactly
+seven fields. Malformed/empty catalogs and an empty classify allowlist
+intersection fail the cycle. DL work uses the shared Python lock helper to open
+the existing canonical baseline directory with `O_DIRECTORY|O_NOFOLLOW`,
+require effective-user ownership with no group/other write permission, acquire
+`flock` on that stable directory inode, and hold it while supervising the
+grouped child work. The directory pathname/device/inode is checked before and
+after acquisition, periodically while the child runs, and after it exits. The
+configured lock-file pathname is only a compatibility marker; replacing it
+cannot split the lock or touch its target. A replaced/non-canonical directory,
+wrong owner/permissions, unavailable helper/interpreter, or lock failure stops
+the group and reports a nonzero result.
+
+The overview reads historical compatibility verdicts but counts only names in
+the current enabled `baseline-classify` target catalog. Rows for disabled or
+no-longer-classifiable registrations remain on disk and are omitted from the
+dashboard.
+
+U10 implementation alone does not authorize or perform a live loop restart.
 
 ---
 

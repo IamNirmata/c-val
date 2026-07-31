@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from cval.baselines.storage import default_classification_db_path
 from cval.k8s.client import KubectlClient
 from cval.models import ClassificationResultRow
+from cval.storage.sqlite_uri import connect_sqlite_file, sqlite_readonly_script_prelude
 from cval.storage.status import resolve_status_pod
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
@@ -101,7 +102,7 @@ def latest_classification_rows_from_db(db_path: str | Path) -> list[Classificati
     path = Path(db_path)
     if not path.exists():
         return []
-    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+    with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
         connection.row_factory = sqlite3.Row
         return [_row_from_dict(dict(row)) for row in _latest_rows(connection)]
 
@@ -123,9 +124,8 @@ def get_latest_classification_rows(
     db_path = db_path or str(default_classification_db_path(active_config))
     kubectl = client or KubectlClient()
     status_pod = resolve_status_pod(kubectl, namespace, pod)
-    code = r'''
+    code = sqlite_readonly_script_prelude() + r'''
 import json
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -155,7 +155,7 @@ def metric_fallbacks(metrics_json):
 
 conn = None
 try:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = connect_sqlite_readonly(db_path)
     conn.row_factory = sqlite3.Row
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "classification_results" not in tables:

@@ -330,7 +330,9 @@ automation.
 Export the latest per-node result rows for one test into a local CSV. The raw
 pass/fail source is the read-only `latest_status` view in `validation.db`.
 `overall` maps to the DB's aggregate `all` row. Baseline classification columns
-are joined from `classification-results.db` by default.
+are joined from `classification-results.db` by default. Per-test choices are
+derived from enabled plugins declaring `export`; `overall` and `all` remain
+fixed aggregate aliases.
 
 ```bash
 python -m cval.cli results --test overall --type csv
@@ -393,13 +395,17 @@ python -m cval.cli classifications --test storage --type csv
 python -m cval.cli classifications --test dltest-compute --type csv
 ```
 
-Available tests: `storage`, `nccl`, `dltest`, `dltest-numerical`,
-`dltest-compute`, `dltest-collective`, and `dltest-overlap`.
+Available tests are the enabled compatibility-classification targets derived
+from `baseline` capabilities. The built-in set remains `storage`, `nccl`,
+`dltest`, `dltest-numerical`, `dltest-compute`, `dltest-collective`, and
+`dltest-overlap`.
 
 ## `baseline`
 
 Build dynamic baselines from result DBs, manage their lifecycle, and classify
-nodes. See [Baselines and Node Classification](baselines.md) for the method.
+nodes. Choices are derived from enabled plugin `baseline` capabilities and are
+re-resolved by handlers. See [Baselines and Node Classification](baselines.md)
+for the method.
 
 Build a baseline. Dry-run prints the computed robust metrics; add `--store` to
 persist as a candidate, and `--activate` to also promote it to active:
@@ -452,6 +458,18 @@ Background loops:
 scripts/cval-baseline-build.sh start
 scripts/cval-baseline-classify.sh start
 ```
+
+The loops consume a hidden read-only `operational-targets` TSV/JSON interface;
+it emits plain data and is not a shell-eval contract. TSV rows use the fixed
+seven-field `cval.operational-target.v1` format. The classify environment list
+remains an allowlist, DL refresh/lock work is once per group/cycle, and a cycle
+reports nonzero only after attempting every selected target. Empty/malformed
+catalogs, an empty allowlist intersection, or unavailable/failed `flock` are
+nonzero fail-closed outcomes; DL work never runs unlocked.
+
+Built-in sources remain `metadata/test-storage.db`, `metadata/test-nccl.db`,
+and `metadata/dltest_*`. U10 performs no U7/U8/U9 source cutover and no live
+loop restart.
 
 `db-rebuild-dltest-metrics` is a separate hidden maintenance hook used by the
 baseline loops. All hidden hooks are implementation details, not operator

@@ -21,6 +21,7 @@ from cval.validation.registry import (
     load_test_registry,
     parse_resource_quantity,
 )
+from cval.validation.operational_targets import build_operational_target_catalog
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "cval.toml"
@@ -256,10 +257,19 @@ def load_config(path: Path | str | None = None) -> CvalConfig:
 def config_to_dict(config: CvalConfig) -> dict[str, Any]:
     """Convert config dataclasses to JSON-serializable dictionaries."""
 
-    data = asdict(config)
-    data["job"]["template_path"] = str(config.job.template_path)
-    data["tests"] = config.tests.registry.to_dict()
-    return data
+    return {
+        "cluster": asdict(config.cluster),
+        "scheduling": asdict(config.scheduling),
+        "job": asdict(config.job) | {"template_path": str(config.job.template_path)},
+        "policy": asdict(config.policy),
+        "monitoring": asdict(config.monitoring),
+        "storage": asdict(config.storage),
+        "runtime": asdict(config.runtime),
+        "tests": config.tests.registry.to_dict(),
+        "job_template": asdict(config.job_template),
+        "baseline": asdict(config.baseline),
+        "health_evaluator": asdict(config.health_evaluator),
+    }
 
 
 def encode_config_snapshot(config: CvalConfig) -> str:
@@ -704,6 +714,9 @@ def _validate_config(config: CvalConfig) -> None:
     tests = config.tests
     if not tests.registry.enabled:
         raise ValueError("At least one test must be enabled under [tests.*]")
+    # Reject reserved/colliding operator-facing names during config loading,
+    # before argparse or a background loop can observe an ambiguous catalog.
+    build_operational_target_catalog(tests.registry)
     if tests.nccl.gpu_count <= 0 or tests.dltest.gpu_count <= 0:
         raise ValueError("NCCL and DL GPU counts must be positive")
     if tests.nccl.iterations <= 0 or tests.dltest.iterations <= 0:
@@ -805,11 +818,11 @@ def _validate_config(config: CvalConfig) -> None:
         )
 
 
-def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
+def _section(data: Mapping[str, Any], name: str) -> dict[str, Any]:
     value = data.get(name, {})
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise ValueError(f"Config section [{name}] must be a table")
-    return value
+    return dict(value)
 
 
 def _reject_section_keys(

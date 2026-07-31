@@ -1,7 +1,7 @@
 # c-val Modular Framework Update Tracker
 
 **Created:** 2026-07-28  
-**Status:** Active — U0–U8 implemented and accepted locally; U9 implementation is in progress
+**Status:** Active — U0–U9 implemented and accepted locally; U10 implementation is in progress
 **Source draft:** `docs/todo/cval-3.md`  
 **Goal:** Make c-val modular, deterministic, easier to extend, and safer to operate without breaking current validation, ingestion, baseline, or classification behavior.
 
@@ -1145,7 +1145,7 @@ Current local validation evidence:
 
 ## U10 — Modularize baselines, exports, and background loops
 
-**Status:** `PROPOSED`  
+**Status:** `DONE` — accepted locally 2026-07-30; no live loop restart, source cutover, or deployment authorized
 **Risk:** High; existing live classification services.  
 **Depends on:** U8 and U9.
 
@@ -1161,6 +1161,81 @@ Acceptance criteria:
 - Existing storage, NCCL, and four DL component verdicts match regression fixtures.
 - Disabled tests are skipped everywhere.
 - A simple new metric plugin can participate without core CLI edits.
+
+Implemented locally during the current `IN PROGRESS` stage:
+
+- Immutable `OperationalTarget` catalog in registry order, with operation sets
+  derived from enabled `baseline` and existing `export` capabilities.
+- One central DL compatibility overlay for aggregate/component aliases, exposed
+  only when the `dltest` owner is enabled and eligible; reserved `all`/
+  `overall` and canonical/alias collisions fail during config loading.
+- Strict immutable baseline/classification contexts plus read-only
+  `ExportContext` and rectangular `ExportRows`; built-in adapters now declare
+  and implement compatibility baseline/classification/export hooks.
+- Dynamic argparse choices and handler-time target re-resolution for baseline
+  build/list/show/activate/classify, results, and classifications while
+  retaining aggregate aliases, current flags, CSV columns, LA filenames, and
+  the wide NCCL `IB_HEALTH` output.
+- Hidden read-only operational-target enumeration in TSV/JSON for local loops;
+  TSV is a fixed seven-field `cval.operational-target.v1` contract, output is
+  plain data, and it is never shell-evaluated.
+- Safe default `plugin-<test-id>-baselines.db` placement for new plugin targets under
+  the configured baseline root; read paths do not create missing baseline DBs.
+- Registry-driven build/classify loops with the existing classify environment
+  allowlist, no environment re-enable of disabled tests, one shared DL lock and
+  refresh decision per cycle/group, per-target failure isolation, and a final
+  nonzero cycle status after all selected work.
+- Compatibility baseline persistence is immutable conflict-`INSERT`: exact
+  retries preserve lifecycle and changed same-ID content conflicts. Strict
+  baseline/verdict schemas, finite JSON-safe metrics, identities, and score
+  invariants are checked at plugin return and again before persistence.
+- Filesystem SQLite opens cited by U10 use canonical percent-encoded URIs with
+  exact `main` path and device/inode checks. In-pod readers carry the same
+  dependency-free fail-closed checks. DL loops refuse work when locking fails;
+  empty/malformed catalogs and empty classify allowlist intersections fail.
+- Synthetic metric-plugin coverage for catalog, parser, baseline build/store/
+  activate/classify, export, and safe paths without a core CLI name edit;
+  exact built-in storage/NCCL/four-component+aggregate DL dispatch fixtures,
+  byte-for-byte CSV checks, and executable fake-catalog loop coverage.
+- Remaining audit hardening uses transaction-safe conflict insert/re-read for
+  concurrent compatibility-baseline writers; recursively freezes descriptor
+  settings/config mappings across every plugin context; derives and reconciles
+  complete DL component/aggregate verdicts; and filters overview history through
+  the enabled classifiable catalog.
+- The shared DL loop lock now flocks the existing canonical baseline directory
+  opened with `O_DIRECTORY|O_NOFOLLOW`, not a replaceable child lock file. The
+  helper requires effective-user ownership and no group/other write permission,
+  launches work in a dedicated process session/group, forwards `INT`/`TERM`,
+  and revalidates pathname/device/inode before, during, and after execution.
+  On replacement, error, signal, or command-parent exit it terminates, bounded-
+  grace kills, and reaps shell wrappers and descendants before releasing the
+  directory flock. Marker replacement cannot split two helpers; canonical
+  directory replacement is reported as a failure.
+
+U10 is a compatibility selection/dispatch change only. Built-ins continue to
+read `metadata/test-storage.db`, `metadata/test-nccl.db`, and the four
+`metadata/dltest_*` DBs and continue to store under `baselines/`. There is no
+U7/U8/U9 source cutover, live Kubernetes/PVC/DB access, deployment, or live
+loop restart in this item. The fixed targeted-`validate` compatibility report
+remains outside U10 as planned.
+
+Current local validation evidence:
+
+- `616` unit tests passed with warnings treated as errors, preserving the U9
+  evaluator/gate/race suite and adding the U10 catalog, synthetic extension,
+  exact built-in parity, CSV, executable loop cases, directory-replacement
+  descendant cleanup/no-overlap, and signal forwarding above.
+- Recursive Bash syntax checks passed for every shell script under `scripts/`
+  and `validation-tests/`.
+- Python compilation passed for `cval`, `tests`, and repository operator skill
+  scripts.
+- Registry/plugin validation reports 3 registered, 3 enabled, and 3 loaded.
+- `git diff --check` passed.
+- No Kubernetes, live PVC/DB, archive, commit, push, deployment, pod update, or
+  loop restart was performed.
+
+Status remains `IN PROGRESS` pending independent certification and operator
+acceptance.
 
 ## U11 — Introduce and cut over to `cval-evaluator`
 

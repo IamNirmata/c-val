@@ -941,10 +941,12 @@ def parse_storage_metrics(results_dir: str | Path) -> dict[str, float]:
 def _connect_writable(db_path: str | Path) -> sqlite3.Connection:
     """Open SQLite in create-if-needed mode and prepare parent directories."""
 
+    from cval.storage.sqlite_uri import connect_sqlite_file
+
     path = safe_writable_file_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path = safe_writable_file_path(path)
-    connection = sqlite3.connect(f"file:{path}?mode=rwc", uri=True, timeout=30)
+    connection = connect_sqlite_file(path, mode="rwc", timeout=30)
     connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("PRAGMA journal_mode=DELETE")
     connection.execute("PRAGMA synchronous=FULL")

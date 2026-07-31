@@ -21,6 +21,10 @@ from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
 from cval.scheduler.priority import build_priority_queue
 from cval.storage.classification_status import get_latest_classification_rows
 from cval.storage.status import get_latest_status_rows, latest_status_rows_to_node_map
+from cval.validation.operational_targets import (
+    BASELINE_CLASSIFY,
+    build_operational_target_catalog,
+)
 
 ACTIVE_PHASES = ("Pending", "Running")
 SECONDS_PER_DAY = 86400
@@ -104,6 +108,7 @@ def build_overview(
             namespace=namespace,
             pod=config.cluster.pvc_access_pod,
             db_path=config.storage.validation_db_path,
+            config=config,
         )
         status_map = latest_status_rows_to_node_map(rows)
     except Exception as exc:  # noqa: BLE001
@@ -136,6 +141,16 @@ def build_overview(
             db_path=str(default_classification_db_path(config)),
             config=config,
         )
+        enabled_classification_targets = set(
+            build_operational_target_catalog(config.tests.registry).names_for(
+                BASELINE_CLASSIFY
+            )
+        )
+        classification_rows = [
+            row
+            for row in classification_rows
+            if row.test_type in enabled_classification_targets
+        ]
     except Exception as exc:  # noqa: BLE001
         errors["classifications"] = str(exc)
     classification_summary = _summarize_classifications(classification_rows)

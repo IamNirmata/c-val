@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import tomllib
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from cval.config import config_to_dict, load_config
+from cval.health.models import HealthContext, SourceSnapshot
+from cval.validation.operational_targets import (
+    BASELINE_BUILD,
+    BASELINE_CLASSIFY,
+    RESULTS_EXPORT,
+    OperationalTarget,
+)
+from cval.validation.plugins import (
+    BaselineBuildContext,
+    BaselineClassificationContext,
+    ExportContext,
+    IngestionContext,
+    RunContext,
+    TestExecutionResult,
+)
 from cval.validation.registry import load_test_registry, parse_resource_quantity
 
 
@@ -192,6 +209,128 @@ iterations = 99
         self.assertEqual(len(registry.tests), 1)
         self.assertEqual(registry.tests[0].id, "smoke")
         self.assertFalse(registry.tests[0].enabled)
+
+    def test_descriptor_settings_are_deeply_immutable_in_all_plugin_contexts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            test_dir = root / "validation-tests/smoke"
+            test_dir.mkdir(parents=True)
+            for name in ("setup.sh", "run-test.sh"):
+                (test_dir / name).write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            (test_dir / "test_config.toml").write_text(
+                """
+schema_version = "cval.test.v1"
+[test]
+id = "smoke"
+display_name = "Smoke"
+order = 1
+entrypoint = "run-test.sh"
+setup = "setup.sh"
+timeout_seconds = 30
+[settings]
+labels = ["first", "second"]
+[settings.nested]
+mode = "strict"
+items = [{name = "one"}, {name = "two"}]
+[artifacts]
+results_db_path = "validation_tests/smoke/smoke_results.db"
+""",
+                encoding="utf-8",
+            )
+            registry = load_test_registry(
+                {
+                    "smoke": {
+                        "enabled": True,
+                        "config_path": "validation-tests/smoke/test_config.toml",
+                    }
+                },
+                repo_root=root,
+                include_defaults=False,
+            )
+            registered = registry.require("smoke")
+            definition = registered.definition
+            base = load_config()
+            config = replace(base, tests=replace(base.tests, registry=registry))
+            target = OperationalTarget(
+                name="smoke",
+                owner_test_id="smoke",
+                baseline_test_type="smoke",
+                status_test="smoke",
+                operations=frozenset(
+                    {BASELINE_BUILD, BASELINE_CLASSIFY, RESULTS_EXPORT}
+                ),
+            )
+            run = RunContext(
+                run_id="smoke-run",
+                node="node-a",
+                started_timestamp=1,
+                started_timestamp_la="1970-01-01 00:00:01 PST",
+                completed_timestamp=2,
+                image_name="image",
+                pytorch_version="",
+                cuda_version="",
+                git_ref="main",
+                global_config_digest="sha256:config",
+                result_digest="sha256:result",
+                validation_root=root,
+                result_path=root / "result.json",
+            )
+            execution = TestExecutionResult(
+                test_id="smoke",
+                status="pass",
+                phase="completed",
+                started_timestamp=1,
+                completed_timestamp=2,
+                duration_ms=1000,
+                exit_code=0,
+                result_path=root / "test-result.json",
+                summary_path=root / "summary.json",
+                artifacts_path=root / "artifacts",
+                stdout_path=root / "stdout.log",
+                stderr_path=root / "stderr.log",
+                log_path=root / "test.log",
+                message="",
+                config_digest="sha256:test",
+                raw_result_json="{}",
+            )
+            contexts = (
+                IngestionContext(definition, run, execution, root / "results.db"),
+                HealthContext(definition, root / "results.db", None, SourceSnapshot(())),
+                BaselineBuildContext(target, definition, config, 30, 3),
+                BaselineClassificationContext(target, definition, config, 30),
+                ExportContext(
+                    target,
+                    definition,
+                    config,
+                    (),
+                    (),
+                    "read-only-pod",
+                    "read-only-namespace",
+                    (),
+                ),
+            )
+
+            for context in contexts:
+                with self.subTest(context=type(context).__name__):
+                    settings = context.definition.settings
+                    with self.assertRaises(TypeError):
+                        settings["nested"] = {}  # type: ignore[index]
+                    with self.assertRaises(TypeError):
+                        settings["nested"]["mode"] = "changed"  # type: ignore[index]
+                    with self.assertRaises(TypeError):
+                        settings["nested"]["items"][0]["name"] = "changed"  # type: ignore[index]
+                    with self.assertRaises(AttributeError):
+                        settings["labels"].append("third")
+
+            serialized_registry = registry.to_dict()
+            serialized_config = config_to_dict(config)
+            json.dumps(serialized_registry)
+            json.dumps(serialized_config)
+            self.assertIsInstance(
+                serialized_registry["smoke"]["settings"]["labels"], list
+            )
+            serialized_registry["smoke"]["settings"]["nested"]["mode"] = "copy"
+            self.assertEqual(definition.settings["nested"]["mode"], "strict")
 
     def test_registry_rejects_config_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

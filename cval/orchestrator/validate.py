@@ -839,6 +839,7 @@ def run_node_validation(
             namespace=namespace,
             pod=config.cluster.pvc_access_pod,
             db_path=config.storage.validation_db_path,
+            config=config,
         )
         for row in rows:
             if row.node == node and row.latest_timestamp == timestamp:

@@ -38,10 +38,15 @@ from cval.storage.per_test_results import (
     validate_health_read_metadata,
 )
 from cval.validation.plugins import (
+    BaselineBuildContext,
+    BaselineClassificationContext,
     ConfigIssue,
+    ExportContext,
+    ExportRows,
     IngestionConflictError,
     IngestionContext,
     IngestionReceipt,
+    export_rows_from_records,
 )
 
 
@@ -169,7 +174,7 @@ def _optional_float(value: object) -> float | None:
 class NcclIngestionPlugin:
     plugin_id = "nccl"
     health_policy_version = "nccl.health.v1"
-    capabilities = frozenset({"config", "ingest", "health"})
+    capabilities = frozenset({"config", "ingest", "health", "baseline", "export"})
 
     def validate_schema(self, connection, allow_missing: bool) -> bool:
         return _validate_nccl_schema(connection, allow_missing)
@@ -219,6 +224,81 @@ class NcclIngestionPlugin:
 
     def metric_specs(self, definition) -> tuple[MetricSpec, ...]:
         return metric_specs_from_definition(definition)
+
+    def build_compatibility_baseline(self, context: BaselineBuildContext):
+        """Build from the established metadata/test-nccl.db surface."""
+
+        from cval.baselines.build import build_nccl_baseline
+
+        return build_nccl_baseline(
+            config=context.config,
+            db_path=context.source_db,
+            window_days=context.window_days,
+            min_samples=context.min_samples,
+            image_name=context.image_name,
+            node=context.node,
+            baseline_id=context.baseline_id,
+        )
+
+    def classify_compatibility(
+        self,
+        context: BaselineClassificationContext,
+        baseline,
+    ) -> tuple[dict, ...]:
+        """Classify from the established metadata/test-nccl.db surface."""
+
+        from cval.baselines.classify import classify_node, classify_nodes
+
+        if context.node:
+            verdicts = [
+                classify_node(
+                    context.target.name,
+                    context.node,
+                    baseline,
+                    config=context.config,
+                    db_path=context.source_db,
+                    window_days=context.window_days,
+                )
+            ]
+        else:
+            verdicts = classify_nodes(
+                context.target.name,
+                baseline,
+                config=context.config,
+                db_path=context.source_db,
+                window_days=context.window_days,
+            )
+        return tuple(verdicts)
+
+    def export_rows(self, context: ExportContext) -> ExportRows:
+        """Return the established wide IB_HEALTH CSV projection."""
+
+        from cval.storage.metrics import get_latest_nccl_health_metrics
+        from cval.storage.results_export import (
+            NCCL_HEALTH_CSV_COLUMNS,
+            latest_result_rows,
+            nccl_health_rows_to_csv_records,
+        )
+
+        metrics = None
+        if context.include_metrics:
+            metrics = get_latest_nccl_health_metrics(
+                pod=context.pod,
+                namespace=context.namespace,
+                db_path=context.source_db_path("nccl"),
+                config=context.config,
+            )
+        selected = latest_result_rows(list(context.status_rows), context.target.name)
+        records = nccl_health_rows_to_csv_records(
+            selected,
+            metrics,
+            list(context.classification_rows),
+        )
+        return export_rows_from_records(
+            NCCL_HEALTH_CSV_COLUMNS,
+            records,
+            row_label="nccl IB_HEALTH",
+        )
 
     def load_observations(
         self,

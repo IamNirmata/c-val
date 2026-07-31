@@ -1,13 +1,17 @@
 """Tests for dynamic baseline building from result DBs and versioned storage."""
 
 import sqlite3
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from cval.baselines import build, stats
+from cval.baselines import build, stats, storage
 from cval.baselines.storage import (
     activate_baseline,
     default_classification_db_path,
@@ -17,6 +21,7 @@ from cval.baselines.storage import (
     load_dynamic_baseline,
     store_classification_results,
     store_dynamic_baseline,
+    validate_default_baseline_db_paths,
 )
 from cval.config import BaselineClassificationConfig, CvalConfig, load_config
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
@@ -245,6 +250,14 @@ class TestBuildDlBaseline(unittest.TestCase):
 
 class TestVersionedBaselineStorage(unittest.TestCase):
     def _record(self, baseline_id: str) -> dict:
+        metric = stats.summarize_metric(
+            "busbw",
+            [498.0, 499.0, 500.0, 501.0, 502.0],
+            direction=stats.DIRECTION_LOW_BAD,
+            tolerance_pct=5.0,
+            bootstrap=False,
+        ).to_dict()
+        metric["source_table"] = "IB_HEALTH"
         return {
             "schema_version": "cval.baseline.v2",
             "baseline_id": baseline_id,
@@ -255,7 +268,7 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             "timestamp": NOW,
             "n_samples": 12,
             "method": "robust_mad",
-            "metrics": {"busbw": {"median": 500.0, "direction": "low_bad"}},
+            "metrics": {"busbw": metric},
         }
 
     def test_store_candidate_then_activate(self):
@@ -301,10 +314,84 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             loaded = load_dynamic_baseline("nccl-all-1", "nccl", db_path=db_path)
             self.assertEqual(loaded["metrics"]["busbw"]["median"], 500.0)
 
+    def test_exact_retry_preserves_active_lifecycle_and_changed_id_conflicts(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "validation %?#.db"
+            record = self._record("nccl-all-1")
+            store_dynamic_baseline(record, db_path=db_path)
+            self.assertTrue(activate_baseline("nccl-all-1", "nccl", db_path=db_path))
+
+            self.assertEqual(
+                store_dynamic_baseline(record, db_path=db_path),
+                "nccl-all-1",
+            )
+            statuses = list_dynamic_baselines("nccl", db_path=db_path)
+            self.assertEqual(statuses[0][2], "active")
+
+            changed = dict(record)
+            changed["n_samples"] = 13
+            with self.assertRaisesRegex(ValueError, "different content"):
+                store_dynamic_baseline(changed, db_path=db_path)
+            self.assertEqual(
+                list_dynamic_baselines("nccl", db_path=db_path)[0][2],
+                "active",
+            )
+
+    def test_many_concurrent_exact_writers_serialize_first_use_schema(self):
+        with TemporaryDirectory() as tmpdir:
+            writer_count = 12
+            for round_index in range(8):
+                db_path = Path(tmpdir) / f"fresh-concurrent-{round_index}.db"
+                baseline_id = f"nccl-concurrent-{round_index}"
+                record = self._record(baseline_id)
+                barrier = threading.Barrier(writer_count)
+
+                def write() -> str:
+                    barrier.wait(timeout=10)
+                    return store_dynamic_baseline(record, db_path=db_path)
+
+                with ThreadPoolExecutor(max_workers=writer_count) as executor:
+                    futures = [executor.submit(write) for _index in range(writer_count)]
+                    results = [future.result(timeout=40) for future in futures]
+
+                self.assertEqual(results, [baseline_id] * writer_count)
+                with closing(sqlite3.connect(db_path)) as connection:
+                    rows = connection.execute(
+                        "SELECT baseline_id, status, metrics_json FROM baselines "
+                        "WHERE baseline_id=? AND test_type='nccl'",
+                        (baseline_id,),
+                    ).fetchall()
+                    columns = [
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(baselines)")
+                    ]
+
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0][1], "candidate")
+                self.assertEqual(len(columns), len(set(columns)))
+                self.assertTrue(
+                    {name for name, _definition in storage._DYNAMIC_COLUMNS}.issubset(columns)
+                )
+
+    def test_unscoped_override_list_filters_disabled_or_unknown_targets(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "mixed.db"
+            store_dynamic_baseline(self._record("nccl-all-1"), db_path=db_path)
+            unknown = dict(self._record("unknown-all-1"))
+            unknown["test_type"] = "unknown"
+            store_dynamic_baseline(unknown, db_path=db_path)
+
+            rows = list_dynamic_baselines(db_path=db_path, config=load_config())
+
+        self.assertEqual({row[1] for row in rows}, {"nccl"})
+
 
 class TestBaselineRootStorage(unittest.TestCase):
     def _config(self, root: str) -> CvalConfig:
-        return CvalConfig(baseline=BaselineClassificationConfig(baseline_root_path=root))
+        return replace(
+            load_config(),
+            baseline=BaselineClassificationConfig(baseline_root_path=root),
+        )
 
     def test_default_baseline_db_paths(self):
         with TemporaryDirectory() as tmpdir:
@@ -328,9 +415,46 @@ class TestBaselineRootStorage(unittest.TestCase):
                 Path(tmpdir) / "classification-results.db",
             )
 
+    def test_generic_plugin_names_are_prefixed_and_default_paths_are_unique(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            self.assertEqual(
+                default_dynamic_baseline_db_path("synthetic", config=config),
+                Path(tmpdir) / "plugin-synthetic-baselines.db",
+            )
+            self.assertNotEqual(
+                default_dynamic_baseline_db_path("test-storage", config=config),
+                default_dynamic_baseline_db_path("storage", config=config),
+            )
+            validate_default_baseline_db_paths(load_config())
+
+    def test_default_path_collision_validation_fails_closed(self):
+        with patch.dict(
+            "cval.baselines.storage.BASELINE_DB_FILENAMES",
+            {"storage": "same.db", "nccl": "same.db"},
+            clear=True,
+        ), self.assertRaisesRegex(ValueError, "collide"):
+            validate_default_baseline_db_paths(load_config())
+
     def test_store_dl_baseline_splits_into_four_component_dbs(self):
         with TemporaryDirectory() as tmpdir:
             config = self._config(tmpdir)
+            def metric(
+                name: str,
+                direction: str,
+                source_table: str,
+                center: float,
+            ) -> dict:
+                value = stats.summarize_metric(
+                    name,
+                    [center] * 8,
+                    direction=direction,
+                    tolerance_pct=10.0,
+                    bootstrap=False,
+                ).to_dict()
+                value["source_table"] = source_table
+                return value
+
             record = {
                 "schema_version": "cval.baseline.v2",
                 "baseline_id": "dl-all-1",
@@ -342,26 +466,30 @@ class TestBaselineRootStorage(unittest.TestCase):
                 "n_samples": 10,
                 "method": "robust_mad",
                 "metrics": {
-                    "nn/layer/rank0/norm_output": {
-                        "median": 0.5,
-                        "direction": "two_sided",
-                        "source_table": "numerical_correctness",
-                    },
-                    "nn/layer/fp_gpu_time": {
-                        "median": 10.0,
-                        "direction": "high_bad",
-                        "source_table": "compute_performance",
-                    },
-                    "coll/layer/gpu_time": {
-                        "median": 20.0,
-                        "direction": "high_bad",
-                        "source_table": "collective_performance",
-                    },
-                    "overlap/task/coll_mean": {
-                        "median": 1.2,
-                        "direction": "two_sided",
-                        "source_table": "overlap_performance",
-                    },
+                    "nn/layer/rank0/norm_output": metric(
+                        "nn/layer/rank0/norm_output",
+                        "two_sided",
+                        "numerical_correctness",
+                        0.5,
+                    ),
+                    "nn/layer/fp_gpu_time": metric(
+                        "nn/layer/fp_gpu_time",
+                        "high_bad",
+                        "compute_performance",
+                        10.0,
+                    ),
+                    "coll/layer/gpu_time": metric(
+                        "coll/layer/gpu_time",
+                        "high_bad",
+                        "collective_performance",
+                        20.0,
+                    ),
+                    "overlap/task/coll_mean": metric(
+                        "overlap/task/coll_mean",
+                        "two_sided",
+                        "overlap_performance",
+                        1.2,
+                    ),
                 },
             }
 
@@ -387,26 +515,60 @@ class TestBaselineRootStorage(unittest.TestCase):
     def test_store_classification_results(self):
         with TemporaryDirectory() as tmpdir:
             config = self._config(tmpdir)
+            normal_metric = {
+                "metric": "x",
+                "component": "",
+                "value": 100.0,
+                "median": 100.0,
+                "status": "normal",
+                "pct_diff": 0.0,
+                "abs_pct_diff": 0.0,
+                "counts_for_degraded_status": False,
+                "direction": "low_bad",
+                "lower_bound": 90.0,
+                "upper_bound": None,
+            }
+            degraded_metric = {
+                **normal_metric,
+                "value": 50.0,
+                "status": "degraded",
+                "pct_diff": -50.0,
+                "abs_pct_diff": 50.0,
+            }
             verdicts = [
                 {
                     "node": "node-a",
                     "test_type": "storage",
+                    "baseline_test_type": "storage",
+                    "dl_component": "",
                     "baseline_id": "storage-1",
                     "status": "normal",
-                    "n_compared": 12,
+                    "n_metrics": 1,
+                    "n_compared": 1,
                     "n_degraded": 0,
+                    "n_band_degraded": 0,
                     "n_improved": 0,
-                    "metrics": [],
+                    "degraded_metric_fraction": 0.0,
+                    "degraded_metric_percent": 0.0,
+                    "worst_pct_diff": 0.0,
+                    "metrics": [normal_metric],
                 },
                 {
                     "node": "node-b",
                     "test_type": "storage",
+                    "baseline_test_type": "storage",
+                    "dl_component": "",
                     "baseline_id": "storage-1",
                     "status": "degraded",
-                    "n_compared": 12,
-                    "n_degraded": 2,
+                    "n_metrics": 1,
+                    "n_compared": 1,
+                    "n_degraded": 1,
+                    "n_band_degraded": 1,
                     "n_improved": 0,
-                    "metrics": [{"metric": "x"}],
+                    "degraded_metric_fraction": 1.0,
+                    "degraded_metric_percent": 100.0,
+                    "worst_pct_diff": 50.0,
+                    "metrics": [degraded_metric],
                 },
             ]
 

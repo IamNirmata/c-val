@@ -1,8 +1,12 @@
 """Tests for the operational overview and job listing."""
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+from cval.config import load_config
 from cval.jobs.monitor import JobPhase, list_job_phases
 from cval.k8s.client import CommandResult
 from cval.models import ClassificationResultRow
@@ -10,6 +14,7 @@ from cval.orchestrator.overview import (
     _freshness_counts,
     _summarize_classifications,
     _summarize_jobs,
+    build_overview,
     render_overview,
 )
 
@@ -57,6 +62,53 @@ class TestSummarizeClassifications(unittest.TestCase):
         self.assertEqual(
             _summarize_classifications(rows),
             {"storage": {"normal": 1, "degraded": 1}, "nccl": {"normal": 1}},
+        )
+
+    def test_overview_excludes_historical_rows_for_disabled_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                "[tests.nccl]\nenabled = false\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            rows = [
+                ClassificationResultRow(
+                    100, "n1", "storage", "s1", "normal", True,
+                    1, 0, 0, 0, 0.0, 0.0,
+                ),
+                ClassificationResultRow(
+                    100, "n2", "nccl", "n1", "degraded", False,
+                    1, 1, 0, 1, 1.0, 20.0,
+                ),
+            ]
+            with (
+                patch(
+                    "cval.orchestrator.overview.discover_free_nodes",
+                    return_value=(
+                        [],
+                        {"capacity": 0, "allocatable": 0, "used": 0, "free": 0},
+                    ),
+                ),
+                patch(
+                    "cval.orchestrator.overview.get_latest_status_rows",
+                    return_value=[],
+                ),
+                patch(
+                    "cval.orchestrator.overview.get_latest_classification_rows",
+                    return_value=rows,
+                ),
+            ):
+                overview = build_overview(
+                    config=config,
+                    include_jobs=False,
+                    now=1_000_000,
+                )
+
+        self.assertEqual(overview["classifications"]["total"], 1)
+        self.assertEqual(
+            overview["classifications"]["by_test"],
+            {"storage": {"normal": 1}},
         )
 
 

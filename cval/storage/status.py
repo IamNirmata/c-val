@@ -12,6 +12,7 @@ import json
 from cval.config import load_config
 from cval.k8s.client import KubectlClient
 from cval.models import LatestStatusRow
+from cval.storage.sqlite_uri import sqlite_readonly_script_prelude
 
 
 def parse_latest_status_tsv(output: str) -> dict[str, int]:
@@ -81,25 +82,25 @@ def get_latest_status_rows(
     pod: str | None = None,
     namespace: str | None = None,
     db_path: str | None = None,
+    config=None,
 ) -> list[LatestStatusRow]:
     """Read latest status rows from the PVC access pod using SQLite read-only mode."""
 
-    config = load_config()
-    pod = pod or config.cluster.pvc_access_pod
-    namespace = namespace or config.cluster.namespace
-    db_path = db_path or config.storage.validation_db_path
+    active_config = config or load_config()
+    pod = pod or active_config.cluster.pvc_access_pod
+    namespace = namespace or active_config.cluster.namespace
+    db_path = db_path or active_config.storage.validation_db_path
     kubectl = client or KubectlClient()
     status_pod = resolve_status_pod(kubectl, namespace, pod)
-    code = r'''
+    code = sqlite_readonly_script_prelude() + r'''
 import json
-import sqlite3
 import sys
 
 db_path = sys.argv[1]
 rows_out = []
 conn = None
 try:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = connect_sqlite_readonly(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT node, test, latest_timestamp, result FROM latest_status ORDER BY node, test"
@@ -123,7 +124,8 @@ finally:
 print(json.dumps(rows_out))
 '''
     result = kubectl.run(
-        ["exec", "-n", namespace, status_pod, "--", "python3", "-c", code, db_path]
+        ["exec", "-i", "-n", namespace, status_pod, "--", "python3", "-", db_path],
+        input_text=code,
     )
     return parse_latest_status_rows_json(result.stdout)
 

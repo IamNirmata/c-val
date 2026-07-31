@@ -9,10 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import math
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
+
+from cval.models import ClassificationResultRow, LatestStatusRow
+from cval.validation.operational_targets import OperationalTarget
 
 from cval.validation.registry import (
     PLUGIN_API_VERSION,
@@ -20,6 +25,9 @@ from cval.validation.registry import (
     ValidationTestDefinition,
     resolve_confined_path,
 )
+
+if TYPE_CHECKING:
+    from cval.config import CvalConfig
 
 
 class PluginError(RuntimeError):
@@ -115,6 +123,205 @@ class IngestionReceipt:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class BaselineBuildContext:
+    """Immutable inputs for one compatibility baseline build hook."""
+
+    target: OperationalTarget
+    definition: ValidationTestDefinition
+    config: "CvalConfig"
+    window_days: int
+    min_samples: int
+    source_db: str | None = None
+    image_name: str | None = None
+    node: str | None = None
+    test_plan: str | None = None
+    baseline_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.target.owner_test_id != self.definition.metadata.id:
+            raise ValueError("Baseline target owner does not match its definition")
+        for name, value in (
+            ("window_days", self.window_days),
+            ("min_samples", self.min_samples),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.source_db is not None and (
+            not isinstance(self.source_db, str) or not self.source_db.strip()
+        ):
+            raise ValueError("source_db must be a non-empty string when supplied")
+
+
+@dataclass(frozen=True)
+class BaselineClassificationContext:
+    """Immutable inputs for one compatibility classification hook."""
+
+    target: OperationalTarget
+    definition: ValidationTestDefinition
+    config: "CvalConfig"
+    window_days: int
+    source_db: str | None = None
+    node: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.target.owner_test_id != self.definition.metadata.id:
+            raise ValueError("Classification target owner does not match its definition")
+        if (
+            isinstance(self.window_days, bool)
+            or not isinstance(self.window_days, int)
+            or self.window_days <= 0
+        ):
+            raise ValueError("window_days must be a positive integer")
+        if self.source_db is not None and (
+            not isinstance(self.source_db, str) or not self.source_db.strip()
+        ):
+            raise ValueError("source_db must be a non-empty string when supplied")
+
+
+@dataclass(frozen=True)
+class ExportContext:
+    """Strict read-only inputs supplied to one result-export hook.
+
+    The context intentionally has no output path, writable database handle, or
+    Kubernetes client.  Built-in adapters may use the source identifiers with
+    the framework's read-only metric readers and must return rows to core.
+    """
+
+    target: OperationalTarget
+    definition: ValidationTestDefinition
+    config: "CvalConfig"
+    status_rows: tuple[LatestStatusRow, ...]
+    classification_rows: tuple[ClassificationResultRow, ...]
+    pod: str
+    namespace: str
+    source_db_paths: tuple[tuple[str, str], ...]
+    include_metrics: bool = True
+
+    def __post_init__(self) -> None:
+        if self.target.owner_test_id != self.definition.metadata.id:
+            raise ValueError("Export target owner does not match its definition")
+        if self.config.tests.registry.get(self.target.owner_test_id) is None:
+            raise ValueError("ExportContext.config does not contain the target owner")
+        if not isinstance(self.status_rows, tuple) or not all(
+            isinstance(row, LatestStatusRow) for row in self.status_rows
+        ):
+            raise TypeError("ExportContext.status_rows must be tuple[LatestStatusRow, ...]")
+        if not isinstance(self.classification_rows, tuple) or not all(
+            isinstance(row, ClassificationResultRow) for row in self.classification_rows
+        ):
+            raise TypeError(
+                "ExportContext.classification_rows must be "
+                "tuple[ClassificationResultRow, ...]"
+            )
+        if not isinstance(self.pod, str) or not self.pod.strip():
+            raise ValueError("ExportContext.pod must be a non-empty string")
+        if not isinstance(self.namespace, str) or not self.namespace.strip():
+            raise ValueError("ExportContext.namespace must be a non-empty string")
+        if not isinstance(self.source_db_paths, tuple):
+            raise TypeError("ExportContext.source_db_paths must be a tuple")
+        keys: set[str] = set()
+        for item in self.source_db_paths:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not all(isinstance(value, str) and value.strip() for value in item)
+            ):
+                raise TypeError(
+                    "ExportContext.source_db_paths must contain non-empty string pairs"
+                )
+            if item[0] in keys:
+                raise ValueError("ExportContext.source_db_paths contains duplicate keys")
+            keys.add(item[0])
+        if not isinstance(self.include_metrics, bool):
+            raise TypeError("ExportContext.include_metrics must be boolean")
+
+    def source_db_path(self, key: str) -> str | None:
+        """Return one declared read-only source DB path."""
+
+        return dict(self.source_db_paths).get(key)
+
+
+@dataclass(frozen=True)
+class ExportRows:
+    """Immutable, strictly rectangular CSV-safe rows returned by a plugin."""
+
+    columns: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+    row_label: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.columns, tuple) or not self.columns:
+            raise TypeError("ExportRows.columns must be a non-empty tuple")
+        if len(set(self.columns)) != len(self.columns) or not all(
+            isinstance(column, str)
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", column)
+            for column in self.columns
+        ):
+            raise ValueError("ExportRows columns must be unique safe identifiers")
+        if not isinstance(self.rows, tuple):
+            raise TypeError("ExportRows.rows must be a tuple")
+        for row in self.rows:
+            if (
+                not isinstance(row, tuple)
+                or len(row) != len(self.columns)
+                or not all(isinstance(value, str) for value in row)
+            ):
+                raise TypeError(
+                    "ExportRows rows must be same-width tuples containing only strings"
+                )
+        if (
+            not isinstance(self.row_label, str)
+            or "\n" in self.row_label
+            or "\r" in self.row_label
+        ):
+            raise ValueError("ExportRows.row_label must be a single-line string")
+
+
+def export_rows_from_records(
+    columns: tuple[str, ...],
+    records: Iterable[Mapping[str, object]],
+    *,
+    row_label: str = "",
+) -> ExportRows:
+    """Normalize scalar record dictionaries into the strict export contract."""
+
+    normalized_rows: list[tuple[str, ...]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise TypeError("Export records must be mappings")
+        unknown = sorted(set(record) - set(columns))
+        if unknown:
+            raise ValueError(
+                "Export record contains undeclared columns: " + ", ".join(unknown)
+            )
+        values: list[str] = []
+        for column in columns:
+            value = record.get(column, "")
+            if value is None:
+                values.append("")
+            elif isinstance(value, bool):
+                values.append(str(value).lower())
+            elif isinstance(value, int) and not isinstance(value, bool):
+                values.append(str(value))
+            elif isinstance(value, float):
+                if not math.isfinite(value):
+                    raise ValueError("Export rows cannot contain non-finite numbers")
+                values.append(str(value))
+            elif isinstance(value, str):
+                values.append(value)
+            else:
+                raise TypeError(
+                    "Export row values must be string, integer, finite float, boolean, or null"
+                )
+        normalized_rows.append(tuple(values))
+    return ExportRows(
+        columns=columns,
+        rows=tuple(normalized_rows),
+        row_label=row_label,
+    )
+
+
 def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | None:
     """Import and validate one declared adapter from its confined test directory."""
 
@@ -175,6 +382,7 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
         "config": ("validate_config",),
         "ingest": ("validate_schema", "ingest"),
         "health": ("metric_specs", "load_observations"),
+        "baseline": ("build_compatibility_baseline", "classify_compatibility"),
         "export": ("export_rows",),
     }
     for capability in sorted(declared):

@@ -45,12 +45,11 @@ DL_COMPUTE_DB=$(config_value storage dl_compute_db_path /data/continuous_validat
 DL_COLLECTIVE_DB=$(config_value storage dl_collective_db_path /data/continuous_validation/metadata/dltest_collective_performance.db)
 DL_OVERLAP_DB=$(config_value storage dl_overlap_db_path /data/continuous_validation/metadata/dltest_overlap_performance.db)
 DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
+DL_METRIC_LOCK_HELPER=${CVAL_DL_METRIC_LOCK_HELPER:-$SCRIPT_DIR/dl-metric-lock.py}
+DL_METRIC_LOCK_PYTHON=${CVAL_DL_METRIC_LOCK_PYTHON:-python3}
 DL_METRIC_REFRESH_INTERVAL_SECONDS=${CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS:-3600}
 LOG_DIR=${CVAL_BASELINE_CLASSIFY_LOG_DIR:-$BASELINE_ROOT/logs/classify}
-TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-storage,nccl,dltest,dltest-numerical,dltest-compute,dltest-collective,dltest-overlap}
-STORAGE_ENABLED=${CVAL_STORAGE_ENABLED:-$(config_value tests.storage enabled true)}
-NCCL_ENABLED=${CVAL_NCCL_ENABLED:-$(config_value tests.nccl enabled true)}
-DLTEST_ENABLED=${CVAL_DLTEST_ENABLED:-$(config_value tests.dltest enabled true)}
+TEST_TYPES=${CVAL_BASELINE_CLASSIFY_TESTS:-}
 
 usage() {
     cat <<EOF
@@ -73,28 +72,14 @@ Environment overrides:
     CVAL_DL_RESULTS_ROOT=$DL_RESULTS_ROOT
     CVAL_DL_METRIC_OUTPUT_DIR=$DL_METRIC_OUTPUT_DIR
         CVAL_DL_METRIC_LOCK_FILE=$DL_METRIC_LOCK_FILE
+    CVAL_DL_METRIC_LOCK_HELPER=$DL_METRIC_LOCK_HELPER
+    CVAL_DL_METRIC_LOCK_PYTHON=$DL_METRIC_LOCK_PYTHON
     CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS=$DL_METRIC_REFRESH_INTERVAL_SECONDS
 EOF
 }
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
-}
-
-is_enabled() {
-    case "${1,,}" in
-        1|true|yes|on) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-test_is_enabled() {
-    case "$1" in
-        storage) is_enabled "$STORAGE_ENABLED" ;;
-        nccl) is_enabled "$NCCL_ENABLED" ;;
-        dltest|dltest-*) is_enabled "$DLTEST_ENABLED" ;;
-        *) return 1 ;;
-    esac
 }
 
 require_command() {
@@ -181,26 +166,37 @@ refresh_dl_metric_dbs_if_needed() {
 with_dl_metric_lock() {
     local label="$1"
     shift
-    mkdir -p "$(dirname "$DL_METRIC_LOCK_FILE")"
-    if command -v flock >/dev/null 2>&1; then
-        log "waiting for DL metric lock: $DL_METRIC_LOCK_FILE ($label)"
-        (
-            flock -x 9
-            log "acquired DL metric lock ($label)"
-            "$@"
-        ) 9>"$DL_METRIC_LOCK_FILE"
-    else
-        log "flock not found; running without DL metric lock ($label)"
-        "$@"
+    local lock_python
+    if ! lock_python=$(command -v "$DL_METRIC_LOCK_PYTHON" 2>/dev/null) || [[ ! -x "$lock_python" ]]; then
+        log "DL metric lock Python unavailable; refusing unlocked work ($label)"
+        return 1
+    fi
+    if [[ ! -f "$DL_METRIC_LOCK_HELPER" ]]; then
+        log "DL metric lock helper unavailable; refusing unlocked work ($label)"
+        return 1
+    fi
+    if ! mkdir -p "$(dirname "$DL_METRIC_LOCK_FILE")"; then
+        log "could not prepare DL metric lock directory; refusing work ($label)"
+        return 1
+    fi
+    log "waiting for DL metric lock: $DL_METRIC_LOCK_FILE ($label)"
+    if ! "$lock_python" "$DL_METRIC_LOCK_HELPER" \
+        "$DL_METRIC_LOCK_FILE" -- "$@"; then
+        log "could not safely acquire DL metric lock; refusing work ($label)"
+        return 1
     fi
 }
 
-is_dl_test() {
-    [[ "$1" == "dltest" || "$1" == dltest-* ]]
-}
-
-tests_include_dltest() {
-    [[ ",$TEST_TYPES," == *",dltest,"* ]] || [[ ",$TEST_TYPES," == *",dltest-"* ]]
+target_is_allowed() {
+    local requested="$1"
+    [[ -n "$TEST_TYPES" ]] || return 0
+    local allowed
+    IFS=',' read -r -a allowlist <<< "$TEST_TYPES"
+    for allowed in "${allowlist[@]}"; do
+        allowed=${allowed//[[:space:]]/}
+        [[ "$allowed" == "$requested" ]] && return 0
+    done
+    return 1
 }
 
 classify_one_test() {
@@ -212,17 +208,26 @@ classify_one_test() {
         --window-days "$WINDOW_DAYS" \
         --store-results \
         --output json | tee "$cycle_dir/${test_type}.json"; then
-        log "classification skipped or failed for $test_type"
+        log "classification failed for $test_type"
+        return 1
     fi
 }
 
 classify_dl_tests() {
     local cycle_dir="$1"
     shift
-    refresh_dl_metric_dbs_if_needed "$cycle_dir"
+    if ! refresh_dl_metric_dbs_if_needed "$cycle_dir"; then
+        log "DL metric refresh failed; skipping DL classification target group"
+        return 1
+    fi
+    local failed=0
+    local test_type
     for test_type in "$@"; do
-        classify_one_test "$cycle_dir" "$test_type"
+        if ! classify_one_test "$cycle_dir" "$test_type"; then
+            failed=1
+        fi
     done
+    return "$failed"
 }
 
 run_cycle() {
@@ -234,30 +239,90 @@ run_cycle() {
     mkdir -p "$cycle_dir"
 
     pushd "$REPO_DIR" >/dev/null
-    log "baseline classification cycle start: root=$BASELINE_ROOT window_days=$WINDOW_DAYS tests=$TEST_TYPES"
+    log "baseline classification cycle start: root=$BASELINE_ROOT window_days=$WINDOW_DAYS tests=${TEST_TYPES:-all-enabled}"
 
-    IFS=',' read -r -a tests <<< "$TEST_TYPES"
-    local dl_tests=()
-    for test_type in "${tests[@]}"; do
-        test_type=$(echo "$test_type" | xargs)
-        [[ -n "$test_type" ]] || continue
-        if ! test_is_enabled "$test_type"; then
-            log "skipping $test_type classification (test disabled)"
-            continue
-        fi
-        if is_dl_test "$test_type"; then
-            dl_tests+=("$test_type")
-        else
-            classify_one_test "$cycle_dir" "$test_type"
-        fi
-    done
-
-    if (( ${#dl_tests[@]} > 0 )); then
-        with_dl_metric_lock "baseline-classify" classify_dl_tests "$cycle_dir" "${dl_tests[@]}"
+    local catalog_file="$cycle_dir/operational-targets.tsv"
+    if ! python -m cval.cli --config "$CONFIG_PATH" operational-targets \
+        --operation baseline-classify --output tsv >"$catalog_file"; then
+        log "could not enumerate baseline-classify targets"
+        popd >/dev/null
+        return 1
     fi
 
-    log "baseline classification cycle complete: artifacts=$cycle_dir"
+    local direct_tests=()
+    local dl_tests=()
+    local catalog_count=0
+    local catalog_failed=0
+    local line format_version test_type owner baseline_type status_test alias refresh_group
+    local fields=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        IFS=$'\t' read -r -a fields <<< "$line"
+        if (( ${#fields[@]} != 7 )); then
+            log "invalid classification target catalog row: expected 7 fields"
+            catalog_failed=1
+            continue
+        fi
+        format_version=${fields[0]}
+        test_type=${fields[1]}
+        owner=${fields[2]}
+        baseline_type=${fields[3]}
+        status_test=${fields[4]}
+        alias=${fields[5]}
+        refresh_group=${fields[6]}
+        if [[ "$format_version" != "cval.operational-target.v1" \
+            || -z "$test_type" || -z "$owner" || -z "$baseline_type" \
+            || -z "$status_test" || ! "$alias" =~ ^(true|false)$ \
+            || -z "$refresh_group" ]]; then
+            log "invalid classification target catalog row: bad version or field value"
+            catalog_failed=1
+            continue
+        fi
+        [[ "$refresh_group" == "-" ]] && refresh_group=""
+        ((catalog_count+=1))
+        if ! target_is_allowed "$test_type"; then
+            log "skipping $test_type classification (not in environment allowlist)"
+            continue
+        fi
+        if [[ "$refresh_group" == "dltest" ]]; then
+            dl_tests+=("$test_type")
+        else
+            direct_tests+=("$test_type")
+        fi
+    done <"$catalog_file"
+
+    if (( catalog_failed != 0 )); then
+        log "baseline-classify target catalog validation failed"
+        popd >/dev/null
+        return 1
+    fi
+    if (( catalog_count == 0 )); then
+        log "no enabled baseline-classify targets were enumerated; refusing empty cycle"
+        popd >/dev/null
+        return 1
+    fi
+    if (( ${#direct_tests[@]} + ${#dl_tests[@]} == 0 )); then
+        log "baseline classification allowlist intersects no enabled target; refusing empty cycle"
+        popd >/dev/null
+        return 1
+    fi
+
+    local cycle_failed=0
+    for test_type in "${direct_tests[@]}"; do
+        if ! classify_one_test "$cycle_dir" "$test_type"; then
+            cycle_failed=1
+        fi
+    done
+    if (( ${#dl_tests[@]} > 0 )); then
+        if ! with_dl_metric_lock "baseline-classify" bash "$0" \
+            run-dl-classifications "$cycle_dir" "${dl_tests[@]}"; then
+            cycle_failed=1
+        fi
+    fi
+
+    log "baseline classification cycle complete: artifacts=$cycle_dir failed=$cycle_failed"
     popd >/dev/null
+    return "$cycle_failed"
 }
 
 run_loop() {
@@ -284,8 +349,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$DL_METRIC_REFRESH_INTERVAL_SECONDS" "$0"
+        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_CLASSIFY_TESTS=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q CVAL_DL_METRIC_LOCK_HELPER=%q CVAL_DL_METRIC_LOCK_PYTHON=%q CVAL_DL_METRIC_REFRESH_INTERVAL_SECONDS=%q bash %q run-loop' \
+        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$TEST_TYPES" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$DL_METRIC_LOCK_HELPER" "$DL_METRIC_LOCK_PYTHON" "$DL_METRIC_REFRESH_INTERVAL_SECONDS" "$0"
 
     local tmux_body
     printf -v tmux_body \
@@ -333,6 +398,7 @@ case "$COMMAND" in
     status) show_status ;;
     run-once) run_cycle ;;
     run-loop) run_loop ;;
+    run-dl-classifications) shift; classify_dl_tests "$@" ;;
     -h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac

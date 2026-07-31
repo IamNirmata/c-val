@@ -56,6 +56,8 @@ flowchart TB
 | `cval.jobs.monitor` | Read-only job phase polling and timeout classification. |
 | `cval.validation.results` | Parse and validate structured result JSON. |
 | `cval.validation.registry` | Compose and validate explicit repository-local test descriptors. |
+| `cval.validation.operational_targets` | Build the immutable enabled/capability-derived compatibility target catalog and central DL alias overlay. |
+| `cval.validation.operations` | Re-resolve targets and dispatch compatibility baseline/classification/export hooks with strict return contracts. |
 | `cval.validation.runtime` | Build the generic registry/config runtime context and compatibility payload. |
 | `cval.validation.ingestion` | Preflight v2/config/evidence identity and dispatch isolated per-test raw/metric ingestion. |
 | `cval.validation.plugins` | Validate and load repository-confined `cval.plugin.v1` adapters and immutable contexts/receipts. |
@@ -124,6 +126,14 @@ batch current-target probes through the unique history target index. Full
 history content validation is a separate streamed joined integrity audit, not a
 routine schema/evaluator scan. Atomic history persistence retains a per-record
 `stored`/`idempotent` outcome when exact concurrent appends race preflight.
+
+U10 separately makes the existing compatibility baseline, classification, and
+result-export target surface registry/capability-driven. The `baseline`
+capability owns compatibility build/classify targets; `export` owns result
+exports. The four DL component aliases are one central overlay owned by the
+enabled `dltest` registration. This is selection and dispatch only: built-ins
+still read the metadata metric DBs and store compatibility baselines/verdicts
+under `baselines/`; no U7/U8/U9 source cutover or live loop restart is implied.
 
 The four `metadata/dltest_*` DBs hold raw tall DL metric rows. The
 `baselines/*-baselines.db` files hold versioned dynamic baselines. The

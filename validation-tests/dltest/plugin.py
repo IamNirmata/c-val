@@ -6,6 +6,7 @@ from dataclasses import asdict, astuple
 import json
 import math
 import sqlite3
+from collections.abc import Mapping
 from contextlib import closing
 from functools import lru_cache
 
@@ -48,10 +49,15 @@ from cval.storage.per_test_results import (
     validate_health_read_metadata,
 )
 from cval.validation.plugins import (
+    BaselineBuildContext,
+    BaselineClassificationContext,
     ConfigIssue,
+    ExportContext,
+    ExportRows,
     IngestionConflictError,
     IngestionContext,
     IngestionReceipt,
+    export_rows_from_records,
     validate_ingestion_artifact_tree,
 )
 
@@ -386,7 +392,7 @@ def _persisted_bundle_payload(
 class DltestIngestionPlugin:
     plugin_id = "dltest"
     health_policy_version = "dltest.health.v1"
-    capabilities = frozenset({"config", "ingest", "health"})
+    capabilities = frozenset({"config", "ingest", "health", "baseline", "export"})
 
     def validate_schema(self, connection, allow_missing: bool) -> bool:
         return _validate_dl_schema(connection, allow_missing)
@@ -406,7 +412,7 @@ class DltestIngestionPlugin:
         if not isinstance(plan, str) or not plan.strip():
             issues.append(ConfigIssue("invalid_test_plan", "test_plan must be non-empty string"))
         aggregation = settings.get("health_aggregation")
-        if not isinstance(aggregation, dict):
+        if not isinstance(aggregation, Mapping):
             issues.append(
                 ConfigIssue("invalid_health_aggregation", "health_aggregation must be a table")
             )
@@ -466,6 +472,66 @@ class DltestIngestionPlugin:
 
     def metric_specs(self, definition) -> tuple[MetricSpec, ...]:
         return metric_specs_from_definition(definition)
+
+    def build_compatibility_baseline(self, context: BaselineBuildContext):
+        """Build from the four established metadata/dltest_* metric DBs."""
+
+        from cval.baselines.build import build_dl_baseline
+
+        return build_dl_baseline(
+            config=context.config,
+            window_days=context.window_days,
+            min_samples=context.min_samples,
+            test_plan=context.test_plan,
+            baseline_id=context.baseline_id,
+        )
+
+    def classify_compatibility(
+        self,
+        context: BaselineClassificationContext,
+        baseline,
+    ) -> tuple[dict, ...]:
+        """Classify aggregate or component aliases from compatibility DL DBs."""
+
+        from cval.baselines.classify import classify_node, classify_nodes
+
+        if context.node:
+            verdicts = [
+                classify_node(
+                    context.target.name,
+                    context.node,
+                    baseline,
+                    config=context.config,
+                    window_days=context.window_days,
+                )
+            ]
+        else:
+            verdicts = classify_nodes(
+                context.target.name,
+                baseline,
+                config=context.config,
+                window_days=context.window_days,
+            )
+        return tuple(verdicts)
+
+    def export_rows(self, context: ExportContext) -> ExportRows:
+        """Return the established raw DL status plus classification columns."""
+
+        from cval.storage.results_export import (
+            get_csv_columns,
+            latest_result_rows,
+            rows_to_csv_records,
+        )
+
+        selected = latest_result_rows(list(context.status_rows), context.target.name)
+        records = rows_to_csv_records(
+            selected,
+            context.target.name,
+            list(context.classification_rows),
+        )
+        columns = get_csv_columns(context.target.name)
+        projected = ({column: record.get(column, "") for column in columns} for record in records)
+        return export_rows_from_records(columns, projected)
 
     def load_observations(
         self,

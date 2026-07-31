@@ -25,6 +25,7 @@ from cval.baselines import stats
 from cval.config import CvalConfig, load_config
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
 from cval.storage.dltest_ingest import validate_dl_metric_generation
+from cval.storage.sqlite_uri import connect_sqlite_file
 
 BASELINE_SCHEMA_VERSION = "cval.baseline.v2"
 
@@ -50,7 +51,7 @@ def _connect_ro(db_path: str | Path | None) -> sqlite3.Connection | None:
     path = Path(db_path)
     if not path.exists():
         return None
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    return connect_sqlite_file(path, mode="ro", timeout=30)
 
 
 def _window_cutoff(window_days: int) -> int:

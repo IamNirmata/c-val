@@ -13,7 +13,8 @@ import json
 import math
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
@@ -26,7 +27,9 @@ RESOURCE_QUANTITY_PATTERN = re.compile(
     r"^(?P<number>(?:\d+(?:\.\d*)?|\.\d+))"
     r"(?P<suffix>m|u|n|[EPTGMK]i?|[eE][+-]?\d+)?$"
 )
-ALLOWED_PLUGIN_CAPABILITIES = frozenset({"config", "ingest", "health", "export"})
+ALLOWED_PLUGIN_CAPABILITIES = frozenset(
+    {"config", "ingest", "health", "baseline", "export"}
+)
 ALLOWED_HEALTH_STRATEGIES = frozenset({"declarative", "custom"})
 COMMON_HEALTH_COMBINATION_FACTORS = frozenset(
     {"image_name", "cuda_version", "pytorch_version"}
@@ -49,6 +52,55 @@ DEFAULT_TEST_REGISTRATIONS: dict[str, dict[str, object]] = {
         "config_path": "validation-tests/dltest/test_config.toml",
     },
 }
+
+
+class FrozenMapping(Mapping[str, Any]):
+    """Pickle-safe immutable mapping used for descriptor-owned settings."""
+
+    __slots__ = ("_items",)
+
+    def __init__(self, values: Mapping[str, Any] | tuple[tuple[str, Any], ...]) -> None:
+        items = values.items() if isinstance(values, Mapping) else values
+        self._items = tuple((key, value) for key, value in items)
+
+    def __getitem__(self, key: str) -> Any:
+        for item_key, value in self._items:
+            if item_key == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _value in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __reduce__(self):
+        return (type(self), (self._items,))
+
+
+def _freeze_json_like(value: Any) -> Any:
+    """Recursively freeze TOML/JSON-like mappings and arrays."""
+
+    if isinstance(value, Mapping):
+        return FrozenMapping(
+            tuple((str(key), _freeze_json_like(item)) for key, item in value.items())
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json_like(item) for item in value)
+    return value
+
+
+def _json_ready(value: Any) -> Any:
+    """Return mutable JSON-ready containers without exposing registry state."""
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: _json_ready(getattr(value, item.name)) for item in fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_ready(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -153,7 +205,7 @@ class RegisteredValidationTest:
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-ready effective test configuration."""
 
-        value = asdict(self.definition)
+        value = _json_ready(self.definition)
         value["enabled"] = self.enabled
         value["config_path"] = self.config_path
         return value
@@ -197,7 +249,7 @@ def validation_test_config_digest(
 
     definition = test.definition if isinstance(test, RegisteredValidationTest) else test
     canonical = json.dumps(
-        asdict(definition),
+        _json_ready(definition),
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -442,7 +494,7 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
         ),
         requirements=requirements,
         artifacts=artifacts,
-        settings=dict(settings),
+        settings=_freeze_json_like(settings),
         plugin=plugin,
         health=health,
     )

@@ -9,27 +9,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from cval.validation.operational_targets import (
+    DL_COMPONENT_TEST_TYPES,
+    compatibility_component,
+    normalize_compatibility_target,
+)
 
-DL_COMPONENT_TEST_TYPES = {
-    "dltest": None,
-    "dltest-numerical": "numerical_correctness",
-    "dltest-compute": "compute_performance",
-    "dltest-collective": "collective_performance",
-    "dltest-overlap": "overlap_performance",
-}
 
 def normalize_baseline_test_type(test_type: str) -> str:
     """Map component aliases to the logical baseline test type."""
 
-    return "dltest" if test_type in DL_COMPONENT_TEST_TYPES else test_type
+    return normalize_compatibility_target(test_type)
 
 
 def dl_component_for_test_type(test_type: str) -> str | None:
     """Return the DL metric component selected by a test alias, if any."""
 
-    if test_type not in DL_COMPONENT_TEST_TYPES:
-        return None
-    return DL_COMPONENT_TEST_TYPES[test_type]
+    return compatibility_component(test_type)
 
 
 @dataclass(frozen=True)

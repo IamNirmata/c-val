@@ -36,7 +36,7 @@ summary_filename = "summary.json"
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "ingest", "health"]
+capabilities = ["config", "ingest", "health", "baseline", "export"]
 
 [health]
 enabled = true

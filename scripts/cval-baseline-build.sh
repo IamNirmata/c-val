@@ -39,13 +39,12 @@ BASELINE_ROOT=${CVAL_BASELINE_ROOT:-$(config_value baseline baseline_root_path /
 INTERVAL_SECONDS=${CVAL_BASELINE_BUILD_INTERVAL_SECONDS:-$(config_value baseline build_interval_seconds 86400)}
 WINDOW_DAYS=${CVAL_BASELINE_WINDOW_DAYS:-$(config_value baseline window_days 30)}
 MIN_SAMPLES=${CVAL_BASELINE_MIN_SAMPLES:-$(config_value baseline min_samples 8)}
-STORAGE_ENABLED=${CVAL_STORAGE_ENABLED:-$(config_value tests.storage enabled true)}
-NCCL_ENABLED=${CVAL_NCCL_ENABLED:-$(config_value tests.nccl enabled true)}
-DLTEST_ENABLED=${CVAL_DLTEST_ENABLED:-$(config_value tests.dltest enabled true)}
 DL_TEST_PLAN=${CVAL_BASELINE_DL_TEST_PLAN:-$(config_value tests.dltest.settings test_plan 80gb-example)}
 DL_RESULTS_ROOT=${CVAL_DL_RESULTS_ROOT:-$(config_value runtime dl_results_root_path /data/continuous_validation/validation_tests/dltest/runs)}
 DL_METRIC_OUTPUT_DIR=${CVAL_DL_METRIC_OUTPUT_DIR:-}
 DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$BASELINE_ROOT/.dl-metric-refresh.lock}
+DL_METRIC_LOCK_HELPER=${CVAL_DL_METRIC_LOCK_HELPER:-$SCRIPT_DIR/dl-metric-lock.py}
+DL_METRIC_LOCK_PYTHON=${CVAL_DL_METRIC_LOCK_PYTHON:-python3}
 LOG_DIR=${CVAL_BASELINE_BUILD_LOG_DIR:-$BASELINE_ROOT/logs/build}
 
 usage() {
@@ -70,18 +69,13 @@ Environment overrides:
     CVAL_DL_RESULTS_ROOT=$DL_RESULTS_ROOT
     CVAL_DL_METRIC_OUTPUT_DIR=$DL_METRIC_OUTPUT_DIR
     CVAL_DL_METRIC_LOCK_FILE=$DL_METRIC_LOCK_FILE
+    CVAL_DL_METRIC_LOCK_HELPER=$DL_METRIC_LOCK_HELPER
+    CVAL_DL_METRIC_LOCK_PYTHON=$DL_METRIC_LOCK_PYTHON
 EOF
 }
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
-}
-
-is_enabled() {
-    case "${1,,}" in
-        1|true|yes|on) return 0 ;;
-        *) return 1 ;;
-    esac
 }
 
 require_command() {
@@ -133,34 +127,67 @@ refresh_dl_metric_dbs() {
 with_dl_metric_lock() {
     local label="$1"
     shift
-    mkdir -p "$(dirname "$DL_METRIC_LOCK_FILE")"
-    if command -v flock >/dev/null 2>&1; then
-        log "waiting for DL metric lock: $DL_METRIC_LOCK_FILE ($label)"
-        (
-            flock -x 9
-            log "acquired DL metric lock ($label)"
-            "$@"
-        ) 9>"$DL_METRIC_LOCK_FILE"
-    else
-        log "flock not found; running without DL metric lock ($label)"
-        "$@"
+    local lock_python
+    if ! lock_python=$(command -v "$DL_METRIC_LOCK_PYTHON" 2>/dev/null) || [[ ! -x "$lock_python" ]]; then
+        log "DL metric lock Python unavailable; refusing unlocked work ($label)"
+        return 1
+    fi
+    if [[ ! -f "$DL_METRIC_LOCK_HELPER" ]]; then
+        log "DL metric lock helper unavailable; refusing unlocked work ($label)"
+        return 1
+    fi
+    if ! mkdir -p "$(dirname "$DL_METRIC_LOCK_FILE")"; then
+        log "could not prepare DL metric lock directory; refusing work ($label)"
+        return 1
+    fi
+    log "waiting for DL metric lock: $DL_METRIC_LOCK_FILE ($label)"
+    if ! "$lock_python" "$DL_METRIC_LOCK_HELPER" \
+        "$DL_METRIC_LOCK_FILE" -- "$@"; then
+        log "could not safely acquire DL metric lock; refusing work ($label)"
+        return 1
     fi
 }
 
-run_dl_baseline_build() {
+build_one_target() {
     local cycle_dir="$1"
-    local baseline_id="$2"
-    refresh_dl_metric_dbs "$cycle_dir"
-
-    log "building dltest baseline_id=dltest-${baseline_id} test_plan=$DL_TEST_PLAN"
-    python -m cval.cli --config "$CONFIG_PATH" baseline build \
-        --test-type dltest \
-        --test-plan "$DL_TEST_PLAN" \
+    local test_type="$2"
+    local baseline_id="$3"
+    local refresh_group="$4"
+    local args=(
+        python -m cval.cli --config "$CONFIG_PATH" baseline build
+        --test-type "$test_type"
         --window-days "$WINDOW_DAYS" \
         --min-samples "$MIN_SAMPLES" \
-        --baseline-id "dltest-${baseline_id}" \
+        --baseline-id "${test_type}-${baseline_id}"
         --activate \
-        --output json | tee "$cycle_dir/dltest.json"
+        --output json
+    )
+    if [[ "$refresh_group" == "dltest" ]]; then
+        args+=(--test-plan "$DL_TEST_PLAN")
+    fi
+    log "building $test_type baseline_id=${test_type}-${baseline_id}"
+    if ! "${args[@]}" | tee "$cycle_dir/${test_type}.json"; then
+        log "baseline build failed for $test_type"
+        return 1
+    fi
+}
+
+run_dl_baseline_builds() {
+    local cycle_dir="$1"
+    local baseline_id="$2"
+    shift 2
+    if ! refresh_dl_metric_dbs "$cycle_dir"; then
+        log "DL metric refresh failed; skipping DL baseline target group"
+        return 1
+    fi
+    local failed=0
+    local test_type
+    for test_type in "$@"; do
+        if ! build_one_target "$cycle_dir" "$test_type" "$baseline_id" dltest; then
+            failed=1
+        fi
+    done
+    return "$failed"
 }
 
 run_cycle() {
@@ -176,34 +203,78 @@ run_cycle() {
 
     local baseline_id
     baseline_id="auto-$(date -u +%Y%m%dT%H%M%SZ)"
-
-    for test_type in storage nccl; do
-        if [[ "$test_type" == "storage" ]] && ! is_enabled "$STORAGE_ENABLED"; then
-            log "skipping storage baseline (test disabled)"
-            continue
-        fi
-        if [[ "$test_type" == "nccl" ]] && ! is_enabled "$NCCL_ENABLED"; then
-            log "skipping nccl baseline (test disabled)"
-            continue
-        fi
-        log "building $test_type baseline_id=${test_type}-${baseline_id}"
-        python -m cval.cli --config "$CONFIG_PATH" baseline build \
-            --test-type "$test_type" \
-            --window-days "$WINDOW_DAYS" \
-            --min-samples "$MIN_SAMPLES" \
-            --baseline-id "${test_type}-${baseline_id}" \
-            --activate \
-            --output json | tee "$cycle_dir/${test_type}.json"
-    done
-
-    if is_enabled "$DLTEST_ENABLED"; then
-        with_dl_metric_lock "baseline-build" run_dl_baseline_build "$cycle_dir" "$baseline_id"
-    else
-        log "skipping dltest baseline (test disabled)"
+    local catalog_file="$cycle_dir/operational-targets.tsv"
+    if ! python -m cval.cli --config "$CONFIG_PATH" operational-targets \
+        --operation baseline-build --output tsv >"$catalog_file"; then
+        log "could not enumerate baseline-build targets"
+        popd >/dev/null
+        return 1
     fi
 
-    log "baseline build cycle complete: artifacts=$cycle_dir"
+    local direct_targets=()
+    local dl_targets=()
+    local catalog_failed=0
+    local line format_version test_type owner baseline_type status_test alias refresh_group
+    local fields=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        IFS=$'\t' read -r -a fields <<< "$line"
+        if (( ${#fields[@]} != 7 )); then
+            log "invalid baseline target catalog row: expected 7 fields"
+            catalog_failed=1
+            continue
+        fi
+        format_version=${fields[0]}
+        test_type=${fields[1]}
+        owner=${fields[2]}
+        baseline_type=${fields[3]}
+        status_test=${fields[4]}
+        alias=${fields[5]}
+        refresh_group=${fields[6]}
+        if [[ "$format_version" != "cval.operational-target.v1" \
+            || -z "$test_type" || -z "$owner" || -z "$baseline_type" \
+            || -z "$status_test" || ! "$alias" =~ ^(true|false)$ \
+            || -z "$refresh_group" ]]; then
+            log "invalid baseline target catalog row: bad version or field value"
+            catalog_failed=1
+            continue
+        fi
+        [[ "$refresh_group" == "-" ]] && refresh_group=""
+        if [[ "$refresh_group" == "dltest" ]]; then
+            dl_targets+=("$test_type")
+        else
+            direct_targets+=("$test_type")
+        fi
+    done <"$catalog_file"
+
+    if (( catalog_failed != 0 )); then
+        log "baseline-build target catalog validation failed"
+        popd >/dev/null
+        return 1
+    fi
+    if (( ${#direct_targets[@]} + ${#dl_targets[@]} == 0 )); then
+        log "no enabled baseline-build targets were enumerated; refusing empty cycle"
+        popd >/dev/null
+        return 1
+    fi
+
+    local cycle_failed=0
+    for test_type in "${direct_targets[@]}"; do
+        if ! build_one_target "$cycle_dir" "$test_type" "$baseline_id" ""; then
+            cycle_failed=1
+        fi
+    done
+    if (( ${#dl_targets[@]} > 0 )); then
+        if ! with_dl_metric_lock "baseline-build" bash "$0" \
+            run-dl-baseline-builds "$cycle_dir" "$baseline_id" \
+            "${dl_targets[@]}"; then
+            cycle_failed=1
+        fi
+    fi
+
+    log "baseline build cycle complete: artifacts=$cycle_dir failed=$cycle_failed"
     popd >/dev/null
+    return "$cycle_failed"
 }
 
 run_loop() {
@@ -230,8 +301,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_BUILD_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_MIN_SAMPLES=%q CVAL_BASELINE_DL_TEST_PLAN=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$MIN_SAMPLES" "$DL_TEST_PLAN" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$0"
+        'CVAL_CONFIG=%q CVAL_BASELINE_ROOT=%q CVAL_BASELINE_BUILD_INTERVAL_SECONDS=%q CVAL_BASELINE_WINDOW_DAYS=%q CVAL_BASELINE_MIN_SAMPLES=%q CVAL_BASELINE_DL_TEST_PLAN=%q CVAL_DL_RESULTS_ROOT=%q CVAL_DL_METRIC_OUTPUT_DIR=%q CVAL_DL_METRIC_LOCK_FILE=%q CVAL_DL_METRIC_LOCK_HELPER=%q CVAL_DL_METRIC_LOCK_PYTHON=%q bash %q run-loop' \
+        "$CONFIG_PATH" "$BASELINE_ROOT" "$INTERVAL_SECONDS" "$WINDOW_DAYS" "$MIN_SAMPLES" "$DL_TEST_PLAN" "$DL_RESULTS_ROOT" "$DL_METRIC_OUTPUT_DIR" "$DL_METRIC_LOCK_FILE" "$DL_METRIC_LOCK_HELPER" "$DL_METRIC_LOCK_PYTHON" "$0"
 
     local tmux_body
     printf -v tmux_body \
@@ -279,6 +350,7 @@ case "$COMMAND" in
     status) show_status ;;
     run-once) run_cycle ;;
     run-loop) run_loop ;;
+    run-dl-baseline-builds) shift; run_dl_baseline_builds "$@" ;;
     -h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac

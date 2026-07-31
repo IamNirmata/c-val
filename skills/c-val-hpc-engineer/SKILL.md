@@ -138,6 +138,10 @@ python -m cval.cli health activate <test-id> <candidate-id> --output json
 ```
 
 - Start with `status` to identify stale or missing results.
+- Resolve compatibility targets from the enabled registry catalog. The
+   `baseline` plugin capability controls build/lifecycle/classification choices;
+   `export` controls result-export choices. The built-in DL component aliases
+   are one overlay owned by enabled `dltest`, not separate registered tests.
 - Build a baseline from recent results (dry-run prints the robust metrics;
   `--store` saves a candidate, `--activate` promotes it):
 
@@ -164,6 +168,18 @@ python -m cval.cli health activate <test-id> <candidate-id> --output json
    scripts/cval-baseline-classify.sh status
    ```
 
+   The loops enumerate targets each cycle. `CVAL_BASELINE_CLASSIFY_TESTS` is an
+   allowlist and cannot re-enable disabled tests; empty/malformed enumeration or
+   an empty allowlist intersection fails the cycle. DL targets take one shared lock
+   and refresh once per group. The helper opens the existing canonical baseline
+   directory with `O_DIRECTORY|O_NOFOLLOW`, requires effective-user ownership and
+   no group/other write permission, flocks that stable directory inode while
+   supervising the child, and revalidates pathname/device/inode before, during,
+   and after child execution. The configured child lock pathname is only a
+   compatibility marker and cannot split locking when replaced. Any validation/
+   acquisition failure stops DL work. One target failure does not skip later targets, but the
+   cycle returns nonzero. Never infer a live restart from a local U10 change.
+
 - Promote a new baseline to active only with operator awareness; it redefines
   what "normal" means for future classification.
 - Classification reads raw metric DBs and never cordons or drains nodes; with
@@ -171,6 +187,8 @@ python -m cval.cli health activate <test-id> <candidate-id> --output json
    `/data/continuous_validation/baselines/classification-results.db`.
 - Prefer the c-val baseline modules (robust median/MAD logic) over ad hoc shell
   parsing of the metric DBs.
+- Keep built-in compatibility readers on the current `metadata/` DBs and
+   compatibility outputs under `baselines/`; U10 is not a U7/U8/U9 cutover.
 
 ## Verification Steps
 

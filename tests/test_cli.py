@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from cval.cli import main
 from cval.models import ClassificationResultRow, LatestStatusRow
+from cval.validation.plugins import ExportRows
 
 
 class CliTests(unittest.TestCase):
@@ -67,6 +68,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(files), 1)
         self.assertIn("Wrote 2 overall latest result row(s)", output.getvalue())
+
+    def test_plugin_results_command_reports_export_row_count(self) -> None:
+        output = io.StringIO()
+        exported = ExportRows(("node",), (("node-a",), ("node-b",)))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "cval.cli.get_latest_status_rows",
+                return_value=[LatestStatusRow("node-a", "storage", 100, "pass")],
+            ), patch(
+                "cval.validation.operations.export_compatibility_rows",
+                return_value=exported,
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "results",
+                            "--test",
+                            "storage",
+                            "--no-classification",
+                            "--no-metrics",
+                            "--output-dir",
+                            tmpdir,
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Wrote 2 storage latest result row(s)", output.getvalue())
 
     def test_classifications_command_writes_csv(self) -> None:
         output = io.StringIO()

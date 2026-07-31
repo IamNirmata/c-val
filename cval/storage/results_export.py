@@ -16,21 +16,14 @@ from zoneinfo import ZoneInfo
 from cval.models import ClassificationResultRow, LatestStatusRow, NcclHealthMetric, NcclMetrics, StorageMetrics
 from cval.storage.classification_status import classification_rows_by_node_test
 from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
+from cval.validation.operational_targets import (
+    normalize_compatibility_target,
+    validate_operational_target_name,
+)
+from cval.validation.plugins import ExportRows
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 UTC = dt.timezone.utc
-
-RESULT_TEST_ALIASES = {
-    "overall": "all",
-    "all": "all",
-    "storage": "storage",
-    "nccl": "nccl",
-    "dltest": "dltest",
-    "dltest-numerical": "dltest",
-    "dltest-compute": "dltest",
-    "dltest-collective": "dltest",
-    "dltest-overlap": "dltest",
-}
 
 CSV_BASE_COLUMNS = (
     "node",
@@ -89,10 +82,9 @@ def normalize_result_test(test_name: str) -> str:
     """Map user-facing result test names to DB latest_status test names."""
 
     normalized = test_name.strip().lower()
-    if normalized not in RESULT_TEST_ALIASES:
-        valid = ", ".join(sorted(RESULT_TEST_ALIASES))
-        raise ValueError(f"test must be one of: {valid}")
-    return RESULT_TEST_ALIASES[normalized]
+    if normalized in {"overall", "all"}:
+        return "all"
+    return normalize_compatibility_target(validate_operational_target_name(normalized))
 
 
 def display_result_test(test_name: str) -> str:
@@ -238,6 +230,24 @@ def write_latest_results_csv(
             rows_to_csv_records(selected, test_name, classifications, nccl_metrics, storage_metrics)
         )
 
+    return output_path
+
+
+def write_export_rows_csv(
+    export: ExportRows,
+    test_name: str,
+    output_dir: str | Path = ".",
+    now: dt.datetime | None = None,
+) -> Path:
+    """Write one validated plugin export using framework-owned naming/output."""
+
+    directory = Path(output_dir).expanduser().resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    output_path = directory / default_results_filename(test_name, now)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(export.columns)
+        writer.writerows(export.rows)
     return output_path
 
 
