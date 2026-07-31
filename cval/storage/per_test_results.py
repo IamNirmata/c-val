@@ -907,6 +907,52 @@ def validate_common_result_connection(connection: Any) -> None:
         )
 
 
+def validate_test_result_owner_integrity(
+    connection: Any,
+    *,
+    test_id: str,
+) -> None:
+    """Require every U7 common row and receipt to belong to one registered test."""
+
+    if type(test_id) is not str or not test_id or test_id != test_id.strip():
+        raise ValueError("Registered U7 test owner must be exact non-empty text")
+    if isinstance(connection, sqlite3.Connection) and not connection.in_transaction:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+    validate_common_result_connection(connection)
+    invalid_result = connection.execute(
+        "SELECT result_id FROM test_results "
+        "WHERE typeof(test_id) != 'text' OR test_id != ? "
+        "OR typeof(run_id) != 'text' OR run_id = '' LIMIT 1",
+        (test_id,),
+    ).fetchone()
+    if invalid_result is not None:
+        raise RuntimeError(
+            f"U7 test_results owner integrity does not match registered test {test_id!r}"
+        )
+    invalid_version = connection.execute(
+        "SELECT test_id FROM adapter_schema_versions "
+        "WHERE typeof(test_id) != 'text' OR test_id != ? LIMIT 1",
+        (test_id,),
+    ).fetchone()
+    if invalid_version is not None:
+        raise RuntimeError(
+            f"U7 adapter schema owner does not match registered test {test_id!r}"
+        )
+    invalid_receipt = connection.execute(
+        "SELECT receipt.run_id FROM metric_ingestion_receipts AS receipt "
+        "LEFT JOIN test_results AS parent ON parent.run_id=receipt.run_id "
+        "WHERE typeof(receipt.run_id) != 'text' OR receipt.run_id = '' "
+        "OR typeof(receipt.test_id) != 'text' OR receipt.test_id != ? "
+        "OR parent.run_id IS NULL OR parent.test_id != ? LIMIT 1",
+        (test_id, test_id),
+    ).fetchone()
+    if invalid_receipt is not None:
+        raise RuntimeError(
+            f"U7 adapter receipt owner/parent integrity does not match registered test {test_id!r}"
+        )
+
+
 def audit_classification_history_integrity(
     db_path: str | Path,
     *,
@@ -926,11 +972,30 @@ def audit_classification_history_integrity(
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN")
-        _assert_supported_schema(connection, allow_empty=False)
-        _validate_schema_shape(connection)
-        if _schema_version_from_migrations(connection) != SCHEMA_VERSION:
-            return 0
-        return _audit_classification_history_rows(connection, page_size=page_size)
+        return audit_classification_history_connection(
+            connection,
+            page_size=page_size,
+        )
+
+
+def audit_classification_history_connection(
+    connection: Any,
+    *,
+    page_size: int = _HISTORY_AUDIT_PAGE_SIZE,
+) -> int:
+    """Audit history through an already-open snapshot connection."""
+
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size <= 0:
+        raise ValueError("classification history audit page_size must be positive")
+    if isinstance(connection, sqlite3.Connection) and not connection.in_transaction:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN")
+    _assert_supported_schema(connection, allow_empty=False)
+    _validate_schema_shape(connection)
+    if _schema_version_from_migrations(connection) != SCHEMA_VERSION:
+        return 0
+    return _audit_classification_history_rows(connection, page_size=page_size)
 
 
 def common_result_schema_version(connection: Any) -> int:
@@ -2541,6 +2606,7 @@ def _audit_classification_history_rows(
 ) -> int:
     last_id = 0
     audited = 0
+    owner_test_id: str | None = None
     while True:
         rows = connection.execute(
             "SELECT history.classification_id, history.classification_key, "
@@ -2550,7 +2616,8 @@ def _audit_classification_history_rows(
             "history.health_class_name, history.health_class_numerical, "
             "history.dnr_reason, history.classified_at, "
             "history.evaluator_version, history.metric_verdicts_json, "
-            "history.details_json, owner.result_id "
+            "history.details_json, owner.result_id, owner.run_id, "
+            "owner.test_id, owner.node "
             "FROM classification_history AS history "
             "LEFT JOIN test_results AS owner ON owner.run_id=history.run_id "
             "WHERE history.classification_id > ? "
@@ -2594,8 +2661,19 @@ def _audit_classification_history_rows(
                 raise RuntimeError(
                     "Classification history contains invalid typed evidence"
                 ) from exc
-            if row[16] != record.result_id:
+            if (
+                row[16] != record.result_id
+                or row[17] != record.run_id
+                or type(row[18]) is not str
+                or not row[18].strip()
+                or type(row[19]) is not str
+                or not row[19].strip()
+            ):
                 raise RuntimeError("Classification history owner identity is invalid")
+            if owner_test_id is None:
+                owner_test_id = row[18]
+            elif row[18] != owner_test_id:
+                raise RuntimeError("Classification history test owner is invalid")
             last_id = classification_id
             audited += 1
 

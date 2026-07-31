@@ -11,6 +11,8 @@ import base64
 import json
 import math
 import os
+import re
+import stat
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -214,6 +216,7 @@ class HealthEvaluatorConfig:
     write_enabled: bool = False
     lock_timeout_seconds: int = 30
     max_classifications_per_test: int = 250
+    validation_root_mode: str = "0700"
 
 
 @dataclass(frozen=True)
@@ -404,7 +407,12 @@ def _build_config(
     health_evaluator = _section(data, "health_evaluator")
     _reject_section_keys(
         health_evaluator,
-        {"write_enabled", "lock_timeout_seconds", "max_classifications_per_test"},
+        {
+            "write_enabled",
+            "lock_timeout_seconds",
+            "max_classifications_per_test",
+            "validation_root_mode",
+        },
         "health_evaluator",
     )
 
@@ -702,6 +710,11 @@ def _build_config(
                 "max_classifications_per_test",
                 defaults.health_evaluator.max_classifications_per_test,
             ),
+            validation_root_mode=_str(
+                health_evaluator,
+                "validation_root_mode",
+                defaults.health_evaluator.validation_root_mode,
+            ),
         ),
     )
     _validate_config(config)
@@ -770,6 +783,22 @@ def _validate_config(config: CvalConfig) -> None:
     }.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"health_evaluator.{name} must be a positive integer")
+    root_mode = config.health_evaluator.validation_root_mode
+    if not re.fullmatch(r"0[0-7]{3}", root_mode):
+        raise ValueError(
+            "health_evaluator.validation_root_mode must be an exact four-digit octal mode"
+        )
+    parsed_root_mode = int(root_mode, 8)
+    if parsed_root_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError(
+            "health_evaluator.validation_root_mode must not be group/world writable"
+        )
+    if parsed_root_mode & (stat.S_IRUSR | stat.S_IXUSR) != (
+        stat.S_IRUSR | stat.S_IXUSR
+    ):
+        raise ValueError(
+            "health_evaluator.validation_root_mode must grant owner read/search"
+        )
     try:
         reserved_gpus = int(config.job_template.gpu_count)
         reserved_rdma = int(config.job_template.rdma_count)

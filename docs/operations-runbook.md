@@ -119,7 +119,7 @@ truncation, migration state, candidate/history counts, and
 `partial_durable_writes=false`. Confirm that no `.health-evaluator.lock`, health
 DB/key, migration, history row, `-wal`, or `-shm` appeared and no source mtime
 changed. A source must be checkpointed with
-absent WAL/SHM sidecars; dry-run fails closed rather than deleting sidecars.
+absent WAL/SHM/rollback-journal sidecars; dry-run fails closed rather than deleting sidecars.
 On Linux, the evaluator uses `O_NOATIME|O_NOFOLLOW` and therefore must own the
 source DB (or have equivalent privilege); it fails closed instead of accepting
 an access-time mutation.
@@ -136,6 +136,38 @@ reopened while the transaction's temporary WAL/SHM sidecars exist.
 The report remains stage-aware if a later operation fails: each SQLite file is
 transactional, but U7 migration/history and U8 candidate commits are explicitly
 cross-database non-atomic and must be retried from immutable evidence.
+
+### U11 offline rollout and rollback preparation
+
+Use only local/disposable copies until the live blockers are closed:
+
+```bash
+python -m cval.cli --config <local-copy-config.toml> \
+  evaluator-preflight --validation-root <copy-root> --access ro
+python -m cval.cli evaluator-parity --u8-json <u8.json> \
+  --compatibility-db <copied-classification-results.db>
+python -m cval.cli evaluator-backup --source-root <copy-root> \
+  --destination <new-backup-directory>
+python -m cval.cli evaluator-backup --source-root <copy-root> \
+  --destination <new-backup-directory> --apply --confirm backup
+```
+
+The local backup command requires both source and destination outside the
+configured runtime root, rejects symlink/traversal/overlap and SQLite
+WAL/SHM/journal sidecars, and does not substitute for a reviewed live backup.
+Its destination parent must already exist; dry-run creates no directories.
+Kubernetes manifests remain
+suspended and contain image/commit/PVC placeholders. The checked-in image
+recipe is build-time offline (`--network=none`, local exact-version/hash-checked
+wheelhouse), embeds the exact commit, and produces a distroless non-root final
+stage; it is not a published or approved image. Build/sign/SBOM/provenance steps
+and the full ancestry/owner/parity checks are documented in the rollout guide.
+Do not apply, unsuspend,
+or create a live Job until U7 availability, PVC owner/mode/sidecars, Kubernetes
+and NetworkPolicy behavior, image digest/embedded commit/SBOM, backup approval,
+shadow criteria, apply, cutover, and rollback commands are separately reviewed.
+The detailed phase plan, risks, and non-destructive rollback are in
+[U11 evaluator rollout preparation](u11-evaluator-rollout.md).
 
 Build a baseline from recent results, review it, then promote it to active:
 

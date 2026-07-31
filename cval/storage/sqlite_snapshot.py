@@ -176,12 +176,13 @@ def _require_absent_sidecars(path: Path) -> None:
         for sidecar in (
             path.with_name(f"{path.name}-wal"),
             path.with_name(f"{path.name}-shm"),
+            path.with_name(f"{path.name}-journal"),
         )
         if sidecar.exists() or sidecar.is_symlink()
     ]
     if present:
         raise RuntimeError(
-            "SQLite snapshot requires a checkpointed database with absent WAL/SHM "
+            "SQLite snapshot requires a quiescent database with absent WAL/SHM/journal "
             f"sidecars; found: {', '.join(present)}"
         )
 

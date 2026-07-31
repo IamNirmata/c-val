@@ -42,6 +42,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.health_evaluator.write_enabled)
         self.assertEqual(config.health_evaluator.lock_timeout_seconds, 30)
         self.assertEqual(config.health_evaluator.max_classifications_per_test, 250)
+        self.assertEqual(config.health_evaluator.validation_root_mode, "0700")
         self.assertEqual(
             config.runtime.dl_results_root_path,
             "/data/continuous_validation/validation_tests/dltest/runs",
@@ -153,6 +154,9 @@ enabled = false
             "lock_timeout_seconds = true",
             "lock_timeout_seconds = 0",
             "max_classifications_per_test = 0",
+            'validation_root_mode = "0770"',
+            'validation_root_mode = "700"',
+            'validation_root_mode = "0600"',
             "unknown = 1",
         )
         for value in variants:

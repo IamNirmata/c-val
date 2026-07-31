@@ -125,6 +125,37 @@ Deferred passing rows retain their bounded action rows and reasons. Their full
 count is included in `classification_remaining`, so zero actionable backlog
 does not imply that deferred work has drained.
 
+### Hidden U11 machine entry points
+
+These commands stay out of public `--help`, use local/copied inputs only, emit
+exactly one compact JSON value, and never invoke Kubernetes:
+
+```text
+evaluator-preflight [--validation-root COPY] [--access ro|rw]
+evaluator-parity [--u8-json FILE] [--u8-db FILE]
+                 [--compatibility-json FILE] [--compatibility-db FILE]
+evaluator-backup --source-root COPY --destination NEW_DIRECTORY
+                 [--apply --confirm backup]
+evaluator-service [--write-enabled --apply --confirm evaluate]
+                  [--expected-commit COMMIT] [--image-ref IMAGE@sha256:DIGEST]
+```
+
+Preflight validates registry/plugins, every existing root-to-U7/U8 directory
+component and post-read identity, exact owner/mode/search/writability, strict U7
+row/adapter/receipt ownership, absent WAL/SHM/journal sidecars, and exact U7/U8
+schemas without creating a lock or file. Parity preserves original labels and
+DNR reasons, rejects unknown/coerced labels, non-integer codes/timestamps,
+invalid run/baseline/reason semantics, and unregistered or mixed U7 owners even
+when history is absent, then projects strict non-authoritative direction
+buckets. Backup requires source and destination
+outside the configured runtime root, is plan-only by default, atomically
+reserves a never-overwritten destination during separately confirmed local-copy
+execution, and validates logical DB/row/content identity for copied SQLite/key
+units. Service suppresses dependency output and emits one
+`cval.evaluator-cycle.v1` object, including on handled SIGINT/SIGTERM, without
+PVC logs. See
+[U11 evaluator rollout preparation](u11-evaluator-rollout.md).
+
 ## Hidden in-pod ingestion hooks
 
 The following commands stay out of public `--help` and are called only by the

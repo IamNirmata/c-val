@@ -108,6 +108,9 @@ classify_interval_seconds = 300
 # confirmation. Enabling this does not enable U6/U7 ingestion writes.
 write_enabled = false
 lock_timeout_seconds = 30
+# U11 preflight requires this exact safe mode on runtime.validation_root; every
+# existing descendant through each test-owned DB parent must be exact 0700.
+validation_root_mode = "0700"
 # Bounds only oldest-pending classification writes per cycle. Candidate source
 # catalogs remain complete and cumulative for every current combination.
 max_classifications_per_test = 250

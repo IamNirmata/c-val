@@ -135,6 +135,31 @@ enabled `dltest` registration. This is selection and dispatch only: built-ins
 still read the metadata metric DBs and store compatibility baselines/verdicts
 under `baselines/`; no U7/U8/U9 source cutover or live loop restart is implied.
 
+U11 adds a locally testable one-shot service boundary around U9, but no live
+cutover. `cval.evaluator.service` verifies the commit embedded in the immutable
+image against the expected release commit, requires a digest-pinned image
+declaration equal to the rendered container image, runs deployment preflight,
+invokes one U9 cycle, suppresses dependency output, and emits one
+`cval.evaluator-cycle.v1` stdout object even on handled SIGINT/SIGTERM. Runtime
+code cannot attest the actual started image; admission, signature, and
+provenance verification remain mandatory live controls. The checked-in suspended Kustomize
+shadow variant mounts the validation root read-only and has no apply argument;
+the separately reviewed apply variant mounts read-write and carries the
+independent write gate plus exact evaluator confirmation. Both use a tokenless
+ServiceAccount, evaluator-scoped deny-all NetworkPolicy, Restricted pod
+security, bounded resources/deadlines/history, and no runtime Git, package
+installation, network, Kubernetes, GPU, or RDMA dependency. The checked-in
+multi-stage recipe installs the packaged commit marker and offline locked wheel
+inputs into a distroless non-root image, while all base/image digests remain
+fail-closed placeholders. Preflight validates and revalidates every existing
+root-to-owner component plus strict U7 row/receipt ownership; copied JSON/SQLite
+parity uses exact class, DNR, baseline, identity, and integer timestamp
+semantics. See
+[U11 evaluator rollout preparation](u11-evaluator-rollout.md). U11 remains
+blocked on live U7/PVC ownership facts, an approved image digest, backup/restore
+evidence, Kubernetes facts, shadow acceptance, and explicit apply/cutover
+approval.
+
 The four `metadata/dltest_*` DBs hold raw tall DL metric rows. The
 `baselines/*-baselines.db` files hold versioned dynamic baselines. The
 `baselines/classification-results.db` file holds derived baseline decisions; raw

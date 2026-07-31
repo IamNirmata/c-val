@@ -1,7 +1,7 @@
 # c-val Modular Framework Update Tracker
 
 **Created:** 2026-07-28  
-**Status:** Active — U0–U9 implemented and accepted locally; U10 implementation is in progress
+**Status:** Active — U0–U10 accepted locally; U11 local preparation validated after audit, with every live rollout criterion still blocked
 **Source draft:** `docs/todo/cval-3.md`  
 **Goal:** Make c-val modular, deterministic, easier to extend, and safer to operate without breaking current validation, ingestion, baseline, or classification behavior.
 
@@ -1162,7 +1162,7 @@ Acceptance criteria:
 - Disabled tests are skipped everywhere.
 - A simple new metric plugin can participate without core CLI edits.
 
-Implemented locally during the current `IN PROGRESS` stage:
+Implemented and accepted locally in U10:
 
 - Immutable `OperationalTarget` catalog in registry order, with operation sets
   derived from enabled `baseline` and existing `export` capabilities.
@@ -1234,22 +1234,72 @@ Current local validation evidence:
 - No Kubernetes, live PVC/DB, archive, commit, push, deployment, pod update, or
   loop restart was performed.
 
-Status remains `IN PROGRESS` pending independent certification and operator
-acceptance.
+U10 is accepted locally. Its explicit live loop restart, source cutover, and
+deployment exclusions remain in force.
 
 ## U11 — Introduce and cut over to `cval-evaluator`
 
-**Status:** `PROPOSED`  
+**Status:** `BLOCKED` — local preparation independently certified READY 2026-07-30; no published image, Kubernetes, PVC, live backup, shadow, apply, or cutover approval is implied
 **Risk:** Production Kubernetes and service cutover.  
 **Depends on:** U9 and U10.
 
 Deliverables:
 
-- CPU-only PVC-mounted evaluator manifest or CronJob.
-- Readiness, logging, bounded execution, and least-privilege configuration.
-- Parallel read-only/shadow validation against current services.
-- Explicit cutover and rollback runbook.
-- Update all code, documentation, and operator customization references after cutover.
+- [x] Production-hardened, suspended `batch/v1` CronJob Kustomize base with
+  read-only shadow and separately reviewed read-write apply variants.
+- [x] Tokenless ServiceAccount without Role/binding, evaluator-scoped deny-all
+  NetworkPolicy, Restricted security context, read-only root, bounded `/tmp`,
+  CPU/memory/deadline/history/TTL limits, and no ports/GPU/RDMA/host path.
+- [x] One-shot startup-verified `cval.evaluator-cycle.v1` stdout service with
+  release/config identity, preflight, duration, U9 report, and exit code.
+- [x] Side-effect-free local deployment preflight and deterministic copied-input
+  U8/compatibility shadow parity report preserving original labels and DNR.
+- [x] Dry-run-first, separately confirmed, evaluator-lock-aware local/disposable
+  U7/U8+key backup and copied-unit restore validation without key hash logging.
+- [x] Strict-JSON hidden CLI entry points; manifest/static, service, preflight,
+  parity, backup, no-side-effect, determinism, idempotency, forced-termination,
+  and offline rollback tests.
+- [x] Current-UID/safe-mode/single-link RW preflight, orphan WAL/SHM/journal
+  rejection, metadata-preserving shadow checks, and logical backup restore
+  inventories with atomic destination reservation and identity-scoped cleanup.
+- [x] Rendered-manifest assertions for exact image-reference declaration,
+  Restricted/tokenless/deny-all policy, mode gates, mounts, suspension, and
+  ephemeral-storage bounds; runtime image attestation remains a live blocker.
+- [x] Architecture/config/CLI/operations rollout and rollback documentation plus
+  agent/instruction/skill synchronization for locally completable preparation.
+- [x] Audited copied U8 readers stream exact classification-history integrity
+  checks from the same immutable snapshot before latest-row selection, bind
+  result/run/test ownership, and reject malformed history; compatibility rows
+  require exact SQLite storage classes, non-empty identities, and stable status.
+- [x] Strict evaluator-service CLI boundary suppresses dependency stdout/stderr,
+  redacts `BaseException`/`SystemExit`, preserves `KeyboardInterrupt`, and emits
+  one JSON error envelope with exit code 2.
+- [x] Preflight validates every existing component from the explicitly
+  exact-mode runtime root through U7/U8 parents as current UID, exact descendant
+  `0700`, searchable, no-symlink, and not group/world writable; it revalidates
+  device/inode/mode after reads and rejects unsafe intermediate directories,
+  foreign owners, and symlink swaps.
+- [x] `BUILD_COMMIT` is wheel/sdist package data. A checked-in multi-stage image
+  recipe consumes only the built cval wheel plus exact-version/hash-verified
+  offline dependency wheels, injects the exact commit and OCI revision label,
+  installs matching config/descriptors/plugins read-only, and emits a
+  distroless UID/GID 65532 final image. Base and manifest digests remain
+  fail-closed placeholders; build/sign/SBOM/provenance steps are documented but
+  unexecuted.
+- [x] Shared strict U7 owner integrity validates every raw owner, adapter schema
+  owner, durable receipt, and receipt parent against the registered test;
+  preflight and parity invoke it before any optional history path, so mixed
+  owner schema-v1 databases fail closed.
+- [x] JSON parity matches SQLite strictness for exact non-empty node/test/run
+  text, required matching class code/name, stable class-5-only `DnrReason`,
+  `hb1` baseline/null semantics, and exact non-negative optional integer
+  timestamps without Boolean/float/coercion acceptance.
+- [ ] Verify live U7 availability, PVC ownership/modes/sidecars, Kubernetes/CNI/
+  admission facts, and real namespace/PVC claim.
+- [ ] Build/sign/scan/publish the CPU-only image; replace digest and embedded
+  commit placeholders only with independently verified release evidence.
+- [ ] Approve and rehearse the live backup/restore unit, apply suspended shadow,
+  accept bounded shadow parity, then separately approve apply and cutover.
 
 Acceptance criteria:
 
@@ -1259,6 +1309,30 @@ Acceptance criteria:
 - New service is pinned to a verified commit.
 
 **Exact Kubernetes commands and risk summary must be approved before execution.**
+
+All currently identified locally remediable findings are implemented and
+tested, but U11 remains
+`IN PROGRESS/BLOCKED` for every live criterion above. No container image build/publication,
+live Kubernetes/PVC/DB or archive access,
+commit, push, deployment, apply, or cutover was performed. See
+`docs/u11-evaluator-rollout.md` for exact local commands, reviewed live phases,
+risks, blockers, and rollback.
+
+Current 2026-07-31 audit validation evidence:
+
+- `81` focused U11/per-test storage tests passed with warnings treated as errors.
+- `666` full unit tests passed with warnings treated as errors.
+- A wheel and sdist were built without package-index access on a disposable
+  source copy; both contained the fail-closed packaged `BUILD_COMMIT` marker.
+- Recursive Bash syntax checks passed for `scripts/` and `validation-tests/`.
+- Python compilation passed for `cval`, `tests`, and repository operator skill
+  scripts.
+- Registry/plugin validation reported 3 registered, 3 enabled, and 3 loaded.
+- Both suspended Kustomize variants rendered locally and passed static YAML,
+  resource-kind, tokenless, read-only-root, image-digest, and suspension checks.
+- `git diff --check` passed.
+- No Kubernetes API, live PVC/DB, archive, commit, push, deploy, pod update, or
+  loop restart was performed.
 
 ## U12 — Compatibility cleanup and framework documentation
 

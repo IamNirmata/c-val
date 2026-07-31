@@ -13,10 +13,12 @@ The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
-from dataclasses import asdict
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from cval.config import (
@@ -62,13 +64,30 @@ from cval.validation.operational_targets import (
 )
 
 
+_STRICT_JSON_COMMANDS = frozenset(
+    {
+        "evaluator-preflight",
+        "evaluator-parity",
+        "evaluator-backup",
+        "evaluator-service",
+    }
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments, dispatch to a handler, and return a process code."""
 
     raw_argv = sys.argv[1:] if argv is None else argv
+    strict_json = any(command in raw_argv for command in _STRICT_JSON_COMMANDS)
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
-    config_args, _ = bootstrap.parse_known_args(raw_argv)
+    parsed_bootstrap = _parse_cli_arguments(
+        lambda: bootstrap.parse_known_args(raw_argv),
+        strict_json=strict_json,
+    )
+    if parsed_bootstrap is None:
+        return 2
+    config_args, _ = parsed_bootstrap
     try:
         snapshot = os.environ.get("CVAL_CONFIG_SNAPSHOT_B64")
         runtime_repo_root = os.environ.get("CVAL_TEST_REPO_ROOT") or os.environ.get(
@@ -83,11 +102,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     except (FileNotFoundError, OSError, ValueError) as exc:
+        if strict_json:
+            _print_strict_json({"ok": False, "error": _single_line_error(exc)})
+            return 2
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
     parser = build_parser(config)
-    args = parser.parse_args(raw_argv)
+    args = _parse_cli_arguments(
+        lambda: parser.parse_args(raw_argv),
+        strict_json=strict_json,
+    )
+    if args is None:
+        return 2
     args.cval_config = config
     try:
         return args.handler(args)
@@ -407,6 +434,39 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     health_activate.add_argument("--confirm")
     health_activate.add_argument("--output", choices=["table", "json"], default="table")
     health_activate.set_defaults(handler=handle_health_activate)
+
+    # U11 machine-only service/deployment preparation commands. They are
+    # intentionally absent from public help and emit exactly one JSON value.
+    evaluator_preflight = subparsers.add_parser("evaluator-preflight")
+    evaluator_preflight.add_argument("--access", choices=["ro", "rw"], default="ro")
+    evaluator_preflight.add_argument("--validation-root", type=Path)
+    evaluator_preflight.set_defaults(handler=handle_evaluator_preflight)
+
+    evaluator_parity = subparsers.add_parser("evaluator-parity")
+    evaluator_parity.add_argument("--u8-json", type=Path, action="append", default=[])
+    evaluator_parity.add_argument("--u8-db", type=Path, action="append", default=[])
+    evaluator_parity.add_argument(
+        "--compatibility-json", type=Path, action="append", default=[]
+    )
+    evaluator_parity.add_argument(
+        "--compatibility-db", type=Path, action="append", default=[]
+    )
+    evaluator_parity.set_defaults(handler=handle_evaluator_parity)
+
+    evaluator_backup = subparsers.add_parser("evaluator-backup")
+    evaluator_backup.add_argument("--source-root", type=Path, required=True)
+    evaluator_backup.add_argument("--destination", type=Path, required=True)
+    evaluator_backup.add_argument("--apply", action="store_true")
+    evaluator_backup.add_argument("--confirm")
+    evaluator_backup.set_defaults(handler=handle_evaluator_backup)
+
+    evaluator_service = subparsers.add_parser("evaluator-service")
+    evaluator_service.add_argument("--apply", action="store_true")
+    evaluator_service.add_argument("--confirm")
+    evaluator_service.add_argument("--write-enabled", action="store_true")
+    evaluator_service.add_argument("--expected-commit")
+    evaluator_service.add_argument("--image-ref")
+    evaluator_service.set_defaults(handler=handle_evaluator_service)
 
     # In-pod ingestion commands; added without `help` so they stay out of --help.
     db_add_result = subparsers.add_parser("db-add-result")
@@ -1163,6 +1223,109 @@ def handle_health_activate(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_evaluator_preflight(args: argparse.Namespace) -> int:
+    """Emit one read-only U11 deployment-preflight JSON object."""
+
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            from cval.evaluator.preflight import run_deployment_preflight
+
+            config = args.cval_config
+            if args.validation_root is not None:
+                config = replace(
+                    config,
+                    runtime=replace(
+                        config.runtime,
+                        validation_root=str(args.validation_root),
+                    ),
+                )
+            report = run_deployment_preflight(config, access=args.access)
+        _print_strict_json(report)
+        return 0 if report["ok"] else 1
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
+        _print_strict_evaluator_error("evaluator preflight", exc)
+        return 2
+
+
+def handle_evaluator_parity(args: argparse.Namespace) -> int:
+    """Emit one deterministic shadow-parity JSON object from copied inputs."""
+
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            from cval.evaluator.parity import build_shadow_parity_report
+
+            report = build_shadow_parity_report(
+                u8_json_paths=args.u8_json,
+                u8_db_paths=args.u8_db,
+                compatibility_json_paths=args.compatibility_json,
+                compatibility_db_paths=args.compatibility_db,
+                registered_test_ids=(
+                    registered.id
+                    for registered in args.cval_config.tests.registry.tests
+                ),
+            )
+        _print_strict_json(report)
+        return 0
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
+        _print_strict_evaluator_error("evaluator parity", exc)
+        return 2
+
+
+def handle_evaluator_backup(args: argparse.Namespace) -> int:
+    """Plan or execute a separately gated backup of a disposable local copy."""
+
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            from cval.evaluator.backup import backup_local_evaluator_state
+
+            report = backup_local_evaluator_state(
+                args.cval_config,
+                source_root=args.source_root,
+                destination=args.destination,
+                apply=args.apply,
+                confirmation=args.confirm,
+            )
+        _print_strict_json(report)
+        return 0 if report["ok"] else 1
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
+        _print_strict_evaluator_error("evaluator backup", exc)
+        return 2
+
+
+def handle_evaluator_service(args: argparse.Namespace) -> int:
+    """Run one startup-verified evaluator cycle and emit one stdout envelope."""
+
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            from cval.evaluator.service import run_evaluator_service
+
+            report = run_evaluator_service(
+                args.cval_config,
+                apply=args.apply,
+                confirmation=args.confirm,
+                write_enabled=args.write_enabled,
+                expected_commit=args.expected_commit,
+                image_ref=args.image_ref,
+            )
+            exit_code = int(report["exit_code"])
+        _print_strict_json(report)
+        return exit_code
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
+        category = "SystemExit" if isinstance(exc, SystemExit) else exc.__class__.__name__
+        _print_strict_json(
+            {"ok": False, "error": f"evaluator service failed ({category})"}
+        )
+        return 2
+
+
 def handle_validate(args: argparse.Namespace) -> int:
     """Submit one node, live-track it, classify the fresh result, and report."""
     from cval.orchestrator.validate import run_node_validation
@@ -1827,6 +1990,41 @@ def _parse_csv(value: str) -> list[str]:
     """Parse comma-separated CLI values while ignoring empty items."""
 
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _single_line_error(exc: BaseException) -> str:
+    return " ".join((str(exc).strip() or exc.__class__.__name__).splitlines())
+
+
+def _print_strict_json(value: object) -> None:
+    print(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+
+def _print_strict_evaluator_error(operation: str, exc: BaseException) -> None:
+    if isinstance(exc, Exception):
+        message = _single_line_error(exc)
+    else:
+        category = "SystemExit" if isinstance(exc, SystemExit) else "BaseException"
+        message = f"{operation} failed ({category})"
+    _print_strict_json({"ok": False, "error": message})
+
+
+def _parse_cli_arguments(parser_call, *, strict_json: bool):
+    if not strict_json:
+        return parser_call()
+    errors = io.StringIO()
+    try:
+        with redirect_stderr(errors):
+            return parser_call()
+    except SystemExit as exc:
+        if exc.code == 0:
+            raise
+        lines = [line.strip() for line in errors.getvalue().splitlines() if line.strip()]
+        message = lines[-1] if lines else "invalid evaluator command arguments"
+        if message.startswith("cval: error: "):
+            message = message.removeprefix("cval: error: ")
+        _print_strict_json({"ok": False, "error": message})
+        return None
 
 
 def _load_db_status(args: argparse.Namespace) -> dict[str, int]:

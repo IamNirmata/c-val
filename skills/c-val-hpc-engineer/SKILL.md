@@ -111,7 +111,7 @@ under `baselines/`. U9 now exposes local dry-run `health evaluate` and
 live service. Do not create, migrate, activate, or assume live
 `validation_tests/<test>/<test>_health_classes.db` files. Apply requires the
 independent evaluator gate and exact confirmation; live rollout is U11.
-Dry-run requires checkpointed canonical copies with absent WAL/SHM sidecars;
+Dry-run requires checkpointed canonical copies with absent WAL/SHM/journal sidecars;
 it reads one in-memory snapshot shared with adapters and never deletes or
 creates source sidecars. Review candidate-source completeness plus
 classification selected/backlog/remaining/truncation, migration,
@@ -136,6 +136,26 @@ valid for the complete apply operation.
 python -m cval.cli health evaluate --output json
 python -m cval.cli health activate <test-id> <candidate-id> --output json
 ```
+
+U11 local preparation adds hidden strict-JSON `evaluator-preflight`,
+`evaluator-parity`, `evaluator-backup`, and `evaluator-service` entry points plus
+suspended Kustomize shadow/apply variants under `deploy/cval-evaluator/`.
+Preflight validates every existing root-to-owner directory component against
+the explicitly configured safe root mode/exact descendant `0700`, revalidates
+identities after reads, and enforces registered U7 row/adapter/receipt owners.
+Parity requires exact JSON/SQLite identity, class, DNR, baseline, and timestamp
+types and checks U7 ownership even without history. Both accept only
+local/copied inputs. Backup
+rejects the configured runtime root and all descendants, is dry-run by default,
+and requires `--apply --confirm backup` for disposable copies. The
+ServiceAccount has no bindings/token and deny-all network policy is required.
+The checked-in offline, hash-bound, distroless image recipe packages the commit
+marker, config, and descriptors/plugins, but base/image digests, embedded-commit
+manifest value, and PVC values are fail-closed placeholders; never apply or
+unsuspend them. U11 remains blocked on live U7 availability, PVC ownership and
+sidecars, real Kubernetes/CNI/admission facts, a verified image digest/commit/
+SBOM, approved live backup/restore, accepted shadow evidence, and explicit
+apply/cutover/rollback approval. Follow `docs/u11-evaluator-rollout.md`.
 
 - Start with `status` to identify stale or missing results.
 - Resolve compatibility targets from the enabled registry catalog. The

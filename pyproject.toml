@@ -16,6 +16,9 @@ cval = "cval.cli:main"
 [tool.setuptools.packages.find]
 include = ["cval*"]
 
+[tool.setuptools.package-data]
+"cval.evaluator" = ["BUILD_COMMIT"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

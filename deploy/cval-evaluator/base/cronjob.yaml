@@ -1,0 +1,98 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cval-evaluator
+  labels:
+    app.kubernetes.io/name: cval-evaluator
+    app.kubernetes.io/component: health-evaluator
+  annotations:
+    cval.io/release-placeholders: "image-digest,embedded-commit,pvc-claim"
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cval-evaluator
+        app.kubernetes.io/component: health-evaluator
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: cval-evaluator
+            app.kubernetes.io/component: health-evaluator
+        spec:
+          serviceAccountName: cval-evaluator
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: evaluator
+              image: registry.invalid/cval-evaluator@sha256:0000000000000000000000000000000000000000000000000000000000000000
+              imagePullPolicy: IfNotPresent
+              command:
+                - /usr/bin/python3
+                - -m
+                - cval.cli
+              args:
+                - --config
+                - /app/config/cval.toml
+                - evaluator-service
+              env:
+                - name: CVAL_EXPECTED_COMMIT
+                  value: "0000000000000000000000000000000000000000"
+                - name: CVAL_IMAGE_REF
+                  value: registry.invalid/cval-evaluator@sha256:0000000000000000000000000000000000000000000000000000000000000000
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: HOME
+                  value: /tmp
+                - name: TMPDIR
+                  value: /tmp
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                  ephemeral-storage: 64Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+                  ephemeral-storage: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                privileged: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: validation-data
+                  mountPath: /data/continuous_validation
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: validation-data
+              persistentVolumeClaim:
+                claimName: replace-with-reviewed-pvc-claim
+                readOnly: true
+            - name: tmp
+              emptyDir:
+                sizeLimit: 128Mi

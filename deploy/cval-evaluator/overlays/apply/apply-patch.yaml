@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cval-evaluator
+  labels:
+    cval.io/evaluator-mode: apply
+spec:
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            cval.io/evaluator-mode: apply
+        spec:
+          containers:
+            - name: evaluator
+              args:
+                - --config
+                - /app/config/cval.toml
+                - evaluator-service
+                - --write-enabled
+                - --apply
+                - --confirm
+                - evaluate
+              volumeMounts:
+                - name: validation-data
+                  mountPath: /data/continuous_validation
+                  readOnly: false
+          volumes:
+            - name: validation-data
+              persistentVolumeClaim:
+                claimName: replace-with-reviewed-pvc-claim
+                readOnly: false

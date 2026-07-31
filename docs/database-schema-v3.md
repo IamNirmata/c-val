@@ -306,6 +306,11 @@ CREATE INDEX idx_test_results_unevaluated
 
 - `run_id` provides ingestion idempotency.
 - `test_id` must equal the database owner's test ID for every row.
+- Deployment preflight and copied-DB parity invoke one shared strict content
+    check: every `test_results.test_id` and `adapter_schema_versions.test_id`
+    equals the effective registered owner, and every durable receipt has that
+    owner plus a parent `test_results` row for the same `run_id`. This check runs
+    even for schema v1 databases with no classification history.
 - `raw_result_json` stores the validated test-specific result object, not the entire run envelope.
 - `result_digest` binds the row to the exact validated `cval.results.v2`
     envelope, including envelope-only fields.
@@ -806,7 +811,7 @@ For multi-metric tests, the adapter/core aggregation policy must be versioned an
 - Use unique keys for idempotency.
 - U9 read preflight copies a checkpointed main DB image into shared memory
     without opening SQLite on the source; adapters read that same snapshot. It
-    requires absent WAL/SHM sidecars and never deletes or creates them.
+    requires absent WAL/SHM/rollback-journal sidecars and never deletes or creates them.
 - U9 history-append revalidation reads the catalog from the already-open U7
     `BEGIN IMMEDIATE` connection and serializes adapter evidence from that same
     transaction into memory. It never snapshots or reopens the U7 source while

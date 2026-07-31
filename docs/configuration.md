@@ -251,15 +251,29 @@ U9 has an independent strict section:
 write_enabled = false
 lock_timeout_seconds = 30
 max_classifications_per_test = 250
+validation_root_mode = "0700"
 ```
 
 - `write_enabled` must be a TOML Boolean. It does not inherit from or enable
   either U6/U7 ingestion gate.
-- `lock_timeout_seconds` and `max_classifications_per_test` must be positive integers;
-  unknown keys are rejected.
+- `lock_timeout_seconds` and `max_classifications_per_test` must be positive integers.
+  `validation_root_mode` is an exact four-digit octal string, must grant owner
+  read/search, and must not grant group/world write. U11 requires this exact
+  mode on `runtime.validation_root` and exact `0700` on every existing
+  descendant through each test-owned U7/U8 parent. Unknown keys are rejected.
 - Dry-run creates no lock, migration, health DB, activation key, or history row.
 - Apply additionally requires `--apply --confirm evaluate`; manual activation
   requires `--apply --confirm activate`.
+- U11's one-shot service has a separate `--write-enabled` process flag for the
+  deployment write gate; there is no duplicate write-enable environment
+  variable. Shadow rejects a true gate; apply requires both a
+  true gate and exact `--apply --confirm evaluate`. This projection changes only
+  the in-memory service config and does not rewrite TOML.
+- Release identity is not configuration: the image supplies an embedded commit
+  marker and deployment supplies matching `CVAL_EXPECTED_COMMIT` plus a
+  digest-pinned `CVAL_IMAGE_REF` exactly equal to the rendered container image.
+  This verifies declarations, not the actual runtime image; admission/signature/
+  provenance policy must provide that binding. All-zero placeholders fail closed.
 
 The max bounds only the oldest pending classifications selected per test/cycle.
 Candidate source catalogs always scan the complete cumulative current-config
