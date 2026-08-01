@@ -76,9 +76,11 @@ Read-only and dry-run commands are the default. Real Kubernetes job creation req
 ```
 
 Read-only commands such as `jobs --watch` never delete jobs. The separately
-started `cval-live` service automatically prunes stale `Pending` jobs matching
-its configured namespace and shared job-name prefix. Other cleanup remains
-explicit and approval-gated.
+started `cval-live` service defaults to audit mode and performs no cluster
+mutations. Submit requires exact `CVAL_LIVE_CONFIRM=submit`; prefix-bounded
+stale-`Pending` pruning remains disabled unless separately confirmed with
+`CVAL_PRUNE_CONFIRM=delete-pending`. Other cleanup remains explicit and
+approval-gated.
 
 ## Historical Validated v1 State
 

@@ -2,19 +2,37 @@
 set -euo pipefail
 
 # Start/stop a tmux-backed c-val live runner.
-# The runner uses a clean worktree from origin/main for code, while reading the
-# operator config from CVAL_CONFIG/config/cval.toml in this repository.
 #
-# Rolling scheduling policy:
-# - Keep at most CVAL_BATCH_SIZE active validation jobs.
-# - Before filling each individual open slot, rebuild the live ranked list from
-#   current Kubernetes state and latest validation DB status.
-# - Skip nodes already submitted in the current cycle and nodes deleted for
-#   pending-start timeout in the current cycle.
-# - Delete a validation job if it remains Pending and never reaches Running
-#   within CVAL_PENDING_START_TIMEOUT_SECONDS.
+# The immutable operation mode is explicit and audit-first:
+# - audit (default): discover, read latest_status, prioritize, render, and select
+#   slots without submitting, resuming, monitoring, or pruning jobs.
+# - submit: additionally requires CVAL_LIVE_CONFIRM=submit. The CLI submission
+#   remains independently gated by --submit --confirm submit.
+# - pruning is disabled unless submit mode also has
+#   CVAL_PRUNE_CONFIRM=delete-pending.
 
 COMMAND=${1:-start}
+
+# Fail the independent submit startup gate before config helpers, worktree
+# operations, or any Kubernetes-capable command is invoked. Non-operational
+# help/status/stop/attach commands remain available regardless of mode env.
+case "$COMMAND" in
+    start|run-once|run-loop)
+        case "${CVAL_LIVE_MODE:-audit}" in
+            audit) ;;
+            submit)
+                if [[ "${CVAL_LIVE_CONFIRM:-}" != "submit" ]]; then
+                    echo "submit mode requires exact CVAL_LIVE_CONFIRM=submit" >&2
+                    exit 2
+                fi
+                ;;
+            *)
+                echo "CVAL_LIVE_MODE must be exactly audit or submit (got: ${CVAL_LIVE_MODE:-})" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+esac
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
@@ -22,11 +40,9 @@ SOURCE_REPO=${CVAL_SOURCE_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}
 CONFIG_PATH=${CVAL_CONFIG:-$SOURCE_REPO/config/cval.toml}
 SESSION_NAME=${CVAL_TMUX_SESSION:-cval-live}
 LOG_DIR=${CVAL_LIVE_LOG_DIR:-$SOURCE_REPO/run-logs/cval-live}
-RUNNER_WORKTREE=${CVAL_RUNNER_WORKTREE:-/tmp/cval-live-worktree}
-LOOP_SLEEP_SECONDS=${CVAL_LOOP_SLEEP_SECONDS:-300}
-CONFIRM_PHRASE=${CVAL_CONFIRM_PHRASE:-submit}
-PLAN_LIMIT=${CVAL_PLAN_LIMIT:-50}
-KUBECTL_TIMEOUT_SECONDS=${CVAL_KUBECTL_TIMEOUT_SECONDS:-120}
+LIVE_MODE=${CVAL_LIVE_MODE:-audit}
+LIVE_CONFIRM=${CVAL_LIVE_CONFIRM:-}
+PRUNE_CONFIRM=${CVAL_PRUNE_CONFIRM:-}
 
 config_value() {
     local section="$1"
@@ -47,13 +63,35 @@ print(value)
 PY
 }
 
-BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 2)}
-DAYS_THRESHOLD=${CVAL_DAYS_THRESHOLD:-$(config_value scheduling days_threshold 7)}
-WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring timeout_seconds 3600)}
-WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
-PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
-NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
-JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
+validate_operational_config() {
+    python - "$CONFIG_PATH" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+with path.open("rb") as handle:
+    data = tomllib.load(handle)
+if not isinstance(data, dict):
+    raise ValueError("c-val config must be a TOML table")
+PY
+}
+
+load_operational_settings() {
+    validate_operational_config
+    RUNNER_WORKTREE=${CVAL_RUNNER_WORKTREE:-/tmp/cval-live-worktree}
+    LOOP_SLEEP_SECONDS=${CVAL_LOOP_SLEEP_SECONDS:-300}
+    PLAN_LIMIT=${CVAL_PLAN_LIMIT:-50}
+    KUBECTL_TIMEOUT_SECONDS=${CVAL_KUBECTL_TIMEOUT_SECONDS:-120}
+    EXPLICIT_GIT_REF=${CVAL_GIT_REF:-}
+    BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 2)}
+    DAYS_THRESHOLD=${CVAL_DAYS_THRESHOLD:-$(config_value scheduling days_threshold 7)}
+    WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring timeout_seconds 3600)}
+    WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
+    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
+    NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
+    JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
+}
 
 usage() {
     cat <<EOF
@@ -68,15 +106,19 @@ Commands:
   run-loop   Internal: run cycles forever
 
 Environment overrides:
+    CVAL_LIVE_MODE=audit                           # audit (default) or submit
+    CVAL_LIVE_CONFIRM=submit                       # required only for submit mode
+    CVAL_PRUNE_CONFIRM=delete-pending              # optional; submit mode only
   CVAL_CONFIG=$CONFIG_PATH
-  CVAL_BATCH_SIZE=$BATCH_SIZE
-  CVAL_DAYS_THRESHOLD=$DAYS_THRESHOLD
-    CVAL_PENDING_START_TIMEOUT_SECONDS=$PENDING_START_TIMEOUT_SECONDS
-  CVAL_GIT_REF=<commit-or-branch>; default is current origin/main commit each cycle
-    CVAL_KUBECTL_TIMEOUT_SECONDS=$KUBECTL_TIMEOUT_SECONDS
-    CVAL_PLAN_LIMIT=$PLAN_LIMIT
+    CVAL_BATCH_SIZE=<positive-integer>
+    CVAL_DAYS_THRESHOLD=<days>
+    CVAL_PENDING_START_TIMEOUT_SECONDS=<seconds>
+    CVAL_GIT_REF=<commit-or-branch>                # explicit session pin only
+    CVAL_KUBECTL_TIMEOUT_SECONDS=120
+    CVAL_PLAN_LIMIT=50
   CVAL_TMUX_SESSION=$SESSION_NAME
-  CVAL_LOOP_SLEEP_SECONDS=$LOOP_SLEEP_SECONDS
+    CVAL_LIVE_LOG_DIR=$LOG_DIR
+    CVAL_LOOP_SLEEP_SECONDS=300
 EOF
 }
 
@@ -91,39 +133,176 @@ require_command() {
     }
 }
 
-resolve_git_ref() {
-    if [[ -n "${CVAL_GIT_REF:-}" ]]; then
-        printf '%s\n' "$CVAL_GIT_REF"
-        return
+validate_runtime_settings() {
+    case "$LIVE_MODE" in
+        audit|submit) ;;
+        *)
+            echo "CVAL_LIVE_MODE must be exactly audit or submit (got: $LIVE_MODE)" >&2
+            return 2
+            ;;
+    esac
+    local name value
+    for name in CVAL_BATCH_SIZE CVAL_PLAN_LIMIT CVAL_KUBECTL_TIMEOUT_SECONDS; do
+        case "$name" in
+            CVAL_BATCH_SIZE) value="$BATCH_SIZE" ;;
+            CVAL_PLAN_LIMIT) value="$PLAN_LIMIT" ;;
+            CVAL_KUBECTL_TIMEOUT_SECONDS) value="$KUBECTL_TIMEOUT_SECONDS" ;;
+        esac
+        if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+            echo "$name must be a positive integer (got: $value)" >&2
+            return 2
+        fi
+    done
+}
+
+require_submit_startup_gate() {
+    if [[ "$LIVE_MODE" == "submit" && "$LIVE_CONFIRM" != "submit" ]]; then
+        echo "submit mode requires exact CVAL_LIVE_CONFIRM=submit" >&2
+        return 2
     fi
-    git -C "$SOURCE_REPO" fetch --quiet origin main
-    git -C "$SOURCE_REPO" rev-parse origin/main
+}
+
+pruning_enabled() {
+    [[ "$LIVE_MODE" == "submit" && "$PRUNE_CONFIRM" == "delete-pending" ]]
+}
+
+resolve_git_ref() {
+    local requested_ref source resolved rc
+    if [[ -n "$EXPLICIT_GIT_REF" ]]; then
+        requested_ref="$EXPLICIT_GIT_REF"
+        source="explicit"
+    else
+        rc=0
+        git -C "$SOURCE_REPO" fetch --quiet origin main || rc=$?
+        if (( rc != 0 )); then
+            log "git fetch failed source=origin-main exit_code=$rc" >&2
+            return "$rc"
+        fi
+        requested_ref="origin/main"
+        source="origin-main"
+    fi
+    rc=0
+    resolved=$(git -C "$SOURCE_REPO" rev-parse --verify "${requested_ref}^{commit}") || rc=$?
+    if (( rc != 0 )); then
+        log "git ref resolution failed source=$source requested_ref=$requested_ref exit_code=$rc" >&2
+        return "$rc"
+    fi
+    if [[ ! "$resolved" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        log "git ref resolution rejected non-commit source=$source value=$resolved" >&2
+        return 1
+    fi
+    RESOLVED_GIT_REF="$resolved"
+    RESOLVED_GIT_REF_SOURCE="$source"
+    log "resolved git ref source=$source sha=$resolved"
 }
 
 ensure_runner_worktree() {
     local git_ref="$1"
+    local rc=0
     mkdir -p "$(dirname "$RUNNER_WORKTREE")"
     if [[ ! -d "$RUNNER_WORKTREE" ]] || ! git -C "$RUNNER_WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         rm -rf "$RUNNER_WORKTREE"
         # /tmp may be cleaned while Git still retains the worktree registration.
         # Prune stale registrations before recreating the detached runner.
-        git -C "$SOURCE_REPO" worktree prune
-        git -C "$SOURCE_REPO" worktree add --detach "$RUNNER_WORKTREE" "$git_ref"
+        git -C "$SOURCE_REPO" worktree prune || rc=$?
+        if (( rc != 0 )); then
+            log "git worktree prune failed exit_code=$rc" >&2
+            return "$rc"
+        fi
+        git -C "$SOURCE_REPO" worktree add --detach "$RUNNER_WORKTREE" "$git_ref" || rc=$?
+        if (( rc != 0 )); then
+            log "git worktree add failed git_ref=$git_ref exit_code=$rc" >&2
+            return "$rc"
+        fi
     else
-        git -C "$RUNNER_WORKTREE" fetch --quiet origin main
-        git -C "$RUNNER_WORKTREE" checkout --quiet --detach "$git_ref"
+        git -C "$RUNNER_WORKTREE" fetch --quiet origin main || rc=$?
+        if (( rc != 0 )); then
+            log "runner worktree git fetch failed exit_code=$rc" >&2
+            return "$rc"
+        fi
+        git -C "$RUNNER_WORKTREE" checkout --quiet --detach "$git_ref" || rc=$?
+        if (( rc != 0 )); then
+            log "runner worktree checkout failed git_ref=$git_ref exit_code=$rc" >&2
+            return "$rc"
+        fi
     fi
 }
 
-json_job_count() {
-    python - "$1" <<'PY'
-import json
-import sys
+enter_runner_worktree() {
+    local operation="$1"
+    local rc=0
+    pushd "$RUNNER_WORKTREE" >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        log "runner worktree entry failed operation=$operation path=$RUNNER_WORKTREE exit_code=$rc" >&2
+        return 2
+    fi
+}
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-print(len(data.get("jobs", [])))
-PY
+assert_runner_worktree() {
+    local context="$1"
+    local expected_sha="$2"
+    local current_physical runner_physical inside_worktree head_sha rc
+
+    if [[ ! "$expected_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        log "runner worktree assertion failed context=$context reason=invalid-expected-sha" >&2
+        return 2
+    fi
+    if [[ ! -d "$RUNNER_WORKTREE" ]]; then
+        log "runner worktree assertion failed context=$context reason=missing-directory path=$RUNNER_WORKTREE" >&2
+        return 2
+    fi
+    rc=0
+    current_physical=$(pwd -P) || rc=$?
+    if (( rc != 0 )) || [[ -z "$current_physical" ]]; then
+        log "runner worktree assertion failed context=$context reason=invalid-current-directory" >&2
+        return 2
+    fi
+    rc=0
+    runner_physical=$(cd -P -- "$RUNNER_WORKTREE" 2>/dev/null && pwd -P) || rc=$?
+    if (( rc != 0 )) || [[ -z "$runner_physical" ]]; then
+        log "runner worktree assertion failed context=$context reason=unresolvable-runner-directory path=$RUNNER_WORKTREE" >&2
+        return 2
+    fi
+    if [[ "$current_physical" != "$runner_physical" ]]; then
+        log "runner worktree assertion failed context=$context reason=physical-cwd-mismatch current=$current_physical expected=$runner_physical" >&2
+        return 2
+    fi
+    if [[ ! "." -ef "$RUNNER_WORKTREE" ]]; then
+        log "runner worktree assertion failed context=$context reason=directory-identity-mismatch path=$RUNNER_WORKTREE" >&2
+        return 2
+    fi
+    rc=0
+    inside_worktree=$(git -C "$RUNNER_WORKTREE" rev-parse --is-inside-work-tree 2>/dev/null) || rc=$?
+    if (( rc != 0 )) || [[ "$inside_worktree" != "true" ]]; then
+        log "runner worktree assertion failed context=$context reason=not-git-worktree path=$RUNNER_WORKTREE" >&2
+        return 2
+    fi
+    rc=0
+    head_sha=$(git -C "$RUNNER_WORKTREE" rev-parse HEAD 2>/dev/null) || rc=$?
+    if (( rc != 0 )) || [[ ! "$head_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        log "runner worktree assertion failed context=$context reason=invalid-head path=$RUNNER_WORKTREE" >&2
+        return 2
+    fi
+    if [[ "$head_sha" != "$expected_sha" ]]; then
+        log "runner worktree assertion failed context=$context reason=head-mismatch expected=$expected_sha actual=$head_sha" >&2
+        return 2
+    fi
+}
+
+leave_runner_worktree() {
+    local operation="$1"
+    local primary_rc="${2:-0}"
+    local popd_rc=0
+    popd >/dev/null 2>&1 || popd_rc=$?
+    if (( popd_rc != 0 )); then
+        log "runner worktree exit failed operation=$operation path=$RUNNER_WORKTREE exit_code=$popd_rc" >&2
+    fi
+    if (( primary_rc != 0 )); then
+        return "$primary_rc"
+    fi
+    if (( popd_rc != 0 )); then
+        return 2
+    fi
 }
 
 json_submitted_jobs_csv() {
@@ -159,16 +338,253 @@ print(",".join(jobs))
 PY
 }
 
-json_nodes_csv() {
+json_plan_summary_tsv() {
+    python - "$1" "$2" "$3" <<'PY'
+import json
+import math
+import sys
+
+plan_path, expected_free_text, expected_batch_text = sys.argv[1:]
+with open(plan_path, encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data, dict):
+    raise ValueError("plan JSON must be an object")
+expected_keys = {
+    "dry_run",
+    "batch_size",
+    "days_threshold",
+    "free_nodes_count",
+    "queue_count",
+    "planned_jobs",
+}
+if set(data) != expected_keys:
+    raise ValueError("plan JSON has an unexpected top-level shape")
+if data["dry_run"] is not True:
+    raise ValueError("plan JSON dry_run must be exactly true")
+
+def positive_int(name, value):
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"plan JSON {name} must be a positive integer")
+    return value
+
+def nonnegative_int(name, value):
+    if type(value) is not int or value < 0:
+        raise ValueError(f"plan JSON {name} must be a non-negative integer")
+    return value
+
+batch_size = positive_int("batch_size", data["batch_size"])
+free_nodes_count = nonnegative_int("free_nodes_count", data["free_nodes_count"])
+queue_count = nonnegative_int("queue_count", data["queue_count"])
+if batch_size != int(expected_batch_text):
+    raise ValueError("plan JSON batch_size does not match the requested plan limit")
+if free_nodes_count != int(expected_free_text):
+    raise ValueError("plan JSON free_nodes_count does not match the discovery snapshot")
+days_threshold = data["days_threshold"]
+if (
+    isinstance(days_threshold, bool)
+    or not isinstance(days_threshold, (int, float))
+    or not math.isfinite(days_threshold)
+    or days_threshold < 0
+):
+    raise ValueError("plan JSON days_threshold must be a non-negative number")
+planned_jobs = data["planned_jobs"]
+if not isinstance(planned_jobs, list):
+    raise ValueError("plan JSON planned_jobs must be a list")
+if queue_count > free_nodes_count:
+    raise ValueError("plan JSON queue_count cannot exceed free_nodes_count")
+if len(planned_jobs) != min(batch_size, queue_count):
+    raise ValueError("plan JSON planned job count is inconsistent with batch_size and queue_count")
+nodes = []
+job_names = []
+expected_job_keys = {
+    "priority",
+    "node",
+    "reason",
+    "last_tested_timestamp",
+    "age_days",
+    "job_name",
+}
+for job in planned_jobs:
+    if not isinstance(job, dict) or set(job) != expected_job_keys:
+        raise ValueError("plan JSON contains a planned job with an unexpected shape")
+    node = job["node"]
+    job_name = job["job_name"]
+    if not isinstance(node, str) or not node.strip():
+        raise ValueError("plan JSON contains an invalid planned job node")
+    if not isinstance(job_name, str) or not job_name.strip():
+        raise ValueError("plan JSON contains an invalid planned job name")
+    positive_int("planned job priority", job["priority"])
+    if not isinstance(job["reason"], str) or not job["reason"].strip():
+        raise ValueError("plan JSON contains an invalid planned job reason")
+    nonnegative_int("planned job last_tested_timestamp", job["last_tested_timestamp"])
+    age_days = job["age_days"]
+    if age_days is not None and (
+        isinstance(age_days, bool)
+        or not isinstance(age_days, (int, float))
+        or not math.isfinite(age_days)
+        or age_days < 0
+    ):
+        raise ValueError("plan JSON contains an invalid planned job age_days")
+    nodes.append(node)
+    job_names.append(job_name)
+if len(set(nodes)) != len(nodes):
+    raise ValueError("plan JSON planned job nodes must be unique")
+if len(set(job_names)) != len(job_names):
+    raise ValueError("plan JSON planned job names must be unique")
+print(f"{free_nodes_count}\t{queue_count}\t{len(planned_jobs)}\t{','.join(nodes)}")
+PY
+}
+
+json_discovery_summary_tsv() {
     python - "$1" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
-nodes = [job["node"] for job in data.get("jobs", [])]
-print(",".join(nodes))
+if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
+    raise ValueError("nodes JSON must be an object containing a nodes list")
+fully_free = []
+for item in data["nodes"]:
+    if not isinstance(item, dict):
+        raise ValueError("nodes JSON contains a non-object node")
+    name = item.get("name")
+    allocatable = item.get("allocatable")
+    free = item.get("free")
+    resource_ready = item.get("resource_ready")
+    if not isinstance(name, str) or not name:
+        raise ValueError("nodes JSON contains an invalid node name")
+    if not isinstance(allocatable, int) or not isinstance(free, int):
+        raise ValueError("nodes JSON contains invalid GPU counts")
+    if resource_ready is True and allocatable > 0 and free == allocatable:
+        fully_free.append(name)
+print(f"{len(data['nodes'])}\t{len(fully_free)}\t{','.join(fully_free)}")
 PY
+}
+
+json_status_to_map_tsv() {
+    python - "$1" "$2" <<'PY'
+import json
+import sys
+
+status_path, map_path = sys.argv[1:]
+with open(status_path, encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data, list):
+    raise ValueError("status JSON must be a list")
+latest = {}
+for item in data:
+    if not isinstance(item, dict):
+        raise ValueError("status JSON contains a non-object row")
+    node = item.get("node")
+    timestamp = item.get("latest_timestamp")
+    if not isinstance(node, str) or not node:
+        raise ValueError("status JSON contains an invalid node")
+    if timestamp is None:
+        value = 0
+    elif isinstance(timestamp, int) and not isinstance(timestamp, bool):
+        value = timestamp
+    else:
+        raise ValueError("status JSON contains an invalid latest_timestamp")
+    latest[node] = max(latest.get(node, 0), value)
+with open(map_path, "w", encoding="utf-8") as handle:
+    json.dump(latest, handle, sort_keys=True)
+    handle.write("\n")
+print(f"{len(data)}\t{len(latest)}")
+PY
+}
+
+write_audit_summary() {
+    python - "$@" <<'PY'
+import json
+import sys
+
+(
+    output_path,
+    git_ref,
+    git_ref_source,
+    free_nodes_count,
+    queue_count,
+    planned_count,
+    selected_nodes_csv,
+    plan_path,
+) = sys.argv[1:]
+payload = {
+    "schema": "cval.live-audit.v1",
+    "mode": "audit",
+    "action": "dry-run",
+    "cluster_mutations": 0,
+    "git_ref": git_ref,
+    "git_ref_source": git_ref_source,
+    "free_nodes_count": int(free_nodes_count),
+    "queue_count": int(queue_count),
+    "planned_count": int(planned_count),
+    "selected_nodes": [item for item in selected_nodes_csv.split(",") if item],
+    "plan_path": plan_path,
+}
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+collect_plan_inputs() {
+    local cycle_dir="$1"
+    local stem="$2"
+    local expected_sha="$3"
+    local nodes_file="$cycle_dir/$stem-nodes.json"
+    local nodes_error="$cycle_dir/$stem-nodes.stderr"
+    local status_file="$cycle_dir/$stem-latest-status.json"
+    local status_error="$cycle_dir/$stem-latest-status.stderr"
+    local status_map="$cycle_dir/$stem-latest-status-map.json"
+    local failed=0
+
+    local nodes_rc=0
+    assert_runner_worktree "$stem-nodes-before" "$expected_sha" || return "$?"
+    python -m cval.cli --config "$CONFIG_PATH" nodes --output json >"$nodes_file" 2>"$nodes_error" || nodes_rc=$?
+    assert_runner_worktree "$stem-nodes-after" "$expected_sha" || return "$?"
+    if (( nodes_rc == 0 )); then
+        local discovery_summary
+        local discovery_parse_rc=0
+        discovery_summary=$(json_discovery_summary_tsv "$nodes_file") || discovery_parse_rc=$?
+        if (( discovery_parse_rc == 0 )); then
+            IFS=$'\t' read -r PLAN_DISCOVERED_NODE_COUNT PLAN_FREE_NODE_COUNT PLAN_FREE_NODES <<<"$discovery_summary"
+            log "component=discovery status=ok discovered_node_count=$PLAN_DISCOVERED_NODE_COUNT free_nodes_count=$PLAN_FREE_NODE_COUNT"
+        else
+            log "component=discovery status=invalid-json exit_code=$discovery_parse_rc artifact=$nodes_file"
+            failed=1
+        fi
+    else
+        log "component=discovery status=failed exit_code=$nodes_rc stderr=$nodes_error"
+        [[ ! -s "$nodes_error" ]] || cat "$nodes_error" >&2
+        failed=1
+    fi
+
+    local status_rc=0
+    assert_runner_worktree "$stem-status-before" "$expected_sha" || return "$?"
+    python -m cval.cli --config "$CONFIG_PATH" status --output json >"$status_file" 2>"$status_error" || status_rc=$?
+    assert_runner_worktree "$stem-status-after" "$expected_sha" || return "$?"
+    if (( status_rc == 0 )); then
+        local status_summary
+        local status_parse_rc=0
+        status_summary=$(json_status_to_map_tsv "$status_file" "$status_map") || status_parse_rc=$?
+        if (( status_parse_rc == 0 )); then
+            IFS=$'\t' read -r PLAN_STATUS_ROW_COUNT PLAN_STATUS_NODE_COUNT <<<"$status_summary"
+            PLAN_STATUS_MAP="$status_map"
+            log "component=latest-status status=ok row_count=$PLAN_STATUS_ROW_COUNT node_count=$PLAN_STATUS_NODE_COUNT source=validation.db/latest_status"
+        else
+            log "component=latest-status status=invalid-json exit_code=$status_parse_rc artifact=$status_file"
+            failed=1
+        fi
+    else
+        log "component=latest-status status=failed exit_code=$status_rc stderr=$status_error"
+        [[ ! -s "$status_error" ]] || cat "$status_error" >&2
+        failed=1
+    fi
+
+    if (( failed != 0 )); then
+        return 1
+    fi
 }
 
 json_selected_nodes_csv() {
@@ -185,7 +601,7 @@ excluded = set(sys.argv[3:])
 with open(plan_file, encoding="utf-8") as handle:
     data = json.load(handle)
 selected = []
-for job in data.get("jobs", []):
+for job in data.get("planned_jobs", []):
     node = job.get("node")
     if not node or node in excluded:
         continue
@@ -194,6 +610,11 @@ for job in data.get("jobs", []):
         break
 print(",".join(selected))
 PY
+}
+
+run_kubectl() {
+    timeout --foreground "${KUBECTL_TIMEOUT_SECONDS}s" \
+        kubectl --request-timeout="${KUBECTL_TIMEOUT_SECONDS}s" "$@"
 }
 
 json_phase() {
@@ -271,13 +692,6 @@ print(match.group(1) if match else "")
 PY
 }
 
-latest_submit_file() {
-    find "$LOG_DIR" -mindepth 2 -maxdepth 2 -name submit.json -printf '%T@ %p\n' 2>/dev/null \
-        | sort -nr \
-        | head -1 \
-        | cut -d' ' -f2-
-}
-
 latest_cycle_dir_with_submits() {
     find "$LOG_DIR" -mindepth 2 -maxdepth 2 \( -name 'submit.json' -o -name 'submit-*.json' \) -printf '%T@ %h\n' 2>/dev/null \
         | sort -nr \
@@ -285,28 +699,54 @@ latest_cycle_dir_with_submits() {
         | cut -d' ' -f2-
 }
 
-json_any_nonterminal() {
-    python - "$1" <<'PY'
+json_jobs_observation_state() {
+    python - "$1" "$2" <<'PY'
 import json
 import sys
 
-active = {"Pending", "Running"}
-with open(sys.argv[1], encoding="utf-8") as handle:
+status_path, jobs_csv = sys.argv[1:]
+tracked = [item for item in jobs_csv.split(",") if item]
+with open(status_path, encoding="utf-8") as handle:
     phases = json.load(handle)
-raise SystemExit(0 if any(item.get("phase") in active for item in phases) else 1)
+if not isinstance(phases, list):
+    raise ValueError("jobs JSON must be a list")
+observed = {}
+for item in phases:
+    if not isinstance(item, dict):
+        raise ValueError("jobs JSON contains a non-object row")
+    job_name = item.get("job_name")
+    phase = item.get("phase")
+    if not isinstance(job_name, str) or not job_name or not isinstance(phase, str):
+        raise ValueError("jobs JSON contains an invalid row")
+    if job_name in observed:
+        raise ValueError("jobs JSON contains duplicate job rows")
+    observed[job_name] = phase
+tracked_phases = [observed.get(job_name, "Unknown") for job_name in tracked]
+terminal = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}
+if any(phase not in terminal | {"Pending", "Running"} for phase in tracked_phases):
+    print("unknown")
+elif any(phase in {"Pending", "Running"} for phase in tracked_phases):
+    print("active")
+else:
+    print("terminal")
 PY
 }
 
 delete_job() {
     local job_name="$1"
+    if ! pruning_enabled; then
+        log "refusing pending-job delete because pruning is not independently enabled"
+        return 2
+    fi
     log "deleting pending job after timeout: $job_name"
-    kubectl delete vcjob -n "$NAMESPACE" "$job_name" --ignore-not-found=true | tee -a "$2"
+    run_kubectl delete vcjob -n "$NAMESPACE" "$job_name" --ignore-not-found=true | tee -a "$2"
 }
 
 stale_pending_jobs() {
     local vcjob_json
     vcjob_json=$(mktemp)
-    if ! kubectl get vcjob -n "$NAMESPACE" -o json > "$vcjob_json"; then
+    if ! run_kubectl get vcjob -n "$NAMESPACE" -o json > "$vcjob_json"; then
+        log "bounded stale-pending vcjob read failed; skipping pruning for this pass"
         rm -f "$vcjob_json"
         return 0
     fi
@@ -342,8 +782,14 @@ PY
 
 prune_stale_pending_jobs() {
     local cycle_dir="$1"
+    if ! pruning_enabled; then
+        return 0
+    fi
     local stale_jobs
-    stale_jobs=$(stale_pending_jobs || true)
+    if ! stale_jobs=$(stale_pending_jobs); then
+        log "stale pending job parsing failed; skipping pruning for this pass"
+        return 0
+    fi
     if [[ -z "$stale_jobs" ]]; then
         return 0
     fi
@@ -355,70 +801,84 @@ prune_stale_pending_jobs() {
     done <<< "$stale_jobs"
 }
 
-wait_for_jobs_once() {
-    local cycle_dir="$1"
-    local jobs_csv="$2"
-
-    pushd "$RUNNER_WORKTREE" >/dev/null
-    log "watching jobs once: $jobs_csv"
-    if python -m cval.cli --config "$CONFIG_PATH" jobs \
-        --jobs "$jobs_csv" \
-        --watch \
-        --timeout-seconds "$WATCH_TIMEOUT_SECONDS" \
-        --poll-interval-seconds "$WATCH_POLL_SECONDS" \
-        --output json | tee "$cycle_dir/monitor.json"; then
-        log "capturing latest validation status"
-        python -m cval.cli --config "$CONFIG_PATH" status --output json \
-            | tee "$cycle_dir/status.json" >/dev/null
-        popd >/dev/null
-        return 0
-    fi
-
-    local rc=$?
-    popd >/dev/null
-    log "job watch failed with exit code $rc"
-    return "$rc"
-}
-
-watch_jobs() {
-    wait_for_jobs_once "$@"
-}
-
 watch_existing_jobs_until_clear() {
     local cycle_dir="$1"
     local active_jobs="$2"
+    local expected_sha="$3"
 
-    pushd "$RUNNER_WORKTREE" >/dev/null
+    enter_runner_worktree "resume-watch" || return "$?"
     while [[ -n "$active_jobs" ]]; do
         local status_file="$cycle_dir/resume-status-$(date -u +%H%M%S).json"
+        local status_error="$status_file.stderr"
+        local status_rc=0
+        assert_runner_worktree "resume-watch-jobs-before" "$expected_sha" || {
+            leave_runner_worktree "resume-watch" 2 || return "$?"
+            return 2
+        }
         python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$active_jobs" --output json \
-            | tee "$status_file"
+            >"$status_file" 2>"$status_error" || status_rc=$?
+        assert_runner_worktree "resume-watch-jobs-after" "$expected_sha" || {
+            leave_runner_worktree "resume-watch" 2 || return "$?"
+            return 2
+        }
+        if (( status_rc != 0 )); then
+            log "resume jobs observation failed exit_code=$status_rc; retaining tracked jobs for a later bounded observation"
+            [[ ! -s "$status_error" ]] || cat "$status_error" >&2
+            leave_runner_worktree "resume-watch" 2 || return "$?"
+            return 2
+        fi
+        cat "$status_file"
+
+        local observation_state
+        local observation_rc=0
+        observation_state=$(json_jobs_observation_state "$status_file" "$active_jobs") || observation_rc=$?
+        if (( observation_rc != 0 )); then
+            log "resume jobs observation was invalid; retaining tracked jobs for a later bounded observation"
+            leave_runner_worktree "resume-watch" 2 || return "$?"
+            return 2
+        fi
+        if [[ "$observation_state" == "unknown" ]]; then
+            log "resume jobs observation is indeterminate; retaining tracked jobs and ending this observation pass"
+            leave_runner_worktree "resume-watch" 2 || return "$?"
+            return 2
+        fi
 
         IFS=',' read -r -a active_array <<< "$active_jobs"
         for job_name in "${active_array[@]}"; do
             [[ -n "$job_name" ]] || continue
             local phase
-            phase=$(json_phase "$status_file" "$job_name")
+            local phase_rc=0
+            phase=$(json_phase "$status_file" "$job_name") || phase_rc=$?
+            if (( phase_rc != 0 )); then
+                log "resume job $job_name observation was invalid; retaining tracked jobs for a later bounded observation"
+                leave_runner_worktree "resume-watch" 2 || return "$?"
+                return 2
+            fi
             log "resume job $job_name phase=$phase"
 
             case "$phase" in
-                Completed|Succeeded|Failed|Aborted|Terminated|Unknown)
-                    if [[ "$phase" == "Unknown" ]]; then
-                        log "resume job $job_name is unknown; treating it as no longer active"
-                    fi
+                Completed|Succeeded|Failed|Aborted|Terminated)
                     active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
                     ;;
                 Pending)
-                    local created_ts
-                    created_ts=$(kubectl get vcjob -n "$NAMESPACE" "$job_name" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
-                    local created_epoch
-                    created_epoch=$(python -c 'import datetime,sys; s=sys.stdin.read().strip(); print(int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else 0)' <<< "$created_ts")
-                    local now_epoch
-                    now_epoch=$(date +%s)
-                    if [[ "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
-                        delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
-                        active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
+                    if pruning_enabled; then
+                        local created_ts
+                        created_ts=$(run_kubectl get vcjob -n "$NAMESPACE" "$job_name" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
+                        local created_epoch
+                        created_epoch=$(python -c 'import datetime,sys; s=sys.stdin.read().strip(); print(int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else 0)' <<< "$created_ts")
+                        local now_epoch
+                        now_epoch=$(date +%s)
+                        if [[ "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
+                            delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
+                            active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
+                        fi
                     fi
+                    ;;
+                Running) ;;
+                Unknown|*)
+                    log "resume job $job_name phase=$phase is indeterminate; retaining tracked jobs and ending this observation pass"
+                    leave_runner_worktree "resume-watch" 2 || return "$?"
+                    return 2
                     ;;
             esac
         done
@@ -427,12 +887,28 @@ watch_existing_jobs_until_clear() {
         sleep "$WATCH_POLL_SECONDS"
     done
 
+    local final_status_rc=0
+    assert_runner_worktree "resume-final-status-before" "$expected_sha" || {
+        leave_runner_worktree "resume-watch" 2 || return "$?"
+        return 2
+    }
     python -m cval.cli --config "$CONFIG_PATH" status --output json \
-        | tee "$cycle_dir/status.json" >/dev/null
-    popd >/dev/null
+        >"$cycle_dir/status.json" || final_status_rc=$?
+    assert_runner_worktree "resume-final-status-after" "$expected_sha" || {
+        leave_runner_worktree "resume-watch" 2 || return "$?"
+        return 2
+    }
+    if (( final_status_rc != 0 )); then
+        log "resume final status observation failed exit_code=$final_status_rc"
+    fi
+    leave_runner_worktree "resume-watch" "$final_status_rc" || return "$?"
 }
 
 resume_latest_cycle_if_needed() {
+    if [[ "$LIVE_MODE" != "submit" ]]; then
+        log "mode=audit; submitted-job resume disabled"
+        return 1
+    fi
     local cycle_dir
     cycle_dir=$(latest_cycle_dir_with_submits)
     if [[ -z "$cycle_dir" ]]; then
@@ -446,45 +922,236 @@ resume_latest_cycle_if_needed() {
     fi
 
     mkdir -p "$cycle_dir"
-    local git_ref
-    git_ref=$(resolve_git_ref)
-    ensure_runner_worktree "$git_ref"
+    resolve_git_ref || return "$?"
+    local resume_git_ref="$RESOLVED_GIT_REF"
+    ensure_runner_worktree "$resume_git_ref" || return "$?"
 
-    pushd "$RUNNER_WORKTREE" >/dev/null
+    enter_runner_worktree "resume-status" || return "$?"
+    local resume_error="$cycle_dir/resume-status.stderr"
+    local resume_rc=0
+    assert_runner_worktree "resume-status-jobs-before" "$resume_git_ref" || {
+        leave_runner_worktree "resume-status" 2 || return "$?"
+        return 2
+    }
     python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$jobs_csv" --output json \
-        | tee "$cycle_dir/resume-status.json" >/dev/null
-    popd >/dev/null
-
-    if json_any_nonterminal "$cycle_dir/resume-status.json"; then
-        log "resuming watch for active jobs from $cycle_dir: $jobs_csv"
-        watch_existing_jobs_until_clear "$cycle_dir" "$jobs_csv"
-        return 0
+        >"$cycle_dir/resume-status.json" 2>"$resume_error" || resume_rc=$?
+    assert_runner_worktree "resume-status-jobs-after" "$resume_git_ref" || {
+        leave_runner_worktree "resume-status" 2 || return "$?"
+        return 2
+    }
+    if (( resume_rc != 0 )); then
+        log "resume jobs observation failed exit_code=$resume_rc; deferring new submission cycle"
+        [[ ! -s "$resume_error" ]] || cat "$resume_error" >&2
+        leave_runner_worktree "resume-status" 2 || return "$?"
+        return 2
     fi
+    leave_runner_worktree "resume-status" 0 || return "$?"
+
+    local observation_state
+    local observation_rc=0
+    observation_state=$(json_jobs_observation_state "$cycle_dir/resume-status.json" "$jobs_csv") || observation_rc=$?
+    if (( observation_rc != 0 )); then
+        log "resume jobs observation was invalid; deferring new submission cycle"
+        return 2
+    fi
+    case "$observation_state" in
+        active)
+            log "resuming watch for active jobs from $cycle_dir: $jobs_csv"
+            watch_existing_jobs_until_clear "$cycle_dir" "$jobs_csv" "$resume_git_ref"
+            return "$?"
+            ;;
+        unknown)
+            log "resume jobs observation is indeterminate; retaining tracked jobs and deferring new submission cycle"
+            return 2
+            ;;
+        terminal) ;;
+        *)
+            log "resume jobs observation returned an invalid state; deferring new submission cycle"
+            return 2
+            ;;
+    esac
 
     log "latest submitted jobs are already terminal; no resume needed"
     return 1
 }
 
-run_cycle() {
-    require_command git
-    require_command kubectl
-    require_command python
-
+new_cycle_dir() {
     mkdir -p "$LOG_DIR"
     local cycle_id
     cycle_id=$(date -u +%Y%m%dT%H%M%SZ)
     local cycle_dir="$LOG_DIR/$cycle_id"
-    mkdir -p "$cycle_dir"
+    local suffix=0
+    while [[ -e "$cycle_dir" ]]; do
+        suffix=$((suffix + 1))
+        cycle_dir="$LOG_DIR/$cycle_id-$suffix"
+    done
+    mkdir "$cycle_dir"
+    CYCLE_DIR="$cycle_dir"
+}
 
-    local git_ref
-    git_ref=$(resolve_git_ref)
-    log "using git_ref=$git_ref"
-    log "using config=$CONFIG_PATH"
-    log "batch_size=$BATCH_SIZE days_threshold=$DAYS_THRESHOLD pending_start_timeout=${PENDING_START_TIMEOUT_SECONDS}s"
+log_operation_settings() {
+    log "mode=$LIVE_MODE config=$CONFIG_PATH"
+    log "batch_size=$BATCH_SIZE plan_limit=$PLAN_LIMIT days_threshold=$DAYS_THRESHOLD kubectl_timeout=${KUBECTL_TIMEOUT_SECONDS}s"
+    if pruning_enabled; then
+        log "pruning=enabled confirmation=delete-pending namespace=$NAMESPACE prefix=$JOB_PREFIX"
+    else
+        log "pruning=disabled"
+    fi
+}
 
-    ensure_runner_worktree "$git_ref"
+run_audit_cycle() {
+    require_command git
+    require_command kubectl
+    require_command timeout
+    require_command python
 
-    pushd "$RUNNER_WORKTREE" >/dev/null
+    new_cycle_dir
+    local cycle_dir="$CYCLE_DIR"
+    resolve_git_ref || return "$?"
+    local git_ref="$RESOLVED_GIT_REF"
+    local git_ref_source="$RESOLVED_GIT_REF_SOURCE"
+    log_operation_settings
+    ensure_runner_worktree "$git_ref" || return "$?"
+
+    enter_runner_worktree "audit" || return "$?"
+    local plan_file="$cycle_dir/audit-plan.json"
+    local plan_error="$cycle_dir/audit-plan.stderr"
+    log "audit action=dry-run: discovery -> latest_status -> priority -> render -> slot selection"
+    local inputs_rc=0
+    collect_plan_inputs "$cycle_dir" audit "$git_ref" || inputs_rc=$?
+    if (( inputs_rc != 0 )); then
+        log "audit cycle failed: one or more read-only input components failed"
+        leave_runner_worktree "audit" "$inputs_rc" || return "$?"
+        return "$inputs_rc"
+    fi
+    local plan_rc=0
+    assert_runner_worktree "audit-plan-before" "$git_ref" || {
+        leave_runner_worktree "audit" 2 || return "$?"
+        return 2
+    }
+    python -m cval.cli --config "$CONFIG_PATH" plan \
+        --free-nodes "$PLAN_FREE_NODES" \
+        --db-status-json "$PLAN_STATUS_MAP" \
+        --threshold-days "$DAYS_THRESHOLD" \
+        --batch-size "$PLAN_LIMIT" \
+        --timestamp "$(date +%s)" \
+        --git-ref "$git_ref" \
+        --output json >"$plan_file" 2>"$plan_error" || plan_rc=$?
+    assert_runner_worktree "audit-plan-after" "$git_ref" || {
+        leave_runner_worktree "audit" 2 || return "$?"
+        return 2
+    }
+    if (( plan_rc != 0 )); then
+        log "audit component=plan status=failed exit_code=$plan_rc stderr=$plan_error"
+        [[ ! -s "$plan_error" ]] || cat "$plan_error" >&2
+        leave_runner_worktree "audit" "$plan_rc" || return "$?"
+        return "$plan_rc"
+    fi
+
+    local summary
+    local parse_rc=0
+    summary=$(json_plan_summary_tsv "$plan_file" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT") || parse_rc=$?
+    if (( parse_rc != 0 )); then
+        log "audit component=plan status=invalid-json exit_code=$parse_rc artifact=$plan_file"
+        leave_runner_worktree "audit" "$parse_rc" || return "$?"
+        return "$parse_rc"
+    fi
+    local free_nodes_count queue_count planned_count planned_nodes
+    IFS=$'\t' read -r free_nodes_count queue_count planned_count planned_nodes <<<"$summary"
+    local selected_nodes=""
+    if (( planned_count > 0 )); then
+        selected_nodes=$(json_selected_nodes_csv "$plan_file" "$BATCH_SIZE")
+    fi
+    leave_runner_worktree "audit" 0 || return "$?"
+
+    log "audit component=discovery-and-status status=ok free_nodes_count=$free_nodes_count"
+    log "audit component=priority-and-render status=ok queue_count=$queue_count planned_count=$planned_count"
+    if [[ -n "$selected_nodes" ]]; then
+        log "audit action=dry-run selected_nodes=$selected_nodes submitted_count=0"
+    elif (( free_nodes_count == 0 )); then
+        log "audit state=no-free-nodes action=dry-run submitted_count=0"
+    else
+        log "audit state=no-due-candidates action=dry-run submitted_count=0"
+    fi
+    write_audit_summary \
+        "$cycle_dir/audit-summary.json" \
+        "$git_ref" \
+        "$git_ref_source" \
+        "$free_nodes_count" \
+        "$queue_count" \
+        "$planned_count" \
+        "$selected_nodes" \
+        "$(basename "$plan_file")"
+    log "audit cycle complete; artifacts in $cycle_dir"
+}
+
+run_submit_cycle() {
+    require_command git
+    require_command kubectl
+    require_command timeout
+    require_command python
+
+    new_cycle_dir
+    local cycle_dir="$CYCLE_DIR"
+
+    resolve_git_ref || return "$?"
+    local git_ref="$RESOLVED_GIT_REF"
+    log_operation_settings
+    log "pending_start_timeout=${PENDING_START_TIMEOUT_SECONDS}s"
+
+    ensure_runner_worktree "$git_ref" || return "$?"
+
+    enter_runner_worktree "submit" || return "$?"
+
+    local inputs_rc=0
+    collect_plan_inputs "$cycle_dir" preflight "$git_ref" || inputs_rc=$?
+    if (( inputs_rc != 0 )); then
+        log "submit cycle preflight failed: discovery/status failure is not an empty queue"
+        leave_runner_worktree "submit" "$inputs_rc" || return "$?"
+        return "$inputs_rc"
+    fi
+    local preflight_plan="$cycle_dir/preflight-plan.json"
+    local preflight_error="$cycle_dir/preflight-plan.stderr"
+    local preflight_rc=0
+    assert_runner_worktree "submit-preflight-plan-before" "$git_ref" || {
+        leave_runner_worktree "submit" 2 || return "$?"
+        return 2
+    }
+    python -m cval.cli --config "$CONFIG_PATH" plan \
+        --free-nodes "$PLAN_FREE_NODES" \
+        --db-status-json "$PLAN_STATUS_MAP" \
+        --threshold-days "$DAYS_THRESHOLD" \
+        --batch-size "$PLAN_LIMIT" \
+        --timestamp "$(date +%s)" \
+        --git-ref "$git_ref" \
+        --output json >"$preflight_plan" 2>"$preflight_error" || preflight_rc=$?
+    assert_runner_worktree "submit-preflight-plan-after" "$git_ref" || {
+        leave_runner_worktree "submit" 2 || return "$?"
+        return 2
+    }
+    if (( preflight_rc != 0 )); then
+        log "submit component=preflight-plan status=failed exit_code=$preflight_rc stderr=$preflight_error"
+        [[ ! -s "$preflight_error" ]] || cat "$preflight_error" >&2
+        leave_runner_worktree "submit" "$preflight_rc" || return "$?"
+        return "$preflight_rc"
+    fi
+    local preflight_summary
+    local preflight_parse_rc=0
+    preflight_summary=$(json_plan_summary_tsv "$preflight_plan" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT") || preflight_parse_rc=$?
+    if (( preflight_parse_rc != 0 )); then
+        log "submit component=preflight-plan status=invalid-json exit_code=$preflight_parse_rc artifact=$preflight_plan"
+        leave_runner_worktree "submit" "$preflight_parse_rc" || return "$?"
+        return "$preflight_parse_rc"
+    fi
+    local preflight_free preflight_queue preflight_planned preflight_nodes
+    IFS=$'\t' read -r preflight_free preflight_queue preflight_planned preflight_nodes <<<"$preflight_summary"
+    log "submit component=preflight-plan status=ok free_nodes_count=$preflight_free queue_count=$preflight_queue planned_count=$preflight_planned"
+    if (( preflight_queue == 0 )); then
+        log "submit state=no-due-candidates; preflight succeeded and no jobs will be submitted"
+        leave_runner_worktree "submit" 0 || return "$?"
+        log "cycle complete; artifacts in $cycle_dir"
+        return 0
+    fi
 
     local active_jobs=""
     local submitted_nodes=""
@@ -497,38 +1164,79 @@ run_cycle() {
 
         local status_file="$cycle_dir/status-$(date -u +%H%M%S).json"
         if [[ -n "$active_jobs" ]]; then
+            local status_error="$status_file.stderr"
+            local status_rc=0
+            assert_runner_worktree "submit-jobs-before" "$git_ref" || {
+                leave_runner_worktree "submit" 2 || return "$?"
+                return 2
+            }
             python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$active_jobs" --output json \
-                | tee "$status_file" >/dev/null
+                >"$status_file" 2>"$status_error" || status_rc=$?
+            assert_runner_worktree "submit-jobs-after" "$git_ref" || {
+                leave_runner_worktree "submit" 2 || return "$?"
+                return 2
+            }
+            if (( status_rc != 0 )); then
+                log "submit jobs observation failed exit_code=$status_rc; retaining active jobs and ending cycle"
+                [[ ! -s "$status_error" ]] || cat "$status_error" >&2
+                leave_runner_worktree "submit" "$status_rc" || return "$?"
+                return "$status_rc"
+            fi
+
+            local observation_state
+            local observation_rc=0
+            observation_state=$(json_jobs_observation_state "$status_file" "$active_jobs") || observation_rc=$?
+            if (( observation_rc != 0 )); then
+                log "submit jobs observation was invalid; retaining active jobs and ending cycle"
+                leave_runner_worktree "submit" 1 || return "$?"
+                return 1
+            fi
+            if [[ "$observation_state" == "unknown" ]]; then
+                log "submit jobs observation is indeterminate; retaining active jobs and ending cycle"
+                leave_runner_worktree "submit" 1 || return "$?"
+                return 1
+            fi
 
             IFS=',' read -r -a active_array <<< "$active_jobs"
             for job_name in "${active_array[@]}"; do
                 [[ -n "$job_name" ]] || continue
                 local phase
-                phase=$(json_phase "$status_file" "$job_name")
+                local phase_rc=0
+                phase=$(json_phase "$status_file" "$job_name") || phase_rc=$?
+                if (( phase_rc != 0 )); then
+                    log "job $job_name observation was invalid; retaining active jobs and ending cycle"
+                    leave_runner_worktree "submit" 1 || return "$?"
+                    return 1
+                fi
                 local node
                 node=$(job_node_from_name "$job_name")
                 log "job $job_name phase=$phase"
 
                 case "$phase" in
-                    Completed|Succeeded|Failed|Aborted|Terminated|Unknown)
-                        if [[ "$phase" == "Unknown" ]]; then
-                            log "job $job_name is unknown; treating it as no longer active"
-                        fi
+                    Completed|Succeeded|Failed|Aborted|Terminated)
                         active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
                         completed_jobs=$(csv_append_unique "$completed_jobs" "$job_name")
                         ;;
-                    Pending|Unknown|*)
-                        local created_ts
-                        created_ts=$(kubectl get vcjob -n "$NAMESPACE" "$job_name" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
-                        local created_epoch
-                        created_epoch=$(python -c 'import datetime,sys; s=sys.stdin.read().strip(); print(int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else 0)' <<< "$created_ts")
-                        local now_epoch
-                        now_epoch=$(date +%s)
-                        if [[ "$phase" == "Pending" && "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
-                            delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
-                            active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
-                            skipped_nodes=$(csv_append_unique "$skipped_nodes" "$node")
+                    Pending)
+                        if pruning_enabled; then
+                            local created_ts
+                            created_ts=$(run_kubectl get vcjob -n "$NAMESPACE" "$job_name" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
+                            local created_epoch
+                            created_epoch=$(python -c 'import datetime,sys; s=sys.stdin.read().strip(); print(int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else 0)' <<< "$created_ts")
+                            local now_epoch
+                            now_epoch=$(date +%s)
+                            if [[ "$phase" == "Pending" && "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
+                                delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
+                                active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
+                                skipped_nodes=$(csv_append_unique "$skipped_nodes" "$node")
+                            fi
                         fi
+                        ;;
+                    Running) ;;
+                    Unknown|*)
+                        log "job $job_name phase=$phase is indeterminate; retaining active jobs and ending cycle"
+                        leave_runner_worktree "submit" 1 || return "$?"
+                        return 1
                         ;;
                 esac
             done
@@ -538,26 +1246,57 @@ run_cycle() {
         active_count=$(csv_count "$active_jobs")
         local slots=$((BATCH_SIZE - active_count))
         while (( slots > 0 )); do
+            local slot_stem="slot-$slots-$(date -u +%H%M%S)"
+            inputs_rc=0
+            collect_plan_inputs "$cycle_dir" "$slot_stem" "$git_ref" || inputs_rc=$?
+            if (( inputs_rc != 0 )); then
+                log "submit cycle failed: slot discovery/status failure is not an empty queue"
+                leave_runner_worktree "submit" "$inputs_rc" || return "$?"
+                return "$inputs_rc"
+            fi
             local plan_file="$cycle_dir/dry-run-$(date -u +%H%M%S)-slot-$slots.json"
             log "rebuilding live ranked list for one open slot ($slots slot(s) available)"
-            if ! python -m cval.cli --config "$CONFIG_PATH" run \
-                --live-status \
+            local plan_rc=0
+            assert_runner_worktree "submit-slot-plan-before" "$git_ref" || {
+                leave_runner_worktree "submit" 2 || return "$?"
+                return 2
+            }
+            python -m cval.cli --config "$CONFIG_PATH" plan \
+                --free-nodes "$PLAN_FREE_NODES" \
+                --db-status-json "$PLAN_STATUS_MAP" \
                 --threshold-days "$DAYS_THRESHOLD" \
                 --batch-size "$PLAN_LIMIT" \
-                --max-batch-size "$PLAN_LIMIT" \
                 --timestamp "$(date +%s)" \
                 --git-ref "$git_ref" \
-                --output json > "$plan_file" 2>&1; then
-                cat "$plan_file"
-                log "dry-run planning failed; ending cycle so the loop can retry"
-                break
+                --output json > "$plan_file" 2>&1 || plan_rc=$?
+            assert_runner_worktree "submit-slot-plan-after" "$git_ref" || {
+                leave_runner_worktree "submit" 2 || return "$?"
+                return 2
+            }
+            if (( plan_rc != 0 )); then
+                cat "$plan_file" >&2
+                log "submit component=plan status=failed exit_code=$plan_rc; ending cycle"
+                leave_runner_worktree "submit" "$plan_rc" || return "$?"
+                return "$plan_rc"
             fi
             cat "$plan_file"
 
             if [[ ! -s "$plan_file" ]]; then
-                log "dry-run planning produced an empty plan file; ending cycle so the loop can retry"
-                break
+                log "submit component=plan status=failed reason=empty-output"
+                leave_runner_worktree "submit" 1 || return "$?"
+                return 1
             fi
+            local plan_summary
+            local parse_rc=0
+            plan_summary=$(json_plan_summary_tsv "$plan_file" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT") || parse_rc=$?
+            if (( parse_rc != 0 )); then
+                log "submit component=plan status=invalid-json exit_code=$parse_rc artifact=$plan_file"
+                leave_runner_worktree "submit" "$parse_rc" || return "$?"
+                return "$parse_rc"
+            fi
+            local free_nodes_count queue_count planned_count planned_nodes
+            IFS=$'\t' read -r free_nodes_count queue_count planned_count planned_nodes <<<"$plan_summary"
+            log "submit component=plan status=ok free_nodes_count=$free_nodes_count queue_count=$queue_count planned_count=$planned_count"
 
             local exclude_args=()
             IFS=',' read -r -a submitted_array <<< "$submitted_nodes"
@@ -572,15 +1311,25 @@ run_cycle() {
                 run_timestamp=$(date +%s)
                 local submit_file="$cycle_dir/submit-$run_timestamp.json"
                 log "submitting node: $nodes_csv timestamp=$run_timestamp"
-                if ! python -m cval.cli --config "$CONFIG_PATH" run \
+                local submit_rc=0
+                assert_runner_worktree "submit-run-before" "$git_ref" || {
+                    leave_runner_worktree "submit" 2 || return "$?"
+                    return 2
+                }
+                python -m cval.cli --config "$CONFIG_PATH" run \
                     --free-nodes "$nodes_csv" \
                     --threshold-days "$DAYS_THRESHOLD" \
                     --batch-size 1 \
                     --timestamp "$run_timestamp" \
                     --git-ref "$git_ref" \
                     --submit \
-                    --confirm "$CONFIRM_PHRASE" \
-                    --output json > "$submit_file" 2>&1; then
+                    --confirm submit \
+                    --output json > "$submit_file" 2>&1 || submit_rc=$?
+                assert_runner_worktree "submit-run-after" "$git_ref" || {
+                    leave_runner_worktree "submit" 2 || return "$?"
+                    return 2
+                }
+                if (( submit_rc != 0 )); then
                     cat "$submit_file"
                     log "submission failed for node $nodes_csv; skipping it for this cycle"
                     skipped_nodes=$(csv_append_unique "$skipped_nodes" "$nodes_csv")
@@ -600,7 +1349,13 @@ run_cycle() {
                 slots=$((slots - 1))
             else
                 idle_rounds=$((idle_rounds + 1))
-                log "no additional eligible nodes for open slots"
+                if (( free_nodes_count > 0 && queue_count == 0 )); then
+                    log "submit state=no-due-candidates; no additional eligible nodes for open slots"
+                elif (( free_nodes_count == 0 )); then
+                    log "submit state=no-free-nodes; no additional eligible nodes for open slots"
+                else
+                    log "submit state=no-additional-candidates; candidates were excluded in this cycle"
+                fi
                 break
             fi
         done
@@ -614,21 +1369,66 @@ run_cycle() {
         sleep "$WATCH_POLL_SECONDS"
     done
 
+    local final_status_rc=0
+    assert_runner_worktree "submit-final-status-before" "$git_ref" || {
+        leave_runner_worktree "submit" 2 || return "$?"
+        return 2
+    }
     python -m cval.cli --config "$CONFIG_PATH" status --output json \
-        | tee "$cycle_dir/status.json" >/dev/null
+        >"$cycle_dir/status.json" || final_status_rc=$?
+    assert_runner_worktree "submit-final-status-after" "$git_ref" || {
+        leave_runner_worktree "submit" 2 || return "$?"
+        return 2
+    }
+    if (( final_status_rc != 0 )); then
+        log "submit final status observation failed exit_code=$final_status_rc"
+    fi
 
-    popd >/dev/null
+    leave_runner_worktree "submit" "$final_status_rc" || return "$?"
     log "cycle complete; artifacts in $cycle_dir"
+}
+
+run_cycle() {
+    if [[ "$LIVE_MODE" == "audit" ]]; then
+        run_audit_cycle
+    else
+        run_submit_cycle
+    fi
+}
+
+run_once() {
+    if [[ "$LIVE_MODE" == "submit" ]]; then
+        local resume_rc=0
+        resume_latest_cycle_if_needed || resume_rc=$?
+        case "$resume_rc" in
+            0) return 0 ;;
+            1) ;;
+            *)
+                log "resume observation failed closed; deferring new cycle"
+                return "$resume_rc"
+                ;;
+        esac
+    fi
+    run_cycle
 }
 
 run_loop() {
     trap 'log "received stop signal; exiting loop"; exit 0' INT TERM
-    if resume_latest_cycle_if_needed; then
-        log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
-        sleep "$LOOP_SLEEP_SECONDS"
-    fi
-
     while true; do
+        if [[ "$LIVE_MODE" == "submit" ]]; then
+            local resume_rc=0
+            resume_latest_cycle_if_needed || resume_rc=$?
+            if (( resume_rc == 0 )); then
+                log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
+                sleep "$LOOP_SLEEP_SECONDS"
+                continue
+            elif (( resume_rc != 1 )); then
+                log "resume observation failed closed; deferring new cycle"
+                log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
+                sleep "$LOOP_SLEEP_SECONDS"
+                continue
+            fi
+        fi
         if ! run_cycle; then
             log "cycle failed; see logs above"
         fi
@@ -647,10 +1447,13 @@ start_session() {
     fi
 
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
-    local runner_cmd
+    local runner_cmd explicit_git_ref_env=""
+    if [[ -n "$EXPLICIT_GIT_REF" ]]; then
+        printf -v explicit_git_ref_env ' CVAL_GIT_REF=%q' "$EXPLICIT_GIT_REF"
+    fi
     printf -v runner_cmd \
-        'CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_DAYS_THRESHOLD=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q bash %q run-loop' \
-        "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$DAYS_THRESHOLD" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$SCRIPT_PATH"
+        'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q%s bash %q run-loop' \
+        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT" "$DAYS_THRESHOLD" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$explicit_git_ref_env" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \
@@ -693,12 +1496,27 @@ show_status() {
 }
 
 case "$COMMAND" in
-    start) start_session ;;
+    start)
+        load_operational_settings
+        validate_runtime_settings
+        require_submit_startup_gate
+        start_session
+        ;;
     stop) stop_session ;;
     attach) exec tmux attach -t "$SESSION_NAME" ;;
     status) show_status ;;
-    run-once) run_cycle ;;
-    run-loop) run_loop ;;
+    run-once)
+        load_operational_settings
+        validate_runtime_settings
+        require_submit_startup_gate
+        run_once
+        ;;
+    run-loop)
+        load_operational_settings
+        validate_runtime_settings
+        require_submit_startup_gate
+        run_loop
+        ;;
     -h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac

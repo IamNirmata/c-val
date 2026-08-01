@@ -177,10 +177,13 @@ This is **opportunistic, non-interfering** sampling: deep coverage without steal
 - **Real submission is double-gated:** `--submit --confirm submit` + policy checks.
 - **Policy gates:** namespace allowlist, max batch size, confirmation phrase.
 - **Read-only everywhere it matters:** status opens SQLite `mode=ro`; monitoring only reads job phase.
-- **Bounded cleanup.** `jobs --watch` never deletes; the separately started live
-  runner prunes stale `Pending` jobs matching its configured namespace and
-  shared job-name prefix after a timeout.
-- **Pinned code refs:** validation runs a pinned commit/tag, not a moving branch.
+- **Audit-first live loop.** Audit runs the complete scheduling plan with zero
+  mutations. Submit has an independent exact startup gate.
+- **Separately gated cleanup.** `jobs --watch` never deletes; submit-mode stale
+  `Pending` pruning is default-off and needs exact
+  `CVAL_PRUNE_CONFIRM=delete-pending`.
+- **Exact code refs:** each cycle resolves fresh `origin/main` to a full commit,
+  or uses a deliberately supplied new-session pin.
 
 <!--
 Manager line: "We can run this against the production cluster today because every dangerous action requires an explicit, auditable human decision."

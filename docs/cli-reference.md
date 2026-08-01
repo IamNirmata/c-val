@@ -352,6 +352,25 @@ Policy gates:
 - planned job count must not exceed max batch size
 - confirmation must match `submit`
 
+### `cval-live.sh`
+
+The tmux-backed live-loop wrapper defaults to
+`CVAL_LIVE_MODE=audit`. Audit mode runs one complete read-only
+discovery → `validation.db/latest_status` → priority → render → slot-selection
+cycle, persists plan/summary JSON, and never submits, resumes submitted jobs, or
+prunes. A successful empty queue is reported separately from discovery,
+latest-status, or plan failure.
+
+Submit mode requires exact `CVAL_LIVE_CONFIRM=submit` before worktree or
+Kubernetes work and continues to invoke `cval run --submit --confirm submit`.
+Stale-Pending pruning is disabled unless the new session also has exact
+`CVAL_PRUNE_CONFIRM=delete-pending`; audit mode never prunes. With no explicit
+`CVAL_GIT_REF`, each cycle fetches and resolves fresh `origin/main` to a full
+commit. See [Operations Runbook](operations-runbook.md#continuous-live-runner).
+
+The optional normalized history DB is not the scheduling source and remains
+default-off. Live scheduling uses compatibility `validation.db/latest_status`.
+
 ## `jobs`
 
 Read Volcano job phase once:

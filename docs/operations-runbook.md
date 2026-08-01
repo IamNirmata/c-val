@@ -18,26 +18,51 @@ Confirm the dry-run output before submitting. Look for:
 
 ## Continuous Live Runner
 
-The tmux live runner is intentionally rolling, not static. It keeps at most the
-configured batch size active at any moment, and before filling each open slot it
-rebuilds the ranked candidate list from live Kubernetes state and current DB
-status. This prevents it from submitting to nodes that were free during an older
-scan but have since become occupied or unschedulable.
+The tmux live runner is explicitly audit-first. `CVAL_LIVE_MODE` is immutable
+for the session and accepts only `audit` or `submit`; the default is `audit`.
+Each audit cycle performs discovery, reads compatibility
+`validation.db/latest_status`, prioritizes due nodes, renders jobs, selects up
+to the configured slots, writes `audit-plan.json` plus
+`audit-summary.json`, and then exits the cycle without submission, submitted-job
+resume/monitoring, or pruning. Logs distinguish discovery/status/plan failures
+from successful `no-free-nodes` and `no-due-candidates` states.
 
-Start, inspect, attach, and stop:
+Normalized run history is optional and independently default-off. A missing
+`node-run-history.db` does not affect live scheduling; the loop continues to use
+the read-only compatibility `latest_status` view.
+
+Start audit mode, inspect, attach, and stop:
 
 ```bash
-scripts/cval-live.sh start
+CVAL_LIVE_MODE=audit CVAL_KUBECTL_TIMEOUT_SECONDS=120 scripts/cval-live.sh start
 scripts/cval-live.sh status
 scripts/cval-live.sh attach
 scripts/cval-live.sh stop
 ```
 
-If a job remains `Pending` past `pending_start_timeout_seconds`, the runner
-deletes every stale `Pending` Volcano job in the configured namespace whose
-name matches the shared `JOB_PREFIX`, then rebuilds the live ranked list before
-submitting replacements. Use a dedicated prefix and inspect matching jobs
-before starting the loop.
+Without an explicit `CVAL_GIT_REF`, every cycle fetches and resolves the current
+`origin/main` to an exact 40-character commit. An explicit ref is resolved to a
+full commit and is propagated only when set on the new `start` invocation.
+
+Submit mode has an independent exact startup gate in addition to the CLI's
+submission gate:
+
+```bash
+CVAL_LIVE_MODE=submit CVAL_LIVE_CONFIRM=submit \
+  CVAL_KUBECTL_TIMEOUT_SECONDS=120 scripts/cval-live.sh start
+```
+
+Submit mode may resume and monitor jobs recorded by an earlier submit cycle. It
+keeps at most the configured batch size active and rebuilds the ranked list for
+each open slot. It still passes `--submit --confirm submit` to the CLI; mode
+alone never authorizes a submission.
+
+Pending-job pruning is disabled by default, including in submit mode. To retain
+the legacy prefix-bounded pruning behavior, separately set the exact destructive
+gate `CVAL_PRUNE_CONFIRM=delete-pending`. Audit mode ignores that value and never
+deletes. Use a dedicated prefix and inspect matching jobs before enabling it.
+Every direct script-level kubectl operation has both a process timeout and
+`--request-timeout`, derived from `CVAL_KUBECTL_TIMEOUT_SECONDS`.
 
 ## One-Node Validation
 
@@ -291,7 +316,8 @@ python -m cval.cli db-rebuild-dltest-metrics \
 
 ## Cleanup
 
-The `jobs --watch` command and `cval-live.sh stop` never delete jobs. A running
-`cval-live` loop does automatically prune matching stale `Pending` jobs as
-described above. Any other cleanup requires explicit approval and an exact
-delete command for the intended validation job.
+The `jobs --watch` command, audit-mode live loop, and `cval-live.sh stop` never
+delete jobs. A submit-mode loop prunes matching stale `Pending` jobs only when
+started with the separate exact `CVAL_PRUNE_CONFIRM=delete-pending` gate. Any
+other cleanup requires explicit approval and an exact delete command for the
+intended validation job.

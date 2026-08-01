@@ -83,12 +83,14 @@ per-test deadline, terminates the process group on timeout, streams stdout and
 stderr into global and per-test files, emits `cval.event.v1`, and continues to
 later tests after a test failure.
 
-## Monitoring Does Not Delete; the Live Loop Has Prefix-Bounded Pruning
+## Monitoring Does Not Delete; Live Pruning Is Separately Gated
 
 `jobs --watch` reports timeout but does not delete or cancel jobs. The separate
-continuous runner automatically prunes stale `Pending` jobs matching its
-configured namespace and shared job-name prefix. Other cleanup needs explicit
-operator approval.
+continuous runner defaults to audit mode and cannot delete jobs. Submit mode
+also leaves pruning disabled unless it has the exact independent
+`CVAL_PRUNE_CONFIRM=delete-pending` gate; only then may it prune stale `Pending`
+jobs matching its configured namespace and shared job-name prefix. Other
+cleanup needs explicit operator approval.
 
 ## Rebuild Live Candidates Per Slot
 

@@ -49,13 +49,23 @@ class KubectlClient:
         to the client's configured timeout.
         """
 
-        command = [self.kubectl, *args]
         if timeout is None:
             effective_timeout = self.timeout_seconds
         elif timeout > 0:
             effective_timeout = timeout
         else:
             effective_timeout = None
+        command = [self.kubectl, *args]
+        if effective_timeout is not None and not any(
+            str(arg).startswith("--request-timeout") for arg in args
+        ):
+            request_timeout = f"--request-timeout={effective_timeout:g}s"
+            try:
+                separator_index = command.index("--", 1)
+            except ValueError:
+                command.append(request_timeout)
+            else:
+                command.insert(separator_index, request_timeout)
         try:
             completed = subprocess.run(
                 command,

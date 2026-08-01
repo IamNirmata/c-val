@@ -127,7 +127,9 @@ The orchestration logic in `job-runner.ipynb` follows these steps:
 - **Logic:** Submits jobs in strictly controlled batches (e.g., 3 jobs at a time) to avoid swamping the scheduler.
     - **Job Creation:** Hydrates `specific-node-job.yml` with the target node name and test parameters.
     - **Monitoring:** Polls job status every `X` minutes.
-    - **Timeouts:** Automatically cancels jobs that stick in `Pending` state for too long to free up the slot.
+        - **Historical v1 timeouts:** This design automatically cancelled jobs that
+            stayed `Pending`; current `cval-live` pruning is default-off and separately
+            exact-gated.
 
 ### 5. In-Pod Execution 
 Once scheduled, the validation pod:

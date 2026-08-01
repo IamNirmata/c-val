@@ -189,12 +189,24 @@ Source of truth:
 
 ---
 
-## Background services (tmux) — run on the PVC pod
+## Background services (tmux)
 
 ```bash
-# Continuous validation runner (discover → prioritize → submit → monitor)
-scripts/cval-live.sh start | status | attach | stop | run-once
+# Dev box: audit is the default and performs zero cluster mutations
+CVAL_LIVE_MODE=audit scripts/cval-live.sh start
+scripts/cval-live.sh status
+scripts/cval-live.sh attach
+scripts/cval-live.sh stop
+scripts/cval-live.sh run-once
 
+# Submission requires both the loop startup gate and the CLI's internal gate
+CVAL_LIVE_MODE=submit CVAL_LIVE_CONFIRM=submit scripts/cval-live.sh start
+
+# Optional destructive stale-Pending pruning is independently gated
+CVAL_LIVE_MODE=submit CVAL_LIVE_CONFIRM=submit \
+  CVAL_PRUNE_CONFIRM=delete-pending scripts/cval-live.sh start
+
+# PVC pod:
 # Daily baseline builder (rebuilds DL DBs, builds + activates baselines)
 scripts/cval-baseline-build.sh start | status | attach | stop | run-once
 
@@ -232,6 +244,11 @@ cval results --test overall --type csv       # 7. export raw status + classifica
 ## Safety reminders
 
 - `run` is **dry-run by default**; real submit needs `--submit --confirm submit`.
+- `cval-live` defaults to immutable audit mode. Submit needs exact
+  `CVAL_LIVE_CONFIRM=submit`; stale-Pending pruning is off unless separately
+  confirmed with `CVAL_PRUNE_CONFIRM=delete-pending`.
+- Live scheduling reads `validation.db/latest_status`; normalized run history is
+  optional and remains default-off.
 - `status`/`jobs`/`overview`/`results` are **read-only**.
 - Baseline `activate` redefines "normal" for future classification — promote deliberately.
 - Run baseline/DL-rebuild commands **where `/data/continuous_validation` is mounted** (the `gcr-admin-pvc-access` pod), not on a dev box.

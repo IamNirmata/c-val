@@ -2101,7 +2101,7 @@ def _build_plan_from_args(args: argparse.Namespace):
     from cval.orchestrator.workflow import build_workflow_plan
 
     db_status = _load_db_status(args)
-    if args.free_nodes:
+    if args.free_nodes is not None:
         # Explicit node lists are useful for controlled one-node submissions.
         free_nodes = _parse_csv(args.free_nodes)
     else:

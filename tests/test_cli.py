@@ -517,6 +517,32 @@ validation_root = "{root}"
         self.assertEqual(plan["queue_count"], 2)
         self.assertEqual(len(plan["planned_jobs"]), 1)
 
+    def test_plan_command_treats_explicit_empty_free_nodes_as_an_empty_snapshot(self) -> None:
+        output = io.StringIO()
+
+        with patch("cval.cli.discover_free_nodes") as discover:
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "plan",
+                        "--free-nodes",
+                        "",
+                        "--batch-size",
+                        "1",
+                        "--timestamp",
+                        "12345",
+                        "--output",
+                        "json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        discover.assert_not_called()
+        plan = json.loads(output.getvalue())
+        self.assertEqual(plan["free_nodes_count"], 0)
+        self.assertEqual(plan["queue_count"], 0)
+        self.assertEqual(plan["planned_jobs"], [])
+
     def test_plan_command_can_use_live_status(self) -> None:
         output = io.StringIO()
 

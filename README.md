@@ -77,9 +77,11 @@ python -m cval.cli run \
 - Planning and rendering are dry-run by default.
 - Kubernetes job creation requires `--submit --confirm submit`.
 - Read-only commands, including `jobs --watch`, never delete or cancel jobs.
-  The separately started `cval-live` service automatically prunes stale
-  `Pending` jobs matching its configured namespace and shared job-name prefix.
-- Runtime jobs should pin `CVAL_GIT_REF` to a commit or tag for reproducibility.
+  The separately started `cval-live` service defaults to audit mode. Submit
+  requires exact `CVAL_LIVE_CONFIRM=submit`; stale-`Pending` pruning is off
+  unless independently confirmed with `CVAL_PRUNE_CONFIRM=delete-pending`.
+- The live loop resolves fresh `origin/main` to an exact commit each cycle by
+  default. Set `CVAL_GIT_REF` on a new session only for a deliberate pin.
 
 ## Documentation
 

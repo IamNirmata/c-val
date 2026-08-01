@@ -12,7 +12,10 @@ from cval.k8s.client import KubectlClient
 class KubectlClientTests(unittest.TestCase):
     def test_passes_timeout_to_subprocess(self) -> None:
         def fake_run(command, **kwargs):
-            self.assertEqual(command, ["kubectl", "get", "nodes"])
+            self.assertEqual(
+                command,
+                ["kubectl", "get", "nodes", "--request-timeout=12.5s"],
+            )
             self.assertEqual(kwargs["timeout"], 12.5)
             return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
@@ -21,6 +24,40 @@ class KubectlClientTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "{}")
+
+    def test_preserves_explicit_request_timeout(self) -> None:
+        def fake_run(command, **kwargs):
+            self.assertEqual(
+                command,
+                ["kubectl", "--request-timeout=5s", "get", "nodes"],
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        with patch("cval.k8s.client.subprocess.run", side_effect=fake_run):
+            KubectlClient(timeout_seconds=12.5).run(
+                ["--request-timeout=5s", "get", "nodes"]
+            )
+
+    def test_request_timeout_precedes_exec_separator(self) -> None:
+        def fake_run(command, **kwargs):
+            self.assertEqual(
+                command,
+                [
+                    "kubectl",
+                    "exec",
+                    "pod-a",
+                    "--request-timeout=12.5s",
+                    "--",
+                    "python3",
+                    "-",
+                ],
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+        with patch("cval.k8s.client.subprocess.run", side_effect=fake_run):
+            KubectlClient(timeout_seconds=12.5).run(
+                ["exec", "pod-a", "--", "python3", "-"]
+            )
 
     def test_per_call_timeout_overrides_client_default(self) -> None:
         seen: dict[str, object] = {}
@@ -44,7 +81,7 @@ class KubectlClientTests(unittest.TestCase):
                 KubectlClient(timeout_seconds=1.0).run(["get", "nodes"])
 
         self.assertIn("Command timed out after 1s", str(exc.exception))
-        self.assertIn("kubectl get nodes", str(exc.exception))
+        self.assertIn("kubectl get nodes --request-timeout=1s", str(exc.exception))
 
     def test_timeout_can_return_command_result_without_check(self) -> None:
         with patch(
