@@ -12,8 +12,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cval.config import encode_config_snapshot, load_config
+from cval.evaluator.state import bind_state_target, state_test_lock
+from cval.storage.per_test_results import (
+    PerTestResultRecord,
+    resolve_test_results_db_path,
+    write_per_test_result,
+)
 from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
-from cval.validation.ingestion import ingest_test_results_file
+from cval.validation.ingestion import (
+    ingest_test_results_file,
+    preflight_test_results_file,
+)
 from cval.validation.registry import load_test_registry
 from cval.validation.runner import run_validation_tests
 from cval.validation.runtime import effective_config_digest
@@ -36,6 +45,136 @@ def _ingest(result_path: Path, config):
 
 
 class ModularPerTestIngestionTests(unittest.TestCase):
+    def test_gate_off_preflight_creates_no_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._config(root, enabled=False)
+            state_root = Path(config.health_evaluator.state_root)
+            result_path = self._write_builtin_result(root, config)
+            result = load_validation_result(result_path)
+            assert isinstance(result, ValidationResultV2)
+
+            run_id = preflight_test_results_file(
+                result_path,
+                config=config,
+                result_digest=validation_result_v2_digest(result),
+                config_snapshot_b64=encode_config_snapshot(config),
+            )
+
+            self.assertEqual(run_id, result.run_id)
+            self.assertFalse(state_root.exists())
+
+    def test_gate_on_wrong_owner_fails_before_compatibility_target_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._config(root, enabled=True)
+            compatibility = root / "compatibility.db"
+            compatibility.write_bytes(b"unchanged")
+            config = replace(
+                config,
+                storage=replace(config.storage, validation_db_path=str(compatibility)),
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    state_owner_uid=os.geteuid() + 1,
+                ),
+            )
+            result_path = self._write_builtin_result(root, config)
+            result = load_validation_result(result_path)
+            assert isinstance(result, ValidationResultV2)
+
+            with self.assertRaisesRegex(PermissionError, "process owner mismatch"):
+                preflight_test_results_file(
+                    result_path,
+                    config=config,
+                    result_digest=validation_result_v2_digest(result),
+                    config_snapshot_b64=encode_config_snapshot(config),
+                )
+
+            self.assertEqual(compatibility.read_bytes(), b"unchanged")
+
+    def test_secure_u7_first_creation_modes_and_identity_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._config(root, enabled=True)
+            registered = config.tests.registry.require("storage")
+            path = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            record = PerTestResultRecord(
+                run_id="identity-race",
+                test_id="storage",
+                node="node-a",
+                run_timestamp=1,
+                started_timestamp=1,
+                completed_timestamp=2,
+                status="fail",
+                exit_code=1,
+                image_name="image",
+                pytorch_version="2.8",
+                cuda_version="12.9",
+                test_config_digest="sha256:" + "1" * 64,
+                result_path=str(root / "result.json"),
+                summary_path="",
+                artifacts_path=str(root / "artifacts"),
+                raw_result_json=(
+                    '{"schema_version":"cval.test-result.v1",'
+                    '"test_id":"storage"}'
+                ),
+                result_digest="sha256:" + "2" * 64,
+            )
+            with state_test_lock(config, path) as lock_guard, bind_state_target(
+                config,
+                path,
+                create=True,
+                allow_missing=False,
+                writable=True,
+                require_writable=True,
+            ) as binding:
+                identity = binding.sqlite_identity
+                assert identity is not None
+                write_per_test_result(
+                    record,
+                    db_path=path,
+                    expected_identity=identity,
+                    state_guard=lambda: (
+                        lock_guard(),
+                        binding.assert_path_binding(),
+                    ),
+                )
+            current = Path(config.health_evaluator.state_root)
+            for part in path.parent.relative_to(current).parts:
+                current = current / part
+                self.assertEqual(current.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_nlink, 1)
+
+            replacement = path.with_name("replacement.db")
+            replacement.touch(mode=0o600)
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, path)
+            with self.assertRaisesRegex(RuntimeError, "path/device/inode changed"):
+                write_per_test_result(
+                    record,
+                    db_path=path,
+                    expected_identity=identity,
+                )
+
+    def test_u7_paths_use_state_root_while_result_evidence_stays_shared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._config(root, enabled=True)
+            result_path = self._write_builtin_result(root, config)
+            report = _ingest(result_path, config)
+            state_root = Path(config.health_evaluator.state_root)
+
+            self.assertTrue(report.ok)
+            self.assertTrue(result_path.is_relative_to(Path(config.runtime.validation_root)))
+            self.assertFalse(result_path.is_relative_to(state_root))
+            self.assertTrue(
+                (state_root / "validation_tests/storage/storage_results.db").is_file()
+            )
+
     def test_direct_ingestion_rejects_missing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -53,6 +192,36 @@ class ModularPerTestIngestionTests(unittest.TestCase):
                 )
 
             self.assertEqual(list(root.glob("validation_tests/**/*.db")), [])
+
+    def test_preflight_rejects_each_evaluator_state_snapshot_field_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._config(root, enabled=True)
+            result_path = self._write_builtin_result(root, config)
+            result = load_validation_result(result_path)
+            assert isinstance(result, ValidationResultV2)
+            variants = {
+                "state_root": str(root / "different-state"),
+                "state_owner_uid": config.health_evaluator.state_owner_uid + 1,
+                "state_owner_gid": config.health_evaluator.state_owner_gid + 1,
+                "validation_root_mode": "0710",
+            }
+            for field, value in variants.items():
+                with self.subTest(field=field):
+                    altered = replace(
+                        config,
+                        health_evaluator=replace(
+                            config.health_evaluator,
+                            **{field: value},
+                        ),
+                    )
+                    with self.assertRaisesRegex(ValueError, "immutable snapshot"):
+                        preflight_test_results_file(
+                            result_path,
+                            config=config,
+                            result_digest=validation_result_v2_digest(result),
+                            config_snapshot_b64=encode_config_snapshot(altered),
+                        )
 
     def test_synthetic_fourth_test_gets_raw_persistence_without_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -119,7 +288,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
 
             report = _ingest(result_path, config)
             with closing(
-                sqlite3.connect(root / "validation_tests/smoke/smoke_results.db")
+                sqlite3.connect(root / "evaluator_state/validation_tests/smoke/smoke_results.db")
             ) as connection:
                 row = connection.execute(
                     "SELECT run_id, test_id, status FROM test_results"
@@ -186,7 +355,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                 )
             result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
             self.assertTrue(_ingest(result_path, config).ok)
-            db_path = root / "validation_tests/smoke/smoke_results.db"
+            db_path = root / "evaluator_state/validation_tests/smoke/smoke_results.db"
             with closing(sqlite3.connect(db_path)) as connection:
                 connection.execute("CREATE VIEW unexpected AS SELECT * FROM test_results")
                 connection.commit()
@@ -220,7 +389,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                 )
             )
 
-            storage_db = root / "validation_tests/storage/storage_results.db"
+            storage_db = root / "evaluator_state/validation_tests/storage/storage_results.db"
             with closing(sqlite3.connect(storage_db)) as connection:
                 common = connection.execute(
                     "SELECT status, image_name, pytorch_version, cuda_version, "
@@ -234,7 +403,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                     "SELECT COUNT(*) FROM metric_ingestion_receipts"
                 ).fetchone()[0]
 
-            nccl_db = root / "validation_tests/nccl/nccl_results.db"
+            nccl_db = root / "evaluator_state/validation_tests/nccl/nccl_results.db"
             with closing(sqlite3.connect(nccl_db)) as connection:
                 nccl = connection.execute(
                     "SELECT iterations, BUS_BW, LATENCY, mlx5_0, mlx5_13, run_id "
@@ -251,7 +420,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                     for row in connection.execute("PRAGMA table_info(IB_HEALTH)")
                 ]
 
-            dl_db = root / "validation_tests/dltest/dltest_results.db"
+            dl_db = root / "evaluator_state/validation_tests/dltest/dltest_results.db"
             with closing(sqlite3.connect(dl_db)) as connection:
                 dl_common = connection.execute(
                     "SELECT status, health_class_name, evaluated_at FROM test_results"
@@ -287,7 +456,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
             second = _ingest(result_path, config)
             counts = {}
             for test_id in ("storage", "nccl", "dltest"):
-                db_path = root / f"validation_tests/{test_id}/{test_id}_results.db"
+                db_path = root / f"evaluator_state/validation_tests/{test_id}/{test_id}_results.db"
                 with closing(sqlite3.connect(db_path)) as connection:
                     counts[test_id] = connection.execute(
                         "SELECT COUNT(*) FROM test_results"
@@ -315,7 +484,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
             for test_id in ("storage", "nccl", "dltest"):
                 with closing(
                     sqlite3.connect(
-                        root / f"validation_tests/{test_id}/{test_id}_results.db"
+                        root / f"evaluator_state/validation_tests/{test_id}/{test_id}_results.db"
                     )
                 ) as connection:
                     keys[test_id] = connection.execute(
@@ -350,7 +519,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
             self.assertTrue(by_test["nccl"].error)
             self.assertFalse(by_test["dltest"].error)
             with closing(
-                sqlite3.connect(root / "validation_tests/nccl/nccl_results.db")
+                sqlite3.connect(root / "evaluator_state/validation_tests/nccl/nccl_results.db")
             ) as connection:
                 raw = connection.execute(
                     "SELECT status, health_class_name FROM test_results"
@@ -361,10 +530,10 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
             self.assertEqual(raw, ("pass", None))
             self.assertIsNone(has_metrics)
             self.assertTrue(
-                (root / "validation_tests/storage/storage_results.db").is_file()
+                (root / "evaluator_state/validation_tests/storage/storage_results.db").is_file()
             )
             self.assertTrue(
-                (root / "validation_tests/dltest/dltest_results.db").is_file()
+                (root / "evaluator_state/validation_tests/dltest/dltest_results.db").is_file()
             )
 
     def test_adapter_cannot_recover_and_commit_parent_sqlite_connection(self) -> None:
@@ -478,7 +647,7 @@ PLUGIN = EscapePlugin()
 
             report = _ingest(result_path, config)
             retry = _ingest(result_path, config)
-            db_path = root / "validation_tests/escape/escape_results.db"
+            db_path = root / "evaluator_state/validation_tests/escape/escape_results.db"
             with closing(sqlite3.connect(db_path)) as connection:
                 marker = connection.execute(
                     "SELECT 1 FROM sqlite_master "
@@ -508,7 +677,7 @@ PLUGIN = EscapePlugin()
             result_path = self._write_builtin_result(root, config)
             first = _ingest(result_path, config)
             self.assertTrue(first.ok)
-            storage_db = root / "validation_tests/storage/storage_results.db"
+            storage_db = root / "evaluator_state/validation_tests/storage/storage_results.db"
             with closing(sqlite3.connect(storage_db)) as connection, self.assertRaises(
                 sqlite3.IntegrityError
             ):
@@ -540,7 +709,7 @@ PLUGIN = EscapePlugin()
             config = self._config(root, enabled=True)
             result_path = self._write_builtin_result(root, config)
             self.assertTrue(_ingest(result_path, config).ok)
-            storage_db = root / "validation_tests/storage/storage_results.db"
+            storage_db = root / "evaluator_state/validation_tests/storage/storage_results.db"
             with closing(sqlite3.connect(storage_db)) as connection, self.assertRaises(
                 sqlite3.IntegrityError
             ):
@@ -556,7 +725,7 @@ PLUGIN = EscapePlugin()
             config = self._config(root, enabled=True)
             result_path = self._write_builtin_result(root, config)
             self.assertTrue(_ingest(result_path, config).ok)
-            storage_db = root / "validation_tests/storage/storage_results.db"
+            storage_db = root / "evaluator_state/validation_tests/storage/storage_results.db"
             statements = (
                 "INSERT OR REPLACE INTO test_results "
                 "SELECT result_id, run_id, test_id, node, run_timestamp, "
@@ -606,7 +775,7 @@ PLUGIN = EscapePlugin()
             config = self._config(root, enabled=True)
             result_path = self._write_builtin_result(root, config)
             self.assertTrue(_ingest(result_path, config).ok)
-            storage_db = root / "validation_tests/storage/storage_results.db"
+            storage_db = root / "evaluator_state/validation_tests/storage/storage_results.db"
             with closing(sqlite3.connect(storage_db)) as connection:
                 connection.execute("DROP INDEX idx_storage_performance_run_id")
                 connection.execute(
@@ -628,7 +797,7 @@ PLUGIN = EscapePlugin()
             config = self._config(root, enabled=True)
             result_path = self._write_builtin_result(root, config)
             self.assertTrue(_ingest(result_path, config).ok)
-            nccl_db = root / "validation_tests/nccl/nccl_results.db"
+            nccl_db = root / "evaluator_state/validation_tests/nccl/nccl_results.db"
             with closing(sqlite3.connect(nccl_db)) as connection:
                 connection.execute("DROP VIEW LATEST_NODE_STATUS")
                 connection.execute(
@@ -645,7 +814,7 @@ PLUGIN = EscapePlugin()
             config = self._config(root, enabled=True)
             result_path = self._write_builtin_result(root, config)
             self.assertTrue(_ingest(result_path, config).ok)
-            storage_db = root / "validation_tests/storage/storage_results.db"
+            storage_db = root / "evaluator_state/validation_tests/storage/storage_results.db"
             with closing(sqlite3.connect(storage_db)) as connection:
                 connection.execute(
                     "CREATE TRIGGER delete_storage AFTER INSERT ON storage_performance "
@@ -674,7 +843,7 @@ PLUGIN = EscapePlugin()
             self.assertEqual(storage.status, "fail")
             self.assertFalse(storage.adapter_called)
             with closing(
-                sqlite3.connect(root / "validation_tests/storage/storage_results.db")
+                sqlite3.connect(root / "evaluator_state/validation_tests/storage/storage_results.db")
             ) as connection:
                 row = connection.execute(
                     "SELECT status, health_class_name FROM test_results"
@@ -726,7 +895,7 @@ PLUGIN = EscapePlugin()
                 storage = next(
                     outcome for outcome in report.outcomes if outcome.test_id == "storage"
                 )
-                db_path = root / "validation_tests/storage/storage_results.db"
+                db_path = root / "evaluator_state/validation_tests/storage/storage_results.db"
                 with closing(sqlite3.connect(db_path)) as connection:
                     statuses = connection.execute(
                         "SELECT run_id, status FROM test_results ORDER BY run_id"
@@ -756,7 +925,7 @@ PLUGIN = EscapePlugin()
                 _ingest(result_path, config)
 
             self.assertFalse(
-                (root / "validation_tests/storage/storage_results.db").exists()
+                (root / "evaluator_state/validation_tests/storage/storage_results.db").exists()
             )
 
     def test_storage_adapter_rejects_symlinked_child_artifact(self) -> None:
@@ -789,13 +958,13 @@ PLUGIN = EscapePlugin()
                 _ingest(result_path, config)
 
             self.assertFalse(
-                (root / "validation_tests/storage/storage_results.db").exists()
+                (root / "evaluator_state/validation_tests/storage/storage_results.db").exists()
             )
             self.assertFalse(
-                (root / "validation_tests/nccl/nccl_results.db").exists()
+                (root / "evaluator_state/validation_tests/nccl/nccl_results.db").exists()
             )
             self.assertFalse(
-                (root / "validation_tests/dltest/dltest_results.db").exists()
+                (root / "evaluator_state/validation_tests/dltest/dltest_results.db").exists()
             )
 
     def test_dl_adapter_rejects_rank_plan_mismatch(self) -> None:
@@ -819,7 +988,7 @@ PLUGIN = EscapePlugin()
             )
             self.assertIn("does not match", dltest.error)
             with closing(
-                sqlite3.connect(root / "validation_tests/dltest/dltest_results.db")
+                sqlite3.connect(root / "evaluator_state/validation_tests/dltest/dltest_results.db")
             ) as connection:
                 metric_table = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name='numerical_correctness'"
@@ -1044,6 +1213,11 @@ PLUGIN = EscapePlugin()
     @staticmethod
     def _config(root: Path, *, enabled: bool):
         base = load_config()
+        root.mkdir(parents=True, exist_ok=True)
+        state_root = root / "evaluator_state"
+        if enabled:
+            state_root.mkdir(mode=0o700)
+            os.chmod(state_root, 0o700)
         return replace(
             base,
             storage=replace(base.storage, per_test_ingestion_enabled=enabled),
@@ -1053,6 +1227,12 @@ PLUGIN = EscapePlugin()
                 dl_results_root_path=str(
                     root / "validation_tests/dltest/runs"
                 ),
+            ),
+            health_evaluator=replace(
+                base.health_evaluator,
+                state_root=str(state_root),
+                state_owner_uid=os.geteuid(),
+                state_owner_gid=os.getegid(),
             ),
         )
 

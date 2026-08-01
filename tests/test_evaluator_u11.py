@@ -17,6 +17,7 @@ import zipfile
 from contextlib import closing, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
@@ -98,6 +99,12 @@ def _smoke_config(source: Path):
     config = replace(
         config,
         runtime=replace(config.runtime, validation_root="/configured-runtime-not-copy"),
+        health_evaluator=replace(
+            config.health_evaluator,
+            state_root="/configured-state-not-copy",
+            state_owner_uid=os.geteuid(),
+            state_owner_gid=os.getegid(),
+        ),
         tests=TestsConfig(registry=ValidationTestRegistry((registered,))),
     )
     result_path = source / active_definition.artifacts.results_db_path
@@ -468,7 +475,16 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             root = Path(tmpdir)
             config = replace(
                 default_config(),
-                runtime=replace(default_config().runtime, validation_root=str(root)),
+                runtime=replace(
+                    default_config().runtime,
+                    validation_root="/configured-shared-not-state",
+                ),
+                health_evaluator=replace(
+                    default_config().health_evaluator,
+                    state_root=str(root),
+                    state_owner_uid=os.geteuid(),
+                    state_owner_gid=os.getegid(),
+                ),
             )
             before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
             report = run_deployment_preflight(config)
@@ -476,6 +492,91 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual(before, after)
         self.assertTrue(all(not test["health_db_present"] for test in report["tests"]))
+
+    def test_preflight_retained_traceback_closes_all_test_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = Path(tmpdir) / "state"
+            state.mkdir(mode=0o700)
+            config, _registered, _result_path = _smoke_config(state)
+            config = replace(
+                config,
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    state_root=str(state),
+                ),
+            )
+            held: list[BaseException] = []
+            before = len(list(Path("/proc/self/fd").iterdir()))
+
+            def fail_snapshot(*_args, **_kwargs):
+                try:
+                    raise RuntimeError("retained snapshot traceback")
+                except RuntimeError as exc:
+                    held.append(exc)
+                    raise
+
+            with patch(
+                "cval.evaluator.preflight.immutable_sqlite_snapshot",
+                side_effect=fail_snapshot,
+            ):
+                report = run_deployment_preflight(config)
+            after = len(list(Path("/proc/self/fd").iterdir()))
+            self.assertFalse(report["ok"])
+            self.assertEqual(before, after)
+            self.assertEqual(len(held), 1)
+
+    def test_shadow_needs_no_write_but_apply_requires_writable_state_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared = root / "shared-evidence"
+            shared.mkdir(mode=0o755)
+            os.chmod(shared, 0o755)
+            state = root / "evaluator-state"
+            state.mkdir(mode=0o700)
+            os.chmod(state, 0o700)
+            config, _registered, _result_path = _smoke_config(state)
+            config = replace(
+                config,
+                runtime=replace(config.runtime, validation_root=str(shared)),
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    state_root=str(state),
+                ),
+            )
+            readonly = SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1))
+            with patch(
+                "cval.evaluator.state.os.statvfs",
+                return_value=readonly,
+            ), patch(
+                "cval.evaluator.preflight.validate_registry_plugins",
+                return_value=("smoke",),
+            ):
+                shadow = run_deployment_preflight(config, access="ro")
+                apply = run_deployment_preflight(config, access="rw")
+
+        self.assertTrue(shadow["ok"])
+        self.assertEqual(shadow["state_root"], str(state))
+        self.assertFalse(shadow["tests"][0]["health_db_present"])
+        self.assertFalse(apply["ok"])
+        self.assertIn("read-only", apply["checks"][1]["detail"])
+
+    def test_preflight_rejects_wrong_fixed_process_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = Path(tmpdir) / "evaluator-state"
+            state.mkdir(mode=0o700)
+            config, _registered, _result_path = _smoke_config(state)
+            config = replace(
+                config,
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    state_root=str(state),
+                    state_owner_uid=os.geteuid() + 1,
+                ),
+            )
+            report = run_deployment_preflight(config, access="ro")
+
+        self.assertFalse(report["ok"])
+        self.assertIn("process owner mismatch", report["checks"][1]["detail"])
 
     def test_parity_preserves_originals_dnr_and_is_deterministic(self) -> None:
         u8 = [
@@ -1007,7 +1108,7 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             os.chmod(result_path, 0o600)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
             )
             with patch(
                 "cval.evaluator.preflight.validate_registry_plugins",
@@ -1054,7 +1155,7 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             os.chmod(result_path, 0o600)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
             )
             with patch(
                 "cval.evaluator.preflight.validate_registry_plugins",
@@ -1091,7 +1192,7 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             nested_registered = replace(registered, definition=nested_definition)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
                 tests=TestsConfig(
                     registry=ValidationTestRegistry((nested_registered,))
                 ),
@@ -1109,7 +1210,7 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             if item["name"] == "health-owner-directory"
         )
         self.assertTrue(check["ok"])
-        self.assertIn("safe creation ancestor", check["detail"])
+        self.assertIn("state ancestry", check["detail"])
         self.assertEqual(before, after)
 
     def test_preflight_rejects_unsafe_intermediate_0770_ancestry(self) -> None:
@@ -1121,16 +1222,16 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             os.chmod(intermediate, 0o770)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
             )
             report = run_deployment_preflight(local)
         owner = next(
             item
             for item in report["tests"][0]["checks"]
-            if item["name"] == "owner-directory"
+            if item["name"] == "result-db-file"
         )
         self.assertFalse(owner["ok"])
-        self.assertIn("group/world writable", owner["detail"])
+        self.assertIn("exact owner 0700", owner["detail"])
 
     def test_preflight_rejects_foreign_owner_ancestry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1139,15 +1240,15 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             config, _registered, _result_path = _smoke_config(root)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
             )
             with patch(
-                "cval.evaluator.preflight.os.geteuid",
+                "cval.evaluator.state.os.geteuid",
                 return_value=os.geteuid() + 1,
             ):
                 report = run_deployment_preflight(local)
         self.assertFalse(report["checks"][1]["ok"])
-        self.assertIn("not owned", report["checks"][1]["detail"])
+        self.assertIn("process owner mismatch", report["checks"][1]["detail"])
 
     def test_preflight_detects_intermediate_symlink_swap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1156,7 +1257,7 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             config, _registered, _result_path = _smoke_config(root)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
             )
             owner = root / "validation_tests/smoke"
             parked = root / "validation_tests/smoke-original"
@@ -1166,9 +1267,9 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             swapped = False
 
             @contextmanager
-            def swapping_snapshot(path):
+            def swapping_snapshot(path, **kwargs):
                 nonlocal swapped
-                with original_snapshot(path) as snapshot_value:
+                with original_snapshot(path, **kwargs) as snapshot_value:
                     yield snapshot_value
                 if not swapped:
                     owner.rename(parked)
@@ -1214,7 +1315,7 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             health_registered = replace(registered, definition=health_definition)
             local = replace(
                 config,
-                runtime=replace(config.runtime, validation_root=str(root)),
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
                 tests=TestsConfig(
                     registry=ValidationTestRegistry((health_registered,))
                 ),
@@ -1234,14 +1335,17 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             if item["name"] == "health-owner-directory"
         )
         self.assertFalse(check["ok"])
-        self.assertIn("mode must be 0700", check["detail"])
+        self.assertIn("exact owner 0700", check["detail"])
 
     def test_rw_preflight_rejects_0400_group_world_modes_and_hardlinks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "source"
             root.mkdir()
             config, _registered, result_path = _smoke_config(root)
-            local = replace(config, runtime=replace(config.runtime, validation_root=str(root)))
+            local = replace(
+                config,
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
+            )
             for mode in (0o400, 0o640, 0o606):
                 with self.subTest(mode=f"{mode:04o}"):
                     os.chmod(result_path, mode)
@@ -1269,7 +1373,10 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
                 root = Path(tmpdir) / "source"
                 root.mkdir()
                 config, registered, result_path = _smoke_config(root)
-                local = replace(config, runtime=replace(config.runtime, validation_root=str(root)))
+                local = replace(
+                    config,
+                    health_evaluator=replace(config.health_evaluator, state_root=str(root)),
+                )
                 if health_sidecar:
                     health_path = root / registered.definition.artifacts.health_classes_db_path
                     sidecar = health_path.with_name(health_path.name + suffix)
@@ -1290,7 +1397,10 @@ class EvaluatorPreflightAndParityTests(unittest.TestCase):
             root.mkdir()
             config, registered, result_path = _smoke_config(root)
             health_path, key_path = _add_health_pair(root, registered)
-            local = replace(config, runtime=replace(config.runtime, validation_root=str(root)))
+            local = replace(
+                config,
+                health_evaluator=replace(config.health_evaluator, state_root=str(root)),
+            )
             for path in (result_path, health_path, key_path):
                 metadata = path.stat()
                 os.utime(path, ns=(1_000_000_000, metadata.st_mtime_ns))
@@ -1445,7 +1555,7 @@ class EvaluatorBackupTests(unittest.TestCase):
             runtime_root = root / "runtime"
             runtime_root.mkdir()
             config = replace(config, runtime=replace(config.runtime, validation_root=str(runtime_root)))
-            with self.assertRaisesRegex(ValueError, "outside runtime.validation_root"):
+            with self.assertRaisesRegex(ValueError, "outside the configured live shared/state roots"):
                 backup_local_evaluator_state(
                     config,
                     source_root=source,
@@ -1476,17 +1586,26 @@ class EvaluatorBackupTests(unittest.TestCase):
             source.mkdir()
             config, _registered, _result_path = _smoke_config(source)
             target = root / "backup"
-            original_mkdir = os.mkdir
+            from cval.evaluator import backup as backup_module
 
-            def racing_mkdir(path, mode=0o777, *, dir_fd=None):
-                if Path(path) == target:
-                    original_mkdir(path, mode, dir_fd=dir_fd)
+            original_copy = backup_module._copy_sqlite
+            parked = root / "reserved-original"
+            raced = False
+
+            def replace_reserved_root(*args, **kwargs):
+                nonlocal raced
+                if not raced:
+                    raced = True
+                    target.rename(parked)
+                    target.mkdir(mode=0o700)
                     (target / "racer-owned").write_text("keep", encoding="utf-8")
-                    raise FileExistsError(path)
-                return original_mkdir(path, mode, dir_fd=dir_fd)
+                return original_copy(*args, **kwargs)
 
-            with patch("cval.evaluator.backup.os.mkdir", side_effect=racing_mkdir):
-                with self.assertRaises(FileExistsError):
+            with patch(
+                "cval.evaluator.backup._copy_sqlite",
+                side_effect=replace_reserved_root,
+            ):
+                with self.assertRaises(RuntimeError):
                     backup_local_evaluator_state(
                         config,
                         source_root=source,
@@ -1495,6 +1614,778 @@ class EvaluatorBackupTests(unittest.TestCase):
                         confirmation="backup",
                     )
             self.assertEqual((target / "racer-owned").read_text(encoding="utf-8"), "keep")
+            self.assertTrue(parked.is_dir())
+
+    def test_backup_rejects_parent_and_higher_ancestor_replacement_before_reservation(self) -> None:
+        for level in ("parent", "higher"):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                source = root / "source"
+                source.mkdir()
+                config, _registered, _result_path = _smoke_config(source)
+                higher = root / "destination-tree"
+                parent = higher / "parent"
+                parent.mkdir(parents=True, mode=0o700)
+                os.chmod(higher, 0o700)
+                os.chmod(parent, 0o700)
+                target = parent / "backup"
+                from cval.evaluator import backup as backup_module
+
+                original_reserve = backup_module._reserve_destination
+                parked = root / f"parked-{level}"
+
+                def replace_then_reserve(binding):
+                    if level == "parent":
+                        parent.rename(parked)
+                        parent.mkdir(mode=0o700)
+                    else:
+                        higher.rename(parked)
+                        higher.mkdir(mode=0o700)
+                        (higher / "parent").mkdir(mode=0o700)
+                    return original_reserve(binding)
+
+                with patch(
+                    "cval.evaluator.backup._reserve_destination",
+                    side_effect=replace_then_reserve,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        backup_local_evaluator_state(
+                            config,
+                            source_root=source,
+                            destination=target,
+                            apply=True,
+                            confirmation="backup",
+                        )
+                self.assertFalse(target.exists())
+                parked_target = (
+                    parked / "backup"
+                    if level == "parent"
+                    else parked / "parent/backup"
+                )
+                self.assertFalse(parked_target.exists())
+
+    def test_backup_root_final_name_racer_is_preserved_and_stage_is_cleaned(self) -> None:
+        from cval.evaluator import backup as backup_module
+        from cval.evaluator import secure_state as secure_state_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = root / "destination-tree/parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(parent.parent, 0o700)
+            os.chmod(parent, 0o700)
+            target = parent / "backup"
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            binding = backup_module._bind_destination_target(target)
+            original_publish = secure_state_module.rename_noreplace_at
+            raced = False
+
+            def publish_after_racer(source_parent_fd, source_name, destination_parent_fd, destination_name):
+                nonlocal raced
+                if destination_name == target.name and not raced:
+                    raced = True
+                    os.mkdir(destination_name, 0o700, dir_fd=destination_parent_fd)
+                    (target / "racer-owned").write_text("keep", encoding="utf-8")
+                return original_publish(
+                    source_parent_fd,
+                    source_name,
+                    destination_parent_fd,
+                    destination_name,
+                )
+
+            try:
+                with patch.object(
+                    secure_state_module,
+                    "rename_noreplace_at",
+                    side_effect=publish_after_racer,
+                ), self.assertRaises(FileExistsError):
+                    backup_module._reserve_destination(binding)
+                self.assertTrue(raced)
+                self.assertTrue(target.is_dir())
+                self.assertEqual(
+                    (target / "racer-owned").read_text(encoding="utf-8"),
+                    "keep",
+                )
+                self.assertEqual(
+                    list(parent.glob(".cval-dir-stage-*")),
+                    [],
+                )
+            finally:
+                binding.close()
+            self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_backup_destination_file_fchmod_interruption_cleans_registered_inode(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "backup"
+            ancestry = backup_module._bind_destination_target(target)
+            reservation = backup_module._reserve_destination(ancestry)
+            primary = KeyboardInterrupt("backup fchmod interrupted")
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            try:
+                with patch.object(
+                    backup_module.os,
+                    "fchmod",
+                    side_effect=primary,
+                ), self.assertRaises(KeyboardInterrupt) as raised:
+                    with backup_module._reserved_destination_file(
+                        reservation,
+                        Path("artifact.db"),
+                    ):
+                        self.fail("interrupted destination creation must not yield")
+                self.assertIs(raised.exception, primary)
+                self.assertFalse((target / "artifact.db").exists())
+                self.assertEqual(reservation.files, {})
+                self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+            finally:
+                backup_module._remove_tree_if_identity(reservation)
+                reservation.close()
+
+    def test_backup_destination_file_interruption_preserves_racer(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "backup"
+            ancestry = backup_module._bind_destination_target(target)
+            reservation = backup_module._reserve_destination(ancestry)
+            original_fchmod = backup_module.os.fchmod
+            raced = False
+
+            def replace_then_interrupt(descriptor, mode):
+                nonlocal raced
+                if not raced:
+                    raced = True
+                    created = target / "artifact.db"
+                    relocated = target / "relocated-created.db"
+                    created.rename(relocated)
+                    created.write_bytes(b"racer")
+                    os.chmod(created, 0o600)
+                    raise SystemExit("backup racer interruption")
+                return original_fchmod(descriptor, mode)
+
+            try:
+                with patch.object(
+                    backup_module.os,
+                    "fchmod",
+                    side_effect=replace_then_interrupt,
+                ), self.assertRaises(SystemExit):
+                    with backup_module._reserved_destination_file(
+                        reservation,
+                        Path("artifact.db"),
+                    ):
+                        self.fail("interrupted destination creation must not yield")
+                self.assertTrue(raced)
+                self.assertEqual((target / "artifact.db").read_bytes(), b"racer")
+                self.assertTrue((target / "relocated-created.db").exists())
+            finally:
+                reservation.close()
+
+    def test_backup_nested_final_name_racer_is_preserved_and_stage_is_cleaned(self) -> None:
+        from cval.evaluator import backup as backup_module
+        from cval.evaluator import secure_state as secure_state_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "backup"
+            ancestry = backup_module._bind_destination_target(target)
+            reservation = backup_module._reserve_destination(ancestry)
+            original_publish = secure_state_module.rename_noreplace_at
+            raced = False
+
+            def publish_after_racer(source_parent_fd, source_name, destination_parent_fd, destination_name):
+                nonlocal raced
+                if destination_name == "nested" and not raced:
+                    raced = True
+                    os.mkdir(destination_name, 0o700, dir_fd=destination_parent_fd)
+                    (target / "nested/racer-owned").write_text("keep", encoding="utf-8")
+                return original_publish(
+                    source_parent_fd,
+                    source_name,
+                    destination_parent_fd,
+                    destination_name,
+                )
+
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            try:
+                with patch.object(
+                    secure_state_module,
+                    "rename_noreplace_at",
+                    side_effect=publish_after_racer,
+                ), self.assertRaisesRegex(RuntimeError, "unreserved directory"):
+                    with backup_module._destination_parent_fd(
+                        reservation,
+                        ("nested",),
+                    ):
+                        self.fail("raced nested creation must not yield")
+                self.assertTrue(raced)
+                self.assertEqual(
+                    (target / "nested/racer-owned").read_text(encoding="utf-8"),
+                    "keep",
+                )
+                self.assertEqual(
+                    list(target.glob(".cval-dir-stage-*")),
+                    [],
+                )
+                self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+            finally:
+                reservation.close()
+
+    def test_backup_rejects_higher_ancestor_replacement_during_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            higher = root / "destination-tree"
+            parent = higher / "parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(higher, 0o700)
+            os.chmod(parent, 0o700)
+            target = parent / "backup"
+            parked = root / "parked-destination-tree"
+            replacement_marker = higher / "replacement-owned"
+            from cval.evaluator import backup as backup_module
+
+            original_copy = backup_module._copy_sqlite
+            raced = False
+
+            def replace_higher_then_copy(*args, **kwargs):
+                nonlocal raced
+                if not raced:
+                    raced = True
+                    higher.rename(parked)
+                    parent.mkdir(parents=True, mode=0o700)
+                    replacement_marker.write_text("keep", encoding="utf-8")
+                return original_copy(*args, **kwargs)
+
+            with patch(
+                "cval.evaluator.backup._copy_sqlite",
+                side_effect=replace_higher_then_copy,
+            ), self.assertRaisesRegex(RuntimeError, "ancestry|cleanup"):
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+            self.assertTrue(raced)
+            self.assertEqual(replacement_marker.read_text(encoding="utf-8"), "keep")
+            self.assertFalse(target.exists())
+            self.assertTrue((parked / "parent/backup").is_dir())
+
+    def test_backup_cleanup_preserves_unknown_file_and_nested_directory(self) -> None:
+        for unknown_kind in ("file", "directory"):
+            with self.subTest(kind=unknown_kind), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                source = root / "source"
+                source.mkdir()
+                config, _registered, _result_path = _smoke_config(source)
+                target = root / "backup"
+                from cval.evaluator import backup as backup_module
+
+                original_copy = backup_module._copy_sqlite
+                unknown = (
+                    target / "unknown.txt"
+                    if unknown_kind == "file"
+                    else target / "unknown-dir"
+                )
+
+                def inject_unknown_then_fail(*args, **kwargs):
+                    original_copy(*args, **kwargs)
+                    if unknown_kind == "file":
+                        unknown.write_text("keep", encoding="utf-8")
+                    else:
+                        unknown.mkdir(mode=0o700)
+                        (unknown / "keep.txt").write_text("keep", encoding="utf-8")
+                    raise RuntimeError("forced failure after unknown injection")
+
+                with patch(
+                    "cval.evaluator.backup._copy_sqlite",
+                    side_effect=inject_unknown_then_fail,
+                ), self.assertRaisesRegex(
+                    RuntimeError,
+                    "forced failure after unknown injection",
+                ) as raised:
+                    backup_local_evaluator_state(
+                        config,
+                        source_root=source,
+                        destination=target,
+                        apply=True,
+                        confirmation="backup",
+                    )
+                self.assertTrue(
+                    any(
+                        "cleanup failed closed" in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                if unknown_kind == "file":
+                    self.assertEqual(unknown.read_text(encoding="utf-8"), "keep")
+                else:
+                    self.assertEqual(
+                        (unknown / "keep.txt").read_text(encoding="utf-8"),
+                        "keep",
+                    )
+                self.assertTrue(target.is_dir())
+
+    def test_backup_cleanup_removes_all_exact_created_entries_without_racer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            target = root / "backup"
+            from cval.evaluator import backup as backup_module
+
+            original_copy = backup_module._copy_sqlite
+
+            def copy_then_fail(*args, **kwargs):
+                original_copy(*args, **kwargs)
+                raise RuntimeError("forced post-copy failure")
+
+            with patch(
+                "cval.evaluator.backup._copy_sqlite",
+                side_effect=copy_then_fail,
+            ), self.assertRaisesRegex(RuntimeError, "forced post-copy failure"):
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+            self.assertFalse(target.exists())
+
+    def test_backup_never_adopts_or_removes_raced_sqlite_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, registered, _result_path = _smoke_config(source)
+            target = root / "backup"
+            from cval.evaluator import backup as backup_module
+
+            original_capture = backup_module._capture_destination_sidecars
+            raced_path = (
+                target
+                / registered.definition.artifacts.results_db_path
+            ).with_name(
+                Path(registered.definition.artifacts.results_db_path).name
+                + "-journal"
+            )
+            injected = False
+
+            def inject_racer(parent_fd, database_name, artifacts, **kwargs):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    descriptor = os.open(
+                        database_name + "-journal",
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        os.write(descriptor, b"racer-owned")
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                return original_capture(
+                    parent_fd,
+                    database_name,
+                    artifacts,
+                    **kwargs,
+                )
+
+            with patch(
+                "cval.evaluator.backup._capture_destination_sidecars",
+                side_effect=inject_racer,
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                "unknown file",
+            ) as raised:
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+            self.assertTrue(
+                any(
+                    "cleanup failed closed" in note
+                    for note in getattr(raised.exception, "__notes__", ())
+                )
+            )
+            self.assertTrue(injected)
+            self.assertEqual(raced_path.read_bytes(), b"racer-owned")
+            self.assertTrue(target.is_dir())
+
+    def test_backup_revalidates_lexical_destination_after_descriptor_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            higher = root / "destination-tree"
+            parent = higher / "parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(higher, 0o700)
+            os.chmod(parent, 0o700)
+            target = parent / "backup"
+            parked = root / "parked-destination-tree"
+            racer = target / "racer-owned"
+            from cval.evaluator import backup as backup_module
+
+            original_close = backup_module._DestinationReservation.close
+            replaced = False
+
+            def replace_during_close(reservation):
+                nonlocal replaced
+                if not replaced:
+                    replaced = True
+                    higher.rename(parked)
+                    target.mkdir(parents=True, mode=0o700)
+                    racer.write_text("keep", encoding="utf-8")
+                return original_close(reservation)
+
+            with patch.object(
+                backup_module._DestinationReservation,
+                "close",
+                replace_during_close,
+            ), self.assertRaisesRegex(RuntimeError, "success finalization"):
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+            self.assertTrue(replaced)
+            self.assertEqual(racer.read_text(encoding="utf-8"), "keep")
+            self.assertTrue((parked / "parent/backup").is_dir())
+
+    def test_backup_rejects_exact_root_relocated_under_replacement_ancestry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            higher = root / "destination-tree"
+            parent = higher / "parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(higher, 0o700)
+            os.chmod(parent, 0o700)
+            target = parent / "backup"
+            parked = root / "parked-destination-tree"
+            parked_marker = parked / "parked-owned"
+            replacement_marker = higher / "replacement-owned"
+            relocated_identity: tuple[int, int] | None = None
+            from cval.evaluator import backup as backup_module
+
+            original_close = backup_module._DestinationReservation.close
+            replaced = False
+
+            def relocate_exact_root_during_close(reservation):
+                nonlocal replaced, relocated_identity
+                if not replaced:
+                    replaced = True
+                    higher.rename(parked)
+                    parked_marker.write_text("keep-parked", encoding="utf-8")
+                    parent.mkdir(parents=True, mode=0o700)
+                    os.chmod(higher, 0o700)
+                    os.chmod(parent, 0o700)
+                    replacement_marker.write_text("keep-replacement", encoding="utf-8")
+                    original_root = parked / "parent/backup"
+                    relocated_identity = (
+                        original_root.stat().st_dev,
+                        original_root.stat().st_ino,
+                    )
+                    original_root.rename(target)
+                return original_close(reservation)
+
+            with patch.object(
+                backup_module._DestinationReservation,
+                "close",
+                relocate_exact_root_during_close,
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                "success finalization",
+            ) as raised:
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+            self.assertTrue(replaced)
+            self.assertIsNotNone(relocated_identity)
+            self.assertEqual(
+                (target.stat().st_dev, target.stat().st_ino),
+                relocated_identity,
+            )
+            self.assertTrue((target / "inventory.json").is_file())
+            self.assertEqual(parked_marker.read_text(encoding="utf-8"), "keep-parked")
+            self.assertEqual(
+                replacement_marker.read_text(encoding="utf-8"),
+                "keep-replacement",
+            )
+            self.assertTrue(
+                any(
+                    "post-close cleanup failed closed" in note
+                    for note in getattr(raised.exception, "__notes__", ())
+                )
+            )
+
+    def test_backup_fresh_validator_errors_cleanup_exact_tree_and_preserve_primary(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        for primary in (
+            RuntimeError("forced fresh validation failure"),
+            KeyboardInterrupt("forced fresh validation interrupt"),
+        ):
+            with self.subTest(error=type(primary).__name__), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                source = root / "source"
+                source.mkdir()
+                config, _registered, _result_path = _smoke_config(source)
+                target = root / "backup"
+                with patch(
+                    "cval.evaluator.backup._assert_published_destination_path",
+                    side_effect=primary,
+                ), self.assertRaises(type(primary)) as raised:
+                    backup_local_evaluator_state(
+                        config,
+                        source_root=source,
+                        destination=target,
+                        apply=True,
+                        confirmation="backup",
+                    )
+                self.assertIs(raised.exception, primary)
+                self.assertFalse(target.exists())
+
+    def test_backup_post_close_cleanup_stops_before_relocated_root_file_deletion(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            target = root / "backup"
+            relocated = root / "relocated-original"
+            racer_marker = target / "racer-owned"
+            primary = RuntimeError("force post-close cleanup")
+            original_cleanup = backup_module._remove_published_tree_if_identity
+            expected_files: dict[Path, bytes] = {}
+            raced = False
+
+            def racing_cleanup(reservation):
+                def relocate_at_first_unlink(
+                    operation: str,
+                    _parts: tuple[str, ...],
+                ) -> None:
+                    nonlocal raced, expected_files
+                    if operation == "file_unlink" and not raced:
+                        raced = True
+                        expected_files = {
+                            item.relative_to(target): item.read_bytes()
+                            for item in target.rglob("*")
+                            if item.is_file()
+                        }
+                        target.rename(relocated)
+                        target.mkdir(mode=0o700)
+                        racer_marker.write_text("keep", encoding="utf-8")
+
+                with patch.object(
+                    backup_module,
+                    "_published_cleanup_checkpoint",
+                    side_effect=relocate_at_first_unlink,
+                ):
+                    return original_cleanup(reservation)
+
+            with patch.object(
+                backup_module,
+                "_assert_published_destination_path",
+                side_effect=primary,
+            ), patch.object(
+                backup_module,
+                "_remove_published_tree_if_identity",
+                side_effect=racing_cleanup,
+            ), self.assertRaisesRegex(RuntimeError, "force post-close cleanup") as raised:
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+
+            self.assertTrue(raced)
+            self.assertTrue(expected_files)
+            self.assertEqual(racer_marker.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(
+                {
+                    item.relative_to(relocated): item.read_bytes()
+                    for item in relocated.rglob("*")
+                    if item.is_file()
+                },
+                expected_files,
+            )
+            self.assertIs(raised.exception, primary)
+            self.assertTrue(
+                any(
+                    "post-close cleanup failed closed" in note
+                    for note in getattr(raised.exception, "__notes__", ())
+                )
+            )
+
+    def test_backup_fresh_ancestry_interruption_closes_descriptors_and_preserves_primary(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            parent = root / "destination-tree/parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(parent.parent, 0o700)
+            os.chmod(parent, 0o700)
+            target = parent / "backup"
+            primary = KeyboardInterrupt("fresh ancestry transfer interrupted")
+            original_validator = backup_module._assert_published_destination_path
+            before = len(list(Path("/proc/self/fd").iterdir()))
+
+            def interrupt_fresh_ancestry(reservation):
+                with patch.object(
+                    backup_module,
+                    "_assert_exact_directory_metadata",
+                    side_effect=primary,
+                ):
+                    return original_validator(reservation)
+
+            with patch.object(
+                backup_module,
+                "_assert_published_destination_path",
+                side_effect=interrupt_fresh_ancestry,
+            ), self.assertRaises(KeyboardInterrupt) as raised:
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+            after = len(list(Path("/proc/self/fd").iterdir()))
+            self.assertIs(raised.exception, primary)
+            self.assertEqual(after, before)
+            self.assertFalse(target.exists())
+
+    def test_backup_retained_ancestry_interruption_closes_fresh_walk_descriptors(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = root / "destination-tree/parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(parent.parent, 0o700)
+            os.chmod(parent, 0o700)
+            baseline = len(list(Path("/proc/self/fd").iterdir()))
+            binding = backup_module._bind_destination_target(parent / "backup")
+            try:
+                retained = len(list(Path("/proc/self/fd").iterdir()))
+                primary = SystemExit("destination ancestry transfer interrupted")
+                with patch.object(
+                    backup_module,
+                    "_assert_exact_directory_metadata",
+                    side_effect=primary,
+                ), self.assertRaises(SystemExit) as raised:
+                    binding.assert_binding()
+                self.assertIs(raised.exception, primary)
+                self.assertEqual(
+                    len(list(Path("/proc/self/fd").iterdir())),
+                    retained,
+                )
+            finally:
+                binding.close()
+            self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), baseline)
+
+    def test_backup_destination_binding_identity_interrupt_closes_open_descriptor(self) -> None:
+        from cval.evaluator import backup as backup_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = root / "destination-tree/parent"
+            parent.mkdir(parents=True, mode=0o700)
+            os.chmod(parent.parent, 0o700)
+            os.chmod(parent, 0o700)
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            primary = KeyboardInterrupt("ancestry identity capture interrupted")
+            original_fstat = backup_module.os.fstat
+            calls = 0
+
+            def interrupt_after_child_open(descriptor):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise primary
+                return original_fstat(descriptor)
+
+            with patch.object(
+                backup_module.os,
+                "fstat",
+                side_effect=interrupt_after_child_open,
+            ), self.assertRaises(KeyboardInterrupt) as raised:
+                backup_module._bind_destination_target(parent / "backup")
+            self.assertIs(raised.exception, primary)
+            self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_backup_nested_destination_replacement_survives_and_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            target = root / "backup"
+            from cval.evaluator import backup as backup_module
+
+            original_write = backup_module._write_destination_bytes
+            parked = target / "validation_tests-original"
+            raced = False
+
+            def replace_nested(reservation, relative, value):
+                nonlocal raced
+                nested = target / "validation_tests"
+                if relative == Path("inventory.json") and not raced:
+                    raced = True
+                    nested.rename(parked)
+                    nested.mkdir(mode=0o700)
+                    (nested / "racer-owned").write_text("keep", encoding="utf-8")
+                return original_write(reservation, relative, value)
+
+            with patch(
+                "cval.evaluator.backup._write_destination_bytes",
+                side_effect=replace_nested,
+            ), self.assertRaises(RuntimeError):
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=target,
+                    apply=True,
+                    confirmation="backup",
+                )
+
+            self.assertEqual(
+                (target / "validation_tests/racer-owned").read_text(encoding="utf-8"),
+                "keep",
+            )
+            self.assertTrue(parked.is_dir())
 
     def test_backup_rejects_rollback_journal_race_and_cleans_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1507,21 +2398,22 @@ class EvaluatorBackupTests(unittest.TestCase):
             from cval.evaluator import backup as backup_module
 
             original_snapshot = backup_module.immutable_sqlite_snapshot
-            calls = 0
+            source_calls = 0
 
             @contextmanager
-            def racing_snapshot(path):
-                nonlocal calls
-                calls += 1
-                if calls == 3:
+            def racing_snapshot(path, **kwargs):
+                nonlocal source_calls
+                if Path(path) == result_path:
+                    source_calls += 1
+                if Path(path) == result_path and source_calls == 2:
                     journal.touch()
-                with original_snapshot(path) as value:
+                with original_snapshot(path, **kwargs) as value:
                     yield value
 
             with patch(
                 "cval.evaluator.backup.immutable_sqlite_snapshot",
                 racing_snapshot,
-            ), self.assertRaisesRegex(RuntimeError, "journal"):
+            ), self.assertRaisesRegex(RuntimeError, "journal|inventory changed"):
                 backup_local_evaluator_state(
                     config,
                     source_root=source,
@@ -1531,6 +2423,48 @@ class EvaluatorBackupTests(unittest.TestCase):
                 )
             self.assertTrue(journal.exists())
             self.assertFalse(target.exists())
+
+    def test_backup_rejects_inverse_live_root_overlaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            protected_descendant = source / "configured-live"
+            config = replace(
+                config,
+                runtime=replace(
+                    config.runtime,
+                    validation_root=str(protected_descendant),
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "ancestors are rejected"):
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=root / "backup",
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            source.mkdir()
+            config, _registered, _result_path = _smoke_config(source)
+            destination = root / "future-parent"
+            config = replace(
+                config,
+                runtime=replace(
+                    config.runtime,
+                    validation_root=str(destination / "live-runtime"),
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "outside"):
+                backup_local_evaluator_state(
+                    config,
+                    source_root=source,
+                    destination=destination,
+                )
+            self.assertFalse(destination.exists())
 
 
 class EvaluatorManifestAndCliTests(unittest.TestCase):
@@ -1600,6 +2534,11 @@ class EvaluatorManifestAndCliTests(unittest.TestCase):
         )
         pod = base["spec"]["jobTemplate"]["spec"]["template"]["spec"]
         container = pod["containers"][0]
+        config_data = tomllib.loads(
+            (REPO_ROOT / "config/cval.toml").read_text(encoding="utf-8")
+        )
+        owner_uid = config_data["health_evaluator"]["state_owner_uid"]
+        owner_gid = config_data["health_evaluator"]["state_owner_gid"]
         self.assertEqual(base["apiVersion"], "batch/v1")
         self.assertTrue(base["spec"]["suspend"])
         self.assertEqual(base["spec"]["concurrencyPolicy"], "Forbid")
@@ -1607,6 +2546,8 @@ class EvaluatorManifestAndCliTests(unittest.TestCase):
         self.assertFalse(service_account["automountServiceAccountToken"])
         self.assertFalse(pod["automountServiceAccountToken"])
         self.assertTrue(pod["securityContext"]["runAsNonRoot"])
+        self.assertEqual(pod["securityContext"]["runAsUser"], owner_uid)
+        self.assertEqual(pod["securityContext"]["runAsGroup"], owner_gid)
         self.assertEqual(pod["securityContext"]["seccompProfile"]["type"], "RuntimeDefault")
         self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
         self.assertFalse(container["securityContext"]["allowPrivilegeEscalation"])
@@ -1619,6 +2560,15 @@ class EvaluatorManifestAndCliTests(unittest.TestCase):
         self.assertNotIn("CVAL_EVALUATOR_WRITE_ENABLED", env)
         self.assertEqual(container["resources"]["requests"]["ephemeral-storage"], "64Mi")
         self.assertEqual(container["resources"]["limits"]["ephemeral-storage"], "256Mi")
+        self.assertEqual(len(container["volumeMounts"]), 2)
+        self.assertEqual(
+            container["volumeMounts"][0]["mountPath"],
+            "/data/continuous_validation/evaluator_state",
+        )
+        self.assertEqual(
+            container["volumeMounts"][0]["subPath"],
+            "continuous_validation/evaluator_state",
+        )
         self.assertTrue(container["volumeMounts"][0]["readOnly"])
         self.assertTrue(
             pod["volumes"][0]["persistentVolumeClaim"]["readOnly"]
@@ -1645,6 +2595,23 @@ class EvaluatorManifestAndCliTests(unittest.TestCase):
             ["volumes"][0]["persistentVolumeClaim"]["readOnly"]
         )
         self.assertFalse(any(DEPLOY_ROOT.rglob("*RoleBinding*.yaml")))
+        dockerfile = (DEPLOY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(f"USER {owner_uid}:{owner_gid}", dockerfile)
+        validation_job = yaml.safe_load(
+            (REPO_ROOT / "ymls/specific-node-job.yml").read_text(encoding="utf-8")
+        )
+        producer_pod = validation_job["spec"]["tasks"][0]["template"]["spec"]
+        producer_container = producer_pod["containers"][0]
+        self.assertNotIn("runAsUser", producer_pod.get("securityContext", {}))
+        self.assertNotIn("runAsGroup", producer_pod.get("securityContext", {}))
+        self.assertNotIn("runAsUser", producer_container.get("securityContext", {}))
+        self.assertNotIn("runAsGroup", producer_container.get("securityContext", {}))
+        rollout = (REPO_ROOT / "docs/u11-evaluator-rollout.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("validation workload execution UID/GID is unspecified", rollout)
+        self.assertIn("NFSv4", rollout)
+        self.assertIn("U7 activation is blocked", rollout)
 
         rendered = {}
         for variant in ("shadow", "apply"):
@@ -1683,6 +2650,26 @@ class EvaluatorManifestAndCliTests(unittest.TestCase):
             self.assertNotIn("CVAL_EVALUATOR_WRITE_ENABLED", rendered_env)
             self.assertIn("ephemeral-storage", rendered_container["resources"]["requests"])
             self.assertIn("ephemeral-storage", rendered_container["resources"]["limits"])
+            state_mounts = [
+                mount
+                for mount in rendered_container["volumeMounts"]
+                if mount["name"] == "evaluator-state"
+            ]
+            self.assertEqual(len(state_mounts), 1)
+            self.assertEqual(
+                state_mounts[0]["mountPath"],
+                "/data/continuous_validation/evaluator_state",
+            )
+            self.assertEqual(
+                state_mounts[0]["subPath"],
+                "continuous_validation/evaluator_state",
+            )
+            self.assertFalse(
+                any(
+                    mount["mountPath"] == "/data/continuous_validation"
+                    for mount in rendered_container["volumeMounts"]
+                )
+            )
         shadow_container = rendered["shadow"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
         apply_container = rendered["apply"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
         self.assertNotIn("--apply", shadow_container["args"])

@@ -96,6 +96,12 @@ Catalog publication validates both the staged snapshot and the installed paths.
 
 A health-capable test also needs a versioned `[health]` policy and a health DB path. Keep `auto_activate = false`. Do not combine first enablement with live database activation, baseline activation, or U11 rollout.
 
+U7/U8 paths are relative to the dedicated evaluator state root. Adding a test
+does not authorize state-subroot provisioning, fixed-UID/GID ingestion, live DB
+creation, evaluator deployment, or activation. Shared validation evidence stays
+under `runtime.validation_root`, which must never be chmod/chown'ed by this
+lifecycle. U12 removals remain blocked on U11 live acceptance.
+
 ## Update an existing test
 
 1. Keep the test ID and historical artifact paths stable.

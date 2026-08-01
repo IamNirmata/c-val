@@ -12,7 +12,6 @@ import json
 import math
 import os
 import re
-import stat
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -178,6 +177,9 @@ class HealthEvaluatorConfig:
     write_enabled: bool = False
     lock_timeout_seconds: int = 30
     max_classifications_per_test: int = 250
+    state_root: str = "/data/continuous_validation/evaluator_state"
+    state_owner_uid: int = 65532
+    state_owner_gid: int = 65532
     validation_root_mode: str = "0700"
 
 
@@ -339,6 +341,21 @@ def _config_path(path: Path | str | None) -> Path:
     return DEFAULT_CONFIG_PATH
 
 
+def _absolute_lexical_config_path(value: str, field_name: str) -> Path:
+    """Require one absolute, normalized, concrete path without expansion."""
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"{field_name} must be a non-empty filesystem path")
+    if not os.path.isabs(value):
+        raise ValueError(f"{field_name} must be an absolute path")
+    if os.path.normpath(value) != value or value == os.path.sep:
+        raise ValueError(f"{field_name} must be lexical-canonical")
+    path = Path(value)
+    if any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise ValueError(f"{field_name} must not contain traversal components")
+    return path
+
+
 def _build_config(
     data: dict[str, Any],
     *,
@@ -372,6 +389,9 @@ def _build_config(
             "write_enabled",
             "lock_timeout_seconds",
             "max_classifications_per_test",
+            "state_root",
+            "state_owner_uid",
+            "state_owner_gid",
             "validation_root_mode",
         },
         "health_evaluator",
@@ -628,6 +648,21 @@ def _build_config(
                 "max_classifications_per_test",
                 defaults.health_evaluator.max_classifications_per_test,
             ),
+            state_root=_str(
+                health_evaluator,
+                "state_root",
+                defaults.health_evaluator.state_root,
+            ),
+            state_owner_uid=_int(
+                health_evaluator,
+                "state_owner_uid",
+                defaults.health_evaluator.state_owner_uid,
+            ),
+            state_owner_gid=_int(
+                health_evaluator,
+                "state_owner_gid",
+                defaults.health_evaluator.state_owner_gid,
+            ),
             validation_root_mode=_str(
                 health_evaluator,
                 "validation_root_mode",
@@ -682,21 +717,37 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     }.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"health_evaluator.{name} must be a positive integer")
+    for name, value in {
+        "state_owner_uid": config.health_evaluator.state_owner_uid,
+        "state_owner_gid": config.health_evaluator.state_owner_gid,
+    }.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+            or value > 2_147_483_647
+        ):
+            raise ValueError(
+                f"health_evaluator.{name} must be a positive non-root 32-bit ID"
+            )
+    state_root = _absolute_lexical_config_path(
+        config.health_evaluator.state_root,
+        "health_evaluator.state_root",
+    )
+    validation_root = _absolute_lexical_config_path(
+        config.runtime.validation_root,
+        "runtime.validation_root",
+    )
+    if state_root == validation_root or state_root in validation_root.parents:
+        raise ValueError(
+            "health_evaluator.state_root must not equal or contain "
+            "runtime.validation_root"
+        )
     root_mode = config.health_evaluator.validation_root_mode
-    if not re.fullmatch(r"0[0-7]{3}", root_mode):
+    if root_mode != "0700":
         raise ValueError(
-            "health_evaluator.validation_root_mode must be an exact four-digit octal mode"
-        )
-    parsed_root_mode = int(root_mode, 8)
-    if parsed_root_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise ValueError(
-            "health_evaluator.validation_root_mode must not be group/world writable"
-        )
-    if parsed_root_mode & (stat.S_IRUSR | stat.S_IXUSR) != (
-        stat.S_IRUSR | stat.S_IXUSR
-    ):
-        raise ValueError(
-            "health_evaluator.validation_root_mode must grant owner read/search"
+            "health_evaluator.validation_root_mode must be exactly '0700' for the "
+            "dedicated evaluator state root"
         )
     try:
         reserved_gpus = int(config.job_template.gpu_count)

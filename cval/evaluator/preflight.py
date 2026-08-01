@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import os
-import stat
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from cval.config import CvalConfig
 from cval.evaluator.release import effective_config_digest
+from cval.evaluator.state import (
+    bind_state_target,
+    StateDirectoryIdentity,
+    StateFileIdentity,
+    configured_state_root,
+    inspect_state_ancestry,
+    inspect_state_target,
+    open_state_root,
+)
 from cval.health.storage import load_baselines_generation, resolve_health_db_path
 from cval.storage.per_test_results import (
     common_result_schema_version,
@@ -22,10 +30,6 @@ from cval.validation.plugins import validate_registry_plugins
 
 
 PREFLIGHT_SCHEMA = "cval.evaluator-preflight.v1"
-_OWNER_READ_ONLY_MODES = frozenset({0o400, 0o600})
-_OWNER_READ_WRITE_MODE = 0o600
-_DIRECTORY_UNSAFE_BITS = stat.S_IWGRP | stat.S_IWOTH
-_TEST_OWNER_DIRECTORY_MODE = 0o700
 
 
 def run_deployment_preflight(
@@ -43,8 +47,7 @@ def run_deployment_preflight(
         raise ValueError("preflight access must be 'ro' or 'rw'")
     checks: list[dict[str, Any]] = []
     tests: list[dict[str, Any]] = []
-    root = Path(config.runtime.validation_root).expanduser()
-    approved_root_mode = int(config.health_evaluator.validation_root_mode, 8)
+    root = configured_state_root(config)
 
     try:
         plugins = validate_registry_plugins(config.tests.registry.tests)
@@ -53,14 +56,24 @@ def run_deployment_preflight(
         plugins = ()
         _check(checks, "registry", False, _safe_error(exc))
 
-    root_ok, root_detail = _directory_check(
-        root,
-        require_writable=access == "rw",
-        exact_mode=approved_root_mode,
-    )
-    _check(checks, "validation-root", root_ok, root_detail)
+    try:
+        with open_state_root(config, require_writable=access == "rw") as (
+            _descriptor,
+            identity,
+        ):
+            root_detail = (
+                f"uid={identity.owner_uid} gid={identity.owner_gid} "
+                f"mode={identity.mode:04o} dev={identity.device} ino={identity.inode}"
+            )
+        root_ok = True
+    except Exception as exc:  # noqa: BLE001 - complete structured report
+        root_ok = False
+        root_detail = _safe_error(exc)
+    _check(checks, "state-root", root_ok, root_detail)
 
-    for registered in config.tests.registry.enabled:
+    for registered, retained in _preflight_test_stacks(
+        config.tests.registry.enabled
+    ):
         plugin = registered.definition.plugin
         health = registered.definition.health
         if not (
@@ -73,35 +86,98 @@ def run_deployment_preflight(
         result_path = resolve_test_results_db_path(root, registered)
         health_path = resolve_health_db_path(root, registered)
         test_checks: list[dict[str, Any]] = []
-        owner_ok, owner_detail, result_ancestry = _directory_ancestry_check(
-            root,
-            result_path.parent,
-            approved_root_mode=approved_root_mode,
-            allow_missing=False,
-            require_leaf_writable=access == "rw",
-        )
-        _check(test_checks, "owner-directory", owner_ok, owner_detail)
-
+        retained_bindings = []
+        ancestry_captures: list[
+            tuple[Path, bool, tuple[StateDirectoryIdentity, ...]]
+        ] = []
+        for target, allow_missing in (
+            (result_path, False),
+            (health_path, True),
+        ):
+            try:
+                captured = inspect_state_ancestry(
+                    config,
+                    target,
+                    allow_missing=allow_missing,
+                    require_writable=access == "rw",
+                )
+                ancestry_captures.append((target, allow_missing, captured))
+            except Exception as exc:  # noqa: BLE001 - structured report
+                _check(
+                    test_checks,
+                    "state-directory-ancestry",
+                    False,
+                    _safe_error(exc),
+                )
+        if len(ancestry_captures) == 2:
+            _check(
+                test_checks,
+                "state-directory-ancestry",
+                True,
+                "captured exact owner/gid/mode/device/inode ancestry",
+            )
         result_schema: int | None = None
-        result_present = result_path.exists() or result_path.is_symlink()
-        result_sidecars = _sqlite_sidecars(result_path)
-        _check(
-            test_checks,
-            "result-db-sidecars",
-            not result_sidecars,
-            "absent" if not result_sidecars else "present: " + ", ".join(result_sidecars),
-        )
+        result_identity: StateFileIdentity | None = None
+        try:
+            result_binding = retained.enter_context(
+                bind_state_target(
+                    config,
+                    result_path,
+                    create=False,
+                    allow_missing=True,
+                    writable=False,
+                    require_writable=access == "rw",
+                )
+            )
+            retained_bindings.append(result_binding)
+            result_identity = result_binding.identity
+        except Exception as exc:  # noqa: BLE001 - structured report
+            result_binding = None
+            _check(test_checks, "result-db-file", False, _safe_error(exc))
+        result_present = result_identity is not None
+        try:
+            result_sidecars = (
+                _sqlite_sidecars_binding(result_binding)
+                if result_binding is not None
+                else _sqlite_sidecars(result_path)
+            )
+        except Exception as exc:  # noqa: BLE001 - structured preflight boundary
+            result_sidecars = ["inspection-failed"]
+            _check(test_checks, "result-db-sidecars", False, _safe_error(exc))
+        if result_sidecars != ["inspection-failed"]:
+            _check(
+                test_checks,
+                "result-db-sidecars",
+                not result_sidecars,
+                "absent" if not result_sidecars else "present: " + ", ".join(result_sidecars),
+            )
         if not result_present:
             _check(test_checks, "result-db", False, "canonical U7 result DB is missing")
         else:
-            file_ok, detail = _owned_regular_file(
-                result_path,
-                require_writable=access == "rw",
-            )
+            assert result_binding is not None and result_identity is not None
+            try:
+                size = os.fstat(result_binding.descriptor).st_size
+                file_ok = True
+                detail = (
+                    f"uid={result_identity.owner_uid} gid={result_identity.owner_gid} "
+                    f"mode={result_identity.mode:04o} links={result_identity.link_count} "
+                    f"dev={result_identity.device} ino={result_identity.inode} size={size}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                file_ok = False
+                detail = _safe_error(exc)
             _check(test_checks, "result-db-file", file_ok, detail)
             if file_ok and not result_sidecars:
                 try:
-                    with immutable_sqlite_snapshot(result_path) as snapshot:
+                    result_binding.assert_path_binding()
+                    with immutable_sqlite_snapshot(
+                        result_path,
+                        expected_identity=result_identity.sqlite_identity(),
+                        source_fd=result_binding.descriptor,
+                        source_parent_fd=result_binding.directory.parent_fd,
+                        source_name=result_binding.name,
+                        binding_guard=result_binding.assert_path_binding,
+                    ) as snapshot:
                         with closing(snapshot.connect()) as connection:
                             validate_common_result_connection(connection)
                             validate_test_result_owner_integrity(
@@ -109,53 +185,111 @@ def run_deployment_preflight(
                                 test_id=registered.id,
                             )
                             result_schema = common_result_schema_version(connection)
+                            result_binding.assert_path_binding()
+                            result_binding.assert_path_binding()
                     _check(test_checks, "result-db-schema", True, f"exact v{result_schema}")
                 except Exception as exc:  # noqa: BLE001
                     _check(test_checks, "result-db-schema", False, _safe_error(exc))
 
-        health_present = health_path.exists() or health_path.is_symlink()
-        health_parent_ok, health_parent_detail, health_ancestry = (
-            _directory_ancestry_check(
-                root,
-                health_path.parent,
-                approved_root_mode=approved_root_mode,
-                allow_missing=not health_present,
-                require_leaf_writable=True,
+        try:
+            health_binding = retained.enter_context(
+                bind_state_target(
+                    config,
+                    health_path,
+                    create=False,
+                    allow_missing=True,
+                    writable=False,
+                    require_writable=access == "rw",
+                )
             )
-        )
-        _check(
-            test_checks,
-            "health-owner-directory",
-            health_parent_ok,
-            health_parent_detail,
-        )
+            retained_bindings.append(health_binding)
+            health_identity = health_binding.identity
+        except Exception as exc:  # noqa: BLE001 - structured report
+            health_binding = None
+            health_identity = None
+            _check(test_checks, "health-db-file", False, _safe_error(exc))
+        health_present = health_identity is not None
+        key_identity: StateFileIdentity | None = None
         key_path = health_path.with_name(f"{health_path.name}.activation.key")
-        health_sidecars = _sqlite_sidecars(health_path)
-        _check(
-            test_checks,
-            "health-db-sidecars",
-            not health_sidecars,
-            "absent" if not health_sidecars else "present: " + ", ".join(health_sidecars),
-        )
+        try:
+            key_binding = retained.enter_context(
+                bind_state_target(
+                    config,
+                    key_path,
+                    create=False,
+                    allow_missing=True,
+                    writable=False,
+                    require_writable=access == "rw",
+                )
+            )
+            retained_bindings.append(key_binding)
+            key_identity = key_binding.identity
+        except Exception as exc:  # noqa: BLE001 - structured report
+            key_binding = None
+            key_identity = None
+            _check(test_checks, "activation-key", False, _safe_error(exc))
+        try:
+            health_sidecars = (
+                _sqlite_sidecars_binding(health_binding)
+                if health_binding is not None
+                else _sqlite_sidecars(health_path)
+            )
+        except Exception as exc:  # noqa: BLE001
+            health_sidecars = ["inspection-failed"]
+            _check(test_checks, "health-db-sidecars", False, _safe_error(exc))
+        if health_sidecars != ["inspection-failed"]:
+            _check(
+                test_checks,
+                "health-db-sidecars",
+                not health_sidecars,
+                "absent" if not health_sidecars else "present: " + ", ".join(health_sidecars),
+            )
         if health_present:
-            file_ok, detail = _owned_regular_file(
-                health_path,
-                require_writable=access == "rw",
-            )
+            assert health_binding is not None and health_identity is not None
+            try:
+                health_size = os.fstat(health_binding.descriptor).st_size
+                file_ok = True
+                detail = (
+                    f"uid={health_identity.owner_uid} gid={health_identity.owner_gid} "
+                    f"mode={health_identity.mode:04o} links={health_identity.link_count} "
+                    f"dev={health_identity.device} ino={health_identity.inode} "
+                    f"size={health_size}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                file_ok = False
+                detail = _safe_error(exc)
             _check(test_checks, "health-db-file", file_ok, detail)
-            key_ok, key_detail = _owned_regular_file(
-                key_path,
-                exact_mode=0o600,
-                exact_size=32,
-                require_writable=access == "rw",
-            )
+            key_ok = key_identity is not None and key_binding is not None
+            if key_ok:
+                try:
+                    key_size = os.fstat(key_binding.descriptor).st_size
+                    key_ok = key_size == 32
+                    key_detail = (
+                        f"uid={key_identity.owner_uid} gid={key_identity.owner_gid} "
+                        f"mode={key_identity.mode:04o} links={key_identity.link_count} "
+                        f"dev={key_identity.device} ino={key_identity.inode} size={key_size}"
+                        if key_ok
+                        else f"Evaluator state file size must be 32, got {key_size}: {key_path}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    key_ok = False
+                    key_detail = _safe_error(exc)
+            else:
+                key_detail = "Health activation key is missing"
             _check(test_checks, "activation-key", key_ok, key_detail)
             if file_ok and not health_sidecars and key_ok:
                 try:
+                    health_binding.assert_path_binding()
+                    key_binding.assert_path_binding()
                     stored, _generation = load_baselines_generation(
                         db_path=health_path,
                         test_id=registered.id,
+                        expected_identity=health_identity.sqlite_identity(),
+                        state_binding=health_binding,
+                        key_binding=key_binding,
                     )
+                    health_binding.assert_path_binding()
+                    key_binding.assert_path_binding()
                     _check(
                         test_checks,
                         "health-db-schema",
@@ -165,20 +299,33 @@ def run_deployment_preflight(
                 except Exception as exc:  # noqa: BLE001
                     _check(test_checks, "health-db-schema", False, _safe_error(exc))
         else:
+            health_identity = None
+            parent_ok, parent_detail = _inspect_missing_state_target(
+                config,
+                health_path,
+                require_writable=access == "rw",
+            )
+            _check(test_checks, "health-owner-directory", parent_ok, parent_detail)
             _check(
                 test_checks,
                 "health-db",
-                not key_path.exists()
-                and not key_path.is_symlink()
-                and not health_sidecars,
+                key_identity is None and not health_sidecars,
                 "absent; creation is apply-only"
-                if not key_path.exists() and not key_path.is_symlink() and not health_sidecars
+                if key_identity is None and not health_sidecars
                 else "activation key or SQLite sidecar exists without its U8 DB",
             )
 
-        stable_ok, stable_detail = _revalidate_directory_ancestry(
-            (*result_ancestry, *health_ancestry)
-        )
+        try:
+            for binding in retained_bindings:
+                binding.assert_path_binding()
+            retained.close()
+            stable_ok = True
+            stable_detail = (
+                f"revalidated {len(retained_bindings)} retained state binding(s)"
+            )
+        except Exception as exc:  # noqa: BLE001 - structured report
+            stable_ok = False
+            stable_detail = _safe_error(exc)
         _check(
             test_checks,
             "directory-ancestry-stable",
@@ -206,7 +353,7 @@ def run_deployment_preflight(
         "ok": ready,
         "access": access,
         "config_digest": effective_config_digest(config),
-        "validation_root": str(root),
+        "state_root": str(root),
         "registered_count": len(config.tests.registry.tests),
         "enabled_count": len(config.tests.registry.enabled),
         "eligible_count": len(tests),
@@ -220,159 +367,115 @@ def run_deployment_preflight(
     }
 
 
-def _directory_check(
+def _preflight_test_stacks(
+    registered_tests: Any,
+) -> Iterator[tuple[Any, ExitStack]]:
+    """Yield one explicitly context-managed descriptor stack per test."""
+
+    for registered in registered_tests:
+        with ExitStack() as retained:
+            try:
+                yield registered, retained
+            finally:
+                try:
+                    retained.close()
+                except Exception:
+                    # The main preflight body records close/revalidation errors as
+                    # structured checks. This drain only prevents double-close.
+                    pass
+
+
+def _inspect_state_file(
+    config: CvalConfig,
     path: Path,
     *,
     require_writable: bool,
-    exact_mode: int,
-) -> tuple[bool, str]:
+    exact_size: int | None = None,
+) -> tuple[StateFileIdentity | None, bool, str]:
     try:
-        metadata = os.lstat(path)
-    except OSError as exc:
-        return False, _safe_error(exc)
-    mode = stat.S_IMODE(metadata.st_mode)
-    facts = f"uid={metadata.st_uid} gid={metadata.st_gid} mode={mode:04o}"
-    if not stat.S_ISDIR(metadata.st_mode) or path.is_symlink():
-        return False, "not a canonical directory; " + facts
-    if metadata.st_uid != os.geteuid():
-        return False, "not owned by evaluator uid; " + facts
-    if mode & _DIRECTORY_UNSAFE_BITS:
-        return False, "group/world writable directory is unsafe; " + facts
-    if mode != exact_mode:
-        return False, f"mode must be {exact_mode:04o}; " + facts
-    if not mode & stat.S_IRUSR or not mode & stat.S_IXUSR:
-        return False, "owner read/search permissions are required; " + facts
-    if require_writable and (
-        not mode & stat.S_IWUSR or not os.access(path, os.W_OK | os.X_OK)
-    ):
-        return False, "not writable for apply; " + facts
-    return True, facts
-
-
-def _directory_ancestry_check(
-    root: Path,
-    target: Path,
-    *,
-    approved_root_mode: int,
-    allow_missing: bool,
-    require_leaf_writable: bool,
-) -> tuple[bool, str, tuple[tuple[Path, int, int, int], ...]]:
-    """Validate every existing root-to-target directory and capture identities."""
-
-    if not root.is_absolute() or not target.is_absolute():
-        return False, "directory ancestry paths must be absolute", ()
-    try:
-        relative = target.relative_to(root)
-    except ValueError:
-        return False, f"directory ancestry escapes validation root: {target}", ()
-    paths = [root]
-    current = root
-    for part in relative.parts:
-        current = current / part
-        paths.append(current)
-    identities: list[tuple[Path, int, int, int]] = []
-    missing = 0
-    for index, candidate in enumerate(paths):
-        try:
-            metadata = os.lstat(candidate)
-        except FileNotFoundError:
-            if not allow_missing:
-                return False, f"directory ancestry component is missing: {candidate}", ()
-            missing = len(paths) - index
-            break
-        except OSError as exc:
-            return False, _safe_error(exc), ()
-        expected_mode = approved_root_mode if index == 0 else _TEST_OWNER_DIRECTORY_MODE
-        ok, detail = _directory_check(
-            candidate,
-            require_writable=require_leaf_writable and index == len(paths) - 1,
-            exact_mode=expected_mode,
-        )
-        if not ok:
-            return False, f"{candidate}: {detail}", ()
-        identities.append(
-            (candidate, metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode))
-        )
-    if not identities:
-        return False, "directory ancestry has no existing validation root", ()
-    if missing and require_leaf_writable:
-        nearest = identities[-1][0]
-        mode = identities[-1][3]
-        if not mode & stat.S_IWUSR or not os.access(nearest, os.W_OK | os.X_OK):
-            return False, f"nearest creation ancestor is not writable: {nearest}", ()
-    detail = f"validated {len(identities)} existing component(s)"
-    if missing:
-        detail += (
-            f"; {missing} missing component(s); safe creation ancestor "
-            f"{identities[-1][0]}"
-        )
-    return True, detail, tuple(identities)
-
-
-def _revalidate_directory_ancestry(
-    identities: tuple[tuple[Path, int, int, int], ...],
-) -> tuple[bool, str]:
-    """Detect a component replacement or symlink swap during preflight."""
-
-    unique = {identity[0]: identity for identity in identities}
-    for path, expected in sorted(unique.items(), key=lambda item: str(item[0])):
-        try:
-            metadata = os.lstat(path)
-        except OSError as exc:
-            return False, f"directory ancestry changed at {path}: {_safe_error(exc)}"
-        actual = (
+        identity = inspect_state_target(
+            config,
             path,
-            metadata.st_dev,
-            metadata.st_ino,
-            stat.S_IMODE(metadata.st_mode),
+            allow_missing=False,
+            require_writable=require_writable,
         )
-        if not stat.S_ISDIR(metadata.st_mode) or path.is_symlink() or actual != expected:
-            return False, f"directory ancestry changed or became a symlink at {path}"
-        if metadata.st_uid != os.geteuid() or not metadata.st_mode & stat.S_IXUSR:
-            return False, f"directory ancestry ownership/search changed at {path}"
-    return True, f"revalidated {len(unique)} component(s)"
+        if identity is None:
+            raise FileNotFoundError(path)
+        size = os.lstat(path).st_size
+        if exact_size is not None and size != exact_size:
+            raise PermissionError(
+                f"Evaluator state file size must be {exact_size}, got {size}: {path}"
+            )
+        return (
+            identity,
+            True,
+            f"uid={identity.owner_uid} gid={identity.owner_gid} "
+            f"mode={identity.mode:04o} links={identity.link_count} "
+            f"dev={identity.device} ino={identity.inode} size={size}",
+        )
+    except Exception as exc:  # noqa: BLE001 - structured report
+        return None, False, _safe_error(exc)
 
 
-def _owned_regular_file(
+def _inspect_missing_state_target(
+    config: CvalConfig,
     path: Path,
     *,
-    exact_mode: int | None = None,
-    exact_size: int | None = None,
-    require_writable: bool = False,
+    require_writable: bool,
 ) -> tuple[bool, str]:
     try:
-        metadata = os.lstat(path)
-    except OSError as exc:
-        return False, _safe_error(exc)
-    mode = stat.S_IMODE(metadata.st_mode)
-    facts = (
-        f"uid={metadata.st_uid} gid={metadata.st_gid} mode={mode:04o} "
-        f"size={metadata.st_size} links={metadata.st_nlink}"
-    )
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
-        return False, "not a regular no-symlink file; " + facts
-    if metadata.st_uid != os.geteuid():
-        return False, "not owned by evaluator uid; " + facts
-    if metadata.st_nlink != 1:
-        return False, "link count must be exactly 1; " + facts
-    if exact_mode is not None and mode != exact_mode:
-        return False, f"mode must be {exact_mode:04o}; " + facts
-    if exact_mode is None:
-        required_modes = (
-            frozenset({_OWNER_READ_WRITE_MODE})
-            if require_writable
-            else _OWNER_READ_ONLY_MODES
+        identity = inspect_state_target(
+            config,
+            path,
+            allow_missing=True,
+            require_writable=require_writable,
         )
-        if mode not in required_modes:
-            allowed = "/".join(f"{value:04o}" for value in sorted(required_modes))
-            return False, f"mode must be {allowed}; " + facts
-    if exact_size is not None and metadata.st_size != exact_size:
-        return False, f"size must be {exact_size}; " + facts
-    if require_writable and (
-        not mode & stat.S_IWUSR or not os.access(path, os.W_OK)
-    ):
-        return False, "not writable for apply; " + facts
-    return True, facts
+        if identity is not None:
+            return False, "state target appeared during absent-target preflight"
+        return True, "existing state ancestry is exact; target may be created only by apply"
+    except Exception as exc:  # noqa: BLE001 - structured report
+        return False, _safe_error(exc)
+
+
+def _revalidate_state_files(
+    config: CvalConfig,
+    identities: tuple[StateFileIdentity, ...],
+    ancestry_captures: tuple[
+        tuple[Path, bool, tuple[StateDirectoryIdentity, ...]], ...
+    ],
+    *,
+    require_writable: bool,
+) -> tuple[bool, str]:
+    try:
+        for target, allow_missing, expected in ancestry_captures:
+            actual_ancestry = inspect_state_ancestry(
+                config,
+                target,
+                allow_missing=allow_missing,
+                require_writable=require_writable,
+            )
+            if actual_ancestry != expected:
+                raise RuntimeError(
+                    f"Evaluator state directory ancestry changed: {target}"
+                )
+        for expected in identities:
+            actual = inspect_state_target(
+                config,
+                expected.path,
+                allow_missing=False,
+                require_writable=require_writable,
+            )
+            if actual != expected:
+                raise RuntimeError(
+                    f"Evaluator state file identity changed: {expected.path}"
+                )
+        return (
+            True,
+            f"revalidated {len(ancestry_captures)} ancestries and "
+            f"{len(identities)} state file(s)",
+        )
+    except Exception as exc:  # noqa: BLE001 - structured report
+        return False, _safe_error(exc)
 
 
 def _sqlite_sidecars(path: Path) -> list[str]:
@@ -385,6 +488,24 @@ def _sqlite_sidecars(path: Path) -> list[str]:
         )
         if candidate.exists() or candidate.is_symlink()
     ]
+
+
+def _sqlite_sidecars_binding(binding: Any) -> list[str]:
+    binding.directory.assert_path_binding()
+    present: list[str] = []
+    for suffix in ("-wal", "-shm", "-journal"):
+        name = binding.name + suffix
+        try:
+            os.stat(
+                name,
+                dir_fd=binding.directory.parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        present.append(name)
+    binding.directory.assert_path_binding()
+    return present
 
 
 def _check(items: list[dict[str, Any]], name: str, ok: bool, detail: str) -> None:

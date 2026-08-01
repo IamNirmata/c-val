@@ -20,11 +20,12 @@ spec:
                 - /app/config/cval.toml
                 - evaluator-service
               volumeMounts:
-                - name: validation-data
-                  mountPath: /data/continuous_validation
+                - name: evaluator-state
+                  mountPath: /data/continuous_validation/evaluator_state
+                  subPath: continuous_validation/evaluator_state
                   readOnly: true
           volumes:
-            - name: validation-data
+            - name: evaluator-state
               persistentVolumeClaim:
                 claimName: replace-with-reviewed-pvc-claim
                 readOnly: true

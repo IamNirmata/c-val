@@ -2,7 +2,7 @@
 
 **Design:** `cval.health.v1` / `robust_mad_bands.v1`  
 **SQLite schema:** version 1, `initial-versioned-health-engine`  
-**Implementation state:** complete and independently certified READY; operationally inactive  
+**Implementation state:** accepted local U8 engine/storage behavior; operationally inactive. This distinct acceptance does not certify the shared-state/U11 backup and traversal surfaces currently under recertification.
 **Approval boundary:** no U9 evaluator, live health DB, migration, automatic activation, cluster action, deployment, commit, or push
 
 ## Executive summary
@@ -418,13 +418,17 @@ The test suite covers:
 - built-in storage/NCCL/DL read-only observation adapters;
 - U7 and existing compatibility ingestion/config/script regressions.
 
-Final certification ran recursive Python compilation, Bash syntax,
+The earlier certification ran recursive Python compilation, Bash syntax,
 registry/plugin validation, editor diagnostics, full unit discovery, and
 `git diff --check`. The complete suite passed 512 tests, including a
 `ResourceWarning`-as-error run after deterministic SQLite/temp cleanup. The final independent
 read-only adversarial audit reported `READY` with no P0/P1/P2 findings under the
 documented SQL-only integrity and trusted filesystem-owner/plugin boundaries.
-Exact completion evidence is recorded in the U8 tracker entry.
+That historical readiness statement applies only to the accepted U8 engine
+boundary. It does not certify the later shared-state/U11 publication, backup,
+cleanup, or traversal surfaces, whose final recertification remains open in the
+tracker. This local U8 acceptance does not authorize a live U8 database or
+evaluator.
 
 ## Retrospective and cleanup
 

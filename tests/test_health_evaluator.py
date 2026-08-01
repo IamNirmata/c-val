@@ -16,6 +16,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from cval.config import load_config
+from cval.evaluator.state import (
+    StateLockError,
+    bind_state_target,
+    state_test_lock,
+)
 from cval.health.combination import resolve_environment_combination
 from cval.health.evaluator import (
     ACTIVATE_CONFIRMATION,
@@ -29,11 +34,11 @@ from cval.health.evaluator import (
     TestEvaluationReport,
     _evaluate_classifications,
     _evaluate_candidates,
+    _evaluate_registered_test,
     _catalog_result_from_row,
     _load_result_catalog,
     activate_health_candidate,
     evaluate_health_cycle,
-    evaluator_test_lock,
 )
 from cval.health.models import (
     ActivationPreflight,
@@ -45,7 +50,7 @@ from cval.health.models import (
     SourceSnapshot,
 )
 from cval.health.engine import build_candidate_from_plugin, metric_specs_from_definition
-from cval.health.storage import persist_candidate, resolve_health_db_path
+from cval.health.storage import _store_candidate, resolve_health_db_path
 from cval.storage.per_test_results import (
     COMMON_IMMUTABLE_KEY_GROUPS,
     PerTestResultRecord,
@@ -64,6 +69,25 @@ from tests import test_health_plugins, test_per_test_ingestion
 
 
 class HealthEvaluatorTests(unittest.TestCase):
+    @staticmethod
+    def _state_config(base, root: Path, *, write_enabled: bool = False):
+        root.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(root, 0o700)
+        return replace(
+            base,
+            runtime=replace(
+                base.runtime,
+                validation_root=str(root.parent / f"{root.name}-shared-evidence"),
+            ),
+            health_evaluator=replace(
+                base.health_evaluator,
+                write_enabled=write_enabled,
+                state_root=str(root),
+                state_owner_uid=os.geteuid(),
+                state_owner_gid=os.getegid(),
+            ),
+        )
+
     def _prepared(self, root: Path):
         case = test_health_plugins.BuiltinHealthPluginTests()
         case.fixture = test_per_test_ingestion.ModularPerTestIngestionTests()
@@ -93,31 +117,51 @@ class HealthEvaluatorTests(unittest.TestCase):
             sort_keys=True,
             separators=(",", ":"),
         )
-        path = resolve_test_results_db_path(config.runtime.validation_root, registered)
-        write_per_test_result(
-            PerTestResultRecord(
-                run_id=run_id,
-                test_id="storage",
-                node="node-a",
-                run_timestamp=timestamp,
-                started_timestamp=timestamp,
-                completed_timestamp=timestamp + 1,
-                status=status,
-                exit_code=0 if status == "pass" else 1,
-                image_name="image",
-                pytorch_version="2.8",
-                cuda_version="12.9",
-                test_config_digest=validation_test_config_digest(registered),
-                combination_key=combination.key,
-                result_path=f"/tmp/{run_id}/result.json",
-                summary_path=f"/tmp/{run_id}/summary.json",
-                artifacts_path=f"/tmp/{run_id}/artifacts",
-                raw_result_json=payload,
-                result_digest="sha256:" + hashlib.sha256(run_id.encode()).hexdigest(),
-            ),
-            db_path=path,
-            now=timestamp,
+        path = resolve_test_results_db_path(
+            config.health_evaluator.state_root,
+            registered,
         )
+        with state_test_lock(config, path) as lock_guard, bind_state_target(
+            config,
+            path,
+            create=True,
+            allow_missing=False,
+            writable=True,
+            require_writable=True,
+        ) as binding:
+            identity = binding.sqlite_identity
+            assert identity is not None
+            write_per_test_result(
+                PerTestResultRecord(
+                    run_id=run_id,
+                    test_id="storage",
+                    node="node-a",
+                    run_timestamp=timestamp,
+                    started_timestamp=timestamp,
+                    completed_timestamp=timestamp + 1,
+                    status=status,
+                    exit_code=0 if status == "pass" else 1,
+                    image_name="image",
+                    pytorch_version="2.8",
+                    cuda_version="12.9",
+                    test_config_digest=validation_test_config_digest(registered),
+                    combination_key=combination.key,
+                    result_path=f"/tmp/{run_id}/result.json",
+                    summary_path=f"/tmp/{run_id}/summary.json",
+                    artifacts_path=f"/tmp/{run_id}/artifacts",
+                    raw_result_json=payload,
+                    result_digest=(
+                        "sha256:" + hashlib.sha256(run_id.encode()).hexdigest()
+                    ),
+                ),
+                db_path=path,
+                now=timestamp,
+                expected_identity=identity,
+                state_guard=lambda: (
+                    lock_guard(),
+                    binding.assert_path_binding(),
+                ),
+            )
         if with_receipt:
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
@@ -151,6 +195,10 @@ class HealthEvaluatorTests(unittest.TestCase):
                 for path in root.rglob("*")
                 if path.is_file()
             }
+            locks_before = sorted(
+                str(path.relative_to(root))
+                for path in root.rglob("*.health-evaluator.lock")
+            )
 
             report = evaluate_health_cycle(config, now=9_999_999_999)
 
@@ -163,9 +211,13 @@ class HealthEvaluatorTests(unittest.TestCase):
                 for path in root.rglob("*")
                 if path.is_file()
             }
+            locks_after = sorted(
+                str(path.relative_to(root))
+                for path in root.rglob("*.health-evaluator.lock")
+            )
             migrations = {}
             for test_id in ("storage", "nccl", "dltest"):
-                db_path = root / f"validation_tests/{test_id}/{test_id}_results.db"
+                db_path = root / f"evaluator_state/validation_tests/{test_id}/{test_id}_results.db"
                 with closing(sqlite3.connect(db_path)) as connection:
                     migrations[test_id] = connection.execute(
                         "SELECT version FROM schema_migrations ORDER BY version"
@@ -174,7 +226,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(before, after)
         self.assertEqual(migrations, {"storage": [(1,)], "nccl": [(1,)], "dltest": [(1,)]})
-        self.assertFalse(any("health-evaluator.lock" in str(path) for path in after))
+        self.assertEqual(locks_after, locks_before)
         self.assertFalse(any("health_classes" in str(path) for path in after))
         self.assertFalse(any(str(path).endswith("activation.key") for path in after))
 
@@ -183,7 +235,7 @@ class HealthEvaluatorTests(unittest.TestCase):
             root = Path(tmpdir)
             config = self._prepared(root)
             for test_id in ("storage", "nccl", "dltest"):
-                path = root / f"validation_tests/{test_id}/{test_id}_results.db"
+                path = root / f"evaluator_state/validation_tests/{test_id}/{test_id}_results.db"
                 with closing(sqlite3.connect(path)) as connection:
                     self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
                     self.assertEqual(connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(), (0, 0, 0))
@@ -205,7 +257,10 @@ class HealthEvaluatorTests(unittest.TestCase):
             registered = config.tests.registry.require("storage")
             plugin = load_registered_plugin(registered)
             self.assertIsNotNone(plugin)
-            storage_path = resolve_test_results_db_path(root, registered)
+            storage_path = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
             with immutable_sqlite_snapshot(storage_path) as snapshot:
                 catalog = _load_result_catalog(
                     snapshot.uri,
@@ -258,7 +313,7 @@ class HealthEvaluatorTests(unittest.TestCase):
                 health_evaluator=replace(config.health_evaluator, write_enabled=True),
             )
             db_paths = tuple(
-                root / f"validation_tests/{test_id}/{test_id}_results.db"
+                root / f"evaluator_state/validation_tests/{test_id}/{test_id}_results.db"
                 for test_id in ("storage", "nccl", "dltest")
             )
             for path in db_paths:
@@ -333,8 +388,14 @@ class HealthEvaluatorTests(unittest.TestCase):
                 health_evaluator=replace(config.health_evaluator, write_enabled=True),
             )
             registered = config.tests.registry.require("storage")
-            result_db = resolve_test_results_db_path(root, registered)
-            health_db = resolve_health_db_path(root, registered)
+            result_db = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            health_db = resolve_health_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
             with closing(sqlite3.connect(result_db)) as connection:
                 self.assertEqual(
                     connection.execute("PRAGMA journal_mode=WAL").fetchone(),
@@ -378,7 +439,7 @@ class HealthEvaluatorTests(unittest.TestCase):
                 or ".staging" in path.name
             )
 
-        self.assertEqual(storage.status, "processed")
+        self.assertEqual(storage.status, "processed", storage)
         self.assertTrue(storage.migrated_to_v2)
         self.assertEqual(storage.candidate_source_count, 10)
         self.assertEqual(storage.candidates_inserted, 1)
@@ -455,8 +516,11 @@ class HealthEvaluatorTests(unittest.TestCase):
                     created_at=20_000,
                 ),
             )
-            health_path = resolve_health_db_path(root, registered)
-            persist_candidate(
+            health_path = resolve_health_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            _store_candidate(
                 candidate,
                 registered.definition,
                 db_path=health_path,
@@ -532,11 +596,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             for index in range(8):
                 self._append_result(config, run_id=f"existing-{index}", status="fail")
             evaluate_health_cycle(
@@ -577,11 +637,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             self._append_result(config, run_id="race-first", status="fail")
             self._append_result(config, run_id="race-second", status="fail")
             original_store = evaluator_module.store_classification_history
@@ -619,7 +675,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(base, runtime=replace(base.runtime, validation_root=str(root)))
+            config = self._state_config(base, root)
             for run_id, status in (("failed", "fail"), ("unfinished", "incomplete"), ("passed", "pass")):
                 self._append_result(config, run_id=run_id, status=status)
             config = replace(
@@ -634,7 +690,10 @@ class HealthEvaluatorTests(unittest.TestCase):
                 now=20_000,
             )
             storage = next(test for test in report.tests if test.test_id == "storage")
-            path = resolve_test_results_db_path(root, config.tests.registry.require("storage"))
+            path = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                config.tests.registry.require("storage"),
+            )
             with closing(sqlite3.connect(path)) as connection:
                 rows = connection.execute(
                     "SELECT run_id,dnr_reason FROM classification_history ORDER BY result_id"
@@ -667,11 +726,11 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
+            config = self._state_config(base, root)
             config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
+                config,
                 health_evaluator=replace(
-                    base.health_evaluator,
+                    config.health_evaluator,
                     max_classifications_per_test=2,
                 ),
             )
@@ -707,7 +766,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(base, runtime=replace(base.runtime, validation_root=str(root)))
+            config = self._state_config(base, root)
             self._append_result(
                 config,
                 run_id="failed-with-receipt",
@@ -960,11 +1019,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "validation ?#% root"
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             path = self._append_result(config, run_id="failed", status="fail")
 
             dry = evaluate_health_cycle(config, now=20_002)
@@ -993,11 +1048,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             path = self._append_result(config, run_id="failed", status="fail")
             replacement = path.with_name("replacement.db")
             shutil.copy2(path, replacement)
@@ -1066,11 +1117,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             path = self._append_result(config, run_id="failed", status="fail")
             dummy = SimpleNamespace(
                 combination=SimpleNamespace(key="sha256:" + "a" * 64),
@@ -1090,7 +1137,7 @@ class HealthEvaluatorTests(unittest.TestCase):
             ), patch(
                 "cval.health.evaluator.selected_result_evidence_guard",
                 side_effect=RuntimeError("candidate U7 evidence changed"),
-            ), patch("cval.health.evaluator.persist_candidate") as persist:
+            ), patch("cval.health.evaluator._persist_candidate") as persist:
                 candidate_report = evaluate_health_cycle(
                     config,
                     apply=True,
@@ -1163,8 +1210,14 @@ class HealthEvaluatorTests(unittest.TestCase):
                 health_evaluator=replace(config.health_evaluator, write_enabled=True),
             )
             registered = config.tests.registry.require("storage")
-            storage_path = resolve_test_results_db_path(root, registered)
-            health_path = resolve_health_db_path(root, registered)
+            storage_path = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            health_path = resolve_health_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
             original_guard = evaluator_module.selected_result_evidence_guard
             mutated = False
 
@@ -1212,11 +1265,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             self._append_result(config, run_id="failed", status="fail")
             dummy = SimpleNamespace(
                 combination=SimpleNamespace(key="sha256:" + "c" * 64),
@@ -1238,7 +1287,7 @@ class HealthEvaluatorTests(unittest.TestCase):
             ), patch(
                 "cval.health.evaluator._assert_candidate_rebuild"
             ), patch(
-                "cval.health.evaluator.persist_candidate",
+                "cval.health.evaluator._persist_candidate",
                 side_effect=RuntimeError("staged first-create failure"),
             ):
                 report = evaluate_health_cycle(
@@ -1259,11 +1308,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             path = self._append_result(config, run_id="failed", status="fail")
             first = evaluate_health_cycle(
                 config, apply=True, confirmation=EVALUATE_CONFIRMATION, now=30_000
@@ -1342,11 +1387,7 @@ class HealthEvaluatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             path = self._append_result(config, run_id="failed", status="fail")
             with patch(
                 "cval.health.evaluator._evaluate_classifications",
@@ -1486,7 +1527,7 @@ class HealthEvaluatorTests(unittest.TestCase):
             rows = {}
             caches = {}
             for test_id in ("storage", "nccl", "dltest"):
-                db_path = root / f"validation_tests/{test_id}/{test_id}_results.db"
+                db_path = root / f"evaluator_state/validation_tests/{test_id}/{test_id}_results.db"
                 with closing(sqlite3.connect(db_path)) as connection:
                     rows[test_id] = connection.execute(
                         "SELECT health_class_numerical, dnr_reason, baseline_id "
@@ -1642,7 +1683,7 @@ class HealthEvaluatorTests(unittest.TestCase):
             return_value=HealthChainCursor(
                 "storage", combination.key, None, None, ()
             ),
-        ), patch("cval.health.evaluator.activate_candidate") as activate:
+        ), patch("cval.health.evaluator._activate_candidate") as activate:
             actions = _evaluate_candidates(
                 config,
                 registered,
@@ -1753,12 +1794,26 @@ tolerance_pct = 1.0
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(base, runtime=replace(base.runtime, validation_root=str(root)))
+            config = self._state_config(base, root)
             registered = config.tests.registry.require("storage")
-            result_path = resolve_test_results_db_path(root, registered)
-            result_path.parent.mkdir(parents=True)
-            result_path.touch()
-            health_path = resolve_health_db_path(root, registered)
+            result_path = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            with state_test_lock(config, result_path), bind_state_target(
+                config,
+                result_path,
+                create=True,
+                allow_missing=False,
+                writable=True,
+                require_writable=True,
+            ):
+                pass
+            locks_before = set(result_path.parent.glob("*.lock"))
+            health_path = resolve_health_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
             baseline_id = "hb1:" + "a" * 64
             preflight = ActivationPreflight(
                 baseline_id,
@@ -1778,19 +1833,24 @@ tolerance_pct = 1.0
             with patch(
                 "cval.health.evaluator.preflight_activation",
                 return_value=preflight,
-            ) as check, patch("cval.health.evaluator.activate_candidate") as activate:
+            ) as check, patch("cval.health.evaluator._activate_candidate") as activate:
                 dry = activate_health_candidate(config, "storage", baseline_id, now=10)
             self.assertEqual(dry.mode, "dry-run")
             self.assertFalse(dry.activated)
             check.assert_called_once()
             activate.assert_not_called()
-            self.assertFalse(any(result_path.parent.glob("*.lock")))
+            self.assertEqual(set(result_path.parent.glob("*.lock")), locks_before)
             self.assertFalse(health_path.exists())
 
             enabled = replace(
                 config,
                 health_evaluator=replace(config.health_evaluator, write_enabled=True),
             )
+            health_path.touch(mode=0o600)
+            os.chmod(health_path, 0o600)
+            key_path = health_path.with_name(f"{health_path.name}.activation.key")
+            key_path.write_bytes(b"k" * 32)
+            os.chmod(key_path, 0o600)
             with self.assertRaises(HealthEvaluatorPolicyError):
                 activate_health_candidate(
                     enabled,
@@ -1803,7 +1863,7 @@ tolerance_pct = 1.0
                 "cval.health.evaluator.preflight_activation",
                 side_effect=(preflight, active),
             ), patch(
-                "cval.health.evaluator.activate_candidate",
+                "cval.health.evaluator._activate_candidate",
                 return_value=True,
             ) as activate:
                 applied = activate_health_candidate(
@@ -1817,11 +1877,213 @@ tolerance_pct = 1.0
             self.assertTrue(applied.activated)
             activate.assert_called_once()
 
+    def test_production_activation_has_no_public_or_unlocked_path(self) -> None:
+        import inspect
+        import cval.health.storage as storage_module
+
+        self.assertFalse(hasattr(storage_module, "activate_candidate"))
+        signature = inspect.signature(storage_module._activate_candidate)
+        for name in ("lock_guard", "state_binding", "key_binding"):
+            self.assertIs(signature.parameters[name].default, inspect.Parameter.empty)
+        with self.assertRaisesRegex(RuntimeError, "retained DB/key bindings"):
+            storage_module._activate_candidate(
+                "hb1:" + "a" * 64,
+                load_config().tests.registry.require("storage").definition,
+                db_path=Path("/must-not-open.db"),
+                lock_guard=None,
+                state_binding=None,
+                key_binding=None,
+            )
+
+    def test_u9_apply_and_activation_reject_wrong_fixed_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._prepared(root)
+            wrong_owner = replace(
+                config,
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    write_enabled=True,
+                    state_owner_uid=os.geteuid() + 1,
+                ),
+            )
+
+            dry = evaluate_health_cycle(wrong_owner, now=50_000)
+            self.assertTrue(dry.ok)
+            with self.assertRaisesRegex(PermissionError, "process owner mismatch"):
+                evaluate_health_cycle(
+                    wrong_owner,
+                    apply=True,
+                    confirmation=EVALUATE_CONFIRMATION,
+                    now=50_001,
+                )
+            with self.assertRaisesRegex(PermissionError, "process owner mismatch"):
+                activate_health_candidate(
+                    wrong_owner,
+                    "storage",
+                    "hb1:" + "a" * 64,
+                    apply=True,
+                    confirmation=ACTIVATE_CONFIRMATION,
+                    now=50_002,
+                )
+
+    def test_apply_creates_nested_health_ancestry_only_after_lock_is_held(self) -> None:
+        import cval.health.evaluator as evaluator_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._prepared(root)
+            registered = config.tests.registry.require("storage")
+            result_path = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            health_path = result_path.parent / "nested/health.db"
+            self.assertFalse(health_path.parent.exists())
+            original_lock = evaluator_module.state_test_lock
+            original_bind_directory = evaluator_module.bind_state_directory
+            lock_held = False
+            creation_observed = False
+
+            @contextmanager
+            def observed_lock(*args, **kwargs):
+                nonlocal lock_held
+                self.assertFalse(health_path.parent.exists())
+                with original_lock(*args, **kwargs) as guard:
+                    lock_held = True
+                    try:
+                        yield guard
+                    finally:
+                        lock_held = False
+
+            @contextmanager
+            def observed_directory(*args, **kwargs):
+                nonlocal creation_observed
+                self.assertTrue(lock_held)
+                self.assertFalse(health_path.parent.exists())
+                with original_bind_directory(*args, **kwargs) as binding:
+                    creation_observed = True
+                    self.assertTrue(health_path.parent.is_dir())
+                    yield binding
+
+            with patch.object(
+                evaluator_module,
+                "resolve_health_db_path",
+                return_value=health_path,
+            ), patch.object(
+                evaluator_module,
+                "state_test_lock",
+                observed_lock,
+            ), patch.object(
+                evaluator_module,
+                "bind_state_directory",
+                observed_directory,
+            ):
+                _evaluate_registered_test(
+                    config,
+                    registered,
+                    apply=True,
+                    now=50_100,
+                )
+            self.assertTrue(creation_observed)
+
+    def test_activation_binds_existing_state_only_after_lock_is_held(self) -> None:
+        import cval.health.evaluator as evaluator_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._prepared(root)
+            config = replace(
+                config,
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    write_enabled=True,
+                ),
+            )
+            registered = config.tests.registry.require("storage")
+            health_path = resolve_health_db_path(
+                config.health_evaluator.state_root,
+                registered,
+            )
+            health_path.write_bytes(b"existing")
+            os.chmod(health_path, 0o600)
+            key_path = health_path.with_name(f"{health_path.name}.activation.key")
+            key_path.write_bytes(b"k" * 32)
+            os.chmod(key_path, 0o600)
+            baseline_id = "hb1:" + "a" * 64
+            preflight = ActivationPreflight(
+                baseline_id,
+                "storage",
+                "sha256:" + "b" * 64,
+                BaselineLifecycle.CANDIDATE,
+                True,
+                False,
+                None,
+            )
+            active = replace(
+                preflight,
+                lifecycle=BaselineLifecycle.ACTIVE,
+                already_active=True,
+                current_active_baseline_id=baseline_id,
+            )
+            original_lock = evaluator_module.state_test_lock
+            original_bind_target = evaluator_module.bind_state_target
+            lock_held = False
+            bound_paths: list[Path] = []
+
+            @contextmanager
+            def observed_lock(*args, **kwargs):
+                nonlocal lock_held
+                self.assertEqual(bound_paths, [])
+                with original_lock(*args, **kwargs) as guard:
+                    lock_held = True
+                    try:
+                        yield guard
+                    finally:
+                        lock_held = False
+
+            @contextmanager
+            def observed_target(*args, **kwargs):
+                self.assertTrue(lock_held)
+                bound_paths.append(Path(args[1]))
+                with original_bind_target(*args, **kwargs) as binding:
+                    yield binding
+
+            with patch.object(
+                evaluator_module,
+                "state_test_lock",
+                observed_lock,
+            ), patch.object(
+                evaluator_module,
+                "bind_state_target",
+                observed_target,
+            ), patch.object(
+                evaluator_module,
+                "preflight_activation",
+                side_effect=(preflight, active),
+            ), patch.object(
+                evaluator_module,
+                "_activate_candidate",
+                return_value=True,
+            ):
+                report = activate_health_candidate(
+                    config,
+                    "storage",
+                    baseline_id,
+                    apply=True,
+                    confirmation=ACTIVATE_CONFIRMATION,
+                    now=50_200,
+                )
+            self.assertTrue(report.activated)
+            self.assertEqual(len(bound_paths), 3)
+
     def test_apply_lock_is_owner_only_bounded_and_rejects_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result_path = Path(tmpdir) / "test_results.db"
+            root = Path(tmpdir)
+            config = self._state_config(load_config(), root)
+            result_path = root / "test_results.db"
             result_path.touch()
-            with evaluator_test_lock(result_path, timeout_seconds=1) as lock_guard:
+            with state_test_lock(config, result_path, timeout_seconds=1) as lock_guard:
                 lock_path = lock_guard.path
                 lock_guard()
                 self.assertEqual(lock_path.stat().st_mode & 0o777, 0o600)
@@ -1836,8 +2098,20 @@ tolerance_pct = 1.0
             outside = Path(tmpdir) / "outside.lock"
             outside.touch(mode=0o600)
             lock_path.symlink_to(outside)
-            with self.assertRaises((ValueError, OSError, HealthEvaluatorLockError)):
-                with evaluator_test_lock(result_path, timeout_seconds=1):
+            with self.assertRaises((ValueError, OSError, StateLockError)):
+                with state_test_lock(config, result_path, timeout_seconds=1):
+                    pass
+
+            lock_path.unlink()
+            wrong_owner = replace(
+                config,
+                health_evaluator=replace(
+                    config.health_evaluator,
+                    state_owner_gid=os.getegid() + 1,
+                ),
+            )
+            with self.assertRaises(PermissionError):
+                with state_test_lock(wrong_owner, result_path, timeout_seconds=1):
                     pass
 
     def test_lock_replacement_allows_split_open_but_blocks_commit_and_completion(self) -> None:
@@ -1846,11 +2120,7 @@ tolerance_pct = 1.0
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             result_path = self._append_result(config, run_id="failed", status="fail")
             original_migrate = evaluator_module.migrate_per_test_results_to_v2
             split_entered = False
@@ -1866,7 +2136,8 @@ tolerance_pct = 1.0
                     0o600,
                 )
                 os.close(descriptor)
-                with evaluator_test_lock(
+                with state_test_lock(
+                    config,
                     result_path,
                     timeout_seconds=1,
                 ) as second_guard:
@@ -1907,11 +2178,7 @@ tolerance_pct = 1.0
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base = load_config()
-            config = replace(
-                base,
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(base.health_evaluator, write_enabled=True),
-            )
+            config = self._state_config(base, root, write_enabled=True)
             result_path = self._append_result(config, run_id="failed", status="fail")
             original_migrate = evaluator_module.migrate_per_test_results_to_v2
             competitor_lock = None
@@ -1928,7 +2195,11 @@ tolerance_pct = 1.0
                     0o600,
                 )
                 os.close(replacement)
-                competitor_lock = evaluator_test_lock(result_path, timeout_seconds=1)
+                competitor_lock = state_test_lock(
+                    config,
+                    result_path,
+                    timeout_seconds=1,
+                )
                 competitor_guard = competitor_lock.__enter__()
                 competitor_guard()
                 return migrated
@@ -1958,7 +2229,7 @@ tolerance_pct = 1.0
 
         self.assertIsNotNone(competitor_guard)
         self.assertEqual(storage.status, "error")
-        self.assertEqual(storage.error_stage, "lock-finalization")
+        self.assertEqual(storage.error_stage, "classification-history")
         self.assertEqual(storage.source_schema_version, 1)
         self.assertTrue(storage.migrated_to_v2)
         self.assertTrue(storage.partial_writes)

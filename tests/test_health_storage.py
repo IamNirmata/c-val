@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import sqlite3
 import unittest
 from contextlib import closing
@@ -11,13 +12,19 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import cval.health.storage as health_storage
+from cval.config import load_config
+from cval.evaluator.state import (
+    StateLockError,
+    StateTargetBinding,
+    bind_state_target,
+    state_test_lock,
+)
 from cval.health.combination import canonicalize_factors
 from cval.health.engine import (
     _build_declarative_candidate,
     _candidate_identity,
     metric_specs_from_definition,
 )
-from cval.health.evaluator import HealthEvaluatorLockError, evaluator_test_lock
 from cval.health.models import (
     BaselineLifecycle,
     HealthContext,
@@ -26,16 +33,16 @@ from cval.health.models import (
     SourceSnapshot,
 )
 from cval.health.storage import (
-    activate_candidate,
+    _activate_candidate_for_test as activate_candidate,
     get_active_baseline,
     get_chain_cursor,
     list_baselines,
     load_baseline,
     load_build_state,
-    persist_candidate_from_plugin,
+    _persist_candidate_from_plugin,
     preflight_activation,
     _store_candidate as store_candidate,
-    store_candidate_from_plugin,
+    _store_candidate_from_plugin,
 )
 from tests.test_health_engine import definition
 from cval.validation.registry import validation_test_config_digest
@@ -118,6 +125,25 @@ def candidate(
 
 
 class HealthStorageTests(unittest.TestCase):
+    @staticmethod
+    def _state_config(root: Path):
+        os.chmod(root, 0o700)
+        base = load_config()
+        return replace(
+            base,
+            runtime=replace(
+                base.runtime,
+                validation_root=str(root.parent / "shared"),
+            ),
+            health_evaluator=replace(
+                base.health_evaluator,
+                state_root=str(root),
+                state_owner_uid=os.geteuid(),
+                state_owner_gid=os.getegid(),
+                lock_timeout_seconds=1,
+            ),
+        )
+
     def test_typed_store_outcome_authoritative_cursor_and_activation_preflight(self) -> None:
         test_definition, built = candidate()
 
@@ -139,8 +165,8 @@ class HealthStorageTests(unittest.TestCase):
         )
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "health.db"
-            first = persist_candidate_from_plugin(Plugin(), context, db_path=path, now=150)
-            second = persist_candidate_from_plugin(Plugin(), context, db_path=path, now=160)
+            first = _persist_candidate_from_plugin(Plugin(), context, db_path=path, now=150)
+            second = _persist_candidate_from_plugin(Plugin(), context, db_path=path, now=160)
             cursor = get_chain_cursor(
                 "smoke",
                 built.combination.key,
@@ -159,6 +185,30 @@ class HealthStorageTests(unittest.TestCase):
         self.assertEqual(cursor.latest_source_result_ids, (1, 2, 3))
         self.assertTrue(readiness.activation_ready)
         self.assertFalse(readiness.already_active)
+
+    def test_unlocked_candidate_creators_are_not_public_or_production_callable(self) -> None:
+        for name in (
+            "store_candidate_from_plugin",
+            "persist_candidate_from_plugin",
+            "persist_candidate",
+        ):
+            self.assertFalse(hasattr(health_storage, name))
+
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "retained DB/key bindings.*shared per-test lock",
+            ):
+                health_storage._persist_candidate(
+                    built,
+                    test_definition,
+                    db_path=path,
+                    now=150,
+                )
+            self.assertEqual(list(path.parent.iterdir()), [])
+
     def test_public_store_loads_plugin_observations_and_binds_activation_key(self) -> None:
         test_definition, built = candidate()
 
@@ -180,7 +230,7 @@ class HealthStorageTests(unittest.TestCase):
         )
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "health.db"
-            stored = store_candidate_from_plugin(
+            stored = _store_candidate_from_plugin(
                 Plugin(),
                 context,
                 db_path=path,
@@ -277,6 +327,238 @@ class HealthStorageTests(unittest.TestCase):
                 {item.name for item in path.parent.iterdir()},
                 {path.name, key_path.name},
             )
+
+    def test_staging_database_real_fchmod_interruption_leaves_no_orphan(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            primary = KeyboardInterrupt("staging fchmod interrupted")
+            original_fchmod = health_storage.os.fchmod
+            interrupted = False
+
+            def interrupt_once(descriptor, mode):
+                nonlocal interrupted
+                if not interrupted:
+                    interrupted = True
+                    raise primary
+                return original_fchmod(descriptor, mode)
+
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            with patch.object(
+                health_storage.os,
+                "fchmod",
+                side_effect=interrupt_once,
+            ), self.assertRaises(KeyboardInterrupt) as raised:
+                store_candidate(built, test_definition, db_path=path, now=150)
+            self.assertIs(raised.exception, primary)
+            self.assertTrue(interrupted)
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name("health.db.activation.key").exists())
+            self.assertEqual(list(path.parent.glob(".health.db.*.staging*")), [])
+            self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_staging_database_sigterm_after_open_waits_for_identity_registration(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "health.db"
+            previous = signal.getsignal(signal.SIGTERM)
+            original_open = health_storage.os.open
+            sent = False
+
+            def terminate(signum, _frame):
+                raise SystemExit(128 + signum)
+
+            def open_then_signal(name, flags, mode=0o777, *, dir_fd=None):
+                nonlocal sent
+                descriptor = original_open(name, flags, mode, dir_fd=dir_fd)
+                if (
+                    not sent
+                    and isinstance(name, str)
+                    and name.startswith(".health.db.")
+                    and name.endswith(".staging")
+                    and flags & os.O_EXCL
+                ):
+                    sent = True
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return descriptor
+
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            signal.signal(signal.SIGTERM, terminate)
+            try:
+                with patch.object(
+                    health_storage.os,
+                    "open",
+                    side_effect=open_then_signal,
+                ), self.assertRaises(SystemExit) as raised:
+                    store_candidate(built, test_definition, db_path=path, now=150)
+                self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+            self.assertTrue(sent)
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(".health.db.*.staging*")), [])
+            self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_first_key_creation_baseexceptions_remove_database_key_and_fds(self) -> None:
+        test_definition, built = candidate()
+        cases = (
+            ("open", KeyboardInterrupt("key open interrupted")),
+            ("fchmod", SystemExit("key chmod interrupted")),
+            ("write", KeyboardInterrupt("key write interrupted")),
+            ("file_fsync", SystemExit("key fsync interrupted")),
+            ("parent_fsync", KeyboardInterrupt("key parent fsync interrupted")),
+            ("complete", SystemExit("key completion interrupted")),
+        )
+        for stage, primary in cases:
+            with self.subTest(stage=stage), TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "health.db"
+                before = len(list(Path("/proc/self/fd").iterdir()))
+
+                def interrupt(current: str) -> None:
+                    if current == stage:
+                        raise primary
+
+                with patch.object(
+                    health_storage,
+                    "_activation_key_creation_checkpoint",
+                    side_effect=interrupt,
+                ), self.assertRaises(type(primary)) as raised:
+                    store_candidate(
+                        built,
+                        test_definition,
+                        db_path=path,
+                        now=150,
+                    )
+                self.assertIs(raised.exception, primary)
+                self.assertFalse(path.exists())
+                self.assertFalse(
+                    path.with_name(f"{path.name}.activation.key").exists()
+                )
+                self.assertEqual(list(path.parent.glob(".health.db.*.staging*")), [])
+                self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_retained_parent_key_creator_cleans_real_syscall_interruptions(self) -> None:
+        cases = (
+            ("fstat", KeyboardInterrupt("key identity syscall interrupted")),
+            ("write", KeyboardInterrupt("key write syscall interrupted")),
+            ("fchmod", SystemExit("key chmod syscall interrupted")),
+            ("fsync", KeyboardInterrupt("key fsync syscall interrupted")),
+        )
+        for operation, primary in cases:
+            with self.subTest(operation=operation), TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                path = root / "health.db"
+                key_path = path.with_name(f"{path.name}.activation.key")
+                parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                original = getattr(health_storage.os, operation)
+                calls = 0
+
+                def interrupt_once(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        raise primary
+                    return original(*args, **kwargs)
+
+                before = len(list(Path("/proc/self/fd").iterdir()))
+                try:
+                    with patch.object(
+                        health_storage.os,
+                        operation,
+                        side_effect=interrupt_once,
+                    ), self.assertRaises(type(primary)) as raised:
+                        health_storage._load_activation_key(
+                            path,
+                            create=True,
+                            parent_fd=parent_fd,
+                            key_name=key_path.name,
+                            created_identities={},
+                        )
+                    self.assertIs(raised.exception, primary)
+                    self.assertFalse(key_path.exists())
+                    self.assertEqual(
+                        calls,
+                        2 if operation == "fstat" else 4 if operation == "fsync" else 1,
+                    )
+                finally:
+                    os.close(parent_fd)
+                self.assertEqual(
+                    len(list(Path("/proc/self/fd").iterdir())),
+                    before - 1,
+                )
+
+    def test_interrupted_first_key_creation_preserves_racer_replacement_only(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "health.db"
+            primary = KeyboardInterrupt("key replacement interruption")
+            racer_bytes = b"r" * 32
+            observed: dict[str, Path] = {}
+
+            def replace_then_interrupt(stage: str) -> None:
+                if stage != "write":
+                    return
+                staging_key = next(
+                    root.glob(".health.db.*.staging.activation.key")
+                )
+                relocated = staging_key.with_name(staging_key.name + ".relocated")
+                staging_key.rename(relocated)
+                staging_key.write_bytes(racer_bytes)
+                os.chmod(staging_key, 0o600)
+                observed.update(staging=staging_key, relocated=relocated)
+                raise primary
+
+            before = len(list(Path("/proc/self/fd").iterdir()))
+            with patch.object(
+                health_storage,
+                "_activation_key_creation_checkpoint",
+                side_effect=replace_then_interrupt,
+            ), self.assertRaises(KeyboardInterrupt) as raised:
+                store_candidate(
+                    built,
+                    test_definition,
+                    db_path=path,
+                    now=150,
+                )
+            self.assertIs(raised.exception, primary)
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name("health.db.activation.key").exists())
+            self.assertEqual(observed["staging"].read_bytes(), racer_bytes)
+            self.assertTrue(observed["relocated"].exists())
+            self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_first_create_staging_replacement_survives_cleanup_and_fails_closed(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "health.db"
+            racer_bytes = b"r" * 32
+            replaced: dict[str, Path] = {}
+
+            def replace_staging_key() -> None:
+                staging_key = next(root.glob(".health.db.*.staging.activation.key"))
+                displaced = staging_key.with_name(staging_key.name + ".displaced")
+                staging_key.rename(displaced)
+                staging_key.write_bytes(racer_bytes)
+                os.chmod(staging_key, 0o600)
+                replaced.update(staging=staging_key, displaced=displaced)
+
+            with self.assertRaisesRegex(RuntimeError, "identity|replaced"):
+                store_candidate(
+                    built,
+                    test_definition,
+                    db_path=path,
+                    now=150,
+                    pre_publish=replace_staging_key,
+                )
+
+            self.assertFalse(path.exists())
+            self.assertFalse(
+                path.with_name(f"{path.name}.activation.key").exists()
+            )
+            self.assertEqual(replaced["staging"].read_bytes(), racer_bytes)
+            self.assertTrue(replaced["displaced"].is_file())
 
     def test_rejected_initial_trigger_creates_no_database_or_key(self) -> None:
         test_definition, built = candidate(count=3, min_new_results=4)
@@ -686,9 +968,10 @@ class HealthStorageTests(unittest.TestCase):
             root = Path(tmpdir)
             result_path = root / "result.db"
             result_path.touch()
+            config = self._state_config(root)
             health_path = root / "health.db"
             key_path = health_path.with_name(f"{health_path.name}.activation.key")
-            first_lock = evaluator_test_lock(result_path, timeout_seconds=1)
+            first_lock = state_test_lock(config, result_path, timeout_seconds=1)
             first_guard = first_lock.__enter__()
             competitor_lock = None
             competitor_guard = None
@@ -702,13 +985,17 @@ class HealthStorageTests(unittest.TestCase):
                     0o600,
                 )
                 os.close(replacement)
-                competitor_lock = evaluator_test_lock(result_path, timeout_seconds=1)
+                competitor_lock = state_test_lock(
+                    config,
+                    result_path,
+                    timeout_seconds=1,
+                )
                 competitor_guard = competitor_lock.__enter__()
                 competitor_guard()
 
             try:
                 with self.assertRaisesRegex(
-                    HealthEvaluatorLockError,
+                    StateLockError,
                     "lock.*changed",
                 ):
                     store_candidate(
@@ -729,8 +1016,282 @@ class HealthStorageTests(unittest.TestCase):
             finally:
                 if competitor_lock is not None:
                     competitor_lock.__exit__(None, None, None)
-                with self.assertRaises(HealthEvaluatorLockError):
+                with self.assertRaises(StateLockError):
                     first_lock.__exit__(None, None, None)
+
+    def test_initial_u8_adoption_rejects_raced_db_and_key_replacements(self) -> None:
+        test_definition, built = candidate()
+        attacker = b"attacker-controlled-bytes"
+        for target_kind in ("database", "key"):
+            with self.subTest(target=target_kind), TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                config = self._state_config(root)
+                result_path = root / "result.db"
+                result_path.touch(mode=0o600)
+                health_path = root / "health.db"
+                key_path = health_path.with_name(f"{health_path.name}.activation.key")
+                raced_path = health_path if target_kind == "database" else key_path
+                original_adopt = StateTargetBinding.adopt_created_file
+                raced = False
+
+                def replace_before_adoption(binding, expected_identity, *, writable):
+                    nonlocal raced
+                    if binding.path == raced_path and not raced:
+                        raced = True
+                        binding.path.unlink()
+                        binding.path.write_bytes(attacker)
+                        os.chmod(binding.path, 0o600)
+                    return original_adopt(
+                        binding,
+                        expected_identity,
+                        writable=writable,
+                    )
+
+                with patch.object(
+                    StateTargetBinding,
+                    "adopt_created_file",
+                    new=replace_before_adoption,
+                ):
+                    with self.assertRaises(RuntimeError) as raised:
+                        with state_test_lock(config, result_path) as lock_guard, bind_state_target(
+                            config,
+                            health_path,
+                            create=False,
+                            allow_missing=True,
+                            writable=True,
+                            require_writable=True,
+                        ) as health_binding, bind_state_target(
+                            config,
+                            key_path,
+                            create=False,
+                            allow_missing=True,
+                            writable=False,
+                            require_writable=True,
+                        ) as key_binding:
+                            store_candidate(
+                                built,
+                                test_definition,
+                                db_path=health_path,
+                                now=150,
+                                lock_guard=lock_guard,
+                                state_binding=health_binding,
+                                key_binding=key_binding,
+                            )
+                self.assertTrue(raced)
+                self.assertNotIn("Bad file descriptor", str(raised.exception))
+                self.assertEqual(raced_path.read_bytes(), attacker)
+                other = key_path if target_kind == "database" else health_path
+                self.assertFalse(other.exists())
+                self.assertEqual(
+                    list(root.glob(f".{health_path.name}.*.staging*")),
+                    [],
+                )
+
+    def test_initial_u8_interruptions_rollback_each_link_and_adoption_boundary(self) -> None:
+        test_definition, built = candidate()
+        boundaries = ("database-link", "key-link", "database-adopt", "key-adopt")
+        for interruption in (KeyboardInterrupt, SystemExit):
+            for boundary in boundaries:
+                with self.subTest(
+                    interruption=interruption.__name__,
+                    boundary=boundary,
+                ), TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    config = self._state_config(root)
+                    result_path = root / "result.db"
+                    result_path.touch(mode=0o600)
+                    health_path = root / "health.db"
+                    key_path = health_path.with_name(
+                        f"{health_path.name}.activation.key"
+                    )
+                    original_link = health_storage.os.link
+                    original_adopt = StateTargetBinding.adopt_created_file
+
+                    def interrupt_after_link(*args, **kwargs):
+                        result = original_link(*args, **kwargs)
+                        destination = args[1]
+                        selected = (
+                            boundary == "database-link" and destination == health_path.name
+                        ) or (
+                            boundary == "key-link" and destination == key_path.name
+                        )
+                        if selected:
+                            raise interruption("publication interrupted")
+                        return result
+
+                    def interrupt_after_adopt(binding, expected_identity, *, writable):
+                        result = original_adopt(
+                            binding,
+                            expected_identity,
+                            writable=writable,
+                        )
+                        selected = (
+                            boundary == "database-adopt" and binding.path == health_path
+                        ) or (
+                            boundary == "key-adopt" and binding.path == key_path
+                        )
+                        if selected:
+                            raise interruption("adoption interrupted")
+                        return result
+
+                    with patch.object(
+                        health_storage.os,
+                        "link",
+                        side_effect=interrupt_after_link,
+                    ), patch.object(
+                        StateTargetBinding,
+                        "adopt_created_file",
+                        new=interrupt_after_adopt,
+                    ), self.assertRaises(interruption):
+                        with state_test_lock(config, result_path) as lock_guard, bind_state_target(
+                            config,
+                            health_path,
+                            create=False,
+                            allow_missing=True,
+                            writable=True,
+                            require_writable=True,
+                        ) as health_binding, bind_state_target(
+                            config,
+                            key_path,
+                            create=False,
+                            allow_missing=True,
+                            writable=False,
+                            require_writable=True,
+                        ) as key_binding:
+                            store_candidate(
+                                built,
+                                test_definition,
+                                db_path=health_path,
+                                now=150,
+                                lock_guard=lock_guard,
+                                state_binding=health_binding,
+                                key_binding=key_binding,
+                            )
+                    self.assertFalse(health_path.exists())
+                    self.assertFalse(key_path.exists())
+                    self.assertEqual(
+                        list(root.glob(f".{health_path.name}.*.staging*")),
+                        [],
+                    )
+
+    def test_initial_u8_interrupted_link_preserves_racer_replacement(self) -> None:
+        test_definition, built = candidate()
+        attacker = b"racer-must-survive"
+        for target_kind in ("database", "key"):
+            with self.subTest(target=target_kind), TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                config = self._state_config(root)
+                result_path = root / "result.db"
+                result_path.touch(mode=0o600)
+                health_path = root / "health.db"
+                key_path = health_path.with_name(f"{health_path.name}.activation.key")
+                raced_path = health_path if target_kind == "database" else key_path
+                original_link = health_storage.os.link
+
+                def replace_after_selected_link(*args, **kwargs):
+                    result = original_link(*args, **kwargs)
+                    if args[1] == raced_path.name:
+                        raced_path.unlink()
+                        raced_path.write_bytes(attacker)
+                        os.chmod(raced_path, 0o600)
+                        raise KeyboardInterrupt("publication interrupted after race")
+                    return result
+
+                with patch.object(
+                    health_storage.os,
+                    "link",
+                    side_effect=replace_after_selected_link,
+                ), self.assertRaises(KeyboardInterrupt) as raised:
+                    with state_test_lock(config, result_path) as lock_guard, bind_state_target(
+                        config,
+                        health_path,
+                        create=False,
+                        allow_missing=True,
+                        writable=True,
+                        require_writable=True,
+                    ) as health_binding, bind_state_target(
+                        config,
+                        key_path,
+                        create=False,
+                        allow_missing=True,
+                        writable=False,
+                        require_writable=True,
+                    ) as key_binding:
+                        store_candidate(
+                            built,
+                            test_definition,
+                            db_path=health_path,
+                            now=150,
+                            lock_guard=lock_guard,
+                            state_binding=health_binding,
+                            key_binding=key_binding,
+                        )
+                self.assertTrue(
+                    any(
+                        "replacement preserved" in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(raced_path.read_bytes(), attacker)
+                other = key_path if target_kind == "database" else health_path
+                self.assertFalse(other.exists())
+                self.assertEqual(
+                    list(root.glob(f".{health_path.name}.*.staging*")),
+                    [],
+                )
+
+    def test_bound_initial_u8_parent_replacement_before_sqlite_open_never_writes_replacement(self) -> None:
+        test_definition, built = candidate()
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = self._state_config(root)
+            result_path = root / "validation_tests/storage/result.db"
+            health_path = root / "validation_tests/storage/health.db"
+            key_path = health_path.with_name(f"{health_path.name}.activation.key")
+            original_connect = health_storage.sqlite3.connect
+            replaced = False
+            parked = root / "validation_tests/parked-storage"
+
+            def replace_parent(*args, **kwargs):
+                nonlocal replaced
+                if not replaced and str(args[0]).startswith("file:/proc/self/fd/"):
+                    replaced = True
+                    health_path.parent.rename(parked)
+                    health_path.parent.mkdir(mode=0o700)
+                return original_connect(*args, **kwargs)
+
+            with self.assertRaises(RuntimeError):
+                with state_test_lock(config, result_path) as lock_guard, bind_state_target(
+                    config,
+                    health_path,
+                    create=False,
+                    allow_missing=True,
+                    writable=True,
+                    require_writable=True,
+                ) as health_binding, bind_state_target(
+                    config,
+                    key_path,
+                    create=False,
+                    allow_missing=True,
+                    writable=False,
+                    require_writable=True,
+                ) as key_binding, patch.object(
+                    health_storage.sqlite3,
+                    "connect",
+                    side_effect=replace_parent,
+                ):
+                    store_candidate(
+                        built,
+                        test_definition,
+                        db_path=health_path,
+                        now=150,
+                        lock_guard=lock_guard,
+                        state_binding=health_binding,
+                        key_binding=key_binding,
+                    )
+            self.assertTrue(replaced)
+            self.assertEqual(list(health_path.parent.iterdir()), [])
+            self.assertFalse(any("staging" in path.name for path in parked.iterdir()))
 
     def test_candidate_storage_never_silently_activates(self) -> None:
         test_definition, built = candidate()

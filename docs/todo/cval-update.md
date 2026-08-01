@@ -1,7 +1,7 @@
 # c-val Modular Framework Update Tracker
 
 **Created:** 2026-07-28  
-**Status:** Active — U0–U10 accepted locally; U11 local preparation validated after audit, with every live rollout criterion still blocked
+**Status:** Active — U0–U10 accepted locally; the U11 fixed-owner state foundation is certified READY LOCAL on 2026-08-01, while every U11 live rollout criterion and every U12 removal remain blocked
 **Source draft:** `docs/todo/cval-3.md`  
 **Goal:** Make c-val modular, deterministic, easier to extend, and safer to operate without breaking current validation, ingestion, baseline, or classification behavior.
 
@@ -879,7 +879,7 @@ Validation evidence:
 
 ## U8 — Implement versioned health-class engine
 
-**Status:** `DONE` — accepted 2026-07-29; local engine/storage only, no live health DB creation, migration, evaluation, or activation  
+**Status:** `DONE` — accepted 2026-07-29 for the distinct local engine/storage behavior only; the current shared-state/U11 recertification neither invalidates that engine acceptance nor certifies shared-state traversal, backup, or live operation; no live health DB creation, migration, evaluation, or activation
 **Risk:** High; changes health interpretation.  
 **Depends on:** U7.
 
@@ -920,11 +920,13 @@ Implemented result:
   plugin. Floating interpolation noise is bounded without scale-dependent
   percentile disorder.
 
-Validation evidence:
+Historical engine-acceptance evidence:
 
 - Multiple independent read-only adversarial audits were repeated after each
-  hardening cycle. The final audit reported `READY` with no P0/P1/P2 findings
+  engine hardening cycle. That audit reported `READY` with no P0/P1/P2 findings
   under the documented SQL-only integrity and trusted owner/plugin boundaries.
+  It did not certify the later shared-state/U11 backup and traversal surfaces,
+  which are currently under recertification.
 - The final full local suite passed `512` tests, including a run with
   `ResourceWarning` promoted to an error after deterministic connection cleanup.
 - Recursive Bash syntax, Python compilation, registry/plugin validation (3
@@ -937,7 +939,7 @@ Validation evidence:
 
 ## U9 — Implement modular evaluator service
 
-**Status:** `DONE` — accepted locally 2026-07-30; no live DB migration/write, write-gate enablement, activation, or deployment authorized
+**Status:** `DONE` — accepted locally 2026-07-30 for the distinct dry-run-first evaluator behavior; current shared-state/U11 recertification remains separate and does not certify live state handling; no live DB migration/write, write-gate enablement, activation, or deployment authorized
 **Risk:** High; derived database writes and background processing.  
 **Depends on:** U8.
 
@@ -1239,14 +1241,15 @@ deployment exclusions remain in force.
 
 ## U11 — Introduce and cut over to `cval-evaluator`
 
-**Status:** `BLOCKED` — local preparation independently certified READY 2026-07-30; no published image, Kubernetes, PVC, live backup, shadow, apply, or cutover approval is implied
+**Status:** `BLOCKED` — fixed-owner evaluator-state foundation independently certified READY LOCAL on 2026-08-01; live state provisioning, ingestion workload, image, Kubernetes, backup, shadow, apply, and cutover remain unapproved and blocked
 **Risk:** Production Kubernetes and service cutover.  
 **Depends on:** U9 and U10.
 
 Deliverables:
 
 - [x] Production-hardened, suspended `batch/v1` CronJob Kustomize base with
-  read-only shadow and separately reviewed read-write apply variants.
+  dedicated `evaluator_state` PVC subPath mounted only read-only in shadow and
+  separately reviewed read-write in apply.
 - [x] Tokenless ServiceAccount without Role/binding, evaluator-scoped deny-all
   NetworkPolicy, Restricted security context, read-only root, bounded `/tmp`,
   CPU/memory/deadline/history/TTL limits, and no ports/GPU/RDMA/host path.
@@ -1274,11 +1277,11 @@ Deliverables:
 - [x] Strict evaluator-service CLI boundary suppresses dependency stdout/stderr,
   redacts `BaseException`/`SystemExit`, preserves `KeyboardInterrupt`, and emits
   one JSON error envelope with exit code 2.
-- [x] Preflight validates every existing component from the explicitly
-  exact-mode runtime root through U7/U8 parents as current UID, exact descendant
-  `0700`, searchable, no-symlink, and not group/world writable; it revalidates
-  device/inode/mode after reads and rejects unsafe intermediate directories,
-  foreign owners, and symlink swaps.
+- [x] Dedicated evaluator state root and fixed-owner contract route U7/U8/key/
+  lock state away from the shared runtime evidence root. Preflight checks exact
+  process UID/GID, descriptor-anchored no-symlink traversal, exact owner
+  `0700` directories/`0600` files, and revalidates owner/GID/mode/device/inode.
+  Shadow requires no writable directory; apply requires a writable mount.
 - [x] `BUILD_COMMIT` is wheel/sdist package data. A checked-in multi-stage image
   recipe consumes only the built cval wheel plus exact-version/hash-verified
   offline dependency wheels, injects the exact commit and OCI revision label,
@@ -1294,8 +1297,39 @@ Deliverables:
   text, required matching class code/name, stable class-5-only `DnrReason`,
   `hb1` baseline/null semantics, and exact non-negative optional integer
   timestamps without Boolean/float/coercion acceptance.
-- [ ] Verify live U7 availability, PVC ownership/modes/sidecars, Kubernetes/CNI/
-  admission facts, and real namespace/PVC claim.
+- [x] Dedicated-state-root follow-up audit remediation centralizes one
+  descriptor-relative fixed-owner lock across U7/U9/backup apply, retains exact
+  root/ancestry/parent/file bindings across path consumers and transactions,
+  extends pre/post-commit guards, binds immutable snapshots to captured inodes,
+  and makes U8/backup publication and cleanup descriptor-relative and
+  identity-checked. Adversarial tests cover two creators, multiprocess lock
+  contention, replacement/move/symlink/hardlink/mode/GID drift, transient
+  substitutes, staging cleanup races, symmetric live-root overlap, nested
+  destination replacement, hidden-shell preflight ordering, and fixed-ID
+  manifest equality.
+- [x] Latest retained-binding audit remediation removes the obsolete pathname
+  lock, binds initial/existing U8 SQLite and activation-key operations to the
+  retained state parent/files, treats missing ancestry as an absence binding,
+  refuses to chmod raced/pre-existing directories, uses descriptor `pread` for
+  U11 DB/key readers, retains backup destination ancestry through reservation,
+  and converts preflight binding/stat/sidecar failures into structured checks.
+  Parent/higher-ancestor substitution tests prove replacement trees receive no
+  U8 or backup writes. This is local hardening only and does not authorize or
+  imply live readiness.
+- [x] Final local recertification for publication-identity
+  adoption, interruption-safe U8 rollback, full backup destination ancestry,
+  manifest-scoped backup cleanup, lock-before-health-state creation, and
+  writable-open `O_NOATIME` separation. The reproduced local defects and final
+  persistent-lock/quarantine-cleanup/descriptor-release findings were remediated;
+  independent review found no local P0/P1/P2 under the documented trusted
+  single-owner-process plus shared-lock boundary. This certifies only the local
+  foundation and implies no live readiness.
+- [ ] Approve and provision the live `evaluator_state` subroot as fixed UID/GID
+  `65532:65532` exact `0700`; never chmod/chown the shared root.
+- [ ] Deploy a fixed-UID/GID U7 ingestion execution path. The current validation
+  workload identity is unspecified, so U7 enablement currently fails closed.
+- [ ] Verify live U7 availability, state-root ownership/modes/sidecars,
+  Kubernetes/CNI/admission facts, and real namespace/PVC claim.
 - [ ] Build/sign/scan/publish the CPU-only image; replace digest and embedded
   commit placeholders only with independently verified release evidence.
 - [ ] Approve and rehearse the live backup/restore unit, apply suspended shadow,
@@ -1310,9 +1344,8 @@ Acceptance criteria:
 
 **Exact Kubernetes commands and risk summary must be approved before execution.**
 
-All currently identified locally remediable findings are implemented and
-tested, but U11 remains
-`IN PROGRESS/BLOCKED` for every live criterion above. No container image build/publication,
+The fixed-owner evaluator-state foundation is READY LOCAL, and U11 remains
+`BLOCKED` for every live criterion above. No container image build/publication,
 live Kubernetes/PVC/DB or archive access,
 commit, push, deployment, apply, or cutover was performed. See
 `docs/u11-evaluator-rollout.md` for exact local commands, reviewed live phases,
@@ -1320,8 +1353,9 @@ risks, blockers, and rollback.
 
 Current 2026-07-31 audit validation evidence:
 
-- `81` focused U11/per-test storage tests passed with warnings treated as errors.
-- `666` full unit tests passed with warnings treated as errors.
+- `170` focused config/U7/U9/U11 tests passed with warnings treated as errors;
+  the final ownership hardening subset rerun passed `118` tests.
+- `724` full unit tests passed with warnings treated as errors.
 - A wheel and sdist were built without package-index access on a disposable
   source copy; both contained the fail-closed packaged `BUILD_COMMIT` marker.
 - Recursive Bash syntax checks passed for `scripts/` and `validation-tests/`.
@@ -1334,14 +1368,183 @@ Current 2026-07-31 audit validation evidence:
 - No Kubernetes API, live PVC/DB, archive, commit, push, deploy, pod update, or
   loop restart was performed.
 
+Final local checkpoint certification on 2026-08-01:
+
+- Independent review returned `READY LOCAL` with no concrete local P0/P1/P2
+  under the documented trusted single-owner-process plus persistent shared-lock
+  boundary. Arbitrary malicious code already running as the fixed owner and
+  guessing private random staging names is outside that boundary.
+- The persistent per-test lock is never unlinked and defers process signals
+  through exact owner/mode/fsync/identity registration. Identity-scoped cleanup
+  atomically quarantines entries before verification, so public-name racers are
+  preserved. Unlock failures still close descriptors exactly once.
+- `158` focused state/signal/U8/backup/U11 tests and the `12` exact defect
+  reproducers passed with warnings treated as errors during independent review;
+  the focused remediation gate passed `228` tests and eight exact regressions
+  passed on each of ten consecutive runs.
+- Independent full certification passed `792` tests plus recursive shell
+  syntax, Python compilation, and `git diff --check`. The final publication
+  gates below supersede this interim count if they differ.
+- Fixed-UID/GID ingestion workload implementation, live NFS/PVC capability
+  proof, state-root provisioning, image release, live backup/restore, shadow,
+  apply, and cutover remain separate unimplemented or unapproved blockers.
+
+Dedicated-state-root follow-up remediation evidence on 2026-07-31:
+
+- `230` focused config/U7/U8/U9/U11/manifest/shell tests passed with warnings
+  treated as errors.
+- The fixed-owner ingestion Kubernetes execution path remains deliberately
+  unimplemented and is still the separate live architecture blocker below;
+  local lock/path/transaction foundations do not authorize that service.
+
+Latest retained-binding audit evidence on 2026-07-31:
+
+- `171` focused evaluator-state/U8/U9/U11/config tests passed with resource and
+  runtime warnings treated as errors; the final explicit per-test `ExitStack`
+  delta rerun passed all `30` preflight/parity tests warning-strict.
+- Four key ancestry/snapshot/U8/backup races passed 10 consecutive repetitions
+  (`40` repeated race executions).
+- `745` full unit tests passed with resource and runtime warnings treated as
+  errors using an external bytecode cache.
+- Recursive Bash syntax checks passed for every repository `*.sh`; external-
+  cache `compileall`, registry validation, both still-suspended Kustomize
+  renders, and `git diff --check` passed. No workspace `__pycache__` remains.
+- No network, Kubernetes API, live PVC/DB, archive, commit, push, deployment,
+  pod update, or loop restart was performed.
+
+Prior publication/rollback/backup/lock-order evidence on 2026-07-31
+(superseded historical evidence; the current final backup/state traversal audit
+reopened local recertification):
+
+- `158` focused evaluator-state/U8/U9/U11 tests passed with resource and
+  runtime warnings treated as errors.
+- The `9` exact final-audit reproducer tests passed on each of 10 consecutive
+  runs (`90` repeated executions). They cover raced DB/key adoption,
+  `KeyboardInterrupt`/`SystemExit` at DB/key link and adoption boundaries,
+  interrupted-link racer preservation, higher destination-ancestor
+  substitution, unknown file/directory cleanup, exact no-racer cleanup,
+  lock-before-health creation/activation binding, and writable-open no-atime
+  separation.
+- Historical/superseded evidence: `754` full unit tests passed with resource
+  and runtime warnings treated as errors and an external bytecode cache before
+  the current final backup/state traversal findings reopened recertification.
+- All `18` repository shell scripts passed `bash -n`; external-cache Python
+  compilation passed for `cval`, `tests`, and repository operator-skill
+  scripts; registry/plugin validation reported 3 registered, 3 enabled, and 3
+  loaded.
+- Both U11 Kustomize overlays rendered locally, remained suspended, retained
+  their fail-closed image digest placeholder, and preserved shadow read-only /
+  apply read-write mount separation. `git diff --check` passed and the
+  workspace contains zero `__pycache__`, `.pyc`, or `.pyo` artifacts.
+- That prior local audit reported no remaining P0, P1, or P2 finding in its
+  scoped adoption/rollback/cleanup/ancestry/pre-lock/open-flag surfaces. The
+  later final backup/state traversal findings supersede that readiness claim;
+  U11 local recertification, U11 live work, and every U12 removal remain
+  blocked.
+- No network, Kubernetes API, live PVC/DB, archive, commit, push, deployment,
+  pod update, loop restart, compatibility removal, or historical-data deletion
+  was performed.
+
+Final reproduced-defect remediation evidence on 2026-07-31 (current local
+recertification evidence, not a readiness declaration):
+
+- Latest three-P1 remediation keeps every registered per-test lock pathname/
+  inode persistent across timeout, acquisition failure, and release. An exact
+  three-process reproducer pauses creator A after publication, lets B lock that
+  inode, times A out, and proves C cannot acquire a replacement while B lives;
+  malformed/raced lock entries remain unchanged and fail closed.
+- U7 ancestry plus backup root/nested persistent directories now use private
+  same-parent 128-bit random staging directories, immediate retained identity,
+  and Linux `renameat2(RENAME_NOREPLACE)` publication. Deterministic final-name
+  racers survive, the original staged inode is removed without an orphan, and
+  no final target is overwritten. The scoped threat model excludes an arbitrary
+  malicious same-UID process guessing private random names; framework
+  concurrency and final-path races are closed. Shared evidence supervision is
+  unchanged and excluded.
+- The public unlocked U8 `activate_candidate` surface is removed. Production
+  `_activate_candidate` has mandatory non-null shared-lock, retained U8 DB, and
+  retained activation-key guards and fails before opening a path if they are
+  absent. Path-based activation remains only in a clearly internal storage-test
+  helper; the production evaluator is the sole caller.
+- Export/grep re-audit found no public activation export, duplicate pathname
+  lock, lock unlink, or direct final-name `mkdir` in evaluator state/backup
+  creators. U12 catalog staging and the shared-evidence supervisor are separate
+  scoped mechanisms, not bypasses.
+- The broader focused warning-strict U7/U8/U9/U11/ingestion set passed `279`
+  tests; the full warning-strict suite passed `786` tests. All `17` repository
+  shell files passed `bash -n`; external-cache `compileall` passed for `cval`,
+  `tests`, and operator-skill scripts. Registry validation reported 3
+  registered, 3 enabled, and 3 loaded plugins. Both local `kubectl kustomize`
+  renders remained suspended with shadow RO/apply RW state mounts.
+  `git diff --check` passed and the final workspace artifact scan found zero
+  `__pycache__`, `.pyc`, `.pyo`, build, dist, or egg-info artifacts.
+- U11 remains under recertification with no `READY` declaration. Fixed-UID/GID
+  Kubernetes ingestion and every live rollout phase remain blocked.
+
+- Persistent creation registration now uses a narrow main-thread
+  `SIGINT`/`SIGTERM` deferral primitive around only `mkdir`/exclusive `open`
+  plus immediate no-follow open/`fstat` and cleanup-registry insertion. It
+  restores both handlers and re-delivers the first pending process signal only
+  after the exact identity is cleanup-owned; direct `KeyboardInterrupt` and
+  `SystemExit` raised by code remain immediate, and non-main threads are
+  unchanged.
+- U7 ancestry, U7 targets, the shared per-test lock, U8 activation keys, U8
+  staging DBs, backup destination reservation/nested directories, and backup
+  files all register exact device/inode identity before chmod/write/fsync.
+  Post-registration `BaseException` cleanup removes only that identity. A
+  relocated directory with a replacement at its old name is preserved
+  fail-closed; a replacement is never adopted as the created identity.
+- U8 candidate write entry points are internal. The evaluator-only persistence
+  wrapper requires retained DB/key bindings plus the held shared lock and
+  cannot reach path-based parent creation. Underscore storage helpers remain
+  available only for isolated local tests.
+
+- Post-close backup cleanup now freshly rebinds exact lexical ancestry,
+  destination root, and the current mutation parent before every unlink/rmdir,
+  and rechecks after each mutation. A deterministic first-file-unlink race
+  preserves every relocated original file and the racer replacement while
+  failing closed.
+- First U8 activation-key creation registers the exclusive inode before
+  chmod/write/fsync callbacks. `KeyboardInterrupt`/`SystemExit` at open, chmod,
+  write, file fsync, parent fsync, and completion boundaries identity-unlink
+  only that incomplete key; replacement keys survive. U7 target creation and
+  backup destination reservation similarly recover identity before cleanup and
+  preserve the primary `BaseException`.
+- The obsolete duplicate `prepare_state_sqlite_file` helper was removed. U7
+  fixtures now exercise the actual `state_test_lock` + `bind_state_target` +
+  ingestion path. Existing writable state bindings use mandatory
+  `O_NOATIME|O_NOFOLLOW` read descriptors for identity/snapshot reads; exclusive
+  creation remains the separate writable opener.
+- The `13` exact creation-registration/signal reproducers passed on each of 10
+  consecutive warning-strict runs (`130` executions); they include primitive
+  handler behavior, U7 open/ancestry, U8 staging, and backup root/file/nested
+  creation. The focused evaluator-state/U7/U8/U9/U11/ingestion suite passed
+  `219` tests warning-strict, and the full warning-strict suite passed `783`
+  tests.
+- All `17` shell files under `scripts/` and `validation-tests/` passed `bash -n`.
+  External-cache `compileall` passed for `cval`, `tests`, and repository
+  operator-skill scripts. Registry validation reported 3 registered, 3
+  enabled, and 3 loaded plugins. Both `kubectl kustomize` local renders remained
+  suspended and preserved shadow read-only/apply read-write mount separation.
+  `git diff --check` passed; the workspace bytecode scan is part of the final
+  status below.
+- All earlier numeric test counts and scoped no-P0/P1/P2/`READY` statements in
+  this tracker are historical/superseded and do not close the current
+  recertification item.
+- No network, Kubernetes API, live PVC/DB, archive, commit, push, deployment,
+  pod update, loop restart, compatibility removal, or historical-data deletion
+  was performed. Fixed-UID/GID Kubernetes U7 ingestion remains unimplemented,
+  so live U7 enablement and every U11 live phase remain blocked.
+
 Subsequent bounded read-only live fact audit on 2026-07-31:
 
 - Kubernetes reports server `v1.32.5+rke2r1`; namespace `gcr-admin` is active,
   and the running PVC access pod declares claim `pvc-vast-gcr-admin` at
   `/data`.
 - The mounted `/data/continuous_validation` root is NFSv4, read-write,
-  root-owned, and mode `0755`; evaluator preflight requires exact `0700` and a
-  separately verified evaluator UID/GID ownership model.
+  root-owned, and mode `0755`; it is shared evidence and must never be
+  chmod/chown'ed. The dedicated fixed-owner `evaluator_state` subroot remains
+  unprovisioned and unapproved.
 - `validation_tests/` is absent, so all enabled tests' U7 results DBs and U8
   DB/key units are absent. No DB or key content was opened.
 - Current RBAC denied PVC-object, StorageClass, NetworkPolicy, validating
@@ -1349,13 +1552,15 @@ Subsequent bounded read-only live fact audit on 2026-07-31:
 - No lock/path/object was created, no evaluator preflight ran, and no PVC,
   SQLite, Kubernetes, image, loop, or compatibility state was changed.
 
-This evidence confirms that U11 Phase 0 is blocked on live U7 activation plus
-a reviewed ownership/mode/coexistence plan; it does not authorize either.
+This evidence confirms that U11 Phase 0 is blocked on state-subroot
+provisioning, a fixed-UID/GID U7 ingestion path, live U7 activation, and a
+reviewed ownership/mode/coexistence plan; it does not authorize any of them.
 
 ## U12 — Compatibility cleanup and framework documentation
 
 **Status:** `BLOCKED` — U12A safe local guide/scaffold/catalog/static cleanup
-independently certified READY 2026-07-31; every removal remains blocked on U11
+is accepted for its bounded local scope; the shared-state foundation is READY
+LOCAL but does not satisfy U11 live acceptance; every removal remains blocked on U11
 live acceptance, copied-input zero-use evidence, explicit approval, and the
 agreed compatibility period.
 **Risk:** Medium to high; removal of old surfaces.  

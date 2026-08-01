@@ -6,20 +6,25 @@ uses only canonical per-test U7/U8 paths, and keeps every test failure isolated.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 import re
 import sqlite3
-import stat
 import time
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 from cval.config import CvalConfig
+from cval.evaluator.state import (
+    StateLockError,
+    bind_state_directory,
+    bind_state_target,
+    open_state_root,
+    state_test_lock,
+)
 from cval.health.combination import resolve_environment_combination
 from cval.health.engine import (
     HEALTH_ENGINE_VERSION,
@@ -39,11 +44,11 @@ from cval.health.models import (
     SourceSnapshot,
 )
 from cval.health.storage import (
-    activate_candidate,
+    _activate_candidate,
     assert_health_database_generation,
     get_chain_cursor,
     load_baselines_generation,
-    persist_candidate,
+    _persist_candidate,
     preflight_activation,
     resolve_health_db_path,
 )
@@ -89,45 +94,6 @@ class HealthEvaluatorPolicyError(HealthEvaluatorError):
 
 class HealthEvaluatorLockError(HealthEvaluatorError):
     """Raised when a bounded owner-only per-test lock cannot be acquired."""
-
-
-@dataclass(frozen=True)
-class EvaluatorTestLockGuard:
-    """Callable binding for one held evaluator-lock pathname and inode."""
-
-    path: Path
-    descriptor: int
-    device: int
-    inode: int
-    link_count: int
-
-    def __call__(self) -> None:
-        try:
-            opened = os.fstat(self.descriptor)
-            current = os.lstat(self.path)
-        except OSError as exc:
-            raise HealthEvaluatorLockError(
-                "Health evaluator lock path changed while held"
-            ) from exc
-        for metadata in (opened, current):
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.geteuid()
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-                or metadata.st_nlink != self.link_count
-            ):
-                raise HealthEvaluatorLockError(
-                    "Health evaluator lock changed; it must remain an owner-only "
-                    "regular file with its expected link count"
-                )
-        if (
-            self.link_count != 1
-            or (opened.st_dev, opened.st_ino) != (self.device, self.inode)
-            or (current.st_dev, current.st_ino) != (self.device, self.inode)
-        ):
-            raise HealthEvaluatorLockError(
-                "Health evaluator lock path/device/inode/link count changed while held"
-            )
 
 
 @dataclass(frozen=True)
@@ -307,6 +273,9 @@ def evaluate_health_cycle(
         confirmation=confirmation,
         expected=EVALUATE_CONFIRMATION,
     )
+    if apply:
+        with open_state_root(config, require_writable=True):
+            pass
     eligible = tuple(
         test
         for test in config.tests.registry.enabled
@@ -361,35 +330,48 @@ def activate_health_candidate(
         )
     if not isinstance(baseline_id, str) or not _BASELINE_PATTERN.fullmatch(baseline_id):
         raise HealthEvaluatorError("baseline_id must be a U8 content-addressed ID")
-    result_path = resolve_test_results_db_path(config.runtime.validation_root, registered)
-    health_path = resolve_health_db_path(config.runtime.validation_root, registered)
-
+    result_path = resolve_test_results_db_path(
+        config.health_evaluator.state_root,
+        registered,
+    )
+    health_path = resolve_health_db_path(
+        config.health_evaluator.state_root,
+        registered,
+    )
     def operation(
         lock_guard: Callable[[], None] | None = None,
+        health_binding: Any | None = None,
+        key_binding: Any | None = None,
     ) -> ActivationReport:
         preflight = preflight_activation(
             baseline_id,
             registered.definition,
             db_path=health_path,
             robust_z_threshold=config.baseline.robust_z_threshold,
+            state_binding=health_binding,
+            key_binding=key_binding,
         )
         activated = False
         if apply:
             if not preflight.activation_ready:
                 raise HealthEvaluatorError("Health candidate is not activation-ready")
-            activated = activate_candidate(
+            activated = _activate_candidate(
                 baseline_id,
                 registered.definition,
                 db_path=health_path,
                 now=timestamp,
                 robust_z_threshold=config.baseline.robust_z_threshold,
                 lock_guard=lock_guard,
+                state_binding=health_binding,
+                key_binding=key_binding,
             )
             preflight = preflight_activation(
                 baseline_id,
                 registered.definition,
                 db_path=health_path,
                 robust_z_threshold=config.baseline.robust_z_threshold,
+                state_binding=health_binding,
+                key_binding=key_binding,
             )
         return ActivationReport(
             mode="apply" if apply else "dry-run",
@@ -404,11 +386,41 @@ def activate_health_candidate(
 
     if not apply:
         return operation()
-    with evaluator_test_lock(
-        result_path,
-        timeout_seconds=config.health_evaluator.lock_timeout_seconds,
-    ) as lock_guard:
-        return operation(lock_guard)
+    try:
+        with state_test_lock(config, result_path) as shared_guard:
+            with bind_state_target(
+                config,
+                result_path,
+                create=False,
+                allow_missing=False,
+                writable=True,
+                require_writable=True,
+            ) as result_binding, bind_state_target(
+                config,
+                health_path,
+                create=False,
+                allow_missing=False,
+                writable=True,
+                require_writable=True,
+            ) as health_binding, bind_state_target(
+                config,
+                health_path.with_name(f"{health_path.name}.activation.key"),
+                create=False,
+                allow_missing=False,
+                writable=False,
+                require_writable=True,
+            ) as key_binding:
+                def guard() -> None:
+                    shared_guard()
+                    result_binding.assert_path_binding()
+                    health_binding.assert_path_binding()
+                    key_binding.assert_path_binding()
+
+                guard.path = shared_guard.path  # type: ignore[attr-defined]
+
+                return operation(guard, health_binding, key_binding)
+    except StateLockError as exc:
+        raise HealthEvaluatorLockError(str(exc)) from exc
 
 
 def _evaluate_registered_test(
@@ -418,8 +430,14 @@ def _evaluate_registered_test(
     apply: bool,
     now: int,
 ) -> TestEvaluationReport:
-    result_path = resolve_test_results_db_path(config.runtime.validation_root, registered)
-    health_path = resolve_health_db_path(config.runtime.validation_root, registered)
+    result_path = resolve_test_results_db_path(
+        config.health_evaluator.state_root,
+        registered,
+    )
+    health_path = resolve_health_db_path(
+        config.health_evaluator.state_root,
+        registered,
+    )
     if not result_path.is_file():
         return TestEvaluationReport(
             test_id=registered.id,
@@ -433,13 +451,25 @@ def _evaluate_registered_test(
 
     def operation(
         lock_guard: Callable[[], None] | None = None,
+        source_identity: Any | None = None,
+        health_binding: Any | None = None,
+        key_binding: Any | None = None,
+        source_binding: Any | None = None,
     ) -> TestEvaluationReport:
         stage = "read-preflight"
         activation_key_path = health_path.with_name(
             f"{health_path.name}.activation.key"
         )
-        health_existed_before = health_path.is_file()
-        key_existed_before = activation_key_path.is_file()
+        health_existed_before = (
+            health_binding.identity is not None
+            if health_binding is not None
+            else health_path.is_file()
+        )
+        key_existed_before = (
+            key_binding.identity is not None
+            if key_binding is not None
+            else activation_key_path.is_file()
+        )
         try:
             plugin = load_registered_plugin(registered)
             if plugin is None:
@@ -447,8 +477,25 @@ def _evaluate_registered_test(
             active, initial_health_generation = _active_baselines_generation(
                 registered.id,
                 health_path,
+                health_binding=health_binding,
+                key_binding=key_binding,
             )
-            with immutable_sqlite_snapshot(result_path) as snapshot:
+            with immutable_sqlite_snapshot(
+                result_path,
+                expected_identity=source_identity,
+                source_fd=(source_binding.descriptor if source_binding is not None else None),
+                source_parent_fd=(
+                    source_binding.directory.parent_fd
+                    if source_binding is not None
+                    else None
+                ),
+                source_name=(source_binding.name if source_binding is not None else None),
+                binding_guard=(
+                    source_binding.assert_path_binding
+                    if source_binding is not None
+                    else None
+                ),
+            ) as snapshot:
                 catalog = _load_result_catalog(
                     snapshot.uri,
                     registered,
@@ -466,6 +513,8 @@ def _evaluate_registered_test(
                     health_path=health_path,
                     result_path=snapshot.uri,
                     now=now,
+                    health_binding=health_binding,
+                    key_binding=key_binding,
                 )
                 classifications, records, verified_idempotent = _evaluate_classifications(
                     config,
@@ -510,8 +559,16 @@ def _evaluate_registered_test(
             candidates=candidates,
             classifications=classifications,
             history_idempotent=verified_idempotent,
-            health_db_present=health_path.is_file(),
-            activation_key_present=activation_key_path.is_file(),
+            health_db_present=(
+                health_binding.identity is not None
+                if health_binding is not None
+                else health_path.is_file()
+            ),
+            activation_key_present=(
+                key_binding.identity is not None
+                if key_binding is not None
+                else activation_key_path.is_file()
+            ),
         )
         if not apply:
             return TestEvaluationReport(status="processed", **common)
@@ -558,7 +615,7 @@ def _evaluate_registered_test(
                         config.health_evaluator.max_classifications_per_test,
                     )
                     candidate_persistence_started = True
-                    outcome = persist_candidate(
+                    outcome = _persist_candidate(
                         candidate,
                         registered.definition,
                         db_path=health_path,
@@ -568,6 +625,8 @@ def _evaluate_registered_test(
                             source_identity
                         ),
                         lock_guard=lock_guard,
+                        state_binding=health_binding,
+                        key_binding=key_binding,
                     )
                 if outcome.status is CandidateStoreStatus.STORED:
                     candidate_inserted += 1
@@ -579,7 +638,12 @@ def _evaluate_registered_test(
             if records:
                 stage = "health-generation-revalidation"
                 _current_active, current_health_generation = (
-                    _active_baselines_generation(registered.id, health_path)
+                    _active_baselines_generation(
+                        registered.id,
+                        health_path,
+                        health_binding=health_binding,
+                        key_binding=key_binding,
+                    )
                 )
                 if (
                     current_health_generation.active_digest
@@ -593,7 +657,11 @@ def _evaluate_registered_test(
                 def pre_history_check(connection: sqlite3.Connection) -> None:
                     nonlocal stage
                     stage = "health-generation-revalidation"
-                    assert_health_database_generation(current_health_generation)
+                    assert_health_database_generation(
+                        current_health_generation,
+                        state_binding=health_binding,
+                        key_binding=key_binding,
+                    )
                     stage = "classification-revalidation"
                     current_catalog = _load_result_catalog(
                         result_path,
@@ -652,15 +720,31 @@ def _evaluate_registered_test(
             )
         except Exception as exc:  # noqa: BLE001 - preserve durable-stage facts
             candidates = _applied_candidate_actions(candidates, candidate_statuses)
-            health_db_present = health_path.is_file()
-            activation_key_present = activation_key_path.is_file()
+            health_db_present = (
+                health_binding.identity is not None
+                if health_binding is not None
+                else health_path.is_file()
+            )
+            activation_key_present = (
+                key_binding.identity is not None
+                if key_binding is not None
+                else activation_key_path.is_file()
+            )
             creation_artifact_effect = (
                 (not health_existed_before and health_db_present)
                 or (not key_existed_before and activation_key_present)
             )
-            staging_present = any(
-                health_path.parent.glob(f".{health_path.name}.*.staging*")
-            )
+            if health_binding is not None:
+                health_binding.directory.assert_path_binding()
+                staging_present = any(
+                    name.startswith(f".{health_path.name}.")
+                    and ".staging" in name
+                    for name in os.listdir(health_binding.directory.parent_fd)
+                )
+            else:
+                staging_present = any(
+                    health_path.parent.glob(f".{health_path.name}.*.staging*")
+                )
             return TestEvaluationReport(
                 status="error",
                 **{
@@ -677,10 +761,8 @@ def _evaluate_registered_test(
                     "creation_cleanup_completed": (
                         not health_existed_before
                         and not key_existed_before
-                        and not health_path.exists()
-                        and not health_path.is_symlink()
-                        and not activation_key_path.exists()
-                        and not activation_key_path.is_symlink()
+                        and not health_db_present
+                        and not activation_key_present
                         and not staging_present
                         if stage.startswith("health-candidate:")
                         and candidate_persistence_started
@@ -713,8 +795,16 @@ def _evaluate_registered_test(
                 "migrated_to_v2": migrated,
                 "candidates_inserted": candidate_inserted,
                 "candidates_idempotent": candidate_idempotent,
-                "health_db_present": health_path.is_file(),
-                "activation_key_present": activation_key_path.is_file(),
+                "health_db_present": (
+                    health_binding.identity is not None
+                    if health_binding is not None
+                    else health_path.is_file()
+                ),
+                "activation_key_present": (
+                    key_binding.identity is not None
+                    if key_binding is not None
+                    else activation_key_path.is_file()
+                ),
                 "write_stages_completed": tuple(completed),
                 "write_atomicity": "per-database transactions; cross-database non-atomic",
             },
@@ -724,14 +814,79 @@ def _evaluate_registered_test(
         return operation()
     report: TestEvaluationReport | None = None
     try:
-        with evaluator_test_lock(
-            result_path,
-            timeout_seconds=config.health_evaluator.lock_timeout_seconds,
-        ) as lock_guard:
-            report = operation(lock_guard)
-    except HealthEvaluatorLockError as exc:
+        with state_test_lock(config, result_path) as shared_guard:
+            with ExitStack() as bindings:
+                result_binding = bindings.enter_context(
+                    bind_state_target(
+                        config,
+                        result_path,
+                        create=False,
+                        allow_missing=False,
+                        writable=True,
+                        require_writable=True,
+                    )
+                )
+                health_directory = bindings.enter_context(
+                    bind_state_directory(
+                        config,
+                        health_path,
+                        create=True,
+                        allow_missing=False,
+                        require_writable=True,
+                    )
+                )
+                health_binding = bindings.enter_context(
+                    bind_state_target(
+                        config,
+                        health_path,
+                        create=False,
+                        allow_missing=True,
+                        writable=True,
+                        require_writable=True,
+                    )
+                )
+                key_binding = bindings.enter_context(
+                    bind_state_target(
+                        config,
+                        health_path.with_name(
+                            f"{health_path.name}.activation.key"
+                        ),
+                        create=False,
+                        allow_missing=True,
+                        writable=False,
+                        require_writable=True,
+                    )
+                )
+
+                def lock_guard() -> None:
+                    shared_guard()
+                    result_binding.assert_path_binding()
+                    health_directory.assert_path_binding()
+                    if health_binding.identity is not None:
+                        health_binding.assert_path_binding()
+                    if key_binding.identity is not None:
+                        key_binding.assert_path_binding()
+
+                lock_guard.path = shared_guard.path  # type: ignore[attr-defined]
+
+                report = operation(
+                    lock_guard,
+                    result_binding.sqlite_identity,
+                    health_binding,
+                    key_binding,
+                    result_binding,
+                )
+    except (
+        StateLockError,
+        HealthEvaluatorLockError,
+        RuntimeError,
+        ValueError,
+        OSError,
+    ) as exc:
         if report is None:
-            raise
+            if isinstance(exc, HealthEvaluatorLockError):
+                raise
+            raise HealthEvaluatorLockError(str(exc)) from exc
         durable_stages = (
             report.migrated_to_v2
             or report.candidates_inserted > 0
@@ -747,7 +902,7 @@ def _evaluate_registered_test(
             report,
             status="error",
             partial_writes=partial_writes,
-            error_stage="lock-finalization",
+            error_stage=report.error_stage or "lock-finalization",
             write_atomicity=(
                 "per-database transactions; cross-database non-atomic"
                 if partial_writes
@@ -955,6 +1110,8 @@ def _plan_candidates(
     health_path: Path,
     result_path: str | Path,
     now: int,
+    health_binding: Any | None = None,
+    key_binding: Any | None = None,
 ) -> tuple[tuple[CandidateAction, ...], tuple[HealthCandidate, ...]]:
     health = registered.definition.health
     assert health is not None and health.enabled
@@ -977,6 +1134,8 @@ def _plan_candidates(
             registered.id,
             combination.key,
             db_path=health_path,
+            state_binding=health_binding,
+            key_binding=key_binding,
         )
         decision = evaluate_build_trigger(
             snapshot.result_ids,
@@ -1098,10 +1257,15 @@ def _active_baselines(test_id: str, health_path: Path) -> dict[str, Any]:
 def _active_baselines_generation(
     test_id: str,
     health_path: Path,
+    *,
+    health_binding: Any | None = None,
+    key_binding: Any | None = None,
 ) -> tuple[dict[str, Any], Any]:
     stored_items, generation = load_baselines_generation(
         db_path=health_path,
         test_id=test_id,
+        state_binding=health_binding,
+        key_binding=key_binding,
     )
     active = {
         stored.candidate.combination.key: stored
@@ -1724,107 +1888,31 @@ def _require_apply_gate(
         )
 
 
-@contextmanager
-def evaluator_test_lock(
-    result_db_path: str | Path,
-    *,
-    timeout_seconds: int,
-) -> Iterator[EvaluatorTestLockGuard]:
-    """Acquire a bounded owner-only, no-symlink per-test evaluator lock."""
-
-    if (
-        isinstance(timeout_seconds, bool)
-        or not isinstance(timeout_seconds, int)
-        or timeout_seconds <= 0
-    ):
-        raise ValueError("Evaluator lock timeout must be a positive integer")
-    result_path = safe_writable_file_path(result_db_path)
-    lock_path = safe_writable_file_path(
-        result_path.parent / f".{result_path.stem}.health-evaluator.lock",
-        allowed_root=result_path.parent,
-        description="health evaluator lock",
-    )
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    descriptor = os.open(lock_path, flags, 0o600)
-    acquired = False
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_nlink != 1
-        ):
-            raise HealthEvaluatorLockError(
-                "Health evaluator lock must be an owner-only regular file "
-                "with one link"
-            )
-        try:
-            canonical_lock_path = lock_path.resolve(strict=True)
-        except OSError as exc:
-            raise HealthEvaluatorLockError(
-                "Health evaluator lock path changed while it was opened"
-            ) from exc
-        if canonical_lock_path != lock_path:
-            raise HealthEvaluatorLockError(
-                "Health evaluator lock path must be canonical"
-            )
-        guard = EvaluatorTestLockGuard(
-            path=canonical_lock_path,
-            descriptor=descriptor,
-            device=metadata.st_dev,
-            inode=metadata.st_ino,
-            link_count=metadata.st_nlink,
-        )
-        guard()
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            guard()
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-                guard()
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise HealthEvaluatorLockError(
-                        f"Timed out acquiring health evaluator lock after {timeout_seconds}s"
-                    )
-                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-        yield guard
-    finally:
-        try:
-            if acquired:
-                guard()
-        finally:
-            if acquired:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
-
-
 def _error_report(
     config: CvalConfig,
     registered: RegisteredValidationTest,
     message: str,
 ) -> TestEvaluationReport:
     try:
-        result_path = resolve_test_results_db_path(config.runtime.validation_root, registered)
+        result_path = resolve_test_results_db_path(
+            config.health_evaluator.state_root,
+            registered,
+        )
         result_value = str(result_path)
     except Exception:  # noqa: BLE001 - report must not mask the original error
         result_value = str(
-            Path(config.runtime.validation_root)
+            Path(config.health_evaluator.state_root)
             / registered.definition.artifacts.results_db_path
         )
     try:
-        health_path = resolve_health_db_path(config.runtime.validation_root, registered)
+        health_path = resolve_health_db_path(
+            config.health_evaluator.state_root,
+            registered,
+        )
         health_value = str(health_path)
     except Exception:  # noqa: BLE001 - report must not mask the original error
         health_value = str(
-            Path(config.runtime.validation_root)
+            Path(config.health_evaluator.state_root)
             / registered.definition.artifacts.health_classes_db_path
         )
     return TestEvaluationReport(
@@ -1879,7 +1967,6 @@ __all__ = [
     "ACTIVATE_CONFIRMATION",
     "EVALUATE_CONFIRMATION",
     "ActivationReport",
-    "EvaluatorTestLockGuard",
     "EvaluationCycleReport",
     "HealthEvaluatorError",
     "HealthEvaluatorLockError",
@@ -1887,5 +1974,4 @@ __all__ = [
     "TestEvaluationReport",
     "activate_health_candidate",
     "evaluate_health_cycle",
-    "evaluator_test_lock",
 ]

@@ -2,6 +2,14 @@
 
 **Design version:** c-val modular schema v3  
 **Implementation status:** U6 node run history, U7 common per-test results plus storage/NCCL/DL metric adapters, U8 versioned health classes, and the local dry-run-first U9 evaluator are implemented. U7 schema v2 adds append-only classification history only during evaluator apply; ordinary ingestion accepts exact v1/v2 without auto-migration. No live health database, migration, activation, background service, or deployment is authorized. U6/U7/U9 production writes remain independently default-off.
+
+Canonical U7/U8 databases, activation keys, and evaluator locks resolve below
+`health_evaluator.state_root` (default
+`/data/continuous_validation/evaluator_state`), not the shared evidence root.
+Production writes require the configured fixed UID/GID, a pre-provisioned exact
+`0700` state root/descendants, exact `0600` single-link files, no symlinks, a
+writable mount, and bound SQLite inode revalidation. The shared
+`runtime.validation_root` is never chmod/chown'ed.
 **Migration rule:** Additive only. Existing databases remain readable until a separately approved compatibility cleanup.
 
 This document defines ownership, relationships, target tables, idempotency, and migration boundaries for node run history, per-test raw results, and per-test health classes.
@@ -43,7 +51,8 @@ Raw execution and derived health remain separate concepts even when latest-healt
     ...
 ```
 
-Database paths are configured root-relative in each test config and resolved beneath the global validation root.
+Database paths are configured state-root-relative in each test config and
+resolved beneath `health_evaluator.state_root`.
 
 ## Relationship overview
 

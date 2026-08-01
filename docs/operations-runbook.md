@@ -137,13 +137,21 @@ The report remains stage-aware if a later operation fails: each SQLite file is
 transactional, but U7 migration/history and U8 candidate commits are explicitly
 cross-database non-atomic and must be retried from immutable evidence.
 
+All evaluator-owned DBs, keys, locks, and state live under the configured
+dedicated state root. Never chmod/chown the shared `runtime.validation_root`.
+Provisioning `/data/continuous_validation/evaluator_state` as UID/GID
+`65532:65532` mode `0700`, deploying fixed-UID/GID U7 ingestion, creating live
+DBs, or mounting/unsuspending the evaluator are still unapproved live steps.
+Because the current validation workload identity is unspecified, enabling U7
+before that fixed-identity ingestion path exists fails closed.
+
 ### U11 offline rollout and rollback preparation
 
 Use only local/disposable copies until the live blockers are closed:
 
 ```bash
 python -m cval.cli --config <local-copy-config.toml> \
-  evaluator-preflight --validation-root <copy-root> --access ro
+  evaluator-preflight --state-root <copy-root> --access ro
 python -m cval.cli evaluator-parity --u8-json <u8.json> \
   --compatibility-db <copied-classification-results.db>
 python -m cval.cli evaluator-backup --source-root <copy-root> \
@@ -153,7 +161,7 @@ python -m cval.cli evaluator-backup --source-root <copy-root> \
 ```
 
 The local backup command requires both source and destination outside the
-configured runtime root, rejects symlink/traversal/overlap and SQLite
+configured live shared and state roots, rejects symlink/traversal/overlap and SQLite
 WAL/SHM/journal sidecars, and does not substitute for a reviewed live backup.
 Its destination parent must already exist; dry-run creates no directories.
 Kubernetes manifests remain

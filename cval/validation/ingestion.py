@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from cval.config import CvalConfig, encode_config_snapshot, load_config
+from cval.evaluator.state import (
+    assert_state_file_identity,
+    bind_state_target,
+    state_test_lock,
+    inspect_state_target,
+    open_state_root,
+)
 from cval.health.combination import resolve_environment_combination
 from cval.storage.per_test_results import (
     PerTestResultRecord,
@@ -98,109 +105,150 @@ def ingest_test_results_file(
 
     outcomes: list[TestIngestionOutcome] = []
     for registered_test, context in prepared:
-        raw_inserted = False
-        adapter_called = False
-        try:
-            combination = resolve_environment_combination(
-                registered_test.definition,
-                {
-                    "image_name": context.run.image_name,
-                    "cuda_version": context.run.cuda_version,
-                    "pytorch_version": context.run.pytorch_version,
-                },
+        outcomes.append(
+            _ingest_prepared_test(
+                active_config,
+                result,
+                registered_test,
+                context,
             )
-            raw_inserted = write_per_test_result(
-                PerTestResultRecord(
-                    run_id=context.run.run_id,
-                    test_id=registered_test.id,
-                    node=context.run.node,
-                    run_timestamp=context.run.started_timestamp,
-                    started_timestamp=context.execution.started_timestamp,
-                    completed_timestamp=context.execution.completed_timestamp,
-                    status=context.execution.status,
-                    exit_code=context.execution.exit_code,
-                    image_name=context.run.image_name,
-                    pytorch_version=context.run.pytorch_version,
-                    cuda_version=context.run.cuda_version,
-                    test_config_digest=context.execution.config_digest,
-                    combination_key=combination.key if combination is not None else "",
-                    result_path=str(context.execution.result_path),
-                    summary_path=str(context.execution.summary_path),
-                    artifacts_path=str(context.execution.artifacts_path),
-                    raw_result_json=context.execution.raw_result_json,
-                    result_digest=context.run.result_digest,
-                ),
-                db_path=context.result_db_path,
-            )
-            declaration = registered_test.definition.plugin
-            should_call_adapter = bool(
-                context.execution.status == "pass"
-                and declaration is not None
-                and "ingest" in declaration.capabilities
-            )
-            if not should_call_adapter:
-                if declaration is not None and "ingest" in declaration.capabilities:
-                    _run_adapter_schema_preflight(
-                        registered_test,
-                        context.result_db_path,
-                    )
-                else:
-                    validate_common_only_result_database(context.result_db_path)
-                outcomes.append(
-                    TestIngestionOutcome(
+        )
+    return IngestionReport(
+        run_id=result.run_id,
+        ok=all(not outcome.error for outcome in outcomes),
+        outcomes=tuple(outcomes),
+    )
+
+
+def _ingest_prepared_test(
+    config: CvalConfig,
+    result: ValidationResultV2,
+    registered_test: RegisteredValidationTest,
+    context: IngestionContext,
+) -> TestIngestionOutcome:
+    """Ingest one test while retaining one exact lock/path generation."""
+
+    raw_inserted = False
+    adapter_called = False
+    try:
+        with state_test_lock(config, context.result_db_path) as lock_guard:
+            with bind_state_target(
+                config,
+                context.result_db_path,
+                create=True,
+                allow_missing=False,
+                writable=True,
+                require_writable=True,
+            ) as database_binding:
+                database_identity = database_binding.sqlite_identity
+                if database_identity is None:
+                    raise RuntimeError("Secure U7 target creation did not produce a file")
+
+                def state_guard() -> None:
+                    lock_guard()
+                    database_binding.assert_path_binding()
+
+                state_guard()
+                combination = resolve_environment_combination(
+                    registered_test.definition,
+                    {
+                        "image_name": context.run.image_name,
+                        "cuda_version": context.run.cuda_version,
+                        "pytorch_version": context.run.pytorch_version,
+                    },
+                )
+                raw_inserted = write_per_test_result(
+                    PerTestResultRecord(
+                        run_id=context.run.run_id,
+                        test_id=registered_test.id,
+                        node=context.run.node,
+                        run_timestamp=context.run.started_timestamp,
+                        started_timestamp=context.execution.started_timestamp,
+                        completed_timestamp=context.execution.completed_timestamp,
+                        status=context.execution.status,
+                        exit_code=context.execution.exit_code,
+                        image_name=context.run.image_name,
+                        pytorch_version=context.run.pytorch_version,
+                        cuda_version=context.run.cuda_version,
+                        test_config_digest=context.execution.config_digest,
+                        combination_key=(
+                            combination.key if combination is not None else ""
+                        ),
+                        result_path=str(context.execution.result_path),
+                        summary_path=str(context.execution.summary_path),
+                        artifacts_path=str(context.execution.artifacts_path),
+                        raw_result_json=context.execution.raw_result_json,
+                        result_digest=context.run.result_digest,
+                    ),
+                    db_path=context.result_db_path,
+                    expected_identity=database_identity,
+                    state_guard=state_guard,
+                )
+                declaration = registered_test.definition.plugin
+                should_call_adapter = bool(
+                    context.execution.status == "pass"
+                    and declaration is not None
+                    and "ingest" in declaration.capabilities
+                )
+                if not should_call_adapter:
+                    if declaration is not None and "ingest" in declaration.capabilities:
+                        _run_adapter_schema_preflight(
+                            registered_test,
+                            context.result_db_path,
+                            expected_identity=database_identity,
+                        )
+                    else:
+                        validate_common_only_result_database(
+                            context.result_db_path,
+                            expected_identity=database_identity,
+                        )
+                    state_guard()
+                    return TestIngestionOutcome(
                         test_id=registered_test.id,
                         status=context.execution.status,
                         raw_result_inserted=raw_inserted,
                         adapter_called=False,
                     )
-                )
-                continue
-            plugin = load_registered_plugin(registered_test)
-            if plugin is None:
-                raise RuntimeError(
-                    f"Test {registered_test.id!r} declares ingest without an adapter"
-                )
-            adapter_called = True
-            with framework_metric_ingestion_session(
-                context.result_db_path
-            ) as connection:
-                receipt = _run_adapter_ingest_subprocess(
-                    registered_test,
-                    context,
-                    connection,
-                )
-                _validate_adapter_receipt(
-                    receipt,
-                    registered_test=registered_test,
-                    run_id=result.run_id,
-                    db_path=context.result_db_path,
-                    connection=connection,
-                )
-            outcomes.append(
-                TestIngestionOutcome(
+                plugin = load_registered_plugin(registered_test)
+                if plugin is None:
+                    raise RuntimeError(
+                        f"Test {registered_test.id!r} declares ingest without an adapter"
+                    )
+                adapter_called = True
+                with framework_metric_ingestion_session(
+                    context.result_db_path,
+                    expected_identity=database_identity,
+                    state_guard=state_guard,
+                ) as connection:
+                    receipt = _run_adapter_ingest_subprocess(
+                        registered_test,
+                        context,
+                        connection,
+                    )
+                    _validate_adapter_receipt(
+                        receipt,
+                        registered_test=registered_test,
+                        run_id=result.run_id,
+                        db_path=context.result_db_path,
+                        connection=connection,
+                    )
+                state_guard()
+                return TestIngestionOutcome(
                     test_id=registered_test.id,
                     status=context.execution.status,
                     raw_result_inserted=raw_inserted,
                     adapter_called=True,
                     receipt=receipt,
                 )
-            )
-        except Exception as exc:  # noqa: BLE001 - isolate one adapter/database
-            outcomes.append(
-                TestIngestionOutcome(
-                    test_id=registered_test.id,
-                    status=context.execution.status,
-                    raw_result_inserted=raw_inserted,
-                    adapter_called=adapter_called,
-                    error_type=exc.__class__.__name__,
-                    error=_first_line(str(exc)) or exc.__class__.__name__,
-                )
-            )
-    return IngestionReport(
-        run_id=result.run_id,
-        ok=all(not outcome.error for outcome in outcomes),
-        outcomes=tuple(outcomes),
-    )
+    except Exception as exc:  # noqa: BLE001 - isolate one adapter/database
+        return TestIngestionOutcome(
+            test_id=registered_test.id,
+            status=context.execution.status,
+            raw_result_inserted=raw_inserted,
+            adapter_called=adapter_called,
+            error_type=exc.__class__.__name__,
+            error=_first_line(str(exc)) or exc.__class__.__name__,
+        )
 
 
 class _AdapterRpcConnection:
@@ -365,6 +413,8 @@ def _run_adapter_ingest_subprocess(
 def _run_adapter_schema_preflight(
     registered_test: RegisteredValidationTest,
     db_path: Path,
+    *,
+    expected_identity=None,
 ) -> bool:
     """Run one adapter's existing-schema validator behind read-only SQL RPC."""
 
@@ -378,7 +428,12 @@ def _run_adapter_schema_preflight(
     child_pipe.close()
     try:
         with closing(
-            connect_sqlite_file(db_path, mode="ro", timeout=30)
+            connect_sqlite_file(
+                db_path,
+                mode="ro",
+                timeout=30,
+                expected_identity=expected_identity,
+            )
         ) as connection:
             result = _serve_adapter_rpc(
                 process,
@@ -557,7 +612,7 @@ def _prepare_ingestion_contexts(
             validation_root=validation_root,
         )
         result_db_path = resolve_test_results_db_path(
-            validation_root,
+            active_config.health_evaluator.state_root,
             registered_test,
         )
         prepared.append(
@@ -624,20 +679,41 @@ def _preflight_write_targets(
     ]
     for target in targets:
         safe_writable_file_path(target)
-    validation_root = Path(config.runtime.validation_root)
-    for registered_test in config.tests.registry.tests:
-        target = resolve_test_results_db_path(validation_root, registered_test)
-        safe_writable_file_path(
-            target,
-            allowed_root=(
-                validation_root / "validation_tests" / registered_test.id
-            ),
-            description=f"{registered_test.id} result database",
-        )
+    if config.storage.per_test_ingestion_enabled:
+        with open_state_root(config, require_writable=True):
+            pass
+        for registered_test in config.tests.registry.tests:
+            target = resolve_test_results_db_path(
+                config.health_evaluator.state_root,
+                registered_test,
+            )
+            inspect_state_target(
+                config,
+                target,
+                allow_missing=True,
+                require_writable=True,
+            )
     for registered_test, context in prepared:
-        if context.result_db_path.is_file():
+        if (
+            config.storage.per_test_ingestion_enabled
+            and context.result_db_path.is_file()
+        ):
+            state_identity = inspect_state_target(
+                config,
+                context.result_db_path,
+                allow_missing=False,
+                require_writable=True,
+            )
+            if state_identity is None:
+                raise RuntimeError("Existing U7 result database disappeared")
+            sqlite_identity = state_identity.sqlite_identity()
             with closing(
-                connect_sqlite_file(context.result_db_path, mode="ro", timeout=30)
+                connect_sqlite_file(
+                    context.result_db_path,
+                    mode="ro",
+                    timeout=30,
+                    expected_identity=sqlite_identity,
+                )
             ) as connection:
                 validate_common_result_connection(connection)
             declaration = registered_test.definition.plugin
@@ -645,9 +721,14 @@ def _preflight_write_targets(
                 _run_adapter_schema_preflight(
                     registered_test,
                     context.result_db_path,
+                    expected_identity=sqlite_identity,
                 )
             else:
-                validate_common_only_result_database(context.result_db_path)
+                validate_common_only_result_database(
+                    context.result_db_path,
+                    expected_identity=sqlite_identity,
+                )
+            assert_state_file_identity(config, sqlite_identity)
         validate_ingestion_artifact_tree(context.execution.artifacts_path)
 
 

@@ -34,8 +34,10 @@ and the U9 dry-run-first evaluator are implemented locally.
 U6/U7 production writes remain independently default-off and unapproved.
 U9 derived writes are also independently default-off: no live health DB,
 evaluator service, automatic activation, migration, or deployment is
-authorized. U9 remains IN PROGRESS pending independent certification; U11 owns
-future live cutover.
+authorized. The accepted local U8 engine and U9 dry-run-first evaluator
+behavior is distinct from the current shared-state/U11 backup and traversal
+recertification; it neither invalidates those accepted engine behaviors nor
+certifies live state handling. U11 owns future live cutover.
 
 U12A safe local work adds a dry-run-first pass/fail test scaffold and an
 immutable compatibility inventory plus bounded explicit-copy audit. Fixed

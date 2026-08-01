@@ -1,7 +1,9 @@
 # U11 evaluator rollout preparation
 
-U11 remains **IN PROGRESS / BLOCKED for live criteria**. This document covers
-locally audited and validated preparation only. It does not authorize Kubernetes access,
+U11 remains **IN PROGRESS / BLOCKED for live criteria**. Final local
+publication, rollback, backup-binding, cleanup, and lock-order hardening is
+under recertification on 2026-07-31. This document covers local preparation only;
+local certification is not live READY/closed status. It does not authorize Kubernetes access,
 PVC reads or writes, database creation/migration, image publication, CronJob
 activation, compatibility cutover, or deployment.
 
@@ -47,8 +49,10 @@ The checked-in Kustomize base and both variants are under
 
 - `base/`: `batch/v1` CronJob, tokenless ServiceAccount with no Role or binding,
   and evaluator-scoped deny-all ingress/egress NetworkPolicy;
-- `overlays/shadow/`: read-only PVC, no `--write-enabled`, and no `--apply`;
-- `overlays/apply/`: read-write PVC, explicit `--write-enabled`, and exact
+- `overlays/shadow/`: only the pre-existing
+  `continuous_validation/evaluator_state` PVC subPath mounted read-only at the
+  configured state root, no `--write-enabled`, and no `--apply`;
+- `overlays/apply/`: only that subPath mounted read-write, explicit `--write-enabled`, and exact
   `--apply --confirm evaluate` arguments.
 
 Every source-controlled CronJob has `suspend: true`, `concurrencyPolicy: Forbid`,
@@ -92,7 +96,7 @@ All examples use local/disposable copies only and produce strict JSON.
 ```bash
 # Config/registry/path/ownership/schema preflight; no writes or locks.
 python -m cval.cli --config <local-copy-config.toml> \
-  evaluator-preflight --validation-root <local-copy-root> --access ro
+  evaluator-preflight --state-root <local-copy-root> --access ro
 
 # Deterministic, non-authoritative direction parity from copied inputs.
 python -m cval.cli evaluator-parity \
@@ -100,7 +104,7 @@ python -m cval.cli evaluator-parity \
   --compatibility-db <copied-classification-results.db>
 
 # Backup plan only. Source and destination must both be outside the configured
-# runtime root, and the destination parent must already exist.
+# live shared/state roots, and the destination parent must already exist.
 python -m cval.cli evaluator-backup \
   --source-root <disposable-copy-root> \
   --destination <new-backup-directory>
@@ -116,24 +120,65 @@ kustomize build deploy/cval-evaluator/overlays/shadow > /tmp/cval-evaluator-shad
 kustomize build deploy/cval-evaluator/overlays/apply > /tmp/cval-evaluator-apply.yaml
 ```
 
-The backup API takes and continuously revalidates each U7 evaluator lock only
-during apply. It rejects rollback-journal, WAL, and SHM sidecars immediately
+The backup API takes the same descriptor-relative fixed-owner per-test lock used
+by U7 ingestion and U9 apply/activation, and continuously revalidates it only
+during backup apply. It rejects rollback-journal, WAL, and SHM sidecars immediately
 around each immutable snapshot, revalidates source identity, preserves a U8 DB
 and owner-only activation key as one unit, and compares source/destination
 schema, logical table inventories, row identities, row counts, and content
 digests. It never reports key bytes or a standalone key hash. Source DB/key
 files must be current-UID, single-link regular files with exact safe modes.
+Snapshot bytes and activation keys are read with `pread` from the retained file
+descriptors; sidecars are inspected through the retained parent. A moved or
+substituted parent therefore either fails before the read or reads only the
+original inode and then rejects binding drift without touching the substitute.
 
-The source must be neither `runtime.validation_root` nor any of its descendants.
+The source and destination must not equal, contain, or be contained by configured
+`runtime.validation_root` or configured `health_evaluator.state_root`; siblings
+remain allowed.
 That rejection occurs before destination reservation or evaluator-lock creation.
-The destination must be outside `runtime.validation_root`, disjoint from the
+The destination must be outside both configured live roots, disjoint from the
 source, traversal-free, and beneath a pre-existing current-UID safe-mode parent.
-Every lexical ancestor is checked for symlinks before resolution. Apply reserves
-the final destination atomically with `mkdir`, never overwrites it, fsyncs files
-and directories, and removes a partial destination only while its original
-device/inode identity is still bound. Dry-run validates only and creates no
+Every lexical ancestor is opened no-follow and its identity is retained from
+destination validation through reservation. Apply reserves the final
+destination and every persistent nested directory through a private same-parent
+128-bit random staging name, immediate no-follow retained binding, and Linux
+`renameat2(RENAME_NOREPLACE)` publication. It retains the parent, higher
+ancestry, root, and every created nested directory identity, never overwrites it,
+creates/writes/fsyncs files through retained descriptors, and removes a partial
+destination only through identity-checked `dir_fd` operations. Racer
+replacements are preserved, unpublished/published staged inodes are cleaned by
+their exact retained identity on every `BaseException`, and the operation fails
+closed. Evaluator U7 ancestry uses the same primitive; the shared-evidence job
+supervisor remains deliberately separate. The threat model closes framework
+concurrency and final-path races. It does not claim safety against an arbitrary
+malicious same-UID process that can guess a cryptographically random private
+staging name. After retained
+descriptors close, success finalization freshly traverses from `/` and compares
+every original ancestry identity before opening the exact destination root.
+If that fresh check raises, post-close cleanup also reopens from `/` and removes
+only a completely unchanged framework-created ancestry/root/tree with no
+unknown entry; relocation, replacement, or ownership ambiguity preserves the
+observed content and reports a chained cleanup failure. This behavior is part
+of the current local recertification and is not a live-readiness claim. Dry-run
+validates only and creates no
 directory or lock. A separately approved live backup procedure is still
 required.
+
+The U7/U9/backup per-test lock is one persistent owner-only `0600` inode. Once
+its canonical pathname has been exclusively created and identity-registered it
+is never unlinked on timeout, failed acquisition, or normal release. Every
+process opens the same no-follow pathname and revalidates pathname, retained
+descriptor, owner, mode, link count, device, and inode while held. This avoids
+the split-lock failure where one waiter removes an inode already locked by
+another process and a third process creates a second lock inode. Malformed or
+raced lock entries remain untouched and fail closed.
+
+U8 production activation is internal to the evaluator. `_activate_candidate`
+requires the held shared-lock guard plus retained U8 database and activation-key
+bindings as mandatory arguments; there is no public path-only activation
+function or production fallback. Isolated storage tests use an explicitly
+internal test helper only.
 
 Parity accepts copied JSON and SQLite inputs. Every JSON input must have exactly
 a top-level array of record objects; duplicate object keys and the non-standard
@@ -165,14 +210,19 @@ baseline must use non-empty TEXT storage; `classified_at` and `rowid` must use
 valid INTEGER storage; and status must already be one of the stable lowercase
 labels.
 
-Preflight validates every existing component from `runtime.validation_root`
-through each U7 owner and U8 parent, not only the nearest child. The root must
-match the exact safe `health_evaluator.validation_root_mode`; descendants must
-be current-UID, no-symlink, exact `0700`, owner-readable/searchable, and never
-group/world writable. Required write parents or the nearest ancestor for a
-missing health path must also be owner-writable. Captured device/inode/mode
-identities are revalidated after DB/key reads, so an intermediate replacement
-or symlink swap fails closed. Preflight invokes the same U7 owner/receipt helper
+Preflight requires the running effective UID/GID to exactly match
+`state_owner_uid`/`state_owner_gid`. It descriptor-traverses foreign outer mount
+ancestors without requiring their ownership or changing them, then requires the
+pre-provisioned state root and every existing descendant to be no-symlink,
+fixed-owner, exact `0700`; files are exact `0600` single-link regular files.
+The compatibility key `validation_root_mode` means the exact state-root mode and
+must remain `0700`. Read-only shadow does not require any writable directory;
+apply additionally requires a writable mount. Captured owner/GID/mode/device/
+inode identities remain descriptor-bound through DB/key reads and are
+revalidated after them. Immutable snapshots receive the captured source inode,
+so a transient substitute fails even if the original pathname is restored.
+Replacement, movement, metadata drift, hard links, or symlink swaps fail
+closed. Missing U8 is valid in shadow; U7 remains required. Preflight invokes the same U7 owner/receipt helper
 with the registered test ID even for schema v1 databases with no history.
 Nested missing parents are inspected without being created.
 
@@ -323,9 +373,9 @@ Confirmed facts:
 - the API server reports Kubernetes `v1.32.5+rke2r1`, namespace `gcr-admin` is
   active, and the running `gcr-admin-pvc-access` pod mounts the claim name
   `pvc-vast-gcr-admin` at `/data`;
-- `/data/continuous_validation` is an NFSv4 read-write mount path owned by
-  UID/GID `0:0` with mode `0755`, not the configured exact evaluator mode
-  `0700`;
+- `/data/continuous_validation` is a shared NFSv4 mount path owned by UID/GID
+  `0:0` with mode `0755`; this is expected shared-root state and must never be
+  chmod/chown'ed by the evaluator;
 - `/data/continuous_validation/validation_tests` is absent, so every enabled
   test's canonical U7 results DB, U8 health DB, and activation-key path is also
   absent; and
@@ -339,8 +389,12 @@ CronJob/ServiceAccount/NetworkPolicy objects. API-resource discovery alone does
 not prove CNI or admission enforcement. Those facts therefore remain unknown,
 not negative evidence.
 
-Phase 0 cannot start from this state. Creating/activating U7, changing root
-ownership or mode, introducing an evaluator-owned subroot, or reading live DB
+Phase 0 cannot start from this state. The dedicated
+`/data/continuous_validation/evaluator_state` subroot has not been approved or
+provisioned. The current validation workload execution UID/GID is unspecified,
+so U7 activation is blocked until a fixed UID/GID ingestion path is deployed;
+enabling the gate before then fails closed. Creating/activating U7, provisioning
+the state subroot, or reading live DB
 contents are separate production-write/read approvals with backup and
 coexistence review. No such action was performed.
 
@@ -349,7 +403,8 @@ and approved:
 
 1. canonical U7 availability and schema/receipt completeness for every enabled
    health test;
-2. evaluator UID/GID ownership, modes, mount behavior, WAL/SHM/journal state, and
+2. approved state-subroot provisioning plus fixed-UID/GID ingestion/evaluator
+  ownership, modes, mount behavior, WAL/SHM/journal state, and
    `O_NOATIME` capability on the real PVC;
 3. namespace, PVC claim/access modes, CNI NetworkPolicy enforcement, admission
    policy, Kubernetes version/features, scheduler, and image-pull facts;

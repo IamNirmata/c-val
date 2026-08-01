@@ -272,14 +272,14 @@ _RAW_RESULT_COLUMNS = (
 
 
 def resolve_test_results_db_path(
-    validation_root: str | Path,
+    evaluator_state_root: str | Path,
     registered_test: RegisteredValidationTest,
 ) -> Path:
-    """Resolve a declared DB path beneath its test-owned validation-root directory."""
+    """Resolve a declared DB path beneath its test-owned evaluator state directory."""
 
-    root = Path(validation_root).expanduser()
+    root = Path(evaluator_state_root).expanduser()
     if not root.is_absolute():
-        raise ValueError("runtime.validation_root must be an absolute path")
+        raise ValueError("health_evaluator.state_root must be an absolute path")
     relative = Path(registered_test.definition.artifacts.results_db_path)
     if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("artifacts.results_db_path must be a confined relative path")
@@ -329,16 +329,26 @@ def write_per_test_result(
     *,
     db_path: str | Path,
     now: int | None = None,
+    expected_identity: SQLiteFileIdentity | None = None,
+    state_guard: Callable[[], None] | None = None,
 ) -> bool:
     """Insert one immutable common raw row, returning false for an exact retry."""
 
     _validate_record(record)
     path = safe_writable_file_path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if expected_identity is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    elif expected_identity.path != path:
+        raise RuntimeError("Precreated U7 identity does not match the requested DB path")
     path = safe_writable_file_path(path)
     now = int(time.time()) if now is None else int(now)
     with closing(
-        connect_sqlite_file(path, mode="rwc", timeout=30)
+        connect_sqlite_file(
+            path,
+            mode="rwc" if expected_identity is None else "rw",
+            timeout=30,
+            expected_identity=expected_identity,
+        )
     ) as connection:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA recursive_triggers=ON")
@@ -349,6 +359,8 @@ def write_per_test_result(
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            if state_guard is not None:
+                state_guard()
             _prepare_schema(connection)
             existing = connection.execute(
                 f"SELECT {', '.join(_RAW_RESULT_COLUMNS)} "
@@ -361,31 +373,48 @@ def write_per_test_result(
                     raise IngestionConflictError(
                         f"Per-test run {record.run_id!r} already has different raw evidence"
                     )
+                if state_guard is not None:
+                    state_guard()
                 connection.commit()
-                return False
-            connection.execute(
-                """
-                INSERT INTO test_results (
-                    run_id, test_id, node, run_timestamp,
-                    started_timestamp, completed_timestamp,
-                    status, exit_code, image_name, pytorch_version, cuda_version,
-                    test_config_digest, combination_key, result_path, summary_path,
-                    artifacts_path, raw_result_json, result_digest,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (record.run_id, *_record_values(record), now, now),
-            )
-            connection.commit()
-            return True
+                if state_guard is not None:
+                    state_guard()
+                inserted = False
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO test_results (
+                        run_id, test_id, node, run_timestamp,
+                        started_timestamp, completed_timestamp,
+                        status, exit_code, image_name, pytorch_version, cuda_version,
+                        test_config_digest, combination_key, result_path, summary_path,
+                        artifacts_path, raw_result_json, result_digest,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (record.run_id, *_record_values(record), now, now),
+                )
+                if state_guard is not None:
+                    state_guard()
+                connection.commit()
+                if state_guard is not None:
+                    state_guard()
+                inserted = True
         except Exception:
             connection.rollback()
             raise
+    if expected_identity is not None:
+        assert_sqlite_file_identity(expected_identity)
+    if state_guard is not None:
+        state_guard()
+    return inserted
 
 
 @contextmanager
 def framework_metric_ingestion_session(
     db_path: str | Path,
+    *,
+    expected_identity: SQLiteFileIdentity | None = None,
+    state_guard: Callable[[], None] | None = None,
 ) -> Iterator[AdapterSQLiteConnection]:
     """Own one adapter transaction until the dispatcher validates its receipt."""
 
@@ -393,7 +422,12 @@ def framework_metric_ingestion_session(
     if not path.is_file():
         raise FileNotFoundError(f"Per-test result DB is not initialized: {path}")
     with closing(
-        connect_sqlite_file(path, mode="rw", timeout=30)
+        connect_sqlite_file(
+            path,
+            mode="rw",
+            timeout=30,
+            expected_identity=expected_identity,
+        )
     ) as connection:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA recursive_triggers=ON")
@@ -402,6 +436,8 @@ def framework_metric_ingestion_session(
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN IMMEDIATE")
+        if state_guard is not None:
+            state_guard()
         adapter_connection = AdapterSQLiteConnection()
         _ADAPTER_CONNECTIONS[id(adapter_connection)] = connection
         token = _ACTIVE_METRIC_SESSION.set((path, adapter_connection))
@@ -409,7 +445,11 @@ def framework_metric_ingestion_session(
             connection.set_authorizer(_deny_adapter_transactions)
             yield adapter_connection
             connection.set_authorizer(None)
+            if state_guard is not None:
+                state_guard()
             connection.commit()
+            if state_guard is not None:
+                state_guard()
         except Exception:
             connection.set_authorizer(None)
             connection.rollback()
@@ -418,6 +458,10 @@ def framework_metric_ingestion_session(
             connection.set_authorizer(None)
             _ACTIVE_METRIC_SESSION.reset(token)
             _ADAPTER_CONNECTIONS.pop(id(adapter_connection), None)
+    if expected_identity is not None:
+        assert_sqlite_file_identity(expected_identity)
+    if state_guard is not None:
+        state_guard()
 
 
 @contextmanager
@@ -878,10 +922,19 @@ def _validate_sql_identifier(value: str) -> None:
         raise ValueError(f"Unsafe SQLite identifier: {value!r}")
 
 
-def validate_common_only_result_database(db_path: str | Path) -> None:
+def validate_common_only_result_database(
+    db_path: str | Path,
+    *,
+    expected_identity: SQLiteFileIdentity | None = None,
+) -> None:
     path = safe_writable_file_path(db_path)
     with closing(
-        connect_sqlite_file(path, mode="ro", timeout=30)
+        connect_sqlite_file(
+            path,
+            mode="ro",
+            timeout=30,
+            expected_identity=expected_identity,
+        )
     ) as connection:
         validate_common_result_connection(connection)
         require_database_tables(connection, COMMON_RESULT_TABLES)
@@ -1612,6 +1665,9 @@ def migrate_per_test_results_to_v2(
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            assert_sqlite_file_identity(identity)
+            if lock_guard is not None:
+                lock_guard()
             _assert_supported_schema(connection, allow_empty=False)
             _validate_schema_shape(connection)
             _revalidate_selected_results(connection, expected_results)
@@ -1623,6 +1679,7 @@ def migrate_per_test_results_to_v2(
                 assert_sqlite_file_identity(identity)
                 if lock_guard is not None:
                     lock_guard()
+                assert_sqlite_file_identity(identity)
                 return False
             _prepare_classification_history_schema(connection)
             connection.execute(
@@ -1635,6 +1692,9 @@ def migrate_per_test_results_to_v2(
             if lock_guard is not None:
                 lock_guard()
             connection.commit()
+            assert_sqlite_file_identity(identity)
+            if lock_guard is not None:
+                lock_guard()
             return True
         except Exception:
             connection.rollback()
@@ -1679,6 +1739,9 @@ def store_classification_history(
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            assert_sqlite_file_identity(identity)
+            if lock_guard is not None:
+                lock_guard()
             _assert_supported_schema(connection, allow_empty=False)
             _validate_schema_shape(connection)
             _revalidate_selected_results(connection, expected_results)
@@ -1742,6 +1805,9 @@ def store_classification_history(
             if lock_guard is not None:
                 lock_guard()
             connection.commit()
+            assert_sqlite_file_identity(identity)
+            if lock_guard is not None:
+                lock_guard()
             return ClassificationHistoryStoreResult(tuple(outcomes))
         except Exception:
             connection.rollback()

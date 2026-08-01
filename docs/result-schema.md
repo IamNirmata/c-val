@@ -7,6 +7,9 @@
 > The generic v2 runner also writes a separate fixed `result.env` compatibility
 > projection for current storage/NCCL/DL ingestion consumers. Those
 > `GCRRESULT*`/`RUN_*` fields are not members of the dynamic v2 JSON schema.
+> Result JSON and artifacts remain shared evidence under
+> `runtime.validation_root`; canonical U7/U8 SQLite state is separately rooted
+> at `health_evaluator.state_root`.
 
 c-val 2.0 historically wrote one structured result JSON per node validation run.
 

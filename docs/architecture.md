@@ -69,7 +69,8 @@ flowchart TB
 | `cval.health.combination` | Build canonical comparable-environment JSON/SHA-256 identities. |
 | `cval.health.engine` | Validate observations/provenance, build content-addressed robust candidates, apply normalized class bands, enforce DNR, and validate custom aggregation. |
 | `cval.health.storage` | Exact per-test SQLite schema, immutable evidence, candidate lifecycle, snapshot-consistent reads, and transactional activation. |
-| `cval.health.evaluator` | Registry enumeration, bounded source catalogs, authoritative candidate triggers, classification history, per-test locking, dry-run reports, and deliberate activation. It imports no Kubernetes modules. |
+| `cval.evaluator.state` | Fixed-owner state-root validation, retained root/ancestry/target bindings, descriptor-relative publication helpers, and the bounded per-test lock shared by U7, U9, and backup apply. |
+| `cval.health.evaluator` | Registry enumeration, bounded source catalogs, authoritative candidate triggers, classification history, dry-run reports, and deliberate activation. It imports no Kubernetes modules. |
 | `cval.health.sqlite_values` | Reject coercive/non-finite SQLite scalars at health adapter read boundaries. |
 | `cval.baselines.stats` | Robust statistics kernels (median, MAD, percentiles, modified z-score, bootstrap). |
 | `cval.baselines.build` | Build dynamic baselines from result DBs per stratum. |
@@ -111,7 +112,21 @@ historical v1 evidence. New runs do not write those paths.
 
 The three canonical per-test DB paths are implemented but
 `storage.per_test_ingestion_enabled` remains `false`. They are not production
-write surfaces until a separately approved dual-write activation. Likewise,
+write surfaces until a separately approved dual-write activation. U7, U8,
+activation keys, evaluator locks, and U9 state resolve below the dedicated
+`health_evaluator.state_root`; `runtime.validation_root` remains shared
+validation evidence and is never chmod/chown'ed by the evaluator. U7 activation
+is blocked until ingestion runs as the configured fixed UID/GID. The current
+validation workload identity is unspecified, so enabling U7 now fails closed.
+Every gate-on U7/U9/backup operation uses the same descriptor-relative per-test
+lock inode. Production U9 retains the exact state-root ancestry, U8/key parent,
+and existing file descriptors before health storage is called. Initial U8/key
+creation stages, opens, publishes, and cleans up relative to that retained
+parent; existing U8 reads/writes use the captured inode. Missing shadow
+ancestry is also a binding: appearance of its first missing component or target
+fails preflight. These local safety properties do not provision the state root
+or close any live rollout blocker.
+Likewise,
 `metadata/node-run-history.db` remains independently default-off.
 
 U9 now wires U8 through a local/PVC-copy evaluator. `health evaluate` is
@@ -145,20 +160,23 @@ invokes one U9 cycle, suppresses dependency output, and emits one
 `cval.evaluator-cycle.v1` stdout object even on handled SIGINT/SIGTERM. Runtime
 code cannot attest the actual started image; admission, signature, and
 provenance verification remain mandatory live controls. The checked-in suspended Kustomize
-shadow variant mounts the validation root read-only and has no apply argument;
-the separately reviewed apply variant mounts read-write and carries the
+shadow variant mounts only the pre-existing `continuous_validation/evaluator_state`
+PVC subPath read-only and has no apply argument; the separately reviewed apply
+variant mounts only that subPath read-write and carries the
 independent write gate plus exact evaluator confirmation. Both use a tokenless
 ServiceAccount, evaluator-scoped deny-all NetworkPolicy, Restricted pod
 security, bounded resources/deadlines/history, and no runtime Git, package
 installation, network, Kubernetes, GPU, or RDMA dependency. The checked-in
 multi-stage recipe installs the packaged commit marker and offline locked wheel
 inputs into a distroless non-root image, while all base/image digests remain
-fail-closed placeholders. Preflight validates and revalidates every existing
-root-to-owner component plus strict U7 row/receipt ownership; copied JSON/SQLite
+fail-closed placeholders. Preflight traverses foreign outer mount ancestors by
+descriptor without changing them, then validates the state root/descendants as
+the fixed UID/GID with exact `0700`/`0600` modes plus strict U7 row/receipt ownership; copied JSON/SQLite
 parity uses exact class, DNR, baseline, identity, and integer timestamp
 semantics. See
 [U11 evaluator rollout preparation](u11-evaluator-rollout.md). U11 remains
-blocked on live U7/PVC ownership facts, an approved image digest, backup/restore
+blocked on approval to provision the state subroot, a fixed-identity ingestion
+execution path, live U7/PVC ownership facts, an approved image digest, backup/restore
 evidence, Kubernetes facts, shadow acceptance, and explicit apply/cutover
 approval.
 

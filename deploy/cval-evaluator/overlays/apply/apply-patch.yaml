@@ -24,11 +24,12 @@ spec:
                 - --confirm
                 - evaluate
               volumeMounts:
-                - name: validation-data
-                  mountPath: /data/continuous_validation
+                - name: evaluator-state
+                  mountPath: /data/continuous_validation/evaluator_state
+                  subPath: continuous_validation/evaluator_state
                   readOnly: false
           volumes:
-            - name: validation-data
+            - name: evaluator-state
               persistentVolumeClaim:
                 claimName: replace-with-reviewed-pvc-claim
                 readOnly: false

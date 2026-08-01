@@ -44,6 +44,12 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.health_evaluator.write_enabled)
         self.assertEqual(config.health_evaluator.lock_timeout_seconds, 30)
         self.assertEqual(config.health_evaluator.max_classifications_per_test, 250)
+        self.assertEqual(
+            config.health_evaluator.state_root,
+            "/data/continuous_validation/evaluator_state",
+        )
+        self.assertEqual(config.health_evaluator.state_owner_uid, 65532)
+        self.assertEqual(config.health_evaluator.state_owner_gid, 65532)
         self.assertEqual(config.health_evaluator.validation_root_mode, "0700")
         self.assertEqual(
             config.runtime.dl_results_root_path,
@@ -196,6 +202,11 @@ enabled = false
             'validation_root_mode = "0770"',
             'validation_root_mode = "700"',
             'validation_root_mode = "0600"',
+            'state_root = "relative/state"',
+            'state_root = "/data/../unsafe"',
+            "state_owner_uid = 0",
+            "state_owner_gid = -1",
+            "state_owner_uid = 2147483648",
             "unknown = 1",
         )
         for value in variants:
@@ -207,6 +218,38 @@ enabled = false
                 )
                 with self.assertRaises(ValueError):
                     load_config(config_path)
+
+    def test_health_evaluator_state_root_relation_matrix(self) -> None:
+        cases = (
+            ("/tmp/cval-shared", "/tmp/cval-shared", False),
+            ("/tmp/cval-state/shared", "/tmp/cval-state", False),
+            ("/tmp/cval-shared", "/tmp/cval-shared/evaluator-state", True),
+            ("/tmp/cval-shared", "/tmp/cval-separate-state", True),
+        )
+        for validation_root, state_root, accepted in cases:
+            with self.subTest(
+                validation_root=validation_root,
+                state_root=state_root,
+            ), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "cval.toml"
+                config_path.write_text(
+                    "[runtime]\n"
+                    f'validation_root = "{validation_root}"\n'
+                    "[health_evaluator]\n"
+                    f'state_root = "{state_root}"\n',
+                    encoding="utf-8",
+                )
+                if accepted:
+                    self.assertEqual(
+                        load_config(config_path).health_evaluator.state_root,
+                        state_root,
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "must not equal or contain",
+                    ):
+                        load_config(config_path)
 
     def test_config_to_dict_is_json_ready(self) -> None:
         data = config_to_dict(load_config())

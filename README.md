@@ -5,6 +5,14 @@ the dry-run-first scaffold and approval rules in
 [docs/test-lifecycle.md](docs/test-lifecycle.md). U12A compatibility removals
 remain blocked on U11 live acceptance and the compatibility period.
 
+Evaluator state is intentionally separated from shared validation evidence.
+`runtime.validation_root` remains a multi-consumer shared root and is never
+chmod/chown'ed by c-val; U7/U8 DBs, activation keys, and locks resolve under the
+fixed-owner `health_evaluator.state_root`. Live state-root provisioning,
+fixed-UID/GID ingestion, DB activation, image/deployment work, and U11 cutover
+remain unapproved. The current validation workload identity is unspecified, so
+enabling U7 before a fixed-identity ingestion path is deployed fails closed.
+
 c-val is a dry-run-first continuous validation framework for GPU clusters. It discovers schedulable free GPU nodes, prioritizes stale or never-tested nodes, renders Volcano validation jobs, gates real submission behind explicit approval, monitors jobs read-only, and ingests deterministic storage, NCCL, and DL test results into SQLite metadata. It also builds robust statistical baselines (median/MAD) from result history, classifies nodes as normal, degraded, or improved, and exports both raw pass/fail status and baseline health verdicts.
 
 ## Why `c-val` and `cval` Both Exist

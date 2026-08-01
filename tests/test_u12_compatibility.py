@@ -410,6 +410,8 @@ class ScaffoldEndToEndTests(unittest.TestCase):
             )
             os.chmod(root / "validation-tests/smoke/tests/test.sh", 0o755)
             validation_root = root / "data"
+            state_root = root / "evaluator-state"
+            state_root.mkdir(mode=0o700)
             history_db = root / "history.db"
             run_config = replace(
                 base,
@@ -420,6 +422,12 @@ class ScaffoldEndToEndTests(unittest.TestCase):
                     run_history_db_path=str(history_db),
                 ),
                 runtime=replace(base.runtime, validation_root=str(validation_root)),
+                health_evaluator=replace(
+                    base.health_evaluator,
+                    state_root=str(state_root),
+                    state_owner_uid=os.geteuid(),
+                    state_owner_gid=os.getegid(),
+                ),
                 tests=TestsConfig(registry=enabled),
             )
             result_payload = run_validation_tests(
@@ -464,7 +472,7 @@ class ScaffoldEndToEndTests(unittest.TestCase):
                 )
             with closing(
                 sqlite3.connect(
-                    validation_root / "validation_tests/smoke/smoke_results.db"
+                    state_root / "validation_tests/smoke/smoke_results.db"
                 )
             ) as connection:
                 self.assertEqual(

@@ -176,6 +176,105 @@ printf '%s\n' \
         self.assertIn('--result-json "$CVAL_RESULT_JSON_FILE"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
 
+    def test_db_update_wrong_owner_preflight_calls_no_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls = root / "calls.txt"
+            writer_marker = root / "writer-called"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+set -u
+printf '%s\n' "$*" >> {str(calls)!r}
+case "$*" in
+  *"-m cval.cli result"*)
+    cat <<'EOF'
+GCRRESULT1=incomplete
+GCRRESULT2=incomplete
+GCRRESULT3=incomplete
+RUN_STORAGE=false
+RUN_NCCL=false
+RUN_DLTEST=false
+overall_result=incomplete
+image_name=
+pytorch_version=
+cuda_version=
+result_node=node-a
+result_timestamp=123
+result_run_id=node-a-123
+result_schema_version=cval.results.v2
+result_global_config_digest=sha256:config
+result_digest=sha256:result
+result_storage_artifacts=
+result_nccl_summary=
+EOF
+    ;;
+  *"db-preflight-compatibility-result"*) exit 0 ;;
+  *"db-preflight-test-results"*)
+    echo "Evaluator process owner mismatch" >&2
+    exit 73
+    ;;
+  *"db-add-"*|*"db-upsert-"*|*"db-ingest-"*)
+    : > {str(writer_marker)!r}
+    exit 99
+    ;;
+  *) exit 0 ;;
+esac
+''',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text("{}\n", encoding="utf-8")
+            env = os.environ | {
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "CVAL_REPO_DIR": str(REPO_ROOT),
+                "CVAL_VALIDATION_ROOT": str(root),
+                "CVAL_RESULT_JSON_FILE": str(result_path),
+                "CVAL_JOB_LOG_DIR": str(result_path.parent),
+                "CVAL_CONFIG_SNAPSHOT_B64": "present",
+                "CVAL_CONFIG_DIGEST": "sha256:config",
+                "CVAL_PER_TEST_INGESTION_ENABLED": "true",
+                "CVAL_RUN_HISTORY_ENABLED": "false",
+                "GCRNODE": "node-a",
+                "GCRTIME": "123",
+                "CVAL_RUN_ID": "node-a-123",
+            }
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/db-update.sh")],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            observed = calls.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(completed.returncode, 73)
+        self.assertIn("process owner mismatch", completed.stderr.lower())
+        self.assertFalse(writer_marker.exists())
+        compatibility_index = next(
+            index
+            for index, call in enumerate(observed)
+            if "db-preflight-compatibility-result" in call
+        )
+        owner_index = next(
+            index
+            for index, call in enumerate(observed)
+            if "db-preflight-test-results" in call
+        )
+        self.assertLess(compatibility_index, owner_index)
+        self.assertFalse(
+            any(
+                token in call
+                for call in observed
+                for token in ("db-add-", "db-upsert-", "db-ingest-")
+            )
+        )
+
     def test_runtime_scripts_use_configured_environment(self) -> None:
         run_test = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(
             encoding="utf-8"
@@ -1069,6 +1168,8 @@ capabilities = ["ingest"]
                 include_defaults=False,
             )
             base = load_config()
+            state_root = root / "evaluator-state"
+            state_root.mkdir(mode=0o700)
             config = replace(
                 base,
                 storage=replace(
@@ -1079,6 +1180,12 @@ capabilities = ["ingest"]
                     nccl_db_path=str(root / "metadata/test-nccl.db"),
                 ),
                 runtime=replace(base.runtime, validation_root=str(root)),
+                health_evaluator=replace(
+                    base.health_evaluator,
+                    state_root=str(state_root),
+                    state_owner_uid=os.geteuid(),
+                    state_owner_gid=os.getegid(),
+                ),
                 tests=replace(base.tests, registry=registry),
             )
             registered = registry.require("smoke")

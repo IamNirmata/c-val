@@ -523,7 +523,12 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     # intentionally absent from public help and emit exactly one JSON value.
     evaluator_preflight = subparsers.add_parser("evaluator-preflight")
     evaluator_preflight.add_argument("--access", choices=["ro", "rw"], default="ro")
-    evaluator_preflight.add_argument("--validation-root", type=Path)
+    evaluator_preflight.add_argument(
+        "--state-root",
+        "--validation-root",
+        dest="state_root",
+        type=Path,
+    )
     evaluator_preflight.set_defaults(handler=handle_evaluator_preflight)
 
     evaluator_parity = subparsers.add_parser("evaluator-parity")
@@ -1392,12 +1397,12 @@ def handle_evaluator_preflight(args: argparse.Namespace) -> int:
             from cval.evaluator.preflight import run_deployment_preflight
 
             config = args.cval_config
-            if args.validation_root is not None:
+            if args.state_root is not None:
                 config = replace(
                     config,
-                    runtime=replace(
-                        config.runtime,
-                        validation_root=str(args.validation_root),
+                    health_evaluator=replace(
+                        config.health_evaluator,
+                        state_root=str(args.state_root),
                     ),
                 )
             report = run_deployment_preflight(config, access=args.access)

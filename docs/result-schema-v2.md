@@ -2,6 +2,11 @@
 
 **Schema:** `cval.results.v2`  
 **Implementation status:** Emitted by the U5 generic runner; consumed by the locally validated U6 run-history writer and U7 registry-driven per-test ingestion dispatcher  
+
+The JSON, logs, summaries, and artifacts described here remain shared evidence
+under `runtime.validation_root`. Canonical U7/U8 SQLite state is resolved
+separately under `health_evaluator.state_root`; no result path is rewritten to
+the evaluator-owned tree.
 **Legacy schema:** `cval.results.v1` remains readable and is documented in [Result Schema](result-schema.md).
 
 `cval.results.v2` represents one c-val run with an arbitrary explicit registry of validation tests. It removes fixed storage/NCCL/DL result slots while preserving deterministic raw status and atomic partial-run recovery.

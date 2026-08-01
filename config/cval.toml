@@ -108,8 +108,13 @@ classify_interval_seconds = 300
 # confirmation. Enabling this does not enable U6/U7 ingestion writes.
 write_enabled = false
 lock_timeout_seconds = 30
-# U11 preflight requires this exact safe mode on runtime.validation_root; every
-# existing descendant through each test-owned DB parent must be exact 0700.
+# Dedicated evaluator-owned state. runtime.validation_root remains shared,
+# root-owned validation evidence and must never be chmod/chown'ed by c-val.
+state_root = "/data/continuous_validation/evaluator_state"
+state_owner_uid = 65532
+state_owner_gid = 65532
+# Compatibility key: this is now the exact dedicated state-root mode, not the
+# mode of runtime.validation_root. Only exact 0700 is accepted.
 validation_root_mode = "0700"
 # Bounds only oldest-pending classification writes per cycle. Candidate source
 # catalogs remain complete and cumulative for every current combination.

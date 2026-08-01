@@ -262,16 +262,31 @@ U9 has an independent strict section:
 write_enabled = false
 lock_timeout_seconds = 30
 max_classifications_per_test = 250
+state_root = "/data/continuous_validation/evaluator_state"
+state_owner_uid = 65532
+state_owner_gid = 65532
 validation_root_mode = "0700"
 ```
 
 - `write_enabled` must be a TOML Boolean. It does not inherit from or enable
   either U6/U7 ingestion gate.
 - `lock_timeout_seconds` and `max_classifications_per_test` must be positive integers.
-  `validation_root_mode` is an exact four-digit octal string, must grant owner
-  read/search, and must not grant group/world write. U11 requires this exact
-  mode on `runtime.validation_root` and exact `0700` on every existing
-  descendant through each test-owned U7/U8 parent. Unknown keys are rejected.
+  `state_root` must be an absolute lexical path. Equality is rejected, and the
+  state root must not be an ancestor of `runtime.validation_root`. A state-root
+  descendant of the shared validation root is allowed (the default layout).
+  An unrelated absolute state root is also deliberately allowed for a separate
+  PVC or bounded local-copy workflow; that does not imply live readiness.
+  `state_owner_uid`/`state_owner_gid` are bounded,
+  positive, non-root fixed IDs. The compatibility key `validation_root_mode`
+  now means the exact dedicated state-root mode and must be exactly `0700`.
+  State descendants are exact owner `0700`; DB/key/lock files are exact owner
+  `0600`, regular, single-link files. Unknown keys are rejected.
+- `runtime.validation_root` is shared evidence only. Never chmod/chown it.
+  Evidence/result JSON/artifacts stay there; U7/U8/key/lock/evaluator state use
+  `state_root`. Apply and gate-on U7 ingestion require the effective UID/GID to
+  exactly match the configured owner and require a pre-provisioned writable
+  state root. Gate-off ingestion and evaluator dry-run neither require nor
+  create that root.
 - Dry-run creates no lock, migration, health DB, activation key, or history row.
 - Apply additionally requires `--apply --confirm evaluate`; manual activation
   requires `--apply --confirm activate`.

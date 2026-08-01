@@ -143,6 +143,7 @@ class BuiltinHealthPluginTests(unittest.TestCase):
                     plugin = load_registered_plugin(registered)
                     db_path = (
                         root
+                        / "evaluator_state"
                         / "validation_tests"
                         / test_id
                         / f"{test_id}_results.db"
@@ -166,7 +167,7 @@ class BuiltinHealthPluginTests(unittest.TestCase):
             config = self._prepared(root)
             registered = config.tests.registry.require("dltest")
             plugin = load_registered_plugin(registered)
-            db_path = root / "validation_tests/dltest/dltest_results.db"
+            db_path = root / "evaluator_state/validation_tests/dltest/dltest_results.db"
             context = self._context(config, "dltest", db_path)
             observations = plugin.load_observations(context)
             first_source = context.source_snapshot.results[0]
@@ -235,7 +236,7 @@ class BuiltinHealthPluginTests(unittest.TestCase):
             config = self._prepared(root)
             registered = config.tests.registry.require("storage")
             plugin = load_registered_plugin(registered)
-            db_path = root / "validation_tests/storage/storage_results.db"
+            db_path = root / "evaluator_state/validation_tests/storage/storage_results.db"
             valid = self._context(config, "storage", db_path)
             forged = HealthContext(
                 definition=valid.definition,
@@ -271,7 +272,7 @@ class BuiltinHealthPluginTests(unittest.TestCase):
                 config = self._prepared(root)
                 registered = config.tests.registry.require("storage")
                 plugin = load_registered_plugin(registered)
-                db_path = root / "validation_tests/storage/storage_results.db"
+                db_path = root / "evaluator_state/validation_tests/storage/storage_results.db"
                 context = self._context(config, "storage", db_path)
                 with closing(sqlite3.connect(db_path)) as connection:
                     with self.assertRaises(sqlite3.IntegrityError):
@@ -304,7 +305,7 @@ class BuiltinHealthPluginTests(unittest.TestCase):
                 config = self._prepared(root)
                 registered = config.tests.registry.require("storage")
                 plugin = load_registered_plugin(registered)
-                db_path = root / "validation_tests/storage/storage_results.db"
+                db_path = root / "evaluator_state/validation_tests/storage/storage_results.db"
                 context = self._context(config, "storage", db_path)
                 with closing(sqlite3.connect(db_path)) as connection:
                     with self.assertRaises(sqlite3.IntegrityError):

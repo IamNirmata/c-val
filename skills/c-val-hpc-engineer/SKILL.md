@@ -133,9 +133,22 @@ transaction projection for both the complete catalog and adapter observations.
 Review the separate deferred count and bounded reasons: deferred rows remain in
 `classification_remaining` even after all actionable history is stored. U7/U8
 writers reject DB, activation-key, and evaluator-lock path replacement at
-commit and exact-retry boundaries. The held lock is a callable identity guard;
-its canonical inode, owner-only `0600` mode, and single-link state must remain
-valid for the complete apply operation.
+transaction-open, precommit, postcommit, and exact-retry boundaries. U7
+ingestion, U9 apply/activation, and backup apply share one descriptor-relative
+per-test lock and retain exact state-root/ancestry/parent/file bindings. The
+held lock is a callable identity guard; its canonical inode, fixed UID/GID,
+owner-only `0600` mode, and single-link state must remain valid for the complete
+operation. Initial U8 database/key staging and publication stay relative to the
+retained parent; existing U8 uses its captured file identity. Missing ancestry
+is also bound, and appearance of its first missing component or target fails.
+Persistent evaluator/backup creators defer only main-thread `SIGINT` and
+`SIGTERM` through the create syscall and immediate no-follow open/`fstat`
+identity registration, restore handlers, then re-deliver the first pending
+signal. Cleanup is exact device/inode-scoped and preserves racers; a currently
+named replacement is never adopted. U8 write helpers are internal, and
+evaluator persistence requires retained DB/key bindings plus this shared lock.
+Immutable U11 snapshots and key reads use retained descriptors with private
+`pread` semantics, so parent substitution cannot redirect a read.
 
 ```bash
 python -m cval.cli health evaluate --output json
@@ -145,14 +158,17 @@ python -m cval.cli health activate <test-id> <candidate-id> --output json
 U11 local preparation adds hidden strict-JSON `evaluator-preflight`,
 `evaluator-parity`, `evaluator-backup`, and `evaluator-service` entry points plus
 suspended Kustomize shadow/apply variants under `deploy/cval-evaluator/`.
-Preflight validates every existing root-to-owner directory component against
-the explicitly configured safe root mode/exact descendant `0700`, revalidates
+Preflight descriptor-traverses foreign outer ancestors, then validates the
+fixed-owner state root/exact descendant `0700` and `0600` files, revalidates
 identities after reads, and enforces registered U7 row/adapter/receipt owners.
 Parity requires exact JSON/SQLite identity, class, DNR, baseline, and timestamp
 types and checks U7 ownership even without history. Both accept only
 local/copied inputs. Backup
-rejects the configured runtime root and all descendants, is dry-run by default,
+rejects equal, ancestor, or descendant overlap with both configured live
+shared/state roots (siblings are allowed), is dry-run by default,
 and requires `--apply --confirm backup` for disposable copies. The
+destination's no-follow ancestry is retained continuously from canonical
+validation through exclusive reservation, restore validation, and cleanup.
 ServiceAccount has no bindings/token and deny-all network policy is required.
 The checked-in offline, hash-bound, distroless image recipe packages the commit
 marker, config, and descriptors/plugins, but base/image digests, embedded-commit
@@ -161,6 +177,9 @@ unsuspend them. U11 remains blocked on live U7 availability, PVC ownership and
 sidecars, real Kubernetes/CNI/admission facts, a verified image digest/commit/
 SBOM, approved live backup/restore, accepted shadow evidence, and explicit
 apply/cutover/rollback approval. Follow `docs/u11-evaluator-rollout.md`.
+The evaluator mounts only the pre-existing state subPath. Never chmod/chown the
+shared evidence root. State provisioning and fixed-UID/GID U7 ingestion remain
+unapproved; current validation workload identity is unspecified.
 
 - Start with `status` to identify stale or missing results.
 - Resolve compatibility targets from the enabled registry catalog. The

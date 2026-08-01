@@ -240,7 +240,7 @@ The test or adapter must reject unknown settings. Secrets are prohibited.
 
 | Field | Type | Required | Default | Rules |
 | --- | --- | --- | --- | --- |
-| `results_db_path` | String | Yes | — | Relative to the global validation root and confined below `validation_tests/<test-id>/`. |
+| `results_db_path` | String | Yes | — | Relative to the evaluator state root and confined below `validation_tests/<test-id>/`. |
 | `health_classes_db_path` | String | Conditional | — | Required when health is enabled; same confinement rule. |
 | `summary_filename` | String | No | `"summary.json"` | Basename only. |
 
@@ -253,7 +253,10 @@ health_classes_db_path = "validation_tests/nccl/nccl_health_classes.db"
 summary_filename = "summary.json"
 ```
 
-At runtime these resolve beneath `/data/continuous_validation` or the configured validation root. Root-relative values keep the test portable when the PVC mount changes.
+At runtime database declarations resolve beneath
+`/data/continuous_validation/evaluator_state` or the configured evaluator state
+root. State-root-relative values keep the test portable when the reviewed PVC
+subPath mount changes.
 
 ### `[plugin]`
 
@@ -544,7 +547,11 @@ Isolation and failure rules:
   evaluator.
 - Passing rows without a durable receipt are deferred. Raw fail/incomplete,
   missing combinations, and absent active baselines are deterministic DNR.
-- Apply uses an owner-only bounded per-test lock and exact v1→v2 migration.
+- U7 ingestion, U9 apply/activation, and local-copy backup apply use one
+  descriptor-relative fixed-owner bounded per-test lock. U7 retains the same
+  root/ancestry/parent/file binding across first creation, raw and adapter
+  transactions, receipts, and final checks. Dry-run, preflight, and a disabled
+  U7 gate create no lock. U9 alone performs the exact v1→v2 migration.
   Classification history is immutable; U7 latest-health cache columns are not
   updated. The final history revalidation uses the already-open U7 write
   transaction for the catalog and an in-memory projection of that connection
@@ -559,6 +566,11 @@ Isolation and failure rules:
 It defaults to `false`; deploying U7 code alone cannot create canonical
 per-test databases. The compatibility status and metric writers remain active
 until a separately approved dual-write activation and migration.
+When true, `db-update.sh` preflight requires the configured fixed process
+UID/GID and a pre-provisioned exact-owner `0700` evaluator state root before any
+compatibility write. The current validation workload identity is unspecified,
+so live U7 activation remains blocked and fails closed. Gate false does not
+require or create the state root.
 
 Future externally packaged adapters may use the `cval.validation_tests` entry-point group, but entry-point discovery is outside `cval.test.v1` implementation scope.
 
@@ -576,14 +588,14 @@ Resolution algorithm:
 4. Require the result to remain under the declared root.
 5. Require expected file type and permissions.
 
-### Validation-root-relative paths
+### Evaluator-state-root-relative database paths
 
 Applies to result and health database paths from test config.
 
 Resolution algorithm:
 
 1. Reject an absolute input.
-2. Join to configured `runtime.validation_root`.
+2. Join to configured `health_evaluator.state_root`.
 3. Normalize path components.
 4. Require the result below `validation_tests/<test-id>/`.
 5. Reject symlink escape when parent paths exist.
@@ -591,6 +603,12 @@ Resolution algorithm:
 The U9 evaluator applies the same algorithm to both canonical result and health
 DB paths. Missing canonical U7 DBs are dry-run skips; no alternate or discovered
 database is accepted.
+
+This database rule does not move validation evidence. Global/per-test result
+JSON, summaries, logs, and artifacts remain under `runtime.validation_root`.
+The framework never chmods or chowns that shared root. Secure production U7
+creation uses descriptor-relative no-follow `mkdir/open`, exact `0700` parents,
+an exact `0600` precreated DB, SQLite `mode=rw`, and pre/post inode binding.
 
 ### Assigned run paths
 
