@@ -29,6 +29,7 @@ CVAL_NCCL_NET=${CVAL_NCCL_NET:-IB}
 CVAL_NCCL_P2P_DISABLE=${CVAL_NCCL_P2P_DISABLE:-true}
 CVAL_NCCL_SHM_DISABLE=${CVAL_NCCL_SHM_DISABLE:-true}
 CVAL_NCCL_DEBUG=${CVAL_NCCL_DEBUG:-INFO}
+CVAL_NCCL_EVALUATION_ENABLED=${CVAL_NCCL_EVALUATION_ENABLED:-false}
 
 GCRNODE=${GCRNODE:-unknown}
 GCRTIME=${GCRTIME:-unknown}
@@ -39,6 +40,8 @@ NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-${CVAL_TEST_OUTPUT_DIR:-$NCCL_RUN_DIR/artifac
 NCCL_LOG_FILE=${NCCL_LOG_FILE:-${CVAL_TEST_LOG_DIR:-$NCCL_RUN_DIR}/workload.log}
 NCCL_SUMMARY_FILE=${NCCL_SUMMARY_FILE:-${CVAL_TEST_SUMMARY_FILE:-$NCCL_RUN_DIR/summary.json}}
 NCCL_IBBW_LOG_FILE=${NCCL_IBBW_LOG_FILE:-$NCCL_OUTPUT_DIR/ibbw-$GCRNODE-$GCRTIME.log}
+NCCL_RUNTIME_EVIDENCE_FILE=${NCCL_RUNTIME_EVIDENCE_FILE:-$NCCL_OUTPUT_DIR/runtime-evidence.json}
+NCCL_RUNTIME_EVIDENCE_POST_FILE=${NCCL_RUNTIME_EVIDENCE_POST_FILE:-${NCCL_RUNTIME_EVIDENCE_FILE%.json}.post.json}
 NCCL_SCRIPT="$CVAL_VALIDATION_TESTS_DIR/nccl/single-node-allreduce.py"
 IBBW_PID=""
 
@@ -93,6 +96,21 @@ args=(
 )
 
 echo "Running NCCL Test..."
+if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED"; then
+    echo "Collecting NCCL runtime evidence -> $NCCL_RUNTIME_EVIDENCE_FILE"
+    if ! PYTHONPATH="$CVAL_REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m cval.nccl_eval.runtime_evidence --output "$NCCL_RUNTIME_EVIDENCE_FILE"; then
+        echo "NCCL pre-workload runtime evidence collection FAILED" >&2
+        exit 1
+    fi
+    if ! PYTHONPATH="$CVAL_REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m cval.nccl_eval.runtime_evidence --validate "$NCCL_RUNTIME_EVIDENCE_FILE"; then
+        echo "NCCL pre-workload runtime evidence validation FAILED" >&2
+        exit 1
+    fi
+else
+    echo "NCCL PostgreSQL evaluation evidence disabled by config"
+fi
 start_ibbw_monitor
 NCCL_NET="$CVAL_NCCL_NET" \
 NCCL_P2P_DISABLE="$(bool_to_int "$CVAL_NCCL_P2P_DISABLE")" \
@@ -106,6 +124,18 @@ append_ibbw_log_to_nccl_log
 trap - EXIT INT TERM
 if [[ $rc -ne 0 ]]; then
     exit "$rc"
+fi
+
+if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED"; then
+    if ! PYTHONPATH="$CVAL_REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m cval.nccl_eval.runtime_evidence --output "$NCCL_RUNTIME_EVIDENCE_POST_FILE"; then
+        echo "NCCL post-workload runtime evidence collection FAILED" >&2
+        exit 1
+    fi
+    if ! cmp -s -- "$NCCL_RUNTIME_EVIDENCE_FILE" "$NCCL_RUNTIME_EVIDENCE_POST_FILE"; then
+        echo "NCCL runtime evidence changed across the workload" >&2
+        exit 1
+    fi
 fi
 
 if ! python3 - "$NCCL_SUMMARY_FILE" "$CVAL_NCCL_ITERATIONS" "$CVAL_NCCL_DATA_SIZE_GB" <<'PY'

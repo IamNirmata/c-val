@@ -9,12 +9,6 @@
 *.log
 *.activation.key
 
-# Canonical local U7/U8 SQLite artifacts (runtime evidence, never source).
-/validation_tests/*/*_results.db
-/validation_tests/*/*_results.db-*
-/validation_tests/*/*_health_classes.db
-/validation_tests/*/*_health_classes.db-*
-
 __pycache__/
 *.py[cod]
 .pytest_cache/

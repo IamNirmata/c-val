@@ -96,10 +96,8 @@ Cannot create baseline root: $BASELINE_ROOT
 
 This usually means you are running on a machine that does not have the c-val PVC
 mounted at /data. Run this script where /data/continuous_validation is mounted
-(for example, inside the gcr-admin PVC access pod), or override CVAL_BASELINE_ROOT
-for local testing:
-
-  CVAL_BASELINE_ROOT=/tmp/cval-baselines $0 run-once
+(for example, inside the gcr-admin PVC access pod). Local classification writes
+are not part of the cluster-first development workflow.
 EOF
         return 1
     fi
@@ -107,8 +105,7 @@ EOF
         cat >&2 <<EOF
 Baseline root is not writable: $BASELINE_ROOT
 
-Run inside the PVC-mounted environment or override CVAL_BASELINE_ROOT for local
-testing.
+Run inside the reviewed PVC-mounted environment.
 EOF
         return 1
     fi

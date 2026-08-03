@@ -1,8 +1,8 @@
 """Generic in-pod runtime context for validation jobs.
 
 The Volcano manifest carries a small fixed environment plus one base64-encoded,
-shell-quoted compatibility payload. This keeps test-specific settings out of
-Kubernetes YAML while the v1 shell runner still consumes its existing variables.
+shell-quoted runtime payload. This keeps test-specific settings out of
+Kubernetes YAML while built-in shell workloads consume established variables.
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ import shlex
 from typing import TYPE_CHECKING
 
 from cval.config import REPO_ROOT, config_to_dict, encode_config_snapshot
-from cval.validation.compatibility import (
-    LEGACY_ENABLE_ENV,
-    LEGACY_RUNTIME_SETTING_DEFAULTS,
+from cval.validation.builtins import (
+    BUILTIN_ENABLE_ENV,
+    BUILTIN_RUNTIME_SETTING_DEFAULTS,
 )
 
 if TYPE_CHECKING:
@@ -28,7 +28,7 @@ ENVIRONMENT_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
 def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
-    """Return the generic registry context plus current v1 compatibility vars."""
+    """Return the generic registry context plus current built-in variables."""
 
     from cval.validation.plugins import validate_registry_plugins
 
@@ -40,17 +40,17 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
     storage_settings = (
         storage.definition.settings
         if storage is not None
-        else LEGACY_RUNTIME_SETTING_DEFAULTS["storage"]
+        else BUILTIN_RUNTIME_SETTING_DEFAULTS["storage"]
     )
     nccl_settings = (
         nccl.definition.settings
         if nccl is not None
-        else LEGACY_RUNTIME_SETTING_DEFAULTS["nccl"]
+        else BUILTIN_RUNTIME_SETTING_DEFAULTS["nccl"]
     )
     dltest_settings = (
         dltest.definition.settings
         if dltest is not None
-        else LEGACY_RUNTIME_SETTING_DEFAULTS["dltest"]
+        else BUILTIN_RUNTIME_SETTING_DEFAULTS["dltest"]
     )
     registrations = {
         test.id: {
@@ -71,22 +71,15 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         "CVAL_VALIDATION_TESTS_DIR": config.runtime.validation_tests_dir,
         "CVAL_DL_UNIT_TEST_DIR": config.runtime.dl_unit_test_dir,
         "CVAL_VALIDATION_DB_PATH": config.storage.validation_db_path,
-        "CVAL_RUN_HISTORY_ENABLED": _shell_bool(
-            config.storage.run_history_enabled
-        ),
-        "CVAL_PER_TEST_INGESTION_ENABLED": _shell_bool(
-            config.storage.per_test_ingestion_enabled
-        ),
-        "CVAL_RUN_HISTORY_DB_PATH": config.storage.run_history_db_path,
         "CVAL_STORAGE_DB_PATH": config.storage.storage_db_path,
         "CVAL_NCCL_DB_PATH": config.storage.nccl_db_path,
         "CVAL_DL_NUMERICAL_DB_PATH": config.storage.dl_numerical_db_path,
         "CVAL_DL_COMPUTE_DB_PATH": config.storage.dl_compute_db_path,
         "CVAL_DL_COLLECTIVE_DB_PATH": config.storage.dl_collective_db_path,
         "CVAL_DL_OVERLAP_DB_PATH": config.storage.dl_overlap_db_path,
-        LEGACY_ENABLE_ENV["storage"]: _shell_bool(bool(storage and storage.enabled)),
+        BUILTIN_ENABLE_ENV["storage"]: _shell_bool(bool(storage and storage.enabled)),
         "CVAL_STORAGE_INSTALL_FIO": _shell_bool(bool(storage_settings["install_fio"])),
-        LEGACY_ENABLE_ENV["nccl"]: _shell_bool(bool(nccl and nccl.enabled)),
+        BUILTIN_ENABLE_ENV["nccl"]: _shell_bool(bool(nccl and nccl.enabled)),
         "CVAL_NCCL_GPU_COUNT": str(nccl_settings["gpu_count"]),
         "CVAL_NCCL_ITERATIONS": str(nccl_settings["iterations"]),
         "CVAL_NCCL_DATA_SIZE_GB": str(nccl_settings["data_size_gb"]),
@@ -103,7 +96,58 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         "CVAL_NCCL_P2P_DISABLE": _shell_bool(bool(nccl_settings["p2p_disable"])),
         "CVAL_NCCL_SHM_DISABLE": _shell_bool(bool(nccl_settings["shm_disable"])),
         "CVAL_NCCL_DEBUG": str(nccl_settings["debug"]),
-        LEGACY_ENABLE_ENV["dltest"]: _shell_bool(bool(dltest and dltest.enabled)),
+        "CVAL_NCCL_EVALUATION_ENABLED": _shell_bool(
+            bool(nccl_settings["evaluation_enabled"])
+        ),
+        "CVAL_NCCL_OUTBOX_ROOT": (
+            f"{config.runtime.validation_root.rstrip('/')}/nccl_eval/outbox"
+        ),
+        "CVAL_NCCL_EVALUATION_TEST_NAME": str(
+            nccl_settings["evaluation_test_name"]
+        ),
+        "CVAL_NCCL_EVALUATION_TEST_DEFINITION_VERSION": str(
+            nccl_settings["evaluation_test_definition_version"]
+        ),
+        "CVAL_NCCL_EVALUATION_COLLECTIVE": str(
+            nccl_settings["evaluation_collective"]
+        ),
+        "CVAL_NCCL_EVALUATION_DATATYPE": str(
+            nccl_settings["evaluation_datatype"]
+        ),
+        "CVAL_NCCL_EVALUATION_REDUCTION": str(
+            nccl_settings["evaluation_reduction"]
+        ),
+        "CVAL_NCCL_EVALUATION_MESSAGE_SIZE_BYTES": str(
+            nccl_settings["evaluation_message_size_bytes"]
+        ),
+        "CVAL_NCCL_EVALUATION_WARMUP_ITERATIONS": str(
+            nccl_settings["evaluation_warmup_iterations"]
+        ),
+        "CVAL_NCCL_EVALUATION_SAMPLES_PER_RESULT": str(
+            nccl_settings["evaluation_samples_per_result"]
+        ),
+        "CVAL_NCCL_EVALUATION_ITERATION_SEMANTICS": str(
+            nccl_settings["evaluation_iteration_semantics"]
+        ),
+        "CVAL_NCCL_EVALUATION_SAMPLE_SEMANTICS": str(
+            nccl_settings["evaluation_sample_semantics"]
+        ),
+        "CVAL_NCCL_EVALUATION_LATENCY_UNIT": str(
+            nccl_settings["evaluation_latency_unit"]
+        ),
+        "CVAL_NCCL_EVALUATION_LATENCY_SOURCE_UNIT": str(
+            nccl_settings["evaluation_latency_source_unit"]
+        ),
+        "CVAL_NCCL_EVALUATION_LATENCY_CONVERSION": str(
+            nccl_settings["evaluation_latency_conversion"]
+        ),
+        "CVAL_NCCL_EVALUATION_DRIVER_GROUP_SOURCE": str(
+            nccl_settings["evaluation_driver_group_source"]
+        ),
+        "CVAL_NCCL_EVALUATION_TOPOLOGY_CLASS_SOURCE": str(
+            nccl_settings["evaluation_topology_class_source"]
+        ),
+        BUILTIN_ENABLE_ENV["dltest"]: _shell_bool(bool(dltest and dltest.enabled)),
         "CVAL_DL_GPU_COUNT": str(dltest_settings["gpu_count"]),
         "CVAL_DL_TEST_PLAN": str(dltest_settings["test_plan"]),
         "CVAL_DL_ITERATIONS": str(dltest_settings["iterations"]),

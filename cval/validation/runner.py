@@ -18,16 +18,16 @@ from typing import Any, Mapping, TextIO
 from zoneinfo import ZoneInfo
 
 from cval.config import CvalConfig, REPO_ROOT, load_config, load_config_snapshot
-from cval.validation.compatibility import (
-    LEGACY_DONE_MARKERS,
-    LEGACY_ENABLE_ENV,
-    LEGACY_FINAL_RESULT_PREFIX,
-    LEGACY_RESULT_ENV,
-    LEGACY_RESULT_PROJECTION_KEYS,
-    LEGACY_RUNNING_MARKERS,
-    LEGACY_SKIPPED_MARKERS,
-    LEGACY_TEST_EVIDENCE_ENV,
-    LEGACY_TEST_IDS,
+from cval.validation.builtins import (
+    BUILTIN_DONE_MARKERS,
+    BUILTIN_ENABLE_ENV,
+    BUILTIN_FINAL_RESULT_PREFIX,
+    BUILTIN_RESULT_ENV,
+    RESULT_PROJECTION_KEYS,
+    BUILTIN_RUNNING_MARKERS,
+    BUILTIN_SKIPPED_MARKERS,
+    BUILTIN_TEST_EVIDENCE_ENV,
+    BUILTIN_TEST_IDS,
 )
 from cval.validation.execution import RunLogger, RunPaths, TestPaths, utc_now
 from cval.validation.registry import (
@@ -54,7 +54,7 @@ def run_validation_tests(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> dict[str, Any]:
-    """Run every enabled test and return validated ``cval.results.v2`` state."""
+    """Run every enabled test and return validated ``cval.results`` state."""
 
     runtime_env = dict(os.environ if environ is None else environ)
     config = config or _load_runtime_config(runtime_env)
@@ -86,6 +86,9 @@ def run_validation_tests(
         runtime_env.get("CVAL_RUN_MARKER_PREACQUIRED", "false")
     )
     secure_layout = _load_secure_layout(runtime_env, validation_root, registry)
+    secure_pass_fds = _secure_pass_fds(runtime_env)
+    if secure_layout is not None:
+        _validate_secure_pass_fds(secure_layout, secure_pass_fds)
     run_paths = (
         _secure_run_paths(secure_layout)
         if secure_layout is not None
@@ -117,7 +120,7 @@ def run_validation_tests(
         stdout=stdout,
         stderr=stderr,
         write_global_files=not external_logging,
-        pass_fds=_secure_pass_fds(runtime_env),
+        pass_fds=secure_pass_fds,
     )
     result = _initial_result(
         config=config,
@@ -210,7 +213,7 @@ def _execute_registry(
                 status="incomplete",
                 message="disabled by config",
             )
-            compatibility_skip = LEGACY_SKIPPED_MARKERS.get(registered_test.id)
+            compatibility_skip = BUILTIN_SKIPPED_MARKERS.get(registered_test.id)
             if compatibility_skip:
                 logger.message(compatibility_skip)
             continue
@@ -348,7 +351,7 @@ def _run_one_test(
             test_paths=test_paths,
             status="incomplete",
         )
-        running_marker = LEGACY_RUNNING_MARKERS.get(test_id)
+        running_marker = BUILTIN_RUNNING_MARKERS.get(test_id)
         if running_marker:
             logger.message(running_marker, test_paths=test_paths)
         entrypoint = (
@@ -511,7 +514,7 @@ def _initial_result(
     selected_tests = [test for test in tests.values() if test["selected"]]
     pytorch_version, cuda_version = _framework_versions(runtime_env)
     return {
-        "schema_version": "cval.results.v2",
+        "schema_version": "cval.results",
         "run_id": run_id,
         "node": node,
         "timestamp": timestamp,
@@ -623,7 +626,7 @@ def _load_runtime_registry(
 
     tests: list[RegisteredValidationTest] = []
     for test in config.tests.registry.tests:
-        env_name = LEGACY_ENABLE_ENV.get(test.id)
+        env_name = BUILTIN_ENABLE_ENV.get(test.id)
         enabled = test.enabled
         if env_name and env_name in environment:
             enabled = _is_enabled(environment[env_name])
@@ -658,7 +661,7 @@ def _test_environment(
             "CVAL_TEST_SUMMARY_FILE": str(test_paths.summary),
         }
     )
-    aliases = LEGACY_TEST_EVIDENCE_ENV.get(registered_test.id)
+    aliases = BUILTIN_TEST_EVIDENCE_ENV.get(registered_test.id)
     if aliases is not None:
         environment[aliases["artifacts"]] = str(test_paths.artifacts)
         environment[aliases["summary"]] = str(test_paths.summary)
@@ -670,6 +673,11 @@ def _test_environment(
         ibbw_alias = aliases.get("ibbw_log")
         if ibbw_alias:
             environment[ibbw_alias] = str(test_paths.artifacts / "ibbw.log")
+        runtime_evidence_alias = aliases.get("runtime_evidence")
+        if runtime_evidence_alias:
+            environment[runtime_evidence_alias] = str(
+                test_paths.artifacts / "runtime-evidence.json"
+            )
     return environment
 
 
@@ -912,15 +920,15 @@ def _write_test_result(test_id: str, state: dict[str, Any], path: Path) -> None:
 
 def _write_legacy_env(result: dict[str, Any], path: Path) -> None:
     lines: list[str] = []
-    for test_id, result_name in LEGACY_RESULT_ENV.items():
+    for test_id, result_name in BUILTIN_RESULT_ENV.items():
         state = result["tests"].get(test_id)
         status = state["status"] if state else "incomplete"
         lines.append(f"{result_name}={status}")
-    for test_id, enabled_name in LEGACY_ENABLE_ENV.items():
+    for test_id, enabled_name in BUILTIN_ENABLE_ENV.items():
         state = result["tests"].get(test_id)
         enabled = bool(state and state["enabled"])
         lines.append(f"{enabled_name}={str(enabled).lower()}")
-    keys = LEGACY_RESULT_PROJECTION_KEYS
+    keys = RESULT_PROJECTION_KEYS
     lines.append(f"{keys['overall']}={result['overall']}")
     lines.append(f"{keys['node']}={result['node']}")
     lines.append(f"{keys['timestamp']}={result['timestamp']}")
@@ -990,7 +998,7 @@ def _legacy_completion_message(
     paths: TestPaths,
     state: Mapping[str, Any],
 ) -> None:
-    markers = LEGACY_DONE_MARKERS.get(test_id)
+    markers = BUILTIN_DONE_MARKERS.get(test_id)
     if markers is None:
         return
     prefix = markers[0] if status == "pass" else markers[1]
@@ -1015,8 +1023,18 @@ def _load_secure_layout(
     if not isinstance(payload, dict) or set(payload) != {
         "schema_version",
         "canonical_root",
+        "node",
+        "run_id",
         "root_fd",
         "run_dir_fd",
+        "result_file_fd",
+        "result_device",
+        "result_inode",
+        "result_size",
+        "result_mtime_ns",
+        "result_ctime_ns",
+        "result_digest",
+        "config_digest",
         "tests",
     }:
         raise ValueError("Secure run layout has unexpected fields")
@@ -1024,6 +1042,22 @@ def _load_secure_layout(
         raise ValueError("Unsupported secure run layout schema")
     if payload["canonical_root"] != str(validation_root):
         raise ValueError("Secure run layout canonical root mismatch")
+    expected_node = environment.get("CVAL_NODE") or environment.get("GCRNODE")
+    expected_run_id = environment.get("CVAL_RUN_ID")
+    if payload["node"] != expected_node or payload["run_id"] != expected_run_id:
+        raise ValueError("Secure run layout identity mismatch")
+    for name in (
+        "result_file_fd",
+        "result_device",
+        "result_inode",
+        "result_size",
+        "result_mtime_ns",
+        "result_ctime_ns",
+    ):
+        if payload[name] is not None:
+            raise ValueError("Runner received an already-bound secure result")
+    if payload["result_digest"] is not None or payload["config_digest"] is not None:
+        raise ValueError("Runner received precomputed secure result digests")
     tests = payload["tests"]
     if not isinstance(tests, dict):
         raise ValueError("Secure run layout tests must be an object")
@@ -1104,12 +1138,22 @@ def _secure_pass_fds(environment: Mapping[str, str]) -> tuple[int, ...]:
     return descriptors
 
 
+def _validate_secure_pass_fds(
+    layout: Mapping[str, Any], descriptors: tuple[int, ...]
+) -> None:
+    expected = {layout["root_fd"], layout["run_dir_fd"]}
+    for values in layout["tests"].values():
+        expected.update(values.values())
+    if set(descriptors) != expected:
+        raise ValueError("CVAL_SECURE_RUN_FDS does not match the secure run layout")
+
+
 def _legacy_final_line(result: Mapping[str, Any]) -> str:
     values = []
-    for test_id in LEGACY_TEST_IDS:
+    for test_id in BUILTIN_TEST_IDS:
         state = result["tests"].get(test_id)
         values.append(f"{test_id}={state['status'] if state else 'incomplete'}")
-    return LEGACY_FINAL_RESULT_PREFIX + " " + " ".join(values)
+    return BUILTIN_FINAL_RESULT_PREFIX + " " + " ".join(values)
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:

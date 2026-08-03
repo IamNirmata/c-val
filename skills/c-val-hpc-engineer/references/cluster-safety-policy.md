@@ -1,13 +1,13 @@
 # Cluster Safety Policy
 
-## Default Mode
+## Read-only observation
 
-Use read-only or dry-run commands first. The safe command set is:
+The nonmutating command set is:
 
 ```bash
 python -m cval.cli status --output table
 python -m cval.cli nodes --output table
-python -m cval.cli run --live-status --threshold-days 4 --batch-size 3 --output json
+python -m cval.cli plan --live-status --git-ref <40-hex-commit> --threshold-days 4 --batch-size 3 --output json
 python -m cval.cli jobs --jobs <job-name> --output json
 python -m cval.cli jobs --jobs <job-name> --watch --timeout-seconds 180 --poll-interval-seconds 30 --output json
 ```
@@ -17,7 +17,7 @@ python -m cval.cli jobs --jobs <job-name> --watch --timeout-seconds 180 --poll-i
 Real validation job submission requires explicit operator approval and this command shape:
 
 ```bash
-python -m cval.cli run --live-status --threshold-days 4 --batch-size 1 --submit --confirm submit
+python -m cval.cli validate --node <node> --git-ref <40-hex-commit> --submit --confirm submit
 ```
 
 ## Never Run Without Approval

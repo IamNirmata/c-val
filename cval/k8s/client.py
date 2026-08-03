@@ -2,7 +2,7 @@
 
 The wrapper centralizes subprocess execution and returns structured stdout,
 stderr, and return codes. Higher-level modules decide whether a command is
-read-only, dry-run, or mutating; this client only executes explicit arguments.
+read-only or mutating; this client only executes explicit arguments.
 """
 
 from __future__ import annotations

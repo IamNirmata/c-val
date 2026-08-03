@@ -1,1 +1,1 @@
-"""Dry-run orchestration workflow for c-val."""
+"""Queue planning and direct-cluster orchestration for c-val."""

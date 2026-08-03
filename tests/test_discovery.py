@@ -134,8 +134,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(node_is_ready(ready))
         self.assertFalse(node_is_ready(not_ready))
         self.assertFalse(node_is_ready(unknown))
-        # Missing Ready condition is treated as ready so partial fixtures are benign.
-        self.assertTrue(node_is_ready({"status": {}}))
+        self.assertFalse(node_is_ready({"status": {}}))
 
     def test_excludes_nodes_without_validation_pod_resources(self) -> None:
         config = CvalConfig(

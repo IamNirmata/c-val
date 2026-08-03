@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from cval.config import load_config
+from cval.k8s.client import CommandResult
 from cval.models import ClassificationResultRow, LatestStatusRow, NcclHealthMetric, NcclMetrics, StorageMetrics
 from cval.storage.classification_status import (
     classification_rows_to_csv_records,
     filter_classification_rows,
+    get_latest_classification_rows,
     latest_classification_rows_from_db,
+    latest_classification_rows_from_dbs,
     write_classifications_csv,
 )
 from cval.storage.metrics import _parse_nccl_health_json, _parse_nccl_json, _parse_storage_json
@@ -33,7 +39,200 @@ from cval.storage.results_export import (
 )
 
 
+class ClassificationReadClient:
+    def __init__(self, rows_by_filename: dict[str, list[dict]]) -> None:
+        self.rows_by_filename = rows_by_filename
+        self.paths: list[str] = []
+
+    def run(self, args, check: bool = True, input_text: str | None = None):
+        path = str(args[-1])
+        self.paths.append(path)
+        return CommandResult(
+            args=list(args),
+            stdout=json.dumps(self.rows_by_filename.get(Path(path).name, [])),
+            stderr="",
+            returncode=0,
+        )
+
+
 class ResultsExportTests(unittest.TestCase):
+    @staticmethod
+    def _classification_item(
+        *,
+        node: str = "node-a",
+        classified_at: int = 100,
+        baseline_id: str = "b1",
+        status: str = "normal",
+    ) -> dict:
+        return {
+            "classified_at": classified_at,
+            "node": node,
+            "test_type": "storage",
+            "baseline_id": baseline_id,
+            "status": status,
+            "passed": status != "degraded",
+            "n_compared": 1,
+            "n_degraded": int(status == "degraded"),
+            "n_improved": int(status == "improved"),
+            "n_band_degraded": int(status == "degraded"),
+            "degraded_metric_fraction": float(status == "degraded"),
+            "worst_pct_diff": 20.0 if status == "degraded" else 0.0,
+        }
+
+    def _read_classifications(
+        self,
+        root: Path,
+        rows_by_filename: dict[str, list[dict]],
+        *,
+        db_path: str | None = None,
+    ) -> tuple[list[ClassificationResultRow], list[str]]:
+        baseline_root = root / "baselines"
+        config_path = root / "cval.toml"
+        config_path.write_text(
+            f'[baseline]\nbaseline_root_path = "{baseline_root}"\n',
+            encoding="utf-8",
+        )
+        client = ClassificationReadClient(rows_by_filename)
+        with patch(
+            "cval.storage.classification_status.resolve_status_pod",
+            return_value="reader-pod",
+        ):
+            rows = get_latest_classification_rows(
+                client=client,
+                db_path=db_path,
+                test_type="storage",
+                config=load_config(config_path),
+            )
+        return rows, client.paths
+
+    def test_classification_reader_global_only(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            item = self._classification_item()
+            rows, paths = self._read_classifications(
+                Path(tmpdir), {"classification-results.db": [item]}
+            )
+
+        self.assertEqual([(row.node, row.classified_at) for row in rows], [("node-a", 100)])
+        self.assertEqual(
+            [Path(path).name for path in paths],
+            ["classification-results.db", "storage-classifications.db"],
+        )
+
+    def test_classification_reader_per_target_only(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            item = self._classification_item()
+            rows, _ = self._read_classifications(
+                Path(tmpdir), {"storage-classifications.db": [item]}
+            )
+
+        self.assertEqual([(row.node, row.classified_at) for row in rows], [("node-a", 100)])
+
+    def test_classification_reader_partial_migration(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            migrated = self._classification_item(node="node-a")
+            legacy_only = self._classification_item(node="node-b")
+            rows, _ = self._read_classifications(
+                Path(tmpdir),
+                {
+                    "classification-results.db": [migrated, legacy_only],
+                    "storage-classifications.db": [migrated],
+                },
+            )
+
+        self.assertEqual([row.node for row in rows], ["node-a", "node-b"])
+
+    def test_classification_reader_prefers_newer_target(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            rows, _ = self._read_classifications(
+                Path(tmpdir),
+                {
+                    "classification-results.db": [self._classification_item()],
+                    "storage-classifications.db": [
+                        self._classification_item(
+                            classified_at=200,
+                            baseline_id="b2",
+                            status="degraded",
+                        )
+                    ],
+                },
+            )
+
+        self.assertEqual((rows[0].classified_at, rows[0].baseline_id), (200, "b2"))
+
+    def test_classification_reader_deduplicates_equal_exact_rows(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            item = self._classification_item()
+            rows, _ = self._read_classifications(
+                Path(tmpdir),
+                {
+                    "classification-results.db": [item],
+                    "storage-classifications.db": [item],
+                },
+            )
+
+        self.assertEqual(len(rows), 1)
+
+    def test_classification_reader_rejects_equal_conflict(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "Conflicting classification rows"):
+                self._read_classifications(
+                    Path(tmpdir),
+                    {
+                        "classification-results.db": [self._classification_item()],
+                        "storage-classifications.db": [
+                            self._classification_item(status="degraded")
+                        ],
+                    },
+                )
+
+    def test_classification_reader_explicit_db_path_does_not_merge_fallback(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            explicit = Path(tmpdir) / "operator.db"
+            rows, paths = self._read_classifications(
+                Path(tmpdir),
+                {
+                    "classification-results.db": [self._classification_item()],
+                    "operator.db": [
+                        self._classification_item(classified_at=300, baseline_id="explicit")
+                    ],
+                },
+                db_path=str(explicit),
+            )
+
+        self.assertEqual(paths, [str(explicit)])
+        self.assertEqual((rows[0].classified_at, rows[0].baseline_id), (300, "explicit"))
+
+    def test_latest_classification_reader_merges_per_target_databases(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            paths = []
+            for test_type, timestamp in (("storage", 100), ("nccl", 200)):
+                path = Path(tmpdir) / f"{test_type}-classifications.db"
+                paths.append(path)
+                with closing(sqlite3.connect(path)) as connection:
+                    connection.execute(
+                        """
+                        CREATE TABLE classification_results (
+                            classified_at INTEGER, node TEXT, test_type TEXT,
+                            baseline_id TEXT, status TEXT, passed INTEGER,
+                            n_compared INTEGER, n_degraded INTEGER, n_improved INTEGER,
+                            n_band_degraded INTEGER, degraded_metric_fraction REAL,
+                            worst_pct_diff REAL, metrics_json TEXT
+                        )
+                        """
+                    )
+                    connection.execute(
+                        "INSERT INTO classification_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (timestamp, "node-a", test_type, "b1", "normal", 1, 1, 0, 0, 0, 0.0, 0.0, "[]"),
+                    )
+                    connection.commit()
+
+            rows = latest_classification_rows_from_dbs(paths)
+
+        self.assertEqual(
+            [(row.test_type, row.classified_at) for row in rows],
+            [("nccl", 200), ("storage", 100)],
+        )
+
     def test_latest_classification_reader_uses_scalar_summary_columns(self) -> None:
         with TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "classification.db"

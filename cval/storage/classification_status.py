@@ -1,9 +1,9 @@
 """Read and export latest baseline classification results.
 
 The raw pass/fail status in ``validation.db`` answers whether a validation job
-completed its deterministic checks. This module reads the derived health
-verdicts in ``classification-results.db`` so operators can see degraded nodes
-without parsing SQLite JSON payloads manually.
+completed its deterministic checks. This module merges derived verdicts from
+deterministic per-target databases so operators can see degraded nodes without
+parsing SQLite JSON payloads manually.
 """
 
 from __future__ import annotations
@@ -17,9 +17,13 @@ from dataclasses import asdict
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.baselines.storage import default_classification_db_path
+from cval.baselines.storage import (
+    default_classification_db_paths,
+    global_classification_db_path,
+)
 from cval.k8s.client import KubectlClient
 from cval.models import ClassificationResultRow
+from cval.storage.classification_legacy import legacy_classification_scalars
 from cval.storage.sqlite_uri import connect_sqlite_file, sqlite_readonly_script_prelude
 from cval.storage.status import resolve_status_pod
 
@@ -107,11 +111,31 @@ def latest_classification_rows_from_db(db_path: str | Path) -> list[Classificati
         return [_row_from_dict(dict(row)) for row in _latest_rows(connection)]
 
 
+def latest_classification_rows_from_dbs(
+    db_paths: list[str | Path] | tuple[str | Path, ...],
+) -> list[ClassificationResultRow]:
+    """Merge latest rows from per-target local databases."""
+
+    latest: dict[tuple[str, str], ClassificationResultRow] = {}
+    for db_path in db_paths:
+        for row in latest_classification_rows_from_db(db_path):
+            key = (row.node, row.test_type)
+            previous = latest.get(key)
+            if previous is None or row.classified_at > previous.classified_at:
+                latest[key] = row
+            elif row.classified_at == previous.classified_at and row != previous:
+                raise ValueError(
+                    "Conflicting classification rows share the same node/test/timestamp"
+                )
+    return sorted(latest.values(), key=lambda row: (row.test_type, row.node))
+
+
 def get_latest_classification_rows(
     client: KubectlClient | None = None,
     pod: str | None = None,
     namespace: str | None = None,
     db_path: str | None = None,
+    test_type: str | None = None,
     config=None,
 ) -> list[ClassificationResultRow]:
     """Read latest classification rows from the PVC access pod in read-only mode."""
@@ -121,7 +145,16 @@ def get_latest_classification_rows(
     active_config = config or load_config()
     pod = pod or active_config.cluster.pvc_access_pod
     namespace = namespace or active_config.cluster.namespace
-    db_path = db_path or str(default_classification_db_path(active_config))
+    if db_path:
+        db_paths = [db_path]
+    else:
+        configured = default_classification_db_paths(active_config)
+        target_paths = (
+            [str(configured[test_type])]
+            if test_type and test_type in configured
+            else [str(path) for path in configured.values()]
+        )
+        db_paths = [str(global_classification_db_path(active_config)), *target_paths]
     kubectl = client or KubectlClient()
     status_pod = resolve_status_pod(kubectl, namespace, pod)
     code = sqlite_readonly_script_prelude() + r'''
@@ -246,26 +279,48 @@ finally:
 
 print(json.dumps(out))
 '''
-    result = kubectl.run(
-        ["exec", "-i", "-n", namespace, status_pod, "--", "python3", "-", db_path],
-        input_text=code,
-    )
-    return parse_latest_classification_rows_json(result.stdout)
+    latest: dict[tuple[str, str], ClassificationResultRow] = {}
+    for current_path in db_paths:
+        result = kubectl.run(
+            [
+                "exec", "-i", "-n", namespace, status_pod,
+                "--", "python3", "-", current_path,
+            ],
+            input_text=code,
+        )
+        for row in parse_latest_classification_rows_json(result.stdout):
+            key = (row.node, row.test_type)
+            previous = latest.get(key)
+            if previous is None or row.classified_at > previous.classified_at:
+                latest[key] = row
+            elif row.classified_at == previous.classified_at and row != previous:
+                raise ValueError(
+                    "Conflicting classification rows share the same node/test/timestamp"
+                )
+    return sorted(latest.values(), key=lambda row: (row.test_type, row.node))
 
 
-def _latest_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+def _latest_rows(connection: sqlite3.Connection) -> list[dict]:
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "classification_results" not in tables:
         return []
     columns = {row[1] for row in connection.execute("PRAGMA table_info(classification_results)")}
+    need_metrics_json = not {
+        "n_band_degraded",
+        "degraded_metric_fraction",
+        "worst_pct_diff",
+    }.issubset(columns)
     selected = [
         "cr.classified_at", "cr.node", "cr.test_type", "cr.baseline_id",
         "cr.status", "cr.passed", "cr.n_compared", "cr.n_degraded", "cr.n_improved",
         "cr.n_band_degraded" if "n_band_degraded" in columns else "NULL AS n_band_degraded",
         "cr.degraded_metric_fraction" if "degraded_metric_fraction" in columns else "NULL AS degraded_metric_fraction",
         "cr.worst_pct_diff" if "worst_pct_diff" in columns else "NULL AS worst_pct_diff",
+        "cr.metrics_json"
+        if need_metrics_json and "metrics_json" in columns
+        else "'[]' AS metrics_json",
     ]
-    return connection.execute(
+    rows = connection.execute(
         f"""
         SELECT {', '.join(selected)} FROM classification_results cr
         JOIN (
@@ -279,6 +334,25 @@ def _latest_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY cr.test_type, cr.node
         """
     ).fetchall()
+    projected = []
+    for row in rows:
+        item = dict(row)
+        if need_metrics_json:
+            band, fraction, worst = legacy_classification_scalars(
+                item.pop("metrics_json", "[]"),
+                n_compared=int(item.get("n_compared") or 0),
+                n_degraded=int(item.get("n_degraded") or 0),
+            )
+            if "n_band_degraded" not in columns:
+                item["n_band_degraded"] = band
+            if "degraded_metric_fraction" not in columns:
+                item["degraded_metric_fraction"] = fraction
+            if "worst_pct_diff" not in columns:
+                item["worst_pct_diff"] = worst
+        else:
+            item.pop("metrics_json", None)
+        projected.append(item)
+    return projected
 
 
 def classification_rows_by_node_test(

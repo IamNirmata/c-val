@@ -56,23 +56,6 @@ def _node_values_storage(db_path: str | Path, node: str, window_days: int) -> di
     return _median_by_column(STORAGE_METRIC_COLUMNS, rows)
 
 
-def _node_values_nccl(db_path: str | Path, node: str, window_days: int) -> dict[str, float]:
-    rows = _query_rows(
-        db_path,
-        "IB_HEALTH",
-        ("BUS_BW", "LATENCY"),
-        "timestamp",
-        window_days,
-        {"Node": node},
-    )
-    source = _median_by_column(("BUS_BW", "LATENCY"), rows)
-    return {
-        metric: source[source_column]
-        for metric, source_column in (("busbw", "BUS_BW"), ("latency", "LATENCY"))
-        if source_column in source
-    }
-
-
 def _node_values_dl(
     db_paths: dict[str, str], node: str, window_days: int, component: str | None = None
 ) -> dict[str, float]:
@@ -124,8 +107,6 @@ def _node_metric_values(
     baseline_test_type = normalize_baseline_test_type(test_type)
     if baseline_test_type == "storage":
         return _node_values_storage(db_path or config.storage.storage_db_path, node, window_days)
-    if baseline_test_type == "nccl":
-        return _node_values_nccl(db_path or config.storage.nccl_db_path, node, window_days)
     if baseline_test_type == "dltest":
         return _node_values_dl(
             dl_db_paths or _default_dl_db_paths(config),
@@ -357,6 +338,11 @@ def classify_node(
             }
         )
 
+    if not metric_reports:
+        raise ValueError(
+            f"No comparable metrics for node {node!r} and target {test_type!r}"
+        )
+
     if baseline_test_type == "dltest":
         summary, components = _dl_overall_summary(metric_reports, config, selected_component)
     else:
@@ -417,8 +403,6 @@ def _distinct_nodes(
 
     if baseline_test_type == "storage":
         _collect(db_path or config.storage.storage_db_path, "storage_performance", "timestamp")
-    elif baseline_test_type == "nccl":
-        _collect(db_path or config.storage.nccl_db_path, "IB_HEALTH", "timestamp")
     elif baseline_test_type == "dltest":
         paths = dl_db_paths or _default_dl_db_paths(config)
         for table, _direction, _tolerance_attr, _keep_rank in _DL_DB_SPECS:

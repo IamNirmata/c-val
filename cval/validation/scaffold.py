@@ -1,4 +1,4 @@
-"""Dry-run-first creation of a disabled pass/fail-only validation test."""
+"""Atomic creation of a disabled pass/fail-only validation test."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from cval.validation.compatibility import (
-    COMPATIBILITY_ALIAS_ROWS,
+from cval.validation.builtins import (
+    BUILTIN_ALIAS_ROWS,
     DEFAULT_TEST_REGISTRATIONS,
 )
 from cval.validation.registry import TEST_ID_PATTERN
@@ -52,7 +52,7 @@ class ScaffoldPlan:
     def to_dict(self, *, applied: bool) -> dict[str, object]:
         return {
             "schema_version": SCAFFOLD_SCHEMA_VERSION,
-            "mode": "apply" if applied else "dry-run",
+            "mode": "apply" if applied else "inspect",
             "applied": applied,
             "test_id": self.test_id,
             "order": self.order,
@@ -60,13 +60,11 @@ class ScaffoldPlan:
             "files": [name for name, _content, _mode in self.files],
             "registry_stanza": self.registry_stanza,
             "global_config_mutated": False,
-            "plugin_created": False,
-            "health_created": False,
             "next_commands": [
                 "Add the printed disabled stanza to config/cval.toml.",
                 f"Implement validation-tests/{self.test_id}/tests/test.sh.",
-                "python -m cval.cli tests validate --output json",
-                "Review a dry-run render before explicitly enabling the test.",
+                "Publish an exact candidate commit containing the implementation.",
+                "Enable the test and run cval validate on one eligible cluster node.",
             ],
         }
 
@@ -76,7 +74,7 @@ def build_scaffold_plan(
     *,
     repo_root: str | Path,
 ) -> ScaffoldPlan:
-    """Validate identity/order/path and return a no-write scaffold plan."""
+    """Validate identity/order/path and return a nonwriting scaffold inspection."""
 
     _validate_identity_and_order(test_id, order)
     root_path, root_fd = open_directory_no_symlinks(repo_root)
@@ -105,7 +103,7 @@ def scaffold_validation_test(
     apply: bool = False,
     confirmation: str | None = None,
 ) -> dict[str, object]:
-    """Render a plan or atomically publish it after exact confirmation."""
+    """Inspect files or atomically publish them after exact confirmation."""
 
     plan = build_scaffold_plan(test_id, order, repo_root=repo_root)
     if not apply:
@@ -222,7 +220,7 @@ def _require_name_absent(parent_fd: int, name: str) -> None:
 def _validate_identity_and_order(test_id: str, order: int) -> None:
     if not isinstance(test_id, str) or not TEST_ID_PATTERN.fullmatch(test_id):
         raise ValueError(f"Invalid validation test ID: {test_id!r}")
-    reserved = {"all", "overall"} | {row[1] for row in COMPATIBILITY_ALIAS_ROWS}
+    reserved = {"all", "overall"} | {row[1] for row in BUILTIN_ALIAS_ROWS}
     if test_id in reserved:
         raise ValueError(f"Reserved compatibility test ID: {test_id!r}")
     if isinstance(order, bool) or not isinstance(order, int) or not 0 <= order <= MAX_TEST_ORDER:
@@ -337,8 +335,8 @@ def _template_files(test_id: str, order: int) -> tuple[tuple[str, str, int], ...
             f"# {display_name}\n\n"
             "Pass/fail-only c-val test scaffold. Keep workload logic under `tests/`; "
             "write the canonical summary to `$CVAL_TEST_SUMMARY_FILE` and return zero "
-            "only on success. Add plugin/health capabilities later as a separately "
-            "reviewed compatibility change.\n",
+            "only on success. Replace the fail-closed placeholder before enabling the "
+            "test.\n",
             0o600,
         ),
         (
@@ -349,7 +347,6 @@ def _template_files(test_id: str, order: int) -> tuple[tuple[str, str, int], ...
             '''timeout_seconds = 300\ncontinue_on_failure = true\n\n[requirements]\n'''
             '''cpu = "1"\nmemory = "1Gi"\ngpu_count = 0\nrdma_count = 0\n'''
             '''shared_memory = "0"\nread_sysfs = false\n\n[artifacts]\n'''
-            f'''results_db_path = "validation_tests/{test_id}/{test_id}_results.db"\n'''
             '''summary_filename = "summary.json"\n''',
             0o600,
         ),
@@ -368,7 +365,7 @@ def _template_files(test_id: str, order: int) -> tuple[tuple[str, str, int], ...
         (
             "tests/README.md",
             "# Workload tests\n\nReplace the fail-closed placeholder with deterministic checks. "
-            "Exit `0` for pass and non-zero for fail; never emit health classes here.\n",
+            "Exit `0` for pass and non-zero for fail.\n",
             0o600,
         ),
         (

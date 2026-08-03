@@ -1,0 +1,293 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cval-evaluator
+  namespace: gcr-admin
+  labels:
+    app.kubernetes.io/name: cval-evaluator
+    app.kubernetes.io/component: resident-evaluator
+  annotations:
+    cval.io/source-replicas: "0"
+    cval.io/production-replicas: "1"
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cval-evaluator
+      app.kubernetes.io/component: resident-evaluator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cval-evaluator
+        app.kubernetes.io/component: resident-evaluator
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: repo-pull
+          image: alpine/git@sha256:729da2347ce652f30476b064198577fe12e1147e58499be9f343039343ef2cee
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: CVAL_GIT_REPO
+              value: https://github.com/IamNirmata/c-val.git
+            - name: CVAL_GIT_REF
+              value: "0000000000000000000000000000000000000000"
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              test "${#CVAL_GIT_REF}" -eq 40
+              test "$CVAL_GIT_REF" != "0000000000000000000000000000000000000000"
+              case "$CVAL_GIT_REF" in *[!0-9a-f]*) exit 1 ;; esac
+              git clone --filter=blob:none --no-checkout "$CVAL_GIT_REPO" /workspace/c-val
+              git -C /workspace/c-val fetch --depth=1 origin "$CVAL_GIT_REF"
+              git -C /workspace/c-val checkout --detach "$CVAL_GIT_REF"
+              test "$(git -C /workspace/c-val rev-parse HEAD)" = "$CVAL_GIT_REF"
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+        - name: bootstrap-cval
+          image: python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              python3 -m venv /opt/cval/venv
+              /opt/cval/venv/bin/pip install --no-cache-dir --require-hashes -r /workspace/c-val/deploy/cval-evaluator/requirements-postgresql.lock
+              /opt/cval/venv/bin/pip install --no-cache-dir --no-build-isolation --no-deps -e /workspace/c-val
+              /opt/cval/venv/bin/python -m cval.cli tests validate --output json >/tmp/registry.json
+              chown -R 65532:65532 /workspace /opt/cval
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+            - name: runtime
+              mountPath: /opt/cval
+            - name: tmp
+              mountPath: /tmp
+        - name: wait-postgres
+          image: postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cval-postgres-admin
+                  key: admin-url
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              attempt=0
+              while [ "$attempt" -lt 60 ]; do
+                pg_isready -d "$DATABASE_URL" -t 3 >/dev/null 2>&1 && exit 0
+                attempt=$((attempt + 1))
+                sleep 2
+              done
+              echo "PostgreSQL readiness deadline exceeded" >&2
+              exit 1
+        - name: schema-and-runtime-role
+          image: python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cval-postgres-admin
+                  key: admin-url
+            - name: CVAL_POSTGRES_RUNTIME_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cval-postgres-runtime
+                  key: runtime-username
+            - name: CVAL_POSTGRES_RUNTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cval-postgres-runtime
+                  key: runtime-password
+          workingDir: /workspace/c-val
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              /opt/cval/venv/bin/python -m cval.cli nccl-eval schema --apply --confirm schema --output json
+              /opt/cval/venv/bin/python -m cval.cli nccl-eval grant-runtime --apply --confirm grant-runtime --output json
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+              readOnly: true
+            - name: runtime
+              mountPath: /opt/cval
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: sqlite-evaluator
+          image: python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: CVAL_CONFIG
+              value: /workspace/c-val/config/cval.toml
+            - name: CVAL_BASELINE_BUILD_INTERVAL_SECONDS
+              value: "86400"
+            - name: CVAL_BASELINE_CLASSIFY_INTERVAL_SECONDS
+              value: "300"
+          workingDir: /workspace/c-val
+          command: ["/opt/cval/venv/bin/python", "-m", "cval.baselines.resident"]
+          args:
+            - run
+            - --repo-root
+            - /workspace/c-val
+            - --state-dir
+            - /run/cval/sqlite
+          readinessProbe:
+            exec:
+              command: ["/opt/cval/venv/bin/python", "-m", "cval.baselines.resident", "status", "--state-dir", "/run/cval/sqlite"]
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["/opt/cval/venv/bin/python", "-m", "cval.baselines.resident", "status", "--state-dir", "/run/cval/sqlite"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+              readOnly: true
+            - name: runtime
+              mountPath: /opt/cval
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: sqlite-state
+              mountPath: /run/cval/sqlite
+            - name: data
+              mountPath: /data
+        - name: nccl-evaluator
+          image: python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cval-postgres-runtime
+                  key: runtime-url
+            - name: EVALUATOR_BATCH_SIZE
+              value: "25"
+            - name: EVALUATOR_POLL_INTERVAL_SECONDS
+              value: "5"
+            - name: EVALUATOR_RECOVER_EVERY_CYCLES
+              value: "12"
+            - name: BASELINE_BUILDER_INTERVAL_SECONDS
+              value: "300"
+          workingDir: /workspace/c-val
+          command: ["/opt/cval/venv/bin/python", "-m", "cval.cli"]
+          args:
+            - nccl-eval
+            - resident
+            - --outbox-root
+            - /data/continuous_validation/nccl_eval/outbox
+            - --ingest-limit
+            - "5000"
+            - --recover-every-cycles
+            - "12"
+            - --apply
+            - --confirm
+            - resident
+            - --output
+            - json
+          readinessProbe:
+            exec:
+              command: ["/opt/cval/venv/bin/python", "-m", "cval.cli", "nccl-eval", "status", "--latest-limit", "1", "--output", "json"]
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["/opt/cval/venv/bin/python", "-m", "cval.cli", "nccl-eval", "status", "--latest-limit", "1", "--output", "json"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+              readOnly: true
+            - name: runtime
+              mountPath: /opt/cval
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+              readOnly: true
+      volumes:
+        - name: source
+          emptyDir: {}
+        - name: runtime
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: sqlite-state
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim:
+            claimName: pvc-vast-gcr-admin

@@ -27,37 +27,27 @@ net = "IB"
 p2p_disable = true
 shm_disable = true
 debug = "INFO"
+evaluation_enabled = false
+evaluation_test_name = "nccl-loopback-allreduce"
+evaluation_test_definition_version = "nccl-loopback-ar-v1"
+evaluation_collective = "all_reduce"
+evaluation_datatype = "bfloat16"
+evaluation_reduction = "sum"
+evaluation_message_size_bytes = 17179869184
+evaluation_warmup_iterations = 1
+evaluation_samples_per_result = 1
+evaluation_iteration_semantics = "timed_collective_repetitions"
+evaluation_sample_semantics = "one_aggregate_mean_per_node"
+evaluation_latency_unit = "us"
+evaluation_latency_source_unit = "ms"
+evaluation_latency_conversion = "ms_to_us_x1000"
+evaluation_driver_group_source = "runtime_evidence"
+evaluation_topology_class_source = "runtime_evidence"
 
 [artifacts]
-results_db_path = "validation_tests/nccl/nccl_results.db"
-health_classes_db_path = "validation_tests/nccl/nccl_health_classes.db"
 summary_filename = "summary.json"
 
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "ingest", "health", "baseline", "export"]
-
-[health]
-enabled = true
-policy_version = "nccl.health.v1"
-strategy = "declarative"
-min_samples = 8
-min_new_results = 10
-target_class_count = 5
-combination_factors = ["image_name", "cuda_version", "pytorch_version", "iterations", "data_size_gb"]
-auto_activate = false
-
-[[health.metrics]]
-name = "busbw"
-source = "busbw"
-direction = "low_bad"
-units = "GB/s"
-tolerance_pct = 5.0
-
-[[health.metrics]]
-name = "latency"
-source = "latency"
-direction = "high_bad"
-units = "ms"
-tolerance_pct = 5.0
+capabilities = ["config", "export"]

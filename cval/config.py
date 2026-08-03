@@ -26,6 +26,14 @@ from cval.validation.operational_targets import build_operational_target_catalog
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "cval.toml"
+_EXACT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_DIGESTED_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
+
+
+def is_exact_commit(value: str) -> bool:
+    """Return whether value is an immutable lowercase Git commit ID."""
+
+    return bool(_EXACT_COMMIT.fullmatch(value)) and value != "0" * 40
 
 
 @dataclass(frozen=True)
@@ -56,7 +64,7 @@ class JobConfig:
     job_prefix: str = "cval"
     image_name: str = ""
     git_repo: str = "https://github.com/IamNirmata/c-val.git"
-    git_ref: str = "main"
+    git_ref: str = "0" * 40
 
 
 @dataclass(frozen=True)
@@ -81,11 +89,6 @@ class StorageConfig:
     """SQLite metadata paths on the shared validation PVC."""
 
     validation_db_path: str = "/data/continuous_validation/metadata/validation.db"
-    run_history_enabled: bool = False
-    per_test_ingestion_enabled: bool = False
-    run_history_db_path: str = (
-        "/data/continuous_validation/metadata/node-run-history.db"
-    )
     storage_db_path: str = "/data/continuous_validation/metadata/test-storage.db"
     nccl_db_path: str = "/data/continuous_validation/metadata/test-nccl.db"
     dl_numerical_db_path: str = (
@@ -147,7 +150,6 @@ class BaselineClassificationConfig:
     """Baseline and peer-comparison tolerance rules."""
 
     baseline_root_path: str = "/data/continuous_validation/baselines"
-    nccl_peer_tolerance_pct: float = 5.0
     storage_peer_tolerance_pct: float = 10.0
     dl_compute_tolerance_pct: float = 3.0
     dl_numerical_tolerance_pct: float = 0.1
@@ -171,19 +173,6 @@ class BaselineClassificationConfig:
 
 
 @dataclass(frozen=True)
-class HealthEvaluatorConfig:
-    """Independent safety and bounded-work controls for the U9 evaluator."""
-
-    write_enabled: bool = False
-    lock_timeout_seconds: int = 30
-    max_classifications_per_test: int = 250
-    state_root: str = "/data/continuous_validation/evaluator_state"
-    state_owner_uid: int = 65532
-    state_owner_gid: int = 65532
-    validation_root_mode: str = "0700"
-
-
-@dataclass(frozen=True)
 class CvalConfig:
     """Complete c-val configuration tree."""
 
@@ -197,7 +186,6 @@ class CvalConfig:
     tests: TestsConfig = field(default_factory=TestsConfig)
     job_template: JobTemplateConfig = field(default_factory=JobTemplateConfig)
     baseline: BaselineClassificationConfig = field(default_factory=BaselineClassificationConfig)
-    health_evaluator: HealthEvaluatorConfig = field(default_factory=HealthEvaluatorConfig)
 
 
 def default_config() -> CvalConfig:
@@ -239,7 +227,6 @@ def config_to_dict(config: CvalConfig) -> dict[str, Any]:
         "tests": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
         "baseline": asdict(config.baseline),
-        "health_evaluator": asdict(config.health_evaluator),
     }
 
 
@@ -269,7 +256,6 @@ def encode_config_snapshot(config: CvalConfig) -> str:
         "test_definitions": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
         "baseline": asdict(config.baseline),
-        "health_evaluator": asdict(config.health_evaluator),
     }
     payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(payload).decode("ascii")
@@ -301,7 +287,6 @@ def load_config_snapshot(
         "test_definitions",
         "job_template",
         "baseline",
-        "health_evaluator",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -382,21 +367,6 @@ def _build_config(
     dl_health_aggregation = _section(dict(dltest), "health_aggregation")
     job_template = _section(data, "job_template")
     baseline = _section(data, "baseline")
-    health_evaluator = _section(data, "health_evaluator")
-    _reject_section_keys(
-        health_evaluator,
-        {
-            "write_enabled",
-            "lock_timeout_seconds",
-            "max_classifications_per_test",
-            "state_root",
-            "state_owner_uid",
-            "state_owner_gid",
-            "validation_root_mode",
-        },
-        "health_evaluator",
-    )
-
     config = CvalConfig(
         cluster=ClusterConfig(
             namespace=_str(cluster, "namespace", defaults.cluster.namespace),
@@ -445,21 +415,6 @@ def _build_config(
         ),
         storage=StorageConfig(
             validation_db_path=_str(storage, "validation_db_path", defaults.storage.validation_db_path),
-            run_history_enabled=_strict_config_bool(
-                storage,
-                "run_history_enabled",
-                defaults.storage.run_history_enabled,
-            ),
-            per_test_ingestion_enabled=_strict_config_bool(
-                storage,
-                "per_test_ingestion_enabled",
-                defaults.storage.per_test_ingestion_enabled,
-            ),
-            run_history_db_path=_str(
-                storage,
-                "run_history_db_path",
-                defaults.storage.run_history_db_path,
-            ),
             storage_db_path=_str(storage, "storage_db_path", defaults.storage.storage_db_path),
             nccl_db_path=_str(storage, "nccl_db_path", defaults.storage.nccl_db_path),
             dl_numerical_db_path=_str(
@@ -539,55 +494,25 @@ def _build_config(
             baseline_root_path=_str(
                 baseline, "baseline_root_path", defaults.baseline.baseline_root_path
             ),
-            nccl_peer_tolerance_pct=_float(
-                baseline,
-                "nccl_peer_tolerance_pct",
-                _health_metric_tolerance(
-                    test_registry,
-                    "nccl",
-                    "busbw",
-                    defaults.baseline.nccl_peer_tolerance_pct,
-                ),
-            ),
             storage_peer_tolerance_pct=_float(
                 baseline,
                 "storage_peer_tolerance_pct",
-                _health_metric_tolerance(
-                    test_registry,
-                    "storage",
-                    "storage_performance",
-                    defaults.baseline.storage_peer_tolerance_pct,
-                ),
+                defaults.baseline.storage_peer_tolerance_pct,
             ),
             dl_compute_tolerance_pct=_float(
                 baseline,
                 "dl_compute_tolerance_pct",
-                _health_metric_tolerance(
-                    test_registry,
-                    "dltest",
-                    "compute_performance",
-                    defaults.baseline.dl_compute_tolerance_pct,
-                ),
+                defaults.baseline.dl_compute_tolerance_pct,
             ),
             dl_numerical_tolerance_pct=_float(
                 baseline,
                 "dl_numerical_tolerance_pct",
-                _health_metric_tolerance(
-                    test_registry,
-                    "dltest",
-                    "numerical_correctness",
-                    defaults.baseline.dl_numerical_tolerance_pct,
-                ),
+                defaults.baseline.dl_numerical_tolerance_pct,
             ),
             dl_overlap_tolerance_pct=_float(
                 baseline,
                 "dl_overlap_tolerance_pct",
-                _health_metric_tolerance(
-                    test_registry,
-                    "dltest",
-                    "overlap_performance",
-                    defaults.baseline.dl_overlap_tolerance_pct,
-                ),
+                defaults.baseline.dl_overlap_tolerance_pct,
             ),
             robust_z_threshold=_float(
                 baseline, "robust_z_threshold", defaults.baseline.robust_z_threshold
@@ -632,43 +557,6 @@ def _build_config(
                 defaults.baseline.classify_interval_seconds,
             ),
         ),
-        health_evaluator=HealthEvaluatorConfig(
-            write_enabled=_strict_config_bool(
-                health_evaluator,
-                "write_enabled",
-                defaults.health_evaluator.write_enabled,
-            ),
-            lock_timeout_seconds=_int(
-                health_evaluator,
-                "lock_timeout_seconds",
-                defaults.health_evaluator.lock_timeout_seconds,
-            ),
-            max_classifications_per_test=_int(
-                health_evaluator,
-                "max_classifications_per_test",
-                defaults.health_evaluator.max_classifications_per_test,
-            ),
-            state_root=_str(
-                health_evaluator,
-                "state_root",
-                defaults.health_evaluator.state_root,
-            ),
-            state_owner_uid=_int(
-                health_evaluator,
-                "state_owner_uid",
-                defaults.health_evaluator.state_owner_uid,
-            ),
-            state_owner_gid=_int(
-                health_evaluator,
-                "state_owner_gid",
-                defaults.health_evaluator.state_owner_gid,
-            ),
-            validation_root_mode=_str(
-                health_evaluator,
-                "validation_root_mode",
-                defaults.health_evaluator.validation_root_mode,
-            ),
-        ),
     )
     _validate_config(config, validate_plugins=validate_plugins)
     return config
@@ -683,9 +571,18 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     # Reject reserved/colliding operator-facing names during config loading,
     # before argparse or a background loop can observe an ambiguous catalog.
     build_operational_target_catalog(tests.registry)
+    nccl = tests.registry.get("nccl")
+    if nccl is not None and nccl.definition.settings.get("evaluation_enabled") is True:
+        if not is_exact_commit(config.job.git_ref):
+            raise ValueError(
+                "NCCL evaluation requires job.git_ref to be an exact lowercase 40-hex commit"
+            )
+        if not _DIGESTED_IMAGE.fullmatch(config.job_template.container_image):
+            raise ValueError(
+                "NCCL evaluation requires job_template.container_image pinned with @sha256"
+            )
     baseline = config.baseline
     non_negative_values = {
-        "nccl_peer_tolerance_pct": baseline.nccl_peer_tolerance_pct,
         "storage_peer_tolerance_pct": baseline.storage_peer_tolerance_pct,
         "dl_compute_tolerance_pct": baseline.dl_compute_tolerance_pct,
         "dl_numerical_tolerance_pct": baseline.dl_numerical_tolerance_pct,
@@ -711,44 +608,6 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     }.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"baseline.{name} must be a positive integer")
-    for name, value in {
-        "lock_timeout_seconds": config.health_evaluator.lock_timeout_seconds,
-        "max_classifications_per_test": config.health_evaluator.max_classifications_per_test,
-    }.items():
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"health_evaluator.{name} must be a positive integer")
-    for name, value in {
-        "state_owner_uid": config.health_evaluator.state_owner_uid,
-        "state_owner_gid": config.health_evaluator.state_owner_gid,
-    }.items():
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value <= 0
-            or value > 2_147_483_647
-        ):
-            raise ValueError(
-                f"health_evaluator.{name} must be a positive non-root 32-bit ID"
-            )
-    state_root = _absolute_lexical_config_path(
-        config.health_evaluator.state_root,
-        "health_evaluator.state_root",
-    )
-    validation_root = _absolute_lexical_config_path(
-        config.runtime.validation_root,
-        "runtime.validation_root",
-    )
-    if state_root == validation_root or state_root in validation_root.parents:
-        raise ValueError(
-            "health_evaluator.state_root must not equal or contain "
-            "runtime.validation_root"
-        )
-    root_mode = config.health_evaluator.validation_root_mode
-    if root_mode != "0700":
-        raise ValueError(
-            "health_evaluator.validation_root_mode must be exactly '0700' for the "
-            "dedicated evaluator state root"
-        )
     try:
         reserved_gpus = int(config.job_template.gpu_count)
         reserved_rdma = int(config.job_template.rdma_count)
@@ -871,23 +730,3 @@ def _repo_path(section: dict[str, Any], key: str, default: Path) -> Path:
         return default
     path = Path(str(value)).expanduser()
     return path if path.is_absolute() else REPO_ROOT / path
-
-
-def _health_metric_tolerance(
-    registry: ValidationTestRegistry,
-    test_id: str,
-    source: str,
-    default: float,
-) -> float:
-    """Read one compatibility tolerance from a test-owned health descriptor."""
-
-    registered = registry.get(test_id)
-    if registered is None:
-        return default
-    health = registered.definition.health
-    if health is None:
-        return default
-    for metric in health.metrics:
-        if metric.source == source:
-            return metric.tolerance_pct
-    return default

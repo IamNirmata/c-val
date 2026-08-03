@@ -18,8 +18,7 @@ The framework calls setup and then the canonical runner. A zero runner exit code
 
 - `settings.install_fio`.
 - Minimum resource requirements.
-- Result and health database paths.
-- Storage health combination factors and the low-is-bad tolerance.
+- The summary filename and baseline/export plugin capabilities.
 
 The global config owns only `[tests.storage].enabled` and `config_path`.
 
@@ -27,31 +26,16 @@ The global config owns only `[tests.storage].enabled` and `config_path`.
 
 FIO profiles live under `fio_jobs/`. Each profile writes JSON below the framework-provided `STORAGE_OUTPUT_DIR`. The runner writes a compact text summary to `STORAGE_SUMMARY_FILE` when `jq` is available; raw JSON remains authoritative for metric ingestion.
 
-`plugin.py` implements `cval.plugin.v1` config, ingestion, and health
-capabilities. For
-a passing current run it validates the confined artifact tree, requires exactly
-the six FIO JSON files, parses twelve finite non-negative IOPS/bandwidth fields,
-and writes one immutable `storage_performance` row plus a durable receipt in the
-framework-owned transaction. Failed/incomplete runs retain only their common
-raw row. The canonical DB is `validation_tests/storage/storage_results.db`.
-
-Canonical writes remain disabled while
-`storage.per_test_ingestion_enabled=false`; the existing
-`metadata/test-storage.db` compatibility writer remains the production surface.
+`db-update.sh` validates the six FIO JSON files and writes the current
+`metadata/test-storage.db` `storage_performance` row. `plugin.py` supplies
+test-owned configuration, baseline, and export hooks; it does not create a
+second framework database.
 
 ## Health methodology
 
-Storage health policy `storage.health.v1` expands the twelve persisted FIO
-columns into independent metrics. Each result contributes exactly one stable
-sample key per expanded metric. Throughput and IOPS are `low_bad`: higher values
-are better. The tolerance floor is 10%; U8 reuses robust median/MAD statistics,
-stratifies by image/CUDA/PyTorch, requires eight qualifying results and ten new
-results for another candidate, and uses framework aggregation
-`max_metric_class.v1`.
-
-U8 candidates remain candidate-first and `auto_activate=false`. No live storage
-health DB/evaluator is enabled; existing compatibility baselines remain the
-operational classification surface until separately approved migration/U9 work.
+`cval.baselines` expands the twelve persisted FIO columns into independent
+low-is-bad metrics. It builds robust median/MAD candidates, uses a 10% tolerance
+floor, and classifies nodes as normal, degraded, or improved.
 
 ## Troubleshooting
 

@@ -29,49 +29,9 @@ min_degraded_metrics = 10
 degraded_severity_pct = 10.0
 
 [artifacts]
-results_db_path = "validation_tests/dltest/dltest_results.db"
-health_classes_db_path = "validation_tests/dltest/dltest_health_classes.db"
 summary_filename = "summary.json"
 
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "ingest", "health", "baseline", "export"]
-
-[health]
-enabled = true
-policy_version = "dltest.health.v1"
-strategy = "custom"
-min_samples = 8
-min_new_results = 10
-target_class_count = 5
-combination_factors = ["image_name", "cuda_version", "pytorch_version", "test_plan", "iterations"]
-auto_activate = false
-
-[[health.metrics]]
-name = "numerical-correctness"
-source = "numerical_correctness"
-direction = "two_sided"
-units = "mixed"
-tolerance_pct = 0.1
-
-[[health.metrics]]
-name = "compute-performance"
-source = "compute_performance"
-direction = "high_bad"
-units = "ms"
-tolerance_pct = 3.0
-
-[[health.metrics]]
-name = "collective-performance"
-source = "collective_performance"
-direction = "high_bad"
-units = "ms"
-tolerance_pct = 3.0
-
-[[health.metrics]]
-name = "overlap-performance"
-source = "overlap_performance"
-direction = "two_sided"
-units = "ms"
-tolerance_pct = 20.0
+capabilities = ["config", "baseline", "export"]

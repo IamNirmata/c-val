@@ -4,13 +4,13 @@ A baseline is computed per ``(test_type, stratum)`` over a rolling time window:
 
 1. Pull each metric's recent values out of the result DB (SQLite has no
    median, so values are aggregated in Python).
-2. Drop non-positive performance readings (failed/missing fio or NCCL runs).
+2. Drop non-positive performance readings (failed/missing storage or DL runs).
 3. ``cval.baselines.stats.summarize_metric`` trims extreme outliers, then
    records the median, MAD/IQR, percentiles, and a directional acceptance band.
 
 Stratification keys differ by test type because the schemas differ:
-  - storage / NCCL rows carry ``image_name`` (no ``test_plan``);
-  - DL tall tables carry ``test_plan`` (no ``image_name``).
+    - storage rows carry ``image_name`` (no ``test_plan``);
+    - DL tall tables carry ``test_plan`` (no ``image_name``).
 GPU SKU / topology are not present in any table and are left for future work.
 """
 
@@ -28,11 +28,6 @@ from cval.storage.dltest_ingest import validate_dl_metric_generation
 from cval.storage.sqlite_uri import connect_sqlite_file
 
 BASELINE_SCHEMA_VERSION = "cval.baseline.v2"
-
-NCCL_DIRECTIONS = {
-    "busbw": stats.DIRECTION_LOW_BAD,   # higher bus bandwidth is better
-    "latency": stats.DIRECTION_HIGH_BAD,  # lower latency is better
-}
 
 # short_name, table, direction, tolerance config attribute, keep rank in key
 _DL_DB_SPECS = (
@@ -183,62 +178,6 @@ def build_storage_baseline(
     )
 
 
-def build_nccl_baseline(
-    *,
-    config: CvalConfig | None = None,
-    db_path: str | Path | None = None,
-    window_days: int | None = None,
-    min_samples: int | None = None,
-    image_name: str | None = None,
-    node: str | None = None,
-    baseline_id: str | None = None,
-) -> dict[str, Any]:
-    """Build an NCCL baseline from ``IB_HEALTH`` aggregate metrics."""
-
-    config = config or load_config()
-    db_path = db_path or config.storage.nccl_db_path
-    window_days = config.baseline.window_days if window_days is None else window_days
-    min_samples = config.baseline.min_samples if min_samples is None else min_samples
-
-    source_columns = ("BUS_BW", "LATENCY")
-    rows = _query_rows(
-        db_path,
-        "IB_HEALTH",
-        source_columns,
-        "timestamp",
-        window_days,
-        {"image_name": image_name, "Node": node},
-    )
-    source_series = _collect_positive(source_columns, rows)
-    series = {
-        "busbw": source_series["BUS_BW"],
-        "latency": source_series["LATENCY"],
-    }
-
-    metrics: dict[str, Any] = {}
-    for column in ("busbw", "latency"):
-        values = series[column]
-        if len(values) >= min_samples:
-            metric_stat = stats.summarize_metric(
-                column,
-                values,
-                direction=NCCL_DIRECTIONS[column],
-                tolerance_pct=config.baseline.nccl_peer_tolerance_pct,
-                z_threshold=config.baseline.robust_z_threshold,
-            ).to_dict()
-            metric_stat["source_table"] = "IB_HEALTH"
-            metrics[column] = metric_stat
-
-    return _assemble_record(
-        "nccl",
-        metrics,
-        window_days=window_days,
-        n_samples=len(rows),
-        stratum_key=_stratum_key({"image": image_name, "node": node}),
-        baseline_id=baseline_id,
-    )
-
-
 def _default_dl_db_paths(config: CvalConfig) -> dict[str, str]:
     return {
         "numerical_correctness": config.storage.dl_numerical_db_path,
@@ -346,16 +285,6 @@ def build_baseline(
 
     if test_type == "storage":
         return build_storage_baseline(
-            config=config,
-            db_path=db_path,
-            window_days=window_days,
-            min_samples=min_samples,
-            image_name=image_name,
-            node=node,
-            baseline_id=baseline_id,
-        )
-    if test_type == "nccl":
-        return build_nccl_baseline(
             config=config,
             db_path=db_path,
             window_days=window_days,

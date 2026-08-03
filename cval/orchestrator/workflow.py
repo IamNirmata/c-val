@@ -1,8 +1,8 @@
-"""Dry-run workflow planning.
+"""Nonmutating workflow planning.
 
 The workflow planner is the package replacement for notebook-local
 orchestration. It combines free nodes, validation history, prioritization, and
-job rendering into a `WorkflowPlan` that can be inspected before submission.
+job rendering into a `WorkflowPlan` used by inspection and submission paths.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def build_workflow_plan(
     now: datetime | None = None,
     config: CvalConfig | None = None,
 ) -> WorkflowPlan:
-    """Build a dry-run plan containing prioritized nodes and rendered jobs."""
+    """Build a nonmutating plan containing prioritized nodes and rendered jobs."""
 
     active_config = config or load_config()
     resolved_days_threshold = (
@@ -76,7 +76,6 @@ def build_workflow_plan(
         planned_jobs=planned_jobs,
         batch_size=resolved_batch_size,
         days_threshold=resolved_days_threshold,
-        dry_run=True,
     )
 
 
@@ -84,7 +83,6 @@ def workflow_plan_to_dict(plan: WorkflowPlan, include_yaml: bool = False) -> dic
     """Convert a workflow plan into JSON-serializable output for CLI/Hermes."""
 
     return {
-        "dry_run": plan.dry_run,
         "batch_size": plan.batch_size,
         "days_threshold": plan.days_threshold,
         "free_nodes_count": len(plan.free_nodes),
@@ -97,6 +95,7 @@ def workflow_plan_to_dict(plan: WorkflowPlan, include_yaml: bool = False) -> dic
                 "last_tested_timestamp": planned.candidate.last_tested_timestamp,
                 "age_days": planned.candidate.age_days,
                 "job_name": planned.rendered_job.job_name,
+                "git_ref": planned.rendered_job.git_ref,
                 # YAML is large and omitted by default to keep plan summaries readable.
                 **({"yaml_text": planned.rendered_job.yaml_text} if include_yaml else {}),
             }

@@ -167,7 +167,7 @@ def _assert_expected_identity(
 ) -> None:
     if actual is None or actual != expected:
         raise RuntimeError(
-            "SQLite database path/device/inode changed since evaluator preflight"
+            "SQLite database path/device/inode changed since identity capture"
         )
 
 

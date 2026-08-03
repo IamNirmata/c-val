@@ -54,34 +54,6 @@ def _make_storage_two_nodes(path: Path) -> None:
         connection.commit()
 
 
-def _make_nccl_two_nodes(path: Path) -> None:
-    with closing(sqlite3.connect(path)) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IB_HEALTH (
-                Node TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                image_name TEXT NOT NULL DEFAULT '',
-                BUS_BW REAL,
-                LATENCY REAL,
-                PRIMARY KEY (Node, timestamp)
-            )
-            """
-        )
-
-        def insert(node: str, busbw: float, latency: float, n_rows: int) -> None:
-            for i in range(n_rows):
-                connection.execute(
-                    "INSERT INTO IB_HEALTH (Node, timestamp, image_name, BUS_BW, LATENCY) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (node, NOW - i * 60, "img:1", busbw + (i % 5 - 2) * 0.5, latency),
-                )
-
-        insert("node-good", 500.0, 25.0, 12)
-        insert("node-bad", 400.0, 35.0, 6)  # lower busbw + higher latency
-        connection.commit()
-
-
 def _make_dl_compute_db(path: Path, node: str, degraded_metrics: int) -> None:
     with closing(sqlite3.connect(path)) as connection:
         connection.execute(
@@ -180,25 +152,31 @@ class TestClassifyStorage(unittest.TestCase):
             self.assertEqual(set(by_node), {"node-good", "node-bad"})
             self.assertEqual(by_node["node-bad"], "degraded")
 
-
-class TestClassifyNccl(unittest.TestCase):
-    def test_low_busbw_and_high_latency_degraded(self):
+    def test_zero_comparable_metrics_is_an_explicit_error(self):
         config = load_config()
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "nccl.db"
-            _make_nccl_two_nodes(db_path)
-
-            baseline = build.build_nccl_baseline(
-                config=config, db_path=db_path, window_days=365, min_samples=5, node="node-good"
+            db_path = Path(tmpdir) / "storage.db"
+            _make_storage_two_nodes(db_path)
+            baseline = build.build_storage_baseline(
+                config=config,
+                db_path=db_path,
+                window_days=365,
+                min_samples=5,
+                node="node-good",
             )
+            baseline["metrics"] = {
+                "not-present": next(iter(baseline["metrics"].values()))
+            }
 
-            bad = classify_node(
-                "nccl", "node-bad", baseline, config=config, db_path=db_path, window_days=365
-            )
-            self.assertEqual(bad["status"], "degraded")
-            degraded_metrics = {m["metric"] for m in bad["metrics"] if m["status"] == "degraded"}
-            self.assertIn("busbw", degraded_metrics)
-            self.assertIn("latency", degraded_metrics)
+            with self.assertRaisesRegex(ValueError, "No comparable metrics"):
+                classify_node(
+                    "storage",
+                    "node-good",
+                    baseline,
+                    config=config,
+                    db_path=db_path,
+                    window_days=365,
+                )
 
 
 class TestClassifyDlAggregation(unittest.TestCase):

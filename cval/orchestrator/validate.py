@@ -1,10 +1,10 @@
-"""Targeted single-node validation: submit, live-track, classify, and report.
+"""Targeted single-node validation: submit, live-track, and report raw evidence.
 
-``cval validate --node <node>`` is the on-demand counterpart to the rolling
-live runner. It renders and submits one validation job for a specific node,
-streams progress while the in-pod tests run, then classifies the fresh result
-against the active baselines (on the PVC access pod, where ``/data`` is mounted)
-and prints a pass/fail + degraded-metric report.
+``cval validate --node <node> --git-ref <commit> --submit --confirm submit`` is
+the cluster-first development path. It submits one validation job for a
+specific eligible node, streams progress while the in-pod tests run, and
+reports the canonical raw evidence written by that job. Derived baseline and
+classification writes remain separate operational actions.
 
 The pure helpers (`parse_test_progress`, `degraded_metrics_from_verdict`,
 `build_validation_report`, `render_validation_report`) are import-only and
@@ -23,32 +23,28 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable
 
-from cval.config import CvalConfig, load_config
+from cval.config import CvalConfig, is_exact_commit, load_config
 from cval.jobs.manager import submit_workflow_plan
 from cval.jobs.monitor import TERMINAL_PHASES, get_job_phase
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
 from cval.models import PlannedJob, QueueCandidate, WorkflowPlan
-from cval.policy import ExecutionPolicy
+from cval.policy import ExecutionPolicy, PolicyViolation
 from cval.storage.status import get_latest_status_rows, resolve_status_pod
-from cval.validation.compatibility import (
-    LEGACY_DB_UPDATE_DONE_MARKER,
-    LEGACY_DONE_MARKERS,
-    LEGACY_FINAL_RESULT_PREFIX,
-    LEGACY_RUNNING_MARKERS,
-    LEGACY_SKIPPED_MARKERS,
-    LEGACY_TEST_IDS,
-)
-from cval.validation.operational_targets import (
-    BASELINE_CLASSIFY,
-    build_operational_target_catalog,
+from cval.validation.builtins import (
+    BUILTIN_DB_UPDATE_DONE_MARKER,
+    BUILTIN_DONE_MARKERS,
+    BUILTIN_FINAL_RESULT_PREFIX,
+    BUILTIN_RUNNING_MARKERS,
+    BUILTIN_SKIPPED_MARKERS,
+    BUILTIN_TEST_IDS,
 )
 
 # In-pod run-test.sh log markers that signal each phase finished.
 _FINAL_RESULT_RE = re.compile(
-    re.escape(LEGACY_FINAL_RESULT_PREFIX)
-    + "".join(rf"\s*{re.escape(test_id)}=(\w+)" for test_id in LEGACY_TEST_IDS)
+    re.escape(BUILTIN_FINAL_RESULT_PREFIX)
+    + "".join(rf"\s*{re.escape(test_id)}=(\w+)" for test_id in BUILTIN_TEST_IDS)
 )
 _CVAL_EVENT_RE = re.compile(r"^CVAL_EVENT\s+(\{.*\})$", re.MULTILINE)
 
@@ -71,17 +67,17 @@ def parse_test_progress(log_text: str) -> dict[str, str]:
     if not log_text:
         return progress
 
-    for test, (done_marker, fail_marker) in LEGACY_DONE_MARKERS.items():
+    for test, (done_marker, fail_marker) in BUILTIN_DONE_MARKERS.items():
         if done_marker in log_text:
             progress[test] = "pass"
         elif fail_marker in log_text:
             progress[test] = "fail"
 
-    for test, running_marker in LEGACY_RUNNING_MARKERS.items():
+    for test, running_marker in BUILTIN_RUNNING_MARKERS.items():
         if running_marker in log_text and test not in progress:
             progress[test] = "running"
 
-    for test, skipped_marker in LEGACY_SKIPPED_MARKERS.items():
+    for test, skipped_marker in BUILTIN_SKIPPED_MARKERS.items():
         if skipped_marker in log_text:
             progress[test] = "incomplete"
 
@@ -90,7 +86,7 @@ def parse_test_progress(log_text: str) -> dict[str, str]:
         progress.update(
             {
                 test_id: _normalize_result(value)
-                for test_id, value in zip(LEGACY_TEST_IDS, match.groups(), strict=True)
+                for test_id, value in zip(BUILTIN_TEST_IDS, match.groups(), strict=True)
             }
         )
 
@@ -116,7 +112,7 @@ def raw_results_from_log(
     """Extract per-test results and aggregate across enabled phases."""
 
     results: dict[str, str] = {}
-    for test, skipped_marker in LEGACY_SKIPPED_MARKERS.items():
+    for test, skipped_marker in BUILTIN_SKIPPED_MARKERS.items():
         if skipped_marker in (log_text or ""):
             results[test] = "incomplete"
     for event in _structured_progress_events(log_text or ""):
@@ -138,12 +134,12 @@ def raw_results_from_log(
         results.update(
             {
                 test_id: _normalize_result(value)
-                for test_id, value in zip(LEGACY_TEST_IDS, match.groups(), strict=True)
+                for test_id, value in zip(BUILTIN_TEST_IDS, match.groups(), strict=True)
             }
         )
     if not results:
         return {}
-    enabled = enabled_tests if enabled_tests is not None else set(LEGACY_TEST_IDS)
+    enabled = enabled_tests if enabled_tests is not None else set(BUILTIN_TEST_IDS)
     if "all" in results:
         return results
     if not enabled:
@@ -179,7 +175,7 @@ def log_signals_db_updated(log_text: str) -> bool:
     ]
     if ingestion_events:
         return ingestion_events[-1].get("status") == "pass"
-    return bool(log_text) and LEGACY_DB_UPDATE_DONE_MARKER in log_text
+    return bool(log_text) and BUILTIN_DB_UPDATE_DONE_MARKER in log_text
 
 
 def render_test_progress_line(
@@ -227,11 +223,11 @@ def build_validation_report(
     timestamp: int,
     job_name: str,
     job_phase: str,
+    git_ref: str = "",
     schedulability: dict[str, Any],
     raw_results: dict[str, str],
     verdicts: dict[str, dict[str, Any] | None],
     metric_limit: int | None = 25,
-    dry_run: bool = False,
     interrupted: bool = False,
     ingestion_complete: bool = True,
     fresh_status_complete: bool = True,
@@ -297,7 +293,7 @@ def build_validation_report(
         "timestamp": timestamp,
         "job_name": job_name,
         "job_phase": job_phase,
-        "dry_run": dry_run,
+        "git_ref": git_ref,
         "interrupted": interrupted,
         "ok": (
             job_ok
@@ -333,6 +329,8 @@ def render_validation_report(report: dict[str, Any]) -> str:
     lines.append(f"c-val validation report: {report['node']}")
     lines.append("=" * 72)
     lines.append(f"job:        {report['job_name']}")
+    if report.get("git_ref"):
+        lines.append(f"commit:     {report['git_ref']}")
     lines.append(f"timestamp:  {report['timestamp']}")
     lines.append(f"job phase:  {report['job_phase']}")
 
@@ -349,11 +347,6 @@ def render_validation_report(report: dict[str, Any]) -> str:
             f"resource_ready={sched.get('resource_ready')} "
             f"({sched.get('reason', '')})"
         )
-
-    if report.get("dry_run"):
-        lines.append("")
-        lines.append("DRY RUN: no job was submitted.")
-        return "\n".join(lines)
 
     lines.append("-" * 72)
     lines.append(f"{'TEST':<10} {'RAW':<8} {'VERDICT':<10} {'BAD':>5} {'BAD%':>7} {'WORST':>9}")
@@ -435,41 +428,6 @@ def render_validation_report(report: dict[str, Any]) -> str:
 def _first_line(text: str) -> str:
     text = (text or "").strip()
     return text.splitlines()[0] if text else ""
-
-
-def _pod_repo_paths(pod_repo_dir: str, pod_config_path: str | None) -> tuple[str, str]:
-    repo = pod_repo_dir.rstrip("/")
-    config_path = pod_config_path or f"{repo}/config/cval.toml"
-    return repo, config_path
-
-
-def _run_pod_cval(
-    kubectl: KubectlClient,
-    namespace: str,
-    pod: str,
-    repo: str,
-    config_path: str,
-    cval_args: list[str],
-    lock_file: str | None = None,
-    lock_wait: float | None = None,
-    timeout: float | None = None,
-):
-    """Run `python -m cval.cli ...` inside the PVC pod, optionally under flock.
-
-    ``lock_wait`` bounds how long ``flock`` waits for the shared DL metric lock
-    before giving up, so a busy baseline rebuild cannot stall the call forever.
-    ``timeout`` overrides the client kubectl timeout for this command only.
-    """
-
-    args = ["exec", "-i", "-n", namespace, pod, "--"]
-    if lock_file:
-        args += ["flock"]
-        if lock_wait is not None:
-            args += ["-w", str(int(lock_wait))]
-        args += ["-x", lock_file]
-    args += ["env", f"PYTHONPATH={repo}", "python3", "-m", "cval.cli", "--config", config_path]
-    args += cval_args
-    return kubectl.run(args, check=False, timeout=timeout)
 
 
 # Pod-side collector: zips this run's logs/summaries/result files from the PVC
@@ -599,23 +557,6 @@ def download_validation_artifacts(
     return finalize_download_zip(result.stdout, report, output_path)
 
 
-def _parse_classify_verdict(stdout: str) -> dict[str, Any] | None:
-    """Extract the single-node verdict from `baseline classify` JSON output."""
-
-    try:
-        data = json.loads(stdout or "")
-    except json.JSONDecodeError:
-        return None
-    if isinstance(data, dict):
-        verdicts = data.get("verdicts")
-        if isinstance(verdicts, list) and verdicts:
-            return verdicts[0]
-        return None
-    if isinstance(data, list) and data:
-        return data[0]
-    return None
-
-
 def _build_single_node_plan(
     node: str,
     timestamp: int,
@@ -645,7 +586,6 @@ def _build_single_node_plan(
         planned_jobs=[PlannedJob(candidate=candidate, rendered_job=rendered)],
         batch_size=1,
         days_threshold=0.0,
-        dry_run=True,
     )
     return plan, rendered
 
@@ -676,14 +616,9 @@ def run_node_validation(
     poll_interval: float = 3.0,
     overall_timeout: float | None = None,
     pending_timeout: float = 600.0,
-    skip_dl_rebuild: bool = False,
-    dl_rebuild_timeout: float = 300.0,
-    dl_lock_wait: float = 120.0,
     pod: str | None = None,
-    pod_repo_dir: str = "/tmp/c-val",
-    pod_config_path: str | None = None,
-    window_days: int | None = None,
-    dry_run: bool = False,
+    submit: bool = False,
+    confirmation: str | None = None,
     download: bool = False,
     download_dir: str | Path = ".",
     verbose: bool = True,
@@ -691,7 +626,7 @@ def run_node_validation(
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
-    """Submit, live-track, classify, and report validation for one node."""
+    """Submit, live-track, and report one real cluster validation job."""
 
     config = config or load_config()
     namespace = namespace or config.cluster.namespace
@@ -704,17 +639,19 @@ def run_node_validation(
         raise ValueError("overall_timeout must be positive")
     if poll_interval <= 0:
         raise ValueError("poll_interval must be positive")
-    window_days = config.baseline.window_days if window_days is None else window_days
+    if not submit:
+        raise PolicyViolation(
+            "Cluster validation requires explicit --submit --confirm submit"
+        )
+    resolved_git_ref = git_ref or config.job.git_ref
+    if not is_exact_commit(resolved_git_ref):
+        raise PolicyViolation(
+            "Cluster validation requires --git-ref to be an exact lowercase "
+            "40-hex commit"
+        )
     notes: list[str] = []
     enabled_test_order = [test.id for test in config.tests.registry.enabled]
     enabled_tests = set(enabled_test_order)
-    classification_test_order = [
-        target.name
-        for target in build_operational_target_catalog(
-            config.tests.registry
-        ).for_operation(BASELINE_CLASSIFY)
-        if not target.alias
-    ]
     disabled_tests = [
         test.id for test in config.tests.registry.tests if not test.enabled
     ]
@@ -725,7 +662,7 @@ def run_node_validation(
         if verbose:
             printer(message)
 
-    # 1. Node schedulability (informational only; we submit regardless).
+    # 1. Fail closed unless the node can run the complete validation workload.
     schedulability: dict[str, Any] = {}
     try:
         status: NodeStatus = describe_node(node, client=kubectl, config=config)
@@ -753,35 +690,35 @@ def run_node_validation(
             notes.append(
                 "node is cordoned; validation job tolerates the cordon taint and targets it anyway"
             )
-    except Exception as exc:  # noqa: BLE001 - status is best-effort, never blocks submit
-        schedulability = {"found": False, "reason": f"could not determine node state: {exc}"}
-        notes.append(f"node status check failed: {_first_line(str(exc))}")
-        emit(f"node {node}: could not determine state ({_first_line(str(exc))}); submitting anyway")
+        eligible = (
+            status.found
+            and status.is_gpu_node
+            and status.ready
+            and status.resource_ready
+            and status.allocatable > 0
+            and status.free == status.allocatable
+            and (status.schedulable or status.cordoned)
+        )
+        if not eligible:
+            raise PolicyViolation(
+                f"Node {node!r} is not eligible for cluster validation: "
+                f"{status.status_label or 'unknown'} ({status.reason})"
+            )
+    except PolicyViolation:
+        raise
+    except Exception as exc:  # noqa: BLE001 - unknown state must block mutation
+        raise PolicyViolation(
+            f"Could not verify node {node!r} eligibility: {_first_line(str(exc))}"
+        ) from exc
 
     # 2. Render the single-node job.
-    plan, rendered = _build_single_node_plan(node, timestamp, config, git_ref)
+    plan, rendered = _build_single_node_plan(
+        node, timestamp, config, resolved_git_ref
+    )
     job_name = rendered.job_name
     pod_name = f"{job_name}-server-0"
 
-    if dry_run:
-        emit(f"[dry-run] would submit job {job_name} for node {node} (timestamp {timestamp})")
-        report = build_validation_report(
-            node=node,
-            timestamp=timestamp,
-            job_name=job_name,
-            job_phase="DryRun",
-            schedulability=schedulability,
-            raw_results={},
-            verdicts={test: None for test in enabled_test_order},
-            test_ids=enabled_test_order,
-            dry_run=True,
-            notes=notes,
-        )
-        if verbose:
-            printer(render_validation_report(report))
-        return report
-
-    # 3. Submit immediately (the explicit `validate` invocation is the approval).
+    # 3. Submit only after the operator supplied the exact confirmation.
     policy = ExecutionPolicy(
         namespace_allowlist=tuple(config.policy.namespace_allowlist),
         max_batch_size=max(1, config.policy.max_batch_size),
@@ -793,7 +730,7 @@ def run_node_validation(
         client=kubectl,
         policy=policy,
         submit=True,
-        confirmation=config.policy.confirmation_phrase,
+        confirmation=confirmation,
     )
     record = submission.records[0]
     emit(f"queued job {record.job_name} for node {node} (timestamp {timestamp})")
@@ -862,7 +799,7 @@ def run_node_validation(
     except KeyboardInterrupt:
         interrupted = True
         notes.append("interrupted by operator; job left running")
-        emit("\ninterrupted; the validation job is still running. Re-run classification later.")
+        emit("\ninterrupted; the validation job is still running and was left untouched.")
 
     # 5. Raw pass/fail from logs, augmented only by rows from this exact run.
     raw_results = raw_results_from_log(logs, enabled_tests=enabled_tests)
@@ -890,139 +827,21 @@ def run_node_validation(
     except Exception as exc:  # noqa: BLE001
         notes.append(f"could not read validation.db status: {_first_line(str(exc))}")
 
-    verdicts: dict[str, dict[str, Any] | None] = {
-        test: None for test in enabled_test_order
-    }
-
-    # 6. Classify only a successful, fully ingested run with fresh DB rows.
-    compatibility_status_tests = enabled_tests & set(LEGACY_TEST_IDS)
+    # 6. Verify fresh raw rows. Derived writes run independently in the evaluator.
+    compatibility_status_tests = enabled_tests & set(BUILTIN_TEST_IDS)
     required_fresh_tests = compatibility_status_tests | {"all"}
     fresh_rows_complete = required_fresh_tests.issubset(fresh_status_tests)
     fresh_rows_match = all(
         fresh_status_results.get(test) == raw_results.get(test)
         for test in required_fresh_tests
     )
-    can_classify = (
-        not interrupted
-        and phase in SUCCESS_PHASES
-        and ingestion_complete
-        and fresh_rows_complete
-        and fresh_rows_match
+    verdicts: dict[str, dict[str, Any] | None] = {
+        test: None for test in enabled_test_order
+    }
+    notes.append(
+        "derived classification is not written by validate; read the resident "
+        "evaluator output separately"
     )
-    if can_classify:
-        try:
-            pvc_pod = resolve_status_pod(kubectl, namespace, pod or config.cluster.pvc_access_pod)
-            repo, pod_config = _pod_repo_paths(pod_repo_dir, pod_config_path)
-            emit(f"classifying results on PVC pod {pvc_pod} ...")
-
-            dltest_enabled = config.tests.registry.require("dltest").enabled
-            dl_refresh_ok = not dltest_enabled
-            dl_lock_file = (
-                f"{config.baseline.baseline_root_path.rstrip('/')}/"
-                ".dl-metric-refresh.lock"
-            )
-            if (
-                dltest_enabled
-                and raw_results.get("dltest") == "pass"
-                and "dltest" in fresh_status_tests
-                and not skip_dl_rebuild
-            ):
-                run_root = (
-                    f"{config.runtime.dl_results_root_path.rstrip('/')}/"
-                    f"{node}/{node}-{timestamp}"
-                )
-                emit("  refreshing DL metric DBs for this node (scoped, locked) ...")
-                rebuild = _run_pod_cval(
-                    kubectl,
-                    namespace,
-                    pvc_pod,
-                    repo,
-                    pod_config,
-                    [
-                        "db-rebuild-dltest-metrics",
-                        "--results-root",
-                        run_root,
-                        "--output",
-                        "json",
-                    ],
-                    lock_file=dl_lock_file,
-                    lock_wait=dl_lock_wait,
-                    timeout=dl_rebuild_timeout,
-                )
-                if rebuild.returncode == 0:
-                    try:
-                        receipt = json.loads(rebuild.stdout)
-                        expected_db_paths = {
-                            "numerical_correctness": config.storage.dl_numerical_db_path,
-                            "compute_performance": config.storage.dl_compute_db_path,
-                            "collective_performance": config.storage.dl_collective_db_path,
-                            "overlap_performance": config.storage.dl_overlap_db_path,
-                        }
-                        dl_refresh_ok = (
-                            isinstance(receipt, dict)
-                            and int(receipt.get("runs", 0)) == 1
-                            and int(receipt.get("rank_files", 0)) > 0
-                            and receipt.get("db_paths") == expected_db_paths
-                            and bool(receipt.get("generation_id"))
-                        )
-                    except (ValueError, TypeError, json.JSONDecodeError):
-                        dl_refresh_ok = False
-                if not dl_refresh_ok:
-                    note = "DL metric refresh did not confirm this exact run; DL classification skipped"
-                    notes.append(note)
-                    emit(f"  {note}")
-            elif dltest_enabled and skip_dl_rebuild:
-                notes.append("DL metric refresh explicitly skipped; DL classification skipped")
-
-            for test in classification_test_order:
-                if test not in enabled_tests:
-                    emit(f"  skipping {test} classification (test disabled) ...")
-                    continue
-                if raw_results.get(test) != "pass" or test not in fresh_status_tests:
-                    emit(f"  skipping {test} classification (no fresh passing result) ...")
-                    continue
-                if test == "dltest" and not dl_refresh_ok:
-                    emit("  skipping dltest classification (fresh metric receipt unavailable) ...")
-                    continue
-                emit(f"  classifying {test} ...")
-                result = _run_pod_cval(
-                    kubectl,
-                    namespace,
-                    pvc_pod,
-                    repo,
-                    pod_config,
-                    [
-                        "baseline",
-                        "classify",
-                        "--test-type",
-                        test,
-                        "--node",
-                        node,
-                        "--window-days",
-                        str(window_days),
-                        "--store-results",
-                        "--output",
-                        "json",
-                    ],
-                    lock_file=dl_lock_file if test == "dltest" else None,
-                    lock_wait=dl_lock_wait if test == "dltest" else None,
-                )
-                if result.returncode == 0:
-                    verdicts[test] = _parse_classify_verdict(result.stdout)
-                    if verdicts[test] is None:
-                        notes.append(f"{test} classification returned no verdict")
-                else:
-                    note = f"{test} classification failed: {_first_line(result.stderr)}"
-                    notes.append(note)
-                    emit(f"  {note}")
-        except Exception as exc:  # noqa: BLE001
-            note = f"classification step failed: {_first_line(str(exc))}"
-            notes.append(note)
-            emit(f"  {note}")
-    elif not interrupted:
-        notes.append(
-            "classification skipped: job was not successfully ingested with fresh rows"
-        )
 
     # 7. Build and render the report.
     report = build_validation_report(
@@ -1030,6 +849,7 @@ def run_node_validation(
         timestamp=timestamp,
         job_name=job_name,
         job_phase=phase,
+        git_ref=resolved_git_ref,
         schedulability=schedulability,
         raw_results=raw_results,
         verdicts=verdicts,
@@ -1040,7 +860,7 @@ def run_node_validation(
         notes=notes,
     )
 
-    # 8. Optionally package logs, results, and the baseline comparison as a zip.
+    # 8. Optionally package logs, results, and the raw report as a zip.
     if download:
         try:
             info = download_validation_artifacts(

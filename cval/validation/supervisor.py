@@ -14,8 +14,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, Mapping, Sequence
 
-from cval.validation.compatibility import LEGACY_TEST_IDS
+from cval.config import load_config_snapshot
+from cval.validation.builtins import BUILTIN_TEST_IDS
 from cval.validation.path_preflight import SAFE_SEGMENT, _registry_test_ids
+from cval.validation.results import (
+    ValidationResultV2,
+    load_validation_result,
+    validation_result_digest,
+)
+from cval.validation.runtime import effective_config_digest
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(
@@ -53,18 +60,30 @@ class SecureRunLayout:
     """Open descriptors anchoring every framework-owned run directory."""
 
     canonical_root: Path
+    node: str
+    run_id: str
     root_fd: int
     run_dir_fd: int
     test_fds: dict[str, tuple[int, int, int]]
     identities: tuple[_DirectoryIdentity, ...]
     global_file_fds: dict[str, int]
     owned_fds: list[int]
+    result_file_fd: int | None = None
+    result_device: int | None = None
+    result_inode: int | None = None
+    result_size: int | None = None
+    result_mtime_ns: int | None = None
+    result_ctime_ns: int | None = None
+    result_digest: str | None = None
+    config_digest: str | None = None
 
     @property
     def inherited_fds(self) -> tuple[int, ...]:
         descriptors = {self.root_fd, self.run_dir_fd}
         for values in self.test_fds.values():
             descriptors.update(values)
+        if self.result_file_fd is not None:
+            descriptors.add(self.result_file_fd)
         return tuple(sorted(descriptors))
 
     def environment(self) -> dict[str, str]:
@@ -79,8 +98,18 @@ class SecureRunLayout:
         payload = {
             "schema_version": _LAYOUT_VERSION,
             "canonical_root": str(self.canonical_root),
+            "node": self.node,
+            "run_id": self.run_id,
             "root_fd": self.root_fd,
             "run_dir_fd": self.run_dir_fd,
+            "result_file_fd": self.result_file_fd,
+            "result_device": self.result_device,
+            "result_inode": self.result_inode,
+            "result_size": self.result_size,
+            "result_mtime_ns": self.result_mtime_ns,
+            "result_ctime_ns": self.result_ctime_ns,
+            "result_digest": self.result_digest,
+            "config_digest": self.config_digest,
             "tests": tests,
         }
         anchored_run = _fd_path(self.run_dir_fd)
@@ -129,6 +158,99 @@ class SecureRunLayout:
                     )
             finally:
                 os.close(check)
+        if self.result_file_fd is not None:
+            self._verify_bound_result()
+
+    def bind_result(
+        self,
+        *,
+        config_snapshot_b64: str,
+        config_digest: str,
+        repo_root: Path | None,
+    ) -> None:
+        """Open and bind the runner's final result before starting ingestion."""
+
+        if self.result_file_fd is not None:
+            raise RuntimeError("Secure validation result is already bound")
+        if not config_snapshot_b64:
+            raise ValueError("Secure ingestion requires an immutable config snapshot")
+        config = load_config_snapshot(config_snapshot_b64, repo_root=repo_root)
+        actual_config_digest = effective_config_digest(config)
+        if config_digest != actual_config_digest:
+            raise ValueError("Secure ingestion config digest does not match snapshot")
+        self.verify()
+        descriptor = os.open(
+            "result.json",
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=self.run_dir_fd,
+        )
+        try:
+            result_stat = os.fstat(descriptor)
+            _require_private_regular_file(result_stat, "validation result")
+            result = load_validation_result(Path(f"/proc/self/fd/{descriptor}"))
+            if not isinstance(result, ValidationResultV2):
+                raise ValueError("Secure supervisor requires a current result schema")
+            if result.node != self.node or result.run_id != self.run_id:
+                raise ValueError("Secure validation result identity is not canonical")
+            if result.global_config_digest != actual_config_digest:
+                raise ValueError("Secure validation result config digest changed")
+            self.result_file_fd = descriptor
+            self.result_device = result_stat.st_dev
+            self.result_inode = result_stat.st_ino
+            self.result_size = result_stat.st_size
+            self.result_mtime_ns = result_stat.st_mtime_ns
+            self.result_ctime_ns = result_stat.st_ctime_ns
+            self.result_digest = validation_result_digest(result)
+            self.config_digest = actual_config_digest
+            self.owned_fds.append(descriptor)
+            self._verify_bound_result()
+        except BaseException:
+            if self.result_file_fd == descriptor:
+                self.result_file_fd = None
+                self.result_device = None
+                self.result_inode = None
+                self.result_size = None
+                self.result_mtime_ns = None
+                self.result_ctime_ns = None
+                self.result_digest = None
+                self.config_digest = None
+                self.owned_fds.remove(descriptor)
+            os.close(descriptor)
+            raise
+
+    def _verify_bound_result(self) -> None:
+        if self.result_file_fd is None:
+            raise RuntimeError("Secure validation result is not bound")
+        retained = os.fstat(self.result_file_fd)
+        named = os.stat("result.json", dir_fd=self.run_dir_fd, follow_symlinks=False)
+        canonical = os.stat(
+            self.canonical_root
+            / "logs"
+            / "job_logs"
+            / self.node
+            / self.run_id
+            / "result.json",
+            follow_symlinks=False,
+        )
+        for value in (retained, named, canonical):
+            _require_private_regular_file(value, "validation result")
+        expected = (
+            self.result_device,
+            self.result_inode,
+            self.result_size,
+            self.result_mtime_ns,
+            self.result_ctime_ns,
+        )
+        for value in (retained, named, canonical):
+            actual = (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+            if actual != expected:
+                raise RuntimeError("Secure validation result identity or content changed")
 
     def release_marker(self) -> None:
         self.verify()
@@ -230,6 +352,8 @@ def reserve_secure_run_layout(
 
         layout = SecureRunLayout(
             canonical_root=root,
+            node=node,
+            run_id=run_id,
             root_fd=root_fd,
             run_dir_fd=run_fd,
             test_fds=test_fds,
@@ -260,6 +384,23 @@ def supervise_validation_run(
     """Reserve evidence, run both compatibility children, and cleanly release."""
 
     runtime_env = dict(environment)
+    sensitive_fragments = (
+        "PASSWORD",
+        "SECRET",
+        "TOKEN",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+        "API_KEY",
+    )
+    for name in tuple(runtime_env):
+        upper = name.upper()
+        if (
+            upper == "DATABASE_URL"
+            or upper.startswith("PG")
+            or upper.startswith("POSTGRES")
+            or any(fragment in upper for fragment in sensitive_fragments)
+        ):
+            runtime_env.pop(name, None)
     required = ("CVAL_VALIDATION_ROOT", "GCRNODE", "CVAL_RUN_ID", "CVAL_TEST_REGISTRY_JSON")
     missing = [name for name in required if not runtime_env.get(name)]
     if missing:
@@ -279,6 +420,9 @@ def supervise_validation_run(
     )
     runtime_env.update(layout.environment())
     runtime_env["CVAL_CANONICAL_JOB_LOG_DIR"] = str(canonical_run)
+    runtime_env["CVAL_CANONICAL_RESULT_JSON_FILE"] = str(
+        canonical_run / "result.json"
+    )
     repo_dir = runtime_env.get("CVAL_REPO_DIR")
     if repo_dir:
         existing_pythonpath = runtime_env.get("PYTHONPATH", "")
@@ -306,9 +450,21 @@ def supervise_validation_run(
     try:
         _write_all(layout.global_file_fds["stdout.log"], b"test started.\n")
         _write_all(layout.global_file_fds["job.log"], b"test started.\n")
-        for command in (runner_command, db_update_command):
+        for index, command in enumerate((runner_command, db_update_command)):
             if command is None:
                 continue
+            if index == 1:
+                repo_root_value = runtime_env.get("CVAL_TEST_REPO_ROOT") or repo_dir
+                layout.bind_result(
+                    config_snapshot_b64=runtime_env.get(
+                        "CVAL_CONFIG_SNAPSHOT_B64", ""
+                    ),
+                    config_digest=runtime_env.get("CVAL_CONFIG_DIGEST", ""),
+                    repo_root=(
+                        None if not repo_root_value else Path(repo_root_value)
+                    ),
+                )
+                runtime_env.update(layout.environment())
             layout.verify()
             return_code = _run_child(
                 command,
@@ -480,6 +636,18 @@ def _require_stat_identity(named: os.stat_result, opened: os.stat_result, name: 
         raise RuntimeError(f"Directory entry identity changed while opening: {name}")
 
 
+def _require_private_regular_file(value: os.stat_result, name: str) -> None:
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_IMODE(value.st_mode) != _FILE_MODE
+        or value.st_uid != os.geteuid()
+        or value.st_nlink != 1
+    ):
+        raise PermissionError(
+            f"Secure {name} must be an owner-only single-link regular file"
+        )
+
+
 def _fd_path(descriptor: int) -> str:
     path = f"/proc/self/fd/{descriptor}"
     if not os.path.exists(path):
@@ -494,7 +662,7 @@ def _add_builtin_compatibility_paths(
     run_id = environment["CVAL_RUN_ID"]
     canonical_root = layout.canonical_root
     for test_id, (log_fd, run_fd, artifacts_fd) in layout.test_fds.items():
-        if test_id not in LEGACY_TEST_IDS:
+        if test_id not in BUILTIN_TEST_IDS:
             continue
         prefix = test_id.upper()
         canonical_run = canonical_root / "validation_tests" / test_id / "runs" / node / run_id
@@ -514,6 +682,12 @@ def _add_builtin_compatibility_paths(
             timestamp = environment.get("GCRTIME", "unknown")
             environment["NCCL_IBBW_LOG_FILE"] = (
                 f"{_fd_path(artifacts_fd)}/ibbw-{node}-{timestamp}.log"
+            )
+            environment["NCCL_RUNTIME_EVIDENCE_FILE"] = (
+                f"{_fd_path(artifacts_fd)}/runtime-evidence.json"
+            )
+            environment["CVAL_CANONICAL_NCCL_RUNTIME_EVIDENCE_FILE"] = str(
+                canonical_run / "artifacts" / "runtime-evidence.json"
             )
         else:
             environment["DLTEST_LOG_FILE"] = f"{_fd_path(log_fd)}/workload.log"

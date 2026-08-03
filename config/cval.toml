@@ -15,7 +15,8 @@ batch_size = 4
 template_path = "ymls/specific-node-job.yml"
 job_prefix = "cval"
 git_repo = "https://github.com/IamNirmata/c-val.git"
-git_ref = "main"
+# Fail closed. Supply an exact published 40-hex commit to cluster validation.
+git_ref = "0000000000000000000000000000000000000000"
 
 [policy]
 namespace_allowlist = ["gcr-admin"]
@@ -31,13 +32,6 @@ pending_start_timeout_seconds = 480
 
 [storage]
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
-# U6 production writes remain disabled until backup/dry-run evidence and an
-# exact activation/deployment command receive separate approval.
-run_history_enabled = false
-run_history_db_path = "/data/continuous_validation/metadata/node-run-history.db"
-# U7 canonical per-test DB dual-writes are independently default-off. Enabling
-# them requires the separate backup/dry-run/live-write approval gate.
-per_test_ingestion_enabled = false
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"
 nccl_db_path = "/data/continuous_validation/metadata/test-nccl.db"
 dl_numerical_db_path = "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
@@ -88,9 +82,12 @@ rdma_toleration_key = "rdma"
 gpu_toleration_key = "nvidia.com/gpu"
 
 [baseline]
-# Shared baseline lifecycle and cadence settings. Test-specific tolerances,
-# combination factors, and aggregation settings live in each test_config.toml.
+# Canonical evaluator lifecycle, tolerance, and cadence settings.
 baseline_root_path = "/data/continuous_validation/baselines"
+storage_peer_tolerance_pct = 10.0
+dl_compute_tolerance_pct = 3.0
+dl_numerical_tolerance_pct = 0.1
+dl_overlap_tolerance_pct = 20.0
 # Robust z-score cutoff for dynamic baselines (Iglewicz & Hoaglin: 3.5)
 robust_z_threshold = 3.5
 # Minimum clean samples before a metric baseline is trusted
@@ -101,21 +98,3 @@ window_days = 30
 build_interval_seconds = 86400
 # Background classifier loop cadence
 classify_interval_seconds = 300
-
-[health_evaluator]
-# U9 is an independent derived-write surface. Dry-run remains available while
-# this gate is false; apply and activation additionally require exact CLI
-# confirmation. Enabling this does not enable U6/U7 ingestion writes.
-write_enabled = false
-lock_timeout_seconds = 30
-# Dedicated evaluator-owned state. runtime.validation_root remains shared,
-# root-owned validation evidence and must never be chmod/chown'ed by c-val.
-state_root = "/data/continuous_validation/evaluator_state"
-state_owner_uid = 65532
-state_owner_gid = 65532
-# Compatibility key: this is now the exact dedicated state-root mode, not the
-# mode of runtime.validation_root. Only exact 0700 is accepted.
-validation_root_mode = "0700"
-# Bounds only oldest-pending classification writes per cycle. Candidate source
-# catalogs remain complete and cumulative for every current combination.
-max_classifications_per_test = 250

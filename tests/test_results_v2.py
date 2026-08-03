@@ -9,10 +9,12 @@ from pathlib import Path
 from cval.validation.results import (
     ValidationResultV2,
     load_validation_result,
+    parse_validation_result,
     parse_validation_result_v2,
     validation_result_to_env,
     validation_result_v2_digest,
 )
+from cval.validation.builtins import project_builtin_statuses
 
 
 DIGEST = "sha256:" + "a" * 64
@@ -128,6 +130,53 @@ class ResultSchemaV2Tests(unittest.TestCase):
             result = load_validation_result(path)
 
         self.assertIsInstance(result, ValidationResultV2)
+        self.assertEqual(result.schema_version, "cval.results.v2")
+
+    def test_loader_dispatches_canonical_current_schema(self) -> None:
+        value = payload()
+        value["schema_version"] = "cval.results"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "result.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            result = load_validation_result(path)
+
+        self.assertIsInstance(result, ValidationResultV2)
+        self.assertEqual(result.schema_version, "cval.results")
+        self.assertEqual(
+            project_builtin_statuses(validation_result_to_env(result)),
+            {"storage": "pass", "nccl": "pass", "dltest": "pass", "all": "pass"},
+        )
+
+    def test_historical_v1_reader_and_builtin_projection_remain_exact(self) -> None:
+        result = parse_validation_result(
+            {
+                "schema_version": "cval.results.v1",
+                "node": "node-a",
+                "timestamp": "123",
+                "overall": "fail",
+                "tests": {
+                    "storage": {"status": "pass", "enabled": True},
+                    "nccl": {"status": "fail", "enabled": True},
+                    "dltest": {"status": "incomplete", "enabled": False},
+                },
+            }
+        )
+        projected = validation_result_to_env(result)
+
+        self.assertEqual(result.schema_version, "cval.results.v1")
+        self.assertEqual(
+            project_builtin_statuses(projected),
+            {
+                "storage": "pass",
+                "nccl": "fail",
+                "dltest": "incomplete",
+                "all": "fail",
+            },
+        )
+        self.assertEqual(
+            {name: projected[name] for name in ("RUN_STORAGE", "RUN_NCCL", "RUN_DLTEST")},
+            {"RUN_STORAGE": "true", "RUN_NCCL": "true", "RUN_DLTEST": "false"},
+        )
 
     def test_allows_disabled_not_selected_test(self) -> None:
         value = payload()

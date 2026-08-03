@@ -5,9 +5,5 @@
 !config/cval.toml
 !deploy/
 !deploy/cval-evaluator/
-!deploy/cval-evaluator/Dockerfile
-!deploy/cval-evaluator/requirements-evaluator.lock
-!deploy/cval-evaluator/wheelhouse/
-!deploy/cval-evaluator/wheelhouse/**
 !validation-tests/
 !validation-tests/**

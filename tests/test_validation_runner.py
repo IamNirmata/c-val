@@ -82,6 +82,7 @@ class ValidationRunnerTests(unittest.TestCase):
             self.assertEqual(result["tests"]["failing"]["status"], "fail")
             self.assertEqual(result["tests"]["after"]["status"], "pass")
             self.assertEqual(result["tests"]["disabled"]["phase"], "not_selected")
+            self.assertNotIn("run-disabled", stdout.getvalue())
             self.assertEqual(
                 [event["test"] for event in events if event["event"] == "test_started"],
                 ["first", "failing", "after"],
@@ -228,6 +229,25 @@ exit 0
 
         self.assertEqual(list(result["tests"]), ["smoke"])
         self.assertEqual(result["tests"]["smoke"]["status"], "pass")
+
+    def test_pass_fail_test_needs_only_descriptor_and_global_stanza(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_test(root, "smoke", order=40)
+            registry = self._registry(root, {"smoke": True})
+
+            result = run_validation_tests(
+                config=load_config(),
+                registry=registry,
+                environ=self._environment(root, root / "data"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(list(result["tests"]), ["smoke"])
+        self.assertEqual(result["schema_version"], "cval.results")
+        self.assertEqual(result["tests"]["smoke"]["status"], "pass")
+        self.assertIsNone(registry.require("smoke").definition.plugin)
 
     def test_rejects_unsafe_run_id_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -517,7 +537,6 @@ setup = "setup.sh"
 timeout_seconds = {timeout_seconds}
 
 [artifacts]
-results_db_path = "validation_tests/{test_id}/{test_id}_results.db"
 summary_filename = "summary.json"
 """,
             encoding="utf-8",

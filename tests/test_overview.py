@@ -10,6 +10,8 @@ from cval.config import load_config
 from cval.jobs.monitor import JobPhase, list_job_phases
 from cval.k8s.client import CommandResult
 from cval.models import ClassificationResultRow
+from cval.storage.classification_status import get_latest_classification_rows
+import cval.orchestrator.overview as overview_module
 from cval.orchestrator.overview import (
     _freshness_counts,
     _summarize_classifications,
@@ -53,6 +55,12 @@ class TestSummarizeJobs(unittest.TestCase):
 
 
 class TestSummarizeClassifications(unittest.TestCase):
+    def test_overview_uses_shared_classification_reader(self):
+        self.assertIs(
+            overview_module.get_latest_classification_rows,
+            get_latest_classification_rows,
+        )
+
     def test_counts_by_test_and_status(self):
         rows = [
             ClassificationResultRow(100, "n1", "storage", "s1", "normal", True, 1, 0, 0, 0, 0.0, 0.0),

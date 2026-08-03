@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from cval.jobs.manager import submit_workflow_plan
@@ -27,15 +28,13 @@ class FakeKubectlClient:
 
 
 class JobManagerTests(unittest.TestCase):
-    def test_submit_workflow_plan_defaults_to_dry_run(self) -> None:
+    def test_submit_workflow_plan_has_no_preview_mode(self) -> None:
         plan = _plan(batch_size=2)
         client = FakeKubectlClient()
 
-        result = submit_workflow_plan(plan, client=client)
+        with self.assertRaisesRegex(ValueError, "use the plan command"):
+            submit_workflow_plan(plan, client=client)
 
-        self.assertTrue(result.dry_run)
-        self.assertEqual(result.submitted_count, 0)
-        self.assertEqual(len(result.records), 2)
         self.assertEqual(client.calls, [])
 
     def test_real_submit_requires_confirmation(self) -> None:
@@ -43,6 +42,30 @@ class JobManagerTests(unittest.TestCase):
 
         with self.assertRaises(PolicyViolation):
             submit_workflow_plan(plan, submit=True, confirmation=None)
+
+    def test_real_submit_rejects_moving_ref_at_create_boundary(self) -> None:
+        plan = _plan(batch_size=1)
+        planned = plan.planned_jobs[0]
+        unsafe = replace(
+            plan,
+            planned_jobs=[
+                replace(
+                    planned,
+                    rendered_job=replace(planned.rendered_job, git_ref="main"),
+                )
+            ],
+        )
+        client = FakeKubectlClient()
+
+        with self.assertRaisesRegex(PolicyViolation, "exact.*40-hex commit"):
+            submit_workflow_plan(
+                unsafe,
+                client=client,
+                submit=True,
+                confirmation="submit",
+            )
+
+        self.assertEqual(client.calls, [])
 
     def test_real_submit_uses_stdin_manifest_when_confirmed(self) -> None:
         plan = _plan(batch_size=1)
@@ -57,8 +80,8 @@ class JobManagerTests(unittest.TestCase):
             confirmation="submit",
         )
 
-        self.assertFalse(result.dry_run)
         self.assertEqual(result.submitted_count, 1)
+        self.assertEqual(result.records[0].git_ref, "a" * 40)
         self.assertEqual(client.calls[0][0], ["create", "-n", "gcr-admin", "-f", "-"])
         self.assertIn("slc01-cl02-hgx-0001", client.calls[0][1])
 
@@ -109,6 +132,7 @@ def _plan(batch_size: int):
             batch_size=batch_size,
             template_path=template_path,
             timestamp=12345,
+            git_ref="a" * 40,
         )
 
 

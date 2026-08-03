@@ -22,7 +22,7 @@ from cval.storage.results_export import (
 )
 from cval.validation.operational_targets import RESULTS_EXPORT
 from cval.validation.operations import (
-    export_compatibility_rows,
+    export_evaluator_rows,
     resolve_operational_target,
 )
 from cval.validation.plugins import ExportContext
@@ -117,7 +117,7 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
         with patch(
             "cval.storage.metrics.get_latest_storage_metrics", return_value=metrics
         ):
-            export = export_compatibility_rows(
+            export = export_evaluator_rows(
                 self.config, "storage", self._context("storage")
             )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -154,7 +154,7 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
         with patch(
             "cval.storage.metrics.get_latest_nccl_health_metrics", return_value=metrics
         ):
-            export = export_compatibility_rows(
+            export = export_evaluator_rows(
                 self.config, "nccl", self._context("nccl")
             )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,7 +172,7 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
             self.assertEqual(old.read_bytes(), new.read_bytes())
 
     def test_dl_alias_csv_is_byte_for_byte_compatible(self) -> None:
-        export = export_compatibility_rows(
+        export = export_evaluator_rows(
             self.config, "dltest-compute", self._context("dltest-compute")
         )
         with tempfile.TemporaryDirectory() as tmpdir:

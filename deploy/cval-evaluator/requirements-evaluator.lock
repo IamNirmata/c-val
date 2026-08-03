@@ -1,3 +1,0 @@
-# Build input only. Populate deploy/cval-evaluator/wheelhouse with the exact
-# platform wheel before invoking the network-disabled image build.
-PyYAML==6.0.2

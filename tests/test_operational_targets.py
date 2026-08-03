@@ -1,4 +1,4 @@
-"""U10 registry-derived compatibility target catalog tests."""
+"""Registry-derived current evaluator target catalog tests."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import io
 import json
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import FrozenInstanceError, replace
 
 from cval.cli import build_parser, main
@@ -55,7 +55,6 @@ class OperationalTargetCatalogTests(unittest.TestCase):
             catalog.names_for(BASELINE_CLASSIFY),
             (
                 "storage",
-                "nccl",
                 "dltest",
                 "dltest-numerical",
                 "dltest-compute",
@@ -64,9 +63,9 @@ class OperationalTargetCatalogTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            catalog.names_for(BASELINE_BUILD), ("storage", "nccl", "dltest")
+            catalog.names_for(BASELINE_BUILD), ("storage", "dltest")
         )
-        self.assertEqual(catalog.names_for(BASELINE_LIST), ("storage", "nccl", "dltest"))
+        self.assertEqual(catalog.names_for(BASELINE_LIST), ("storage", "dltest"))
         self.assertEqual(
             catalog.names_for(RESULTS_EXPORT),
             (
@@ -140,7 +139,7 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         for test_id, message in (
             ("overall", "reserved"),
             ("all", "reserved"),
-            ("dltest-compute", "compatibility target aliases"),
+            ("dltest-compute", "built-in target aliases"),
         ):
             with self.subTest(test_id=test_id):
                 colliding = self._test(
@@ -161,29 +160,33 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             catalog.targets[0].name = "changed"  # type: ignore[misc]
 
-    def test_parser_retains_all_old_aliases(self) -> None:
+    def test_parser_exposes_nccl_only_for_raw_results(self) -> None:
         parser = build_parser(self.config)
-        for command in (
-            ("baseline", "classify", "--test-type"),
-            ("results", "--test"),
-            ("classifications", "--test"),
-        ):
-            for target in (
+        baseline_targets = (
                 "storage",
-                "nccl",
                 "dltest",
                 "dltest-numerical",
                 "dltest-compute",
                 "dltest-collective",
                 "dltest-overlap",
-            ):
-                with self.subTest(command=command, target=target):
-                    args = [*command, target]
-                    if command[0] == "baseline":
-                        args.append("--output")
-                        args.append("json")
-                    parsed = parser.parse_args(args)
-                    self.assertIsInstance(parsed, argparse.Namespace)
+        )
+        for target in baseline_targets:
+            with self.subTest(command="baseline", target=target):
+                parsed = parser.parse_args(
+                    ["baseline", "classify", "--test-type", target, "--output", "json"]
+                )
+                self.assertIsInstance(parsed, argparse.Namespace)
+            with self.subTest(command="classifications", target=target):
+                parsed = parser.parse_args(["classifications", "--test", target])
+                self.assertIsInstance(parsed, argparse.Namespace)
+        for target in ("storage", "nccl", *baseline_targets[1:]):
+            with self.subTest(command="results", target=target):
+                parsed = parser.parse_args(["results", "--test", target])
+                self.assertIsInstance(parsed, argparse.Namespace)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["baseline", "build", "--test-type", "nccl"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["classifications", "--test", "nccl"])
 
     def test_parser_discovers_synthetic_target_without_cli_constant_edit(self) -> None:
         synthetic = self._test("storage", test_id="synthetic", order=15)
@@ -240,7 +243,7 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         self.assertTrue(
             all(row[0] == "cval.operational-target.v1" for row in fields)
         )
-        self.assertEqual([row[1] for row in fields], ["storage", "nccl", "dltest"])
+        self.assertEqual([row[1] for row in fields], ["storage", "dltest"])
         self.assertFalse(any("=" in line or "eval" in line for line in lines))
 
         output = io.StringIO()

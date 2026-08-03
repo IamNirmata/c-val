@@ -19,6 +19,7 @@ from cval.validation.registry import ValidationTestRegistry, load_test_registry
 TEMPLATE = (
         Path(__file__).resolve().parents[1] / "ymls/specific-node-job.yml"
 ).read_text(encoding="utf-8")
+COMMIT = "a" * 40
 
 
 class RendererTests(unittest.TestCase):
@@ -27,7 +28,7 @@ class RendererTests(unittest.TestCase):
           TEMPLATE,
           "slc01-cl02-hgx-0001",
           timestamp=12345,
-          git_ref="abc123",
+          git_ref=COMMIT,
         )
 
         self.assertEqual(
@@ -40,7 +41,9 @@ class RendererTests(unittest.TestCase):
         )
         self.assertIn('kubernetes.io/hostname: "slc01-cl02-hgx-0001"', rendered.yaml_text)
         self.assertIn('value: "12345"', rendered.yaml_text)
-        self.assertIn('value: "abc123"', rendered.yaml_text)
+        self.assertIn(f'value: "{COMMIT}"', rendered.yaml_text)
+        self.assertIn('git -C "$CVAL_REPO_DIR" checkout --detach FETCH_HEAD', rendered.yaml_text)
+        self.assertIn('test "$(git -C "$CVAL_REPO_DIR" rev-parse HEAD)" = "$CVAL_GIT_REF"', rendered.yaml_text)
         self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
 
     def test_rejects_volcano_pod_name_overflow(self) -> None:
@@ -85,8 +88,8 @@ class RendererTests(unittest.TestCase):
             'command: ["/bin/bash", "-lc"]',
             'command: ["sh", "-c"]',
         ).replace(
-            "                  git clone",
-            "                  # git clone",
+            "                  git init",
+            "                  # git init",
         )
 
         with self.assertRaisesRegex(ValueError, "/bin/bash -lc"):
@@ -254,7 +257,7 @@ class RendererTests(unittest.TestCase):
             default_template_path(),
             "slc01-cl02-hgx-0001",
             timestamp=12345,
-            git_ref="abc123",
+            git_ref=COMMIT,
             cval_config=config,
         )
 
@@ -276,6 +279,11 @@ class RendererTests(unittest.TestCase):
         self.assertIn("export CVAL_IBBW_END_DEVICE=''", runtime)
         self.assertIn("export CVAL_DL_ITERATIONS=100", runtime)
         self.assertIn("export CVAL_NCCL_NET=IB", runtime)
+        self.assertIn("export CVAL_NCCL_EVALUATION_ENABLED=false", runtime)
+        self.assertIn(
+            "export CVAL_NCCL_OUTBOX_ROOT=/data/continuous_validation/nccl_eval/outbox",
+            runtime,
+        )
         self.assertIn("export CVAL_ENABLED_TESTS=storage,nccl,dltest", runtime)
         self.assertIn("export CVAL_CONFIG_PATH=/workspace/c-val/config/cval.toml", runtime)
         self.assertIn(
@@ -294,7 +302,7 @@ class RendererTests(unittest.TestCase):
             default_template_path(),
             "slc01-cl02-hgx-0001",
             timestamp=12345,
-            git_ref="abc123",
+            git_ref=COMMIT,
         )
         # Validation must be able to land on a cordoned (suspected-unhealthy) node.
         self.assertIn("node.kubernetes.io/unschedulable", rendered.yaml_text)
@@ -318,7 +326,7 @@ enabled = true
                 default_template_path(),
                 "slc01-cl02-hgx-0001",
                 timestamp=12345,
-                git_ref="abc123",
+                git_ref=COMMIT,
                 cval_config=config,
             )
 
@@ -344,6 +352,7 @@ enabled = true
             "RUN_NCCL",
             "RUN_DLTEST",
             "CVAL_NCCL_ITERATIONS",
+            "CVAL_NCCL_OUTBOX_ROOT",
             "CVAL_DL_ITERATIONS",
         ):
             self.assertNotIn(f"name: {environment_name}", template)
@@ -366,7 +375,6 @@ entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
 [artifacts]
-results_db_path = "validation_tests/smoke/smoke_results.db"
 """
             )
             smoke_registry = load_test_registry(
@@ -389,7 +397,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                 default_template_path(),
                 "slc01-cl02-hgx-0001",
                 timestamp=12345,
-                git_ref="abc123",
+                git_ref=COMMIT,
                 cval_config=config,
             )
 

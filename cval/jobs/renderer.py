@@ -176,6 +176,7 @@ def render_validation_job(
         job_name=job_name,
         node_name=node_name,
         timestamp=rendered_timestamp,
+        git_ref=resolved_git_ref,
         yaml_text=yaml_text,
     )
 
@@ -370,8 +371,12 @@ def _validate_runtime_bootstrap(template_text: str) -> None:
         raise ValueError("Template must contain one executable Bash args block")
 
     ordered_contract: tuple[tuple[str, str], ...] = (
-        ('git clone "$CVAL_GIT_REPO" "$CVAL_REPO_DIR"', "exact"),
-        ('git checkout "$CVAL_GIT_REF"', "exact"),
+        ('git init "$CVAL_REPO_DIR"', "exact"),
+        ('git -C "$CVAL_REPO_DIR" remote add origin "$CVAL_GIT_REPO"', "exact"),
+        ('git -C "$CVAL_REPO_DIR" fetch --depth=1 origin "$CVAL_GIT_REF"', "exact"),
+        ('git -C "$CVAL_REPO_DIR" checkout --detach FETCH_HEAD', "exact"),
+        ('test "$(git -C "$CVAL_REPO_DIR" rev-parse HEAD)" = "$CVAL_GIT_REF"', "exact"),
+        ('cd "$CVAL_REPO_DIR"', "exact"),
         ('printf \'%s\' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env', "exact"),
         ("source /tmp/cval-runtime.env", "exact"),
         ("exec python3 -m cval.validation.supervisor", "exact"),

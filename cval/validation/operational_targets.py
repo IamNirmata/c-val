@@ -1,10 +1,8 @@
-"""Immutable registry-derived targets for compatibility operations.
+"""Immutable registry-derived targets for current evaluator operations.
 
-U10 keeps the established compatibility baseline and export surfaces while
-removing fixed test-name lists from the CLI and background loops.  Targets are
-created in registry order from enabled adapter capabilities.  The DL component
-names are the only compatibility aliases and live in this module so every
-consumer sees the same overlay.
+Targets are created in registry order from enabled adapter capabilities. The
+four built-in DL component aliases live here so the CLI, loops, and exports use
+one deterministic catalog.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from cval.validation.compatibility import COMPATIBILITY_ALIAS_ROWS
+from cval.validation.builtins import BUILTIN_ALIAS_ROWS
 from cval.validation.registry import TEST_ID_PATTERN, ValidationTestRegistry
 
 BASELINE_BUILD = "baseline-build"
@@ -49,17 +47,17 @@ _ALIAS_OPERATIONS = frozenset(
 )
 RESERVED_TARGET_NAMES = frozenset({"all", "overall"})
 
-# owner, alias, component, refresh group.  Keep this as the one compatibility
+# owner, alias, component, refresh group. Keep this as the one built-in
 # overlay; models, exporters, the CLI, and loops must not maintain copies.
-COMPATIBILITY_TARGET_ALIASES = MappingProxyType(
-    {alias: owner for owner, alias, _component, _refresh in COMPATIBILITY_ALIAS_ROWS}
+BUILTIN_TARGET_ALIASES = MappingProxyType(
+    {alias: owner for owner, alias, _component, _refresh in BUILTIN_ALIAS_ROWS}
 )
 DL_COMPONENT_TEST_TYPES = MappingProxyType(
     {
         "dltest": None,
         **{
             alias: component
-            for owner, alias, component, _refresh in COMPATIBILITY_ALIAS_ROWS
+            for owner, alias, component, _refresh in BUILTIN_ALIAS_ROWS
             if owner == "dltest"
         },
     }
@@ -68,7 +66,7 @@ DL_COMPONENT_TEST_TYPES = MappingProxyType(
 
 @dataclass(frozen=True)
 class OperationalTarget:
-    """One immutable operator-facing compatibility target."""
+    """One immutable operator-facing evaluator target."""
 
     name: str
     owner_test_id: str
@@ -144,11 +142,11 @@ class OperationalTargetCatalog:
 def build_operational_target_catalog(
     registry: ValidationTestRegistry,
 ) -> OperationalTargetCatalog:
-    """Build and validate the compatibility catalog for a registry.
+    """Build and validate the evaluator catalog for a registry.
 
     Disabled tests produce no targets.  A ``baseline`` capability enables the
-    compatibility baseline lifecycle and classification operations; the
-    existing ``export`` capability enables result export.  Alias names are
+    baseline lifecycle and classification operations; the ``export`` capability
+    enables result export. Alias names are
     reserved even when their owner is disabled so a future enable cannot change
     the meaning of an already-registered canonical test ID.
     """
@@ -167,11 +165,11 @@ def build_operational_target_catalog(
             + ", ".join(reserved)
         )
 
-    alias_names = {alias for _owner, alias, _component, _refresh in COMPATIBILITY_ALIAS_ROWS}
+    alias_names = {alias for _owner, alias, _component, _refresh in BUILTIN_ALIAS_ROWS}
     alias_collisions = sorted(set(registered_names) & alias_names)
     if alias_collisions:
         raise ValueError(
-            "Validation test IDs collide with compatibility target aliases: "
+            "Validation test IDs collide with built-in target aliases: "
             + ", ".join(alias_collisions)
         )
 
@@ -200,7 +198,7 @@ def build_operational_target_catalog(
         )
         targets.append(canonical)
 
-        for owner, alias, component, alias_refresh_group in COMPATIBILITY_ALIAS_ROWS:
+        for owner, alias, component, alias_refresh_group in BUILTIN_ALIAS_ROWS:
             if owner != registered.id:
                 continue
             alias_operations = operations & _ALIAS_OPERATIONS
@@ -228,14 +226,14 @@ def build_operational_target_catalog(
     return OperationalTargetCatalog(tuple(targets))
 
 
-def normalize_compatibility_target(name: str) -> str:
-    """Return the canonical owner for a compatibility alias."""
+def normalize_operational_target(name: str) -> str:
+    """Return the canonical owner for a built-in alias."""
 
     normalized = name.strip().lower()
-    return COMPATIBILITY_TARGET_ALIASES.get(normalized, normalized)
+    return BUILTIN_TARGET_ALIASES.get(normalized, normalized)
 
 
-def compatibility_component(name: str) -> str | None:
+def operational_component(name: str) -> str | None:
     """Return the component selected by a known DL target, if any."""
 
     return DL_COMPONENT_TEST_TYPES.get(name.strip().lower())
@@ -274,7 +272,7 @@ __all__ = [
     "BASELINE_LIST",
     "BASELINE_SHOW",
     "CLASSIFICATIONS_EXPORT",
-    "COMPATIBILITY_TARGET_ALIASES",
+    "BUILTIN_TARGET_ALIASES",
     "DL_COMPONENT_TEST_TYPES",
     "OPERATION_ORDER",
     "OperationalTarget",
@@ -282,7 +280,7 @@ __all__ = [
     "RESERVED_TARGET_NAMES",
     "RESULTS_EXPORT",
     "build_operational_target_catalog",
-    "compatibility_component",
-    "normalize_compatibility_target",
+    "operational_component",
+    "normalize_operational_target",
     "validate_operational_target_name",
 ]

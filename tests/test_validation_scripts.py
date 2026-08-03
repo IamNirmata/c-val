@@ -143,13 +143,13 @@ printf '%s\n' \
         self.assertIn("set -euo pipefail", script)
         self.assertIn("CVAL_RESULT_ENV_FILE", runner)
         self.assertIn("CVAL_RESULT_JSON_FILE", runner)
-        self.assertIn('"schema_version": "cval.results.v2"', runner)
+        self.assertIn('"schema_version": "cval.results"', runner)
         self.assertIn("_atomic_write_json", runner)
         self.assertIn("test_setup_started", runner)
         self.assertIn("test_started", runner)
         self.assertIn("test_finished", runner)
 
-    def test_db_update_records_per_test_results(self) -> None:
+    def test_db_update_records_current_raw_results_only(self) -> None:
         script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(encoding="utf-8")
 
         self.assertIn('Loading structured test result state from $CVAL_RESULT_JSON_FILE', script)
@@ -171,109 +171,17 @@ printf '%s\n' \
         self.assertIn('--image-name "$CVAL_IMAGE_NAME"', script)
         self.assertIn('emit_cval_event "ingestion_started"', script)
         self.assertIn('emit_cval_event "ingestion_finished" "pass"', script)
-        self.assertIn('is_enabled "$CVAL_PER_TEST_INGESTION_ENABLED"', script)
-        self.assertIn("db-ingest-test-results", script)
+        self.assertIn('nccl-eval emit-outbox', script)
+        self.assertIn('--apply --confirm emit-outbox', script)
+        self.assertIn('CVAL_NCCL_EVALUATION_ENABLED', script)
+        self.assertIn('partial durable compatibility DB', script)
+        self.assertNotIn('DATABASE_URL', script)
+        self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", script)
+        self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", script)
+        self.assertNotIn("db-ingest-test-results", script)
+        self.assertNotIn("db-upsert-run-history", script)
         self.assertIn('--result-json "$CVAL_RESULT_JSON_FILE"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
-
-    def test_db_update_wrong_owner_preflight_calls_no_writer(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            calls = root / "calls.txt"
-            writer_marker = root / "writer-called"
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-set -u
-printf '%s\n' "$*" >> {str(calls)!r}
-case "$*" in
-  *"-m cval.cli result"*)
-    cat <<'EOF'
-GCRRESULT1=incomplete
-GCRRESULT2=incomplete
-GCRRESULT3=incomplete
-RUN_STORAGE=false
-RUN_NCCL=false
-RUN_DLTEST=false
-overall_result=incomplete
-image_name=
-pytorch_version=
-cuda_version=
-result_node=node-a
-result_timestamp=123
-result_run_id=node-a-123
-result_schema_version=cval.results.v2
-result_global_config_digest=sha256:config
-result_digest=sha256:result
-result_storage_artifacts=
-result_nccl_summary=
-EOF
-    ;;
-  *"db-preflight-compatibility-result"*) exit 0 ;;
-  *"db-preflight-test-results"*)
-    echo "Evaluator process owner mismatch" >&2
-    exit 73
-    ;;
-  *"db-add-"*|*"db-upsert-"*|*"db-ingest-"*)
-    : > {str(writer_marker)!r}
-    exit 99
-    ;;
-  *) exit 0 ;;
-esac
-''',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
-            result_path.parent.mkdir(parents=True)
-            result_path.write_text("{}\n", encoding="utf-8")
-            env = os.environ | {
-                "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                "CVAL_REPO_DIR": str(REPO_ROOT),
-                "CVAL_VALIDATION_ROOT": str(root),
-                "CVAL_RESULT_JSON_FILE": str(result_path),
-                "CVAL_JOB_LOG_DIR": str(result_path.parent),
-                "CVAL_CONFIG_SNAPSHOT_B64": "present",
-                "CVAL_CONFIG_DIGEST": "sha256:config",
-                "CVAL_PER_TEST_INGESTION_ENABLED": "true",
-                "CVAL_RUN_HISTORY_ENABLED": "false",
-                "GCRNODE": "node-a",
-                "GCRTIME": "123",
-                "CVAL_RUN_ID": "node-a-123",
-            }
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/db-update.sh")],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            observed = calls.read_text(encoding="utf-8").splitlines()
-
-        self.assertEqual(completed.returncode, 73)
-        self.assertIn("process owner mismatch", completed.stderr.lower())
-        self.assertFalse(writer_marker.exists())
-        compatibility_index = next(
-            index
-            for index, call in enumerate(observed)
-            if "db-preflight-compatibility-result" in call
-        )
-        owner_index = next(
-            index
-            for index, call in enumerate(observed)
-            if "db-preflight-test-results" in call
-        )
-        self.assertLess(compatibility_index, owner_index)
-        self.assertFalse(
-            any(
-                token in call
-                for call in observed
-                for token in ("db-add-", "db-upsert-", "db-ingest-")
-            )
-        )
 
     def test_runtime_scripts_use_configured_environment(self) -> None:
         run_test = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(
@@ -293,6 +201,12 @@ esac
         self.assertIn("CVAL_IBBW_START_DEVICE", nccl)
         self.assertIn("CVAL_IBBW_END_DEVICE", nccl)
         self.assertIn('torchrun --nproc_per_node="$CVAL_NCCL_GPU_COUNT"', nccl)
+        self.assertIn('cval.nccl_eval.runtime_evidence --output', nccl)
+        self.assertIn('cval.nccl_eval.runtime_evidence --validate', nccl)
+        self.assertLess(
+            nccl.index('cval.nccl_eval.runtime_evidence --output'),
+            nccl.index('torchrun --nproc_per_node'),
+        )
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)
         self.assertIn("CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-100}", dltest)
@@ -383,7 +297,6 @@ setup = "setup.sh"
 timeout_seconds = 30
 
 [artifacts]
-results_db_path = "validation_tests/storage/storage_results.db"
 summary_filename = "summary.txt"
 """,
                 encoding="utf-8",
@@ -471,11 +384,31 @@ echo "fake torchrun"
                 encoding="utf-8",
             )
             fake_torchrun.chmod(0o755)
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
+    output=${{@: -1}}
+    cat > "$output" <<'JSON'
+{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}
+JSON
+    chmod 600 "$output"
+    exit 0
+fi
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then
+    exit 0
+fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
             output_dir = root / "nccl"
             env = os.environ | {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
                 "CVAL_IBBW_ENABLED": "false",
+                "CVAL_NCCL_EVALUATION_ENABLED": "true",
                 "GCRNODE": "node-a",
                 "GCRTIME": "123",
                 "NCCL_OUTPUT_DIR": str(output_dir),
@@ -506,6 +439,21 @@ echo "fake torchrun"
             fake_torchrun = bin_dir / "torchrun"
             fake_torchrun.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
             fake_torchrun.chmod(0o755)
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
+    output=${{@: -1}}
+    printf '%s\n' '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}' > "$output"
+    chmod 600 "$output"
+    exit 0
+fi
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
             output_dir = root / "nccl"
             env = os.environ | {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -532,6 +480,295 @@ echo "fake torchrun"
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("summary validation FAILED", completed.stderr)
+
+    def test_nccl_collector_failure_never_starts_workload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            marker = root / "torchrun-started"
+            (bin_dir / "python3").write_text("#!/bin/bash\nexit 9\n", encoding="utf-8")
+            (bin_dir / "torchrun").write_text(
+                f"#!/bin/bash\ntouch {marker}\nexit 0\n", encoding="utf-8"
+            )
+            for path in (bin_dir / "python3", bin_dir / "torchrun"):
+                path.chmod(0o755)
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "false",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
+                    "NCCL_OUTPUT_DIR": str(root / "output"),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            workload_started = marker.exists()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(workload_started)
+        self.assertIn("pre-workload runtime evidence collection FAILED", completed.stderr)
+
+    def test_nccl_post_workload_evidence_mismatch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            counter = root / "evidence-count"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
+    output=${{@: -1}}
+    count=0
+    [[ -f "{counter}" ]] && count=$(cat "{counter}")
+    count=$((count + 1))
+    echo "$count" > "{counter}"
+    printf '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200-%s","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}\n' "$count" > "$output"
+    chmod 600 "$output"
+    exit 0
+fi
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            fake_torchrun = bin_dir / "torchrun"
+            fake_torchrun.write_text(
+                '''#!/bin/bash
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--result-file" ]]; then result_file="$2"; shift 2; else shift; fi
+done
+printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
+''',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            fake_torchrun.chmod(0o755)
+            output = root / "output"
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "false",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
+                    "NCCL_OUTPUT_DIR": str(output),
+                    "NCCL_SUMMARY_FILE": str(output / "summary.json"),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("runtime evidence changed", completed.stderr)
+
+    def test_nccl_post_workload_evidence_collection_failure_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            counter = root / "evidence-count"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
+    output=${{@: -1}}
+    count=0
+    [[ -f "{counter}" ]] && count=$(cat "{counter}")
+    count=$((count + 1))
+    echo "$count" > "{counter}"
+    [[ "$count" -eq 2 ]] && exit 9
+    printf '%s\n' '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}' > "$output"
+    chmod 600 "$output"
+    exit 0
+fi
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            fake_torchrun = bin_dir / "torchrun"
+            fake_torchrun.write_text(
+                '''#!/bin/bash
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--result-file" ]]; then result_file="$2"; shift 2; else shift; fi
+done
+printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
+''',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            fake_torchrun.chmod(0o755)
+            output = root / "output"
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "false",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
+                    "NCCL_OUTPUT_DIR": str(output),
+                    "NCCL_SUMMARY_FILE": str(output / "summary.json"),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("post-workload runtime evidence collection FAILED", completed.stderr)
+
+    def test_nccl_evaluation_disabled_never_invokes_collector_or_creates_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            collector_marker = root / "collector-invoked"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence"* ]]; then
+    touch "{collector_marker}"
+    exit 99
+fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            fake_torchrun = bin_dir / "torchrun"
+            fake_torchrun.write_text(
+                '''#!/bin/bash
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--result-file" ]]; then result_file="$2"; shift 2; else shift; fi
+done
+printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
+''',
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            fake_torchrun.chmod(0o755)
+            output = root / "output"
+            evidence = output / "runtime-evidence.json"
+            post_evidence = output / "runtime-evidence.post.json"
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "false",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "false",
+                    "NCCL_OUTPUT_DIR": str(output),
+                    "NCCL_SUMMARY_FILE": str(output / "summary.json"),
+                    "NCCL_RUNTIME_EVIDENCE_FILE": str(evidence),
+                    "NCCL_RUNTIME_EVIDENCE_POST_FILE": str(post_evidence),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        self.assertIn("evaluation evidence disabled", completed.stdout)
+        self.assertFalse(collector_marker.exists())
+        self.assertFalse(evidence.exists())
+        self.assertFalse(post_evidence.exists())
+
+    def test_nccl_evidence_validation_failure_never_starts_workload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            workload_marker = root / "workload-started"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
+    output=${{@: -1}}
+    printf '%s\n' '{{}}' > "$output"
+    chmod 600 "$output"
+    exit 0
+fi
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 8; fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            (bin_dir / "torchrun").write_text(
+                f"#!/bin/bash\ntouch '{workload_marker}'\nexit 0\n", encoding="utf-8"
+            )
+            fake_python.chmod(0o755)
+            (bin_dir / "torchrun").chmod(0o755)
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "false",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
+                    "NCCL_OUTPUT_DIR": str(root / "output"),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(workload_marker.exists())
+        self.assertIn("pre-workload runtime evidence validation FAILED", completed.stderr)
+
+    def test_nccl_workload_failure_preserves_exit_and_skips_post_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            collection_count = root / "collection-count"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f'''#!/bin/bash
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
+    output=${{@: -1}}
+    count=0
+    [[ -f "{collection_count}" ]] && count=$(cat "{collection_count}")
+    echo $((count + 1)) > "{collection_count}"
+    printf '%s\n' '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}' > "$output"
+    chmod 600 "$output"
+    exit 0
+fi
+if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
+exec {os.sys.executable} "$@"
+''',
+                encoding="utf-8",
+            )
+            (bin_dir / "torchrun").write_text("#!/bin/bash\nexit 7\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            (bin_dir / "torchrun").chmod(0o755)
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "false",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
+                    "NCCL_OUTPUT_DIR": str(root / "output"),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            count = collection_count.read_text(encoding="utf-8").strip()
+        self.assertEqual(completed.returncode, 7)
+        self.assertEqual(count, "1")
 
     def test_storage_runner_preserves_six_json_artifacts_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -816,7 +1053,7 @@ JSON
         self.assertEqual(payload["overall"], "incomplete")
         self.assertTrue(all(not test["enabled"] for test in payload["tests"].values()))
 
-    def test_v2_result_flows_through_compatibility_db_update(self) -> None:
+    def test_current_result_flows_through_raw_db_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             smoke_dir = root / "repo" / "validation-tests" / "smoke"
@@ -836,7 +1073,6 @@ entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
 [artifacts]
-results_db_path = "validation_tests/smoke/smoke_results.db"
 """
             )
             registry = load_test_registry(
@@ -855,10 +1091,6 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                 storage=replace(
                     base.storage,
                     validation_db_path=str(root / "metadata/validation.db"),
-                    run_history_enabled=True,
-                    run_history_db_path=str(
-                        root / "metadata/node-run-history.db"
-                    ),
                     storage_db_path=str(root / "metadata/test-storage.db"),
                     nccl_db_path=str(root / "metadata/test-nccl.db"),
                 ),
@@ -907,19 +1139,10 @@ bash "$1/db-update.sh"
                 rows = connection.execute(
                     "SELECT test, result FROM runs ORDER BY rowid"
                 ).fetchall()
-            with closing(
-                sqlite3.connect(root / "metadata/node-run-history.db")
-            ) as connection:
-                history = connection.execute(
-                    "SELECT run_id, node, overall_status, tests_requested_json FROM runs"
-                ).fetchone()
-                history_tests = connection.execute(
-                    "SELECT test_id, status FROM run_tests ORDER BY execution_order"
-                ).fetchall()
             result = json.loads(result_path.read_text(encoding="utf-8"))
             events = events_path.read_text(encoding="utf-8")
 
-        self.assertEqual(result["schema_version"], "cval.results.v2")
+        self.assertEqual(result["schema_version"], "cval.results")
         self.assertEqual(result["tests"]["smoke"]["status"], "pass")
         self.assertEqual(
             rows,
@@ -933,11 +1156,6 @@ bash "$1/db-update.sh"
         self.assertIn('"event":"ingestion_started"', events)
         self.assertIn('"event":"ingestion_finished"', events)
         self.assertIn("Main DB update completed.", completed.stdout)
-        self.assertEqual(
-            history,
-            ("node-a-123", "node-a", "pass", '["smoke"]'),
-        )
-        self.assertEqual(history_tests, [("smoke", "pass")])
 
     def test_db_update_rejects_invalid_result_before_any_db_write(self) -> None:
         for result_text, expected_error in (
@@ -998,7 +1216,6 @@ bash "$1/db-update.sh"
                 storage=replace(
                     base.storage,
                     validation_db_path=str(root / "validation.db"),
-                    run_history_db_path=str(root / "node-run-history.db"),
                     storage_db_path=str(root / "storage.db"),
                     nccl_db_path=str(root / "nccl.db"),
                     dl_numerical_db_path=str(root / "dl-numerical.db"),
@@ -1052,290 +1269,6 @@ bash "$1/db-update.sh"
         self.assertIn("missing required summary", completed.stderr)
         self.assertFalse((root / "validation.db").exists())
 
-    def test_run_history_is_default_off_and_does_not_create_db(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            base = load_config()
-            config = replace(
-                base,
-                storage=replace(
-                    base.storage,
-                    validation_db_path=str(root / "metadata/validation.db"),
-                    run_history_enabled=False,
-                    run_history_db_path=str(
-                        root / "metadata/node-run-history.db"
-                    ),
-                    per_test_ingestion_enabled=False,
-                    storage_db_path=str(root / "metadata/test-storage.db"),
-                    nccl_db_path=str(root / "metadata/test-nccl.db"),
-                ),
-                runtime=replace(base.runtime, validation_root=str(root)),
-            )
-            env = os.environ | build_runtime_environment(config) | {
-                "RUN_STORAGE": "false",
-                "RUN_NCCL": "false",
-                "RUN_DLTEST": "false",
-                "GCRNODE": "node-a",
-                "GCRTIME": "123",
-                "CVAL_RUN_ID": "node-a-123",
-                "CVAL_REPO_DIR": str(REPO_ROOT),
-                "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                "CVAL_VALIDATION_ROOT": str(root),
-                "CVAL_PYTORCH_VERSION": "test",
-                "CVAL_CUDA_VERSION": "test",
-            }
-            command = """
-set -euo pipefail
-bash "$1/run-test.sh"
-source "$1/0-env.sh"
-bash "$1/db-update.sh"
-"""
-            completed = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    command,
-                    "bash",
-                    str(REPO_ROOT / "validation-tests"),
-                ],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            history_exists = (root / "metadata/node-run-history.db").exists()
-            validation_exists = (root / "metadata/validation.db").is_file()
-            canonical_dbs = list(root.glob("validation_tests/**/*.db"))
-
-        self.assertIn("run_history_enabled=false", completed.stdout)
-        self.assertIn("per_test_ingestion_enabled=false", completed.stdout)
-        self.assertFalse(history_exists)
-        self.assertTrue(validation_exists)
-        self.assertEqual(canonical_dbs, [])
-
-    def test_modular_failure_preserves_current_compatibility_status(self) -> None:
-        from tests.test_results_v2 import test_result
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            repo = root / "repo"
-            smoke_dir = repo / "validation-tests/smoke"
-            smoke_dir.mkdir(parents=True)
-            (smoke_dir / "setup.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-            (smoke_dir / "run-test.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-            (smoke_dir / "plugin.py").write_text(
-                '''
-CVAL_PLUGIN_API = "cval.plugin.v1"
-class FailingPlugin:
-    plugin_id = "smoke"
-    capabilities = frozenset({"ingest"})
-    def validate_schema(self, connection, allow_missing):
-        return False
-    def ingest(self, context):
-        raise RuntimeError("synthetic adapter failure")
-PLUGIN = FailingPlugin()
-''',
-                encoding="utf-8",
-            )
-            (smoke_dir / "test_config.toml").write_text(
-                '''
-schema_version = "cval.test.v1"
-[test]
-id = "smoke"
-display_name = "Smoke"
-order = 40
-entrypoint = "run-test.sh"
-setup = "setup.sh"
-timeout_seconds = 30
-[artifacts]
-results_db_path = "validation_tests/smoke/smoke_results.db"
-[plugin]
-adapter = "plugin.py"
-api_version = "cval.plugin.v1"
-capabilities = ["ingest"]
-''',
-                encoding="utf-8",
-            )
-            registry = load_test_registry(
-                {
-                    "smoke": {
-                        "enabled": True,
-                        "config_path": "validation-tests/smoke/test_config.toml",
-                    }
-                },
-                repo_root=repo,
-                include_defaults=False,
-            )
-            base = load_config()
-            state_root = root / "evaluator-state"
-            state_root.mkdir(mode=0o700)
-            config = replace(
-                base,
-                storage=replace(
-                    base.storage,
-                    per_test_ingestion_enabled=True,
-                    validation_db_path=str(root / "metadata/validation.db"),
-                    storage_db_path=str(root / "metadata/test-storage.db"),
-                    nccl_db_path=str(root / "metadata/test-nccl.db"),
-                ),
-                runtime=replace(base.runtime, validation_root=str(root)),
-                health_evaluator=replace(
-                    base.health_evaluator,
-                    state_root=str(state_root),
-                    state_owner_uid=os.geteuid(),
-                    state_owner_gid=os.getegid(),
-                ),
-                tests=replace(base.tests, registry=registry),
-            )
-            registered = registry.require("smoke")
-            state = test_result("smoke", order=40)
-            state["display_name"] = registered.definition.metadata.display_name
-            state["config_path"] = registered.config_path
-            state["config_digest"] = validation_test_config_digest(registered)
-            run_dir = root / "validation_tests/smoke/runs/node-a/node-a-123"
-            log_dir = root / "logs/smoke/node-a/node-a-123"
-            state.update(
-                {
-                    "stdout": str(log_dir / "stdout.log"),
-                    "stderr": str(log_dir / "stderr.log"),
-                    "log": str(log_dir / "events.jsonl"),
-                    "summary": str(run_dir / "summary.json"),
-                    "result": str(run_dir / "result.json"),
-                    "artifacts": str(run_dir / "artifacts"),
-                }
-            )
-            log_dir.mkdir(parents=True)
-            for name in ("stdout.log", "stderr.log", "events.jsonl"):
-                (log_dir / name).touch()
-            (run_dir / "artifacts").mkdir(parents=True)
-            (run_dir / "result.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": "cval.test-result.v1",
-                        "test_id": "smoke",
-                        "status": "pass",
-                        "phase": "finished",
-                        "started_at": state["started_at"],
-                        "completed_at": state["completed_at"],
-                        "duration_ms": state["duration_ms"],
-                        "exit_code": 0,
-                        "summary": state["summary"],
-                        "artifacts": state["artifacts"],
-                        "message": "",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
-            result_path.parent.mkdir(parents=True)
-            result_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "cval.results.v2",
-                        "run_id": "node-a-123",
-                        "node": "node-a",
-                        "timestamp": 123,
-                        "timestamp_la": "1969-12-31T16:02:03-08:00",
-                        "generated_at": "2026-07-28T16:00:01Z",
-                        "completed_at": "2026-07-28T16:00:01Z",
-                        "overall": "pass",
-                        "image_name": "image",
-                        "pytorch_version": "2.8",
-                        "cuda_version": "12.9",
-                        "git_ref": "test",
-                        "global_config_digest": effective_config_digest(config),
-                        "tests": {"smoke": state},
-                        "errors": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            env = os.environ | build_runtime_environment(config) | {
-                "GCRNODE": "node-a",
-                "GCRTIME": "123",
-                "CVAL_RUN_ID": "node-a-123",
-                "CVAL_REPO_DIR": str(REPO_ROOT),
-                "CVAL_TEST_REPO_ROOT": str(repo),
-                "CVAL_VALIDATION_ROOT": str(root),
-                "CVAL_RESULT_JSON_FILE": str(result_path),
-            }
-
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/db-update.sh")],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertTrue(
-                (root / "metadata/validation.db").is_file(),
-                msg=f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
-            )
-            with closing(
-                sqlite3.connect(root / "metadata/validation.db")
-            ) as connection:
-                rows = connection.execute(
-                    "SELECT test, result FROM runs ORDER BY test"
-                ).fetchall()
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn('"ok": false', completed.stdout)
-        self.assertIn("synthetic adapter failure", completed.stdout)
-        self.assertEqual(
-            rows,
-            [
-                ("all", "pass"),
-                ("dltest", "incomplete"),
-                ("nccl", "incomplete"),
-                ("storage", "incomplete"),
-            ],
-        )
-
-    def test_v2_runtime_gate_mismatch_writes_no_database(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            base_config = load_config()
-            env = os.environ | build_runtime_environment(base_config) | {
-                "RUN_STORAGE": "false",
-                "RUN_NCCL": "false",
-                "RUN_DLTEST": "false",
-                "GCRNODE": "node-a",
-                "GCRTIME": "123",
-                "CVAL_RUN_ID": "node-a-123",
-                "CVAL_REPO_DIR": str(REPO_ROOT),
-                "CVAL_VALIDATION_ROOT": str(root),
-                "CVAL_VALIDATION_DB_PATH": str(root / "metadata/validation.db"),
-                "CVAL_STORAGE_DB_PATH": str(root / "metadata/test-storage.db"),
-                "CVAL_NCCL_DB_PATH": str(root / "metadata/test-nccl.db"),
-            }
-            command = """
-set -euo pipefail
-bash "$1/run-test.sh"
-source "$1/0-env.sh"
-export CVAL_RUN_HISTORY_ENABLED=1
-bash "$1/db-update.sh"
-"""
-            completed = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    command,
-                    "bash",
-                    str(REPO_ROOT / "validation-tests"),
-                ],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("does not match", completed.stderr)
-            self.assertEqual(list(root.glob("**/*.db")), [])
-
     def test_v2_missing_snapshot_writes_no_database(self) -> None:
         from tests.test_results_v2 import payload
 
@@ -1355,9 +1288,6 @@ bash "$1/db-update.sh"
                 "STORAGE_OUTPUT_DIR": "/runs/storage/artifacts",
                 "NCCL_SUMMARY_FILE": "/runs/nccl/summary.json",
                 "CVAL_VALIDATION_DB_PATH": str(root / "metadata/validation.db"),
-                "CVAL_RUN_HISTORY_DB_PATH": str(
-                    root / "metadata/node-run-history.db"
-                ),
                 "CVAL_STORAGE_DB_PATH": str(root / "metadata/test-storage.db"),
                 "CVAL_NCCL_DB_PATH": str(root / "metadata/test-nccl.db"),
             }
@@ -1374,126 +1304,6 @@ bash "$1/db-update.sh"
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("CVAL_CONFIG_SNAPSHOT_B64 is required", completed.stderr)
             self.assertEqual(list(root.glob("**/*.db")), [])
-
-    def test_v2_rejects_external_compatibility_evidence_paths_before_writes(self) -> None:
-        from tests.test_per_test_ingestion import ModularPerTestIngestionTests
-
-        for override_name in ("STORAGE_OUTPUT_DIR", "CVAL_JOB_LOG_DIR"):
-            with self.subTest(override=override_name), tempfile.TemporaryDirectory() as tmpdir:
-                root = Path(tmpdir)
-                helper = ModularPerTestIngestionTests()
-                config = helper._config(root, enabled=True)
-                result_path = helper._write_builtin_result(root, config)
-                outside = root / "outside"
-                outside.mkdir()
-                env = os.environ | build_runtime_environment(config) | {
-                    "GCRNODE": "node-a",
-                    "GCRTIME": "123",
-                    "CVAL_RUN_ID": "node-a-123",
-                    "CVAL_REPO_DIR": str(REPO_ROOT),
-                    "CVAL_VALIDATION_ROOT": str(root),
-                    "CVAL_RESULT_JSON_FILE": str(result_path),
-                    override_name: str(outside),
-                }
-                command = """
-set -euo pipefail
-source "$1/0-env.sh"
-export "$2=$3"
-bash "$1/db-update.sh"
-"""
-
-                completed = subprocess.run(
-                    [
-                        "bash",
-                        "-c",
-                        command,
-                        "bash",
-                        str(REPO_ROOT / "validation-tests"),
-                        override_name,
-                        str(outside),
-                    ],
-                    env=env,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                )
-
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(list(outside.iterdir()), [])
-                self.assertEqual(list(root.glob("metadata/*.db")), [])
-
-    def test_default_off_v2_retry_rejects_changed_envelope_digest(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            from tests.test_per_test_ingestion import ModularPerTestIngestionTests
-
-            helper = ModularPerTestIngestionTests()
-            config = helper._config(root, enabled=False)
-            config = replace(
-                config,
-                storage=replace(
-                    config.storage,
-                    validation_db_path=str(root / "metadata/validation.db"),
-                    run_history_db_path=str(
-                        root / "metadata/node-run-history.db"
-                    ),
-                    storage_db_path=str(root / "metadata/test-storage.db"),
-                    nccl_db_path=str(root / "metadata/test-nccl.db"),
-                    dl_numerical_db_path=str(root / "metadata/dl-numerical.db"),
-                    dl_compute_db_path=str(root / "metadata/dl-compute.db"),
-                    dl_collective_db_path=str(root / "metadata/dl-collective.db"),
-                    dl_overlap_db_path=str(root / "metadata/dl-overlap.db"),
-                ),
-            )
-            result_path = helper._write_builtin_result(root, config)
-            env = os.environ | build_runtime_environment(config) | {
-                "GCRNODE": "node-a",
-                "GCRTIME": "123",
-                "CVAL_RUN_ID": "node-a-123",
-                "CVAL_REPO_DIR": str(REPO_ROOT),
-                "CVAL_VALIDATION_ROOT": str(root),
-                "CVAL_RESULT_JSON_FILE": str(result_path),
-            }
-            command = """
-set -euo pipefail
-source "$1/0-env.sh"
-bash "$1/db-update.sh"
-"""
-            first = subprocess.run(
-                ["bash", "-c", command, "bash", str(REPO_ROOT / "validation-tests")],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertEqual(
-                first.returncode,
-                0,
-                msg=f"stdout={first.stdout!r} stderr={first.stderr!r}",
-            )
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-            result["generated_at"] = "2026-07-28T16:00:02Z"
-            result_path.write_text(json.dumps(result), encoding="utf-8")
-
-            second = subprocess.run(
-                ["bash", "-c", command, "bash", str(REPO_ROOT / "validation-tests")],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            with closing(
-                sqlite3.connect(root / "metadata/validation.db")
-            ) as connection:
-                count = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-
-        self.assertIn("Main DB update completed", first.stdout)
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn("different result digest", second.stderr)
-        self.assertEqual(count, 4)
 
     def test_dltest_summary_script_summarizes_rank_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,8 +1,8 @@
 """Submission policy gates for c-val mutating operations.
 
 This module is intentionally small and explicit: it guards the only path that
-can create Kubernetes validation jobs. Dry-run planning does not need these
-checks, but real submission always does.
+can create Kubernetes validation jobs. Read-only queue inspection is separate;
+real submission always passes these checks.
 """
 
 from __future__ import annotations

@@ -79,7 +79,7 @@ spec:
                 - name: CVAL_GIT_REPO
                   value: "git-repo-placeholder"
                 - name: CVAL_GIT_REF
-                  # Pin the runtime checkout to a commit/tag instead of moving main.
+                  # Real cluster validation accepts only an exact commit.
                   value: "git-ref-placeholder"
                 - name: CVAL_IMAGE_NAME
                   value: "image-name-placeholder"
@@ -108,10 +108,12 @@ spec:
                   set -euo pipefail
                   # The job clones c-val inside the container so the runtime code
                   # matches the explicitly supplied CVAL_GIT_REF.
-                  git clone "$CVAL_GIT_REPO" "$CVAL_REPO_DIR"
+                  git init "$CVAL_REPO_DIR"
+                  git -C "$CVAL_REPO_DIR" remote add origin "$CVAL_GIT_REPO"
+                  git -C "$CVAL_REPO_DIR" fetch --depth=1 origin "$CVAL_GIT_REF"
+                  git -C "$CVAL_REPO_DIR" checkout --detach FETCH_HEAD
+                  test "$(git -C "$CVAL_REPO_DIR" rev-parse HEAD)" = "$CVAL_GIT_REF"
                   cd "$CVAL_REPO_DIR"
-                  git fetch --all --tags
-                  git checkout "$CVAL_GIT_REF"
                   # Decode a renderer-generated, shell-quoted export file. It is
                   # data only: operators cannot supply arbitrary shell text.
                   printf '%s' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env

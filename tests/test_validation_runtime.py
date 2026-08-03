@@ -18,7 +18,7 @@ from cval.validation.runtime import (
 
 
 class ValidationRuntimeTests(unittest.TestCase):
-    def test_runtime_environment_contains_registry_and_compatibility_values(self) -> None:
+    def test_runtime_environment_contains_registry_and_builtin_values(self) -> None:
         config = load_config()
 
         values = build_runtime_environment(config)
@@ -28,15 +28,20 @@ class ValidationRuntimeTests(unittest.TestCase):
         self.assertEqual(values["RUN_NCCL"], "true")
         self.assertEqual(values["RUN_DLTEST"], "true")
         self.assertEqual(values["CVAL_CONFIG_PATH"], "/workspace/c-val/config/cval.toml")
-        self.assertEqual(
-            values["CVAL_RUN_HISTORY_DB_PATH"],
-            "/data/continuous_validation/metadata/node-run-history.db",
-        )
-        self.assertEqual(values["CVAL_RUN_HISTORY_ENABLED"], "false")
-        self.assertEqual(values["CVAL_PER_TEST_INGESTION_ENABLED"], "false")
+        self.assertNotIn("CVAL_RUN_HISTORY_DB_PATH", values)
+        self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", values)
+        self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", values)
         snapshot = load_config_snapshot(values["CVAL_CONFIG_SNAPSHOT_B64"])
         self.assertEqual(effective_config_digest(snapshot), effective_config_digest(config))
         self.assertEqual(values["CVAL_NCCL_ITERATIONS"], "20")
+        self.assertEqual(values["CVAL_NCCL_EVALUATION_ENABLED"], "false")
+        self.assertEqual(
+            values["CVAL_NCCL_EVALUATION_TEST_NAME"], "nccl-loopback-allreduce"
+        )
+        self.assertEqual(
+            values["CVAL_NCCL_OUTBOX_ROOT"],
+            "/data/continuous_validation/nccl_eval/outbox",
+        )
         self.assertEqual(values["CVAL_DL_ITERATIONS"], "100")
         registry = json.loads(values["CVAL_TEST_REGISTRY_JSON"])
         self.assertEqual(registry["nccl"]["order"], 20)
@@ -110,9 +115,6 @@ enabled = false
             config_path = Path(tmpdir) / "alternate.toml"
             config_path.write_text(
                 f'''
-[storage]
-per_test_ingestion_enabled = true
-
 [runtime]
 validation_root = "{tmpdir}/validation"
 ''',
@@ -123,7 +125,6 @@ validation_root = "{tmpdir}/validation"
             values = build_runtime_environment(config)
             restored = load_config_snapshot(values["CVAL_CONFIG_SNAPSHOT_B64"])
 
-        self.assertTrue(restored.storage.per_test_ingestion_enabled)
         self.assertEqual(restored.runtime.validation_root, f"{tmpdir}/validation")
         self.assertEqual(effective_config_digest(restored), effective_config_digest(config))
 

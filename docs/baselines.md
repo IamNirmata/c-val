@@ -1,558 +1,87 @@
-# Baselines and Node Classification
+# Baselines and classification
 
-c-val builds **baselines** from historical validation results and uses them to
-**classify nodes** as:
+`cval.baselines` is the sole canonical storage/DL evaluator. NCCL is the
+explicit PostgreSQL exception described in `docs/evals/nccl-eval-process.md`.
 
-- **normal**: within the baseline's acceptance band
-- **degraded**: on the failing side of the band; warrants investigation
-- **improved**: better than the good-side tail (informational)
+## Method
 
-There are three layers:
+For each metric, c-val builds robust statistics over the configured rolling
+window:
 
-1. **U8/U9 versioned health classes (implemented locally, not operationally
-  activated)** — per-test, environment-combination candidates with stable
-  classes 0–5, exact provenance/sample coverage, normalized threshold bands,
-  and immutable SQLite evidence.
-2. **Compatibility dynamic baselines (current operational system)** — built directly from the result DBs with
-   robust statistics, stored as versioned records in SQLite, and used to
-  classify nodes through the existing baseline CLI and background scripts.
-3. **Directory baselines (legacy)** — hand-authored `summary.json` references
-   loaded from disk, for fixed golden references.
+- center: median;
+- scale: $1.4826 \times \mathrm{MAD}$;
+- engineering floor: configured percentage of the center;
+- direction: low-bad, high-bad, or two-sided.
 
-The compatibility command names, flags, built-in rows, and filenames later in
-this document remain unchanged. U10 derives their enabled target choices from
-the registry. U9 adds a separate dry-run-first `health` command group, but no
-live per-test health DB, migration, evaluator schedule, or activation is
-approved.
+A node is classified from the median of its recent observations:
 
----
+- `normal` — inside the acceptance band;
+- `degraded` — on the failing side;
+- `improved` — beyond the good-side tail with no degraded metric.
 
-## How dynamic baselines are built (the method)
+DL components additionally require sufficiently severe misses by count or
+fraction. The four components are evaluated separately: numerical correctness,
+compute performance, collective performance, and overlap performance.
 
-Performance metrics on a GPU fleet are skewed and routinely contaminated by a few
-bad nodes. Mean and standard deviation break down in exactly that case — one bad
-run shifts the mean and inflates the deviation, hiding the next anomaly — so c-val
-uses **robust statistics** instead.
+## Database layout
 
-For each metric, over a rolling window per stratum:
+Baseline databases under `baseline.baseline_root_path`:
 
-1. **Collect** recent values from the result DB (non-positive performance
-   readings are dropped as failed/missing runs).
-2. **Trim** extreme outliers iteratively using the modified z-score
-   (Iglewicz & Hoaglin), threshold `3.5`.
-3. **Summarize** with the **median** (center) and **MAD** scaled to sigma
-   (`1.4826 × MAD`) for spread, plus IQR, percentiles, skewness, kurtosis, and a
-   bootstrap confidence interval for the median.
-4. **Set a directional acceptance band** (below).
+- `test-storage-baselines.db`;
+- `dltest_numerical_correctness-baselines.db`;
+- `dltest_compute_performance-baselines.db`;
+- `dltest_collective_performance-baselines.db`;
+- `dltest_overlap_performance-baselines.db`.
 
-### Directional acceptance bands
+Classification databases are per target:
 
-The half-width of the band is:
+- `storage-classifications.db`;
+- `dltest-classifications.db`;
+- `dltest-numerical-classifications.db`;
+- `dltest-compute-classifications.db`;
+- `dltest-collective-classifications.db`;
+- `dltest-overlap-classifications.db`.
 
-```text
-delta = max(z * 1.4826 * MAD,  tolerance_pct/100 * |median|)
-```
+Extensions use `plugin-<target>-baselines.db` and
+`plugin-<target>-classifications.db` by default. Readers enumerate enabled
+targets and merge latest rows.
 
-with `z = robust_z_threshold` (default 3.5). The relative-tolerance floor means a
-freakishly tight MAD can never make classification more sensitive than the
-configured engineering tolerance.
+Historical SQLite NCCL baseline/classification files may remain as retained
+compatibility evidence, but generic NCCL baseline/classification helpers and
+operational targets are removed. Raw `cval results --test nccl` export remains
+available.
 
-Directionality decides which side is a failure:
+## Lifecycle
 
-| Direction | Meaning | Metrics |
-| --- | --- | --- |
-| `low_bad` | higher is better; only the low side fails | busbw, all storage IOPS/BW |
-| `high_bad` | lower is better; only the high side fails | NCCL latency, DL time metrics |
-| `two_sided` | any deviation fails | DL numerical correctness, overlap |
+Baselines are immutable and move through:
 
-### Deterministic metrics (MAD = 0)
+`candidate → active → superseded`
 
-DL numerical-correctness outputs should be bit-reproducible for a fixed image and
-seed, so more than half the samples are identical and MAD is `0`. c-val detects
-this, avoids dividing by zero (MeanAD fallback in the z-score), and uses the tight
-relative tolerance (`dl_numerical_tolerance_pct`, default 0.1%) as the band. Any
-real spread is itself a signal.
+Activation redefines normal and must remain deliberate.
 
-### U8 stratification
-
-Baselines are computed per stratum so comparisons stay apples-to-apples. The keys
-differ by test type because the schemas do:
-
-- **storage**: image, CUDA, and PyTorch versions.
-- **NCCL**: image, CUDA, PyTorch, iteration count, and BF16 data size.
-- **DL**: image, CUDA, PyTorch, test plan, and iteration count.
-
-GPU SKU / topology are not yet recorded per run and are left for future work.
-
-### Sample size
-
-U8 requires at least `min_samples` distinct qualifying results (default 8 in
-built-ins), complete expanded-metric result membership, and the same exact
-non-empty sample-key set in every result. A pooled metric cannot become nominal
-after a rank/sample disappears. A new candidate also requires
-`min_new_results` IDs absent from the preceding immutable candidate snapshot.
-
----
-
-## Per-test rules
-
-| Test | Source DB | Metrics | Direction | Tolerance floor |
-| --- | --- | --- | --- | --- |
-| NCCL | `test-nccl.db` (`nccl_performance`) | busbw, latency | busbw `low_bad`, latency `high_bad` | `nccl_peer_tolerance_pct` (5%) |
-| Storage | `test-storage.db` (`storage_performance`) | 12 IOPS/BW columns | `low_bad` | `storage_peer_tolerance_pct` (10%) |
-| DL numerical | `dltest_numerical_correctness.db` | per `task/rank/metric` | `two_sided` | `dl_numerical_tolerance_pct` (0.1%) |
-| DL compute | `dltest_compute_performance.db` | fp/bp cpu/gpu time | `high_bad` | `dl_compute_tolerance_pct` (3%) |
-| DL collective | `dltest_collective_performance.db` | cpu/gpu time | `high_bad` | `dl_compute_tolerance_pct` (3%) |
-| DL overlap | `dltest_overlap_performance.db` | coll/layer mean/stdev | `two_sided` | `dl_overlap_tolerance_pct` (20%) |
-
-DL numerical keeps `rank` in the metric key (ranks may legitimately differ and
-must stay near-exact per rank); DL performance metrics pool ranks since the GPUs
-are timing peers.
-
-DL metric DBs are rebuilt from remapped rank JSON artifacts before DL baseline
-build/classification:
+## Commands
 
 ```text
-/data/continuous_validation/validation_tests/dltest/runs/<node>/<run-id>/artifacts/workdir/test_plans/<plan>/runs/*.json
+cval baseline build --test-type storage --store
+cval baseline activate <baseline-id> storage
+cval baseline classify --test-type storage --store-results
+cval classifications --test all --type csv
+cval results --test storage --type csv
 ```
 
-The scanner also accepts historical
-`/data/continuous_validation/dltest/<node>/dltest-*/workdir/...` layouts when
-that legacy root is supplied explicitly.
+The background build/classify scripts enumerate enabled targets from the test
+registry. A DL group takes one shared metric-refresh lock.
 
-The maintenance command is:
+## Global-classification split preparation
 
-```bash
-python -m cval.cli db-rebuild-dltest-metrics \
-  --results-root /data/continuous_validation/validation_tests/dltest/runs \
-  --output-dir /data/continuous_validation/metadata
-```
-
-### DL verdict aggregation
-
-DL has thousands of metrics per node, so c-val does **not** mark a node degraded
-because one metric barely crosses a robust band. Each metric is still classified
-against its median/MAD band, but the node/component verdict uses two additional
-aggregation variables:
-
-- `n_degraded` / `degraded_metric_fraction`: how many metrics are meaningfully bad.
-- `worst_pct_diff`: how far the worst out-of-band metric is from the baseline.
-
-For DL only, a metric counts toward the node's degraded verdict when it is both
-outside the band and at least `dl_degraded_severity_pct` percent away from the
-baseline median. A DL component becomes `degraded` when those severe misses reach
-either `dl_min_degraded_metrics` or `dl_degraded_metric_fraction`.
-
-The four DL components can be classified as separate tests:
+The former global DB is not touched automatically. After a separately approved
+whole-root backup, preview a split locally or against an explicit copied tree:
 
 ```text
-dltest-numerical
-dltest-compute
-dltest-collective
-dltest-overlap
+scripts/cval-split-classifications.py \
+  --source <copy>/baselines/classification-results.db
 ```
 
-`dltest` remains the aggregate view and includes per-component summaries in JSON
-output.
-
----
-
-## U8 versioned health records
-
-U8 stores one database per test at
-`validation_tests/<test-id>/<test-id>_health_classes.db`. Candidate IDs are
-SHA-256 content identities over canonical combination factors, descriptor and
-health-policy versions, adapter-schema version, robust-z policy, exact source
-and durable-receipt provenance, exact observations/sample coverage, statistics,
-thresholds, and lifecycle parent. Adapter observation order and wall-clock
-storage time do not alter identity.
-
-Metric center/spread reuse the established median/MAD kernel. With
-$\sigma_{MAD}=1.4826\,MAD$, the degradation width is:
-
-$$
-\Delta = \max\left(z\sigma_{MAD},\;\frac{t}{100}|m|\right)
-$$
-
-where $m$ is the median, $z$ is the effective robust-z policy, and $t$ is the
-configured tolerance. Classes 2/3/4 occupy the directional $1\Delta$,
-$2\Delta$, and beyond-$3\Delta$ degradation bands; class 0 is the good-side
-tail where applicable, class 1 is nominal, and class 5 is DNR with no threshold.
-For zero-center metrics, severity falls back to delta-relative distance rather
-than falsely reporting zero percent.
-
-Declarative aggregation is `max_metric_class.v1`. DL uses the validated
-`dl_severity_count_fraction.v1` final aggregation while preserving every
-framework-generated metric verdict. Candidate construction is always
-framework-owned; custom adapters cannot replace statistics, DNR, or provenance.
-
-The lifecycle remains:
-
-```text
-candidate  ->  active  ->  superseded
-```
-
-Building never activates. Explicit activation atomically supersedes only the
-current parent in the same `(test_id, combination_key)`. Exact SQL triggers
-protect all correctness evidence and legal lifecycle transitions; the mutable
-build-state row is advisory only. See
-[U8 Health Engine Design Report](u8-health-engine-design-report.md).
-
-### U9 evaluator semantics
-
-The evaluator reconstructs candidate eligibility from the authoritative U8
-candidate chain, never from advisory `health_build_state`. Passing rows need an
-exact current config digest, canonical environment combination, adapter schema,
-and durable receipt. A pass without a receipt is deferred. Raw fail/incomplete,
-missing combination, or no active compatible baseline produce class 5 DNR.
-Wholly absent adapter state is accepted only when no selected passing row needs
-metrics, allowing raw fail/incomplete DNR history; partial adapter state remains
-an error. Plugin/schema failures are isolated per test.
-
-Candidate construction pages through every current-config passing source and
-is never truncated by the classification batch size. Classification selects
-the oldest pending targets, reports backlog/truncation, and drains successive
-pages; a new active baseline therefore eventually reevaluates the full history.
-Passing rows that cannot yet be evaluated are retained as a separately counted,
-bounded deferred page with their reasons. They remain included in
-`classification_remaining`; storing every actionable row therefore never
-misreports deferred work as drained.
-Result scans use bounded primary-key keyset pages. Each page resolves current
-history through one exact `(run_id, baseline_identity)` lookup backed by the
-table's unique index, rather than one query per result or a full-history load.
-
-Classification history is append-only in the canonical U7 DB. Its versioned
-target identity binds test/config/health-policy/evaluator, adapter version,
-combination/category, and active baseline (including baseline-less DNR).
-`target_digest` additionally binds raw result/receipt evidence;
-`evidence_digest` binds the complete verdict. Exact retries are idempotent,
-changed evidence for the same target conflicts, and version/policy/baseline
-changes append. When no pending backlog remains, a bounded existing-target page
-is reclassified and its recomputed evidence digest is compared before
-`history_idempotent` is reported; identity alone is never accepted as proof.
-If an exact target is appended after preflight, the atomic history store reports
-that record as `idempotent` while preserving `stored` for other records in the
-same batch; planned actions are never relabeled wholesale.
-Canonical metric verdicts, stable `DnrReason` values, and
-canonical DNR details are stored while nullable latest-health columns remain
-untouched.
-
-Eligible candidate apply holds the selected U7 `BEGIN IMMEDIATE` reservation
-and rebuilds both the complete source catalog and adapter observations from one
-in-memory projection of that exact connection. U7/U8 writers bind the file
-identity captured before open and recheck it immediately before commit, so an
-in-transaction path replacement rolls back rather than reporting success.
-
-## Compatibility dynamic baseline records
-
-### Registry-derived operational targets (U10)
-
-The immutable `OperationalTarget` catalog is rebuilt in registry order. An
-enabled plugin's `baseline` capability exposes compatibility build, lifecycle,
-classification, and classification-export targets; its existing `export`
-capability exposes result export. A canonical plugin target therefore needs no
-core CLI name edit. Tests without a required capability do not appear for that
-operation, and disabled tests never appear.
-
-`dltest-numerical`, `dltest-compute`, `dltest-collective`, and
-`dltest-overlap` are one central compatibility overlay. They exist only while
-their `dltest` owner is enabled and eligible, and expose classify/result-export
-operations while the canonical `dltest` target owns baseline build/lifecycle.
-`all` and `overall` are reserved, and registry IDs colliding with either a
-reserved name or a DL alias are rejected during configuration loading.
-
-Built-in adapters keep the exact current sources and output contracts:
-
-- storage: `metadata/test-storage.db`;
-- NCCL: `metadata/test-nccl.db` / wide `IB_HEALTH` export;
-- DL: the four `metadata/dltest_*` DBs;
-- baselines and derived verdicts: `baselines/*.db` and
-  `baselines/classification-results.db`.
-
-There is explicitly **no U7/U8/U9 source cutover** in U10. A new canonical
-plugin gets the collision-free default `baselines/plugin-<test-id>-baselines.db`; reads do
-not create a missing DB, and storage occurs only when the existing `--store` or
-`--activate` path is requested.
-
-Baselines are immutable, versioned records in SQLite DBs under
-`/data/continuous_validation/baselines`, with a lifecycle status:
-
-```text
-candidate  ->  active  ->  superseded
-```
-
-`build --store` writes a `candidate`. `activate` promotes it to `active` and
-supersedes the previous active baseline **for the same `(test_type, stratum)`**,
-so different strata keep independent active baselines. New results are always
-classified against the single `active` baseline (or an explicit `--baseline-id`).
-Candidates are the default so a slowly degrading fleet cannot silently
-re-baseline itself.
-
-Compatibility baseline content is immutable. Persistence uses conflict-free
-`INSERT`; concurrent writers take a SQLite write reservation, use conflict
-`DO NOTHING`, and re-read and validate the winning row in the same transaction.
-An exact same-ID/content retry is idempotent and preserves the row's current
-lifecycle, while changed content or first-class identity columns under the same
-ID fail closed. Plugin baseline and verdict returns use exact schemas, finite
-JSON-safe scalar values, bound target/baseline identities, and validated
-count/fraction/distance invariants before dispatch and again before storage.
-DL validation independently derives all component and top-level statuses,
-counts, fractions, worst distances, and severity flags from the metric reports;
-component and aggregate thresholds must agree exactly.
-
-Default baseline DBs:
-
-```text
-/data/continuous_validation/baselines/
-  test-storage-baselines.db
-  test-nccl-baselines.db
-  dltest_numerical_correctness-baselines.db
-  dltest_compute_performance-baselines.db
-  dltest_collective_performance-baselines.db
-  dltest_overlap_performance-baselines.db
-  classification-results.db
-  logs/
-    build/
-    classify/
-```
-
-Storage and NCCL have one baseline DB each. DL has four baseline DBs mirroring
-the four DL metric DBs. `classification-results.db` stores derived baseline
-decisions (`normal`, `improved`, `degraded`), a boolean `passed` column, and
-graded score columns such as `n_compared`, `n_degraded`,
-`degraded_metric_fraction`, and `worst_pct_diff`. Raw validation
-`pass/fail/incomplete` rows stay untouched in `validation.db`.
-
-### Stored record schema (`metrics_json`)
-
-```json
-{
-  "schema_version": "cval.baseline.v2",
-  "baseline_id": "nccl-image=pytorch:26.05-py3-1781000000",
-  "test_type": "nccl",
-  "stratum_key": "image=pytorch:26.05-py3",
-  "window_days": 30,
-  "created_at": 1781000000,
-  "timestamp": 1781000000,
-  "n_samples": 42,
-  "method": "robust_mad",
-  "metrics": {
-    "busbw": {
-      "metric": "busbw",
-      "direction": "low_bad",
-      "n": 40, "n_excluded": 2,
-      "median": 480.0, "mad": 3.0, "mad_sigma": 4.45, "iqr": 5.0,
-      "p01": 470.0, "p05": 473.0, "p25": 478.0, "p50": 480.0,
-      "p75": 483.0, "p95": 487.0, "p99": 490.0,
-      "minimum": 465.0, "maximum": 492.0,
-      "skewness": -0.1, "kurtosis": 0.2,
-      "ci_low": 478.0, "ci_high": 482.0,
-      "deterministic": false,
-      "lower_bound": 456.0, "upper_bound": null,
-      "method": "robust_mad",
-      "source_table": "IB_HEALTH"
-    }
-  }
-}
-```
-
-`null` bounds mean "unbounded on that side" (one-sided performance metrics).
-
----
-
-## CLI
-
-### Build a baseline
-
-```bash
-# Build from the NCCL DB over the last 30 days, store as a candidate
-python -m cval.cli baseline build --test-type nccl --window-days 30 --store
-
-# Stratify storage by image, then store and promote to active in one step
-python -m cval.cli baseline build --test-type storage \
-  --image-name pytorch:26.05-py3 --baseline-id storage-2026Q2 --activate
-
-# DL baseline for one test plan, JSON output (no store)
-python -m cval.cli baseline build --test-type dltest --test-plan 80gb-example --output json
-```
-
-Useful flags: `--min-samples`, `--node`, `--source-db`, `--db-path` (where the
-baseline is stored), `--store`, `--activate`.
-
-### Activate / show / list
-
-```bash
-python -m cval.cli baseline activate storage-2026Q2 storage
-python -m cval.cli baseline show storage-2026Q2 storage
-python -m cval.cli baseline list --test-type storage --output json
-```
-
-### Classify nodes
-
-```bash
-# Classify all nodes seen in the window against the active storage baseline
-python -m cval.cli baseline classify --test-type storage
-
-# One node, JSON output, against an explicit baseline id
-python -m cval.cli baseline classify --test-type nccl \
-  --node slc01-cl02-hgx-0009 --baseline-id nccl-2026Q2 --output json
-
-# Persist derived pass/degraded decisions into classification-results.db
-python -m cval.cli baseline classify --test-type dltest --store-results --output json
-
-# DL components can be classified separately
-python -m cval.cli baseline classify --test-type dltest-compute --store-results
-python -m cval.cli baseline classify --test-type dltest-numerical --store-results
-```
-
-Table output:
-
-```text
-Classification vs baseline storage-2026Q2 (storage)
-NODE                             STATUS         BAD BAND_BAD     BAD%   WORST% COMPARED
-slc01-cl02-hgx-0001              normal           0        0    0.00%    0.00%       12
-slc01-cl02-hgx-0009              degraded        12       12  100.00%   35.00%       12
-Degraded nodes: slc01-cl02-hgx-0009
-```
-
-A node's value for each metric is the **median of its recent runs** in the window,
-so a single noisy run does not flip the verdict. Storage and NCCL still degrade
-when any metric crosses the failing side of its band. DL adds the aggregation
-rules above so tiny numbers of weak misses remain visible in `BAND_BAD` and
-`worst_pct_diff` without flipping the node verdict.
-
-Classification exports:
-
-```bash
-python -m cval.cli classifications --test all --type csv
-python -m cval.cli classifications --test dltest-compute --type csv
-python -m cval.cli results --test dltest-compute --type csv
-```
-
-`results` keeps the raw `result` column from `validation.db` and adds
-`classification_status`, `classification_passed`, `n_degraded`,
-`degraded_metric_fraction`, and `worst_pct_diff` from `classification-results.db`.
-
-### Background scripts
-
-Two tmux-managed loops are provided for the PVC access pod (or any environment
-where `/data/continuous_validation` is visible):
-
-```bash
-scripts/cval-baseline-build.sh start       # daily baseline build + activate
-scripts/cval-baseline-build.sh status
-scripts/cval-baseline-build.sh attach
-
-scripts/cval-baseline-classify.sh start    # classify every configured interval
-scripts/cval-baseline-classify.sh status
-scripts/cval-baseline-classify.sh attach
-```
-
-For a one-shot run without starting tmux:
-
-```bash
-scripts/cval-baseline-build.sh run-once
-scripts/cval-baseline-classify.sh run-once
-```
-
-The builder cadence defaults to daily (`build_interval_seconds = 86400`). The
-classifier cadence defaults to five minutes (`classify_interval_seconds = 300`).
-Both loops enumerate enabled targets from the hidden read-only catalog output
-instead of fixed shell lists. `CVAL_BASELINE_CLASSIFY_TESTS` remains an
-allowlist and cannot re-enable a registry-disabled test. Targets sharing the DL
-refresh group take one shared lock and perform at most one refresh per cycle.
-One target failure does not skip later targets; the cycle exits nonzero after
-all eligible work is attempted.
-
-The loop TSV contract is versioned as `cval.operational-target.v1` with exactly
-seven fields. Malformed/empty catalogs and an empty classify allowlist
-intersection fail the cycle. DL work uses the shared Python lock helper to open
-the existing canonical baseline directory with `O_DIRECTORY|O_NOFOLLOW`,
-require effective-user ownership with no group/other write permission, acquire
-`flock` on that stable directory inode, and hold it while supervising the
-grouped child work. The directory pathname/device/inode is checked before and
-after acquisition, periodically while the child runs, and after it exits. The
-configured lock-file pathname is only a compatibility marker; replacing it
-cannot split the lock or touch its target. A replaced/non-canonical directory,
-wrong owner/permissions, unavailable helper/interpreter, or lock failure stops
-the group and reports a nonzero result.
-
-The overview reads historical compatibility verdicts but counts only names in
-the current enabled `baseline-classify` target catalog. Rows for disabled or
-no-longer-classifiable registrations remain on disk and are omitted from the
-dashboard.
-
-U10 implementation alone does not authorize or perform a live loop restart.
-
----
-
-## Python API
-
-```python
-from cval.baselines import (
-    build_baseline,
-    store_dynamic_baseline,
-    activate_baseline,
-    get_active_baseline,
-    classify_node,
-    classify_nodes,
-)
-
-# 1. Build a baseline from the result DBs (robust stats).
-record = build_baseline("storage", image_name="pytorch:26.05-py3", window_days=30)
-
-# 2. Persist as a candidate, then promote to active.
-store_dynamic_baseline(record)                       # status = candidate
-activate_baseline(record["baseline_id"], "storage")  # status = active
-
-# 3. Classify nodes against the active baseline.
-baseline = get_active_baseline("storage")
-verdicts = classify_nodes("storage", baseline)
-degraded = [v["node"] for v in verdicts if v["status"] == "degraded"]
-```
-
-Low-level robust statistics live in `cval.baselines.stats` (`summarize_metric`,
-`classify_value`, `median`, `mad`, `modified_zscores`, `tukey_fences`,
-`bootstrap_median_ci`).
-
----
-
-## Configuration
-
-Shared lifecycle and robust-statistics defaults remain global:
-
-```toml
-[baseline]
-robust_z_threshold = 3.5            # modified z-score cutoff
-min_samples = 8                     # minimum clean samples per metric
-window_days = 30                    # rolling window for building baselines
-```
-
-Test-specific tolerances, directions, combination factors, and rebuild controls
-live under `[health]` and `[[health.metrics]]` in each test's
-`test_config.toml`. DL verdict aggregation lives under
-`[settings.health_aggregation]` in
-`validation-tests/dltest/test_config.toml`. The composed config exposes
-compatibility values to the current baseline modules, so classification behavior
-is unchanged while ownership moves to each test.
-
-Every enabled U8 health descriptor also declares a versioned
-`health.policy_version`, matched by the repository adapter. It must change when
-observation or aggregation semantics become incompatible.
-
----
-
-## Integration with Hermes
-
-The Hermes `c-val-hpc-engineer` skill can build baselines, classify nodes, and
-summarize degraded nodes through these commands. See
-[c-val-hpc-engineer/SKILL.md](../skills/c-val-hpc-engineer/SKILL.md).
-
-## Limitations and future work
-
-- **GPU SKU / topology strata**: not yet recorded per run; only image/test_plan.
-- **Trend analysis**: rolling baselines over time to catch slow degradation.
-- **Auto-promotion guardrail**: promote an improved baseline only when stable and
-  not drifting too far from the current active one.
-- **U9 evaluator/live wiring**: build and classify completed canonical results
-  without weakening default-off write gates or U8 activation controls.
+Apply requires both a backup manifest that contains the source file and exact
+`--apply --confirm split-classifications`. The command refuses existing target
+files and never deletes the source.

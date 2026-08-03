@@ -1,26 +1,26 @@
-"""Dry-run and approval-gated validation job submission.
+"""Approval-gated validation job submission.
 
 This module is the only package layer that can create Kubernetes resources. It
-is dry-run by default and calls `ExecutionPolicy` before any real `kubectl
-create` operation.
+calls `ExecutionPolicy` before every real `kubectl create` operation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cval.config import load_config
+from cval.config import is_exact_commit, load_config
 from cval.k8s.client import KubectlClient
 from cval.models import WorkflowPlan
-from cval.policy import ExecutionPolicy, validate_submit_request
+from cval.policy import ExecutionPolicy, PolicyViolation, validate_submit_request
 
 
 @dataclass(frozen=True)
 class JobSubmissionRecord:
-    """One dry-run or submitted job action in a submission result."""
+    """One submitted job action in a submission result."""
 
     node: str
     job_name: str
+    git_ref: str
     action: str
     submitted: bool
     stdout: str = ""
@@ -31,7 +31,6 @@ class JobSubmissionResult:
     """Submission response containing all planned/submitted job records."""
 
     namespace: str
-    dry_run: bool
     records: list[JobSubmissionRecord]
 
     @property
@@ -49,11 +48,27 @@ def submit_workflow_plan(
     submit: bool = False,
     confirmation: str | None = None,
 ) -> JobSubmissionResult:
-    """Preview or submit a workflow plan after policy validation."""
+    """Submit a workflow plan after exact policy validation."""
+
+    if not submit:
+        raise ValueError(
+            "Submission requires submit=True; use the plan command for read-only inspection"
+        )
 
     resolved_namespace = namespace or load_config().cluster.namespace
     active_policy = policy or ExecutionPolicy(namespace_allowlist=(resolved_namespace,))
-    # Run policy checks before dry-run output too, so bad plans are visible early.
+    invalid_refs = sorted(
+        {
+            planned.rendered_job.git_ref
+            for planned in plan.planned_jobs
+            if not is_exact_commit(planned.rendered_job.git_ref)
+        }
+    )
+    if invalid_refs:
+        raise PolicyViolation(
+            "Real cluster submission requires every rendered job to use an exact "
+            "nonzero lowercase 40-hex commit"
+        )
     validate_submit_request(
         namespace=resolved_namespace,
         planned_jobs_count=len(plan.planned_jobs),
@@ -61,22 +76,6 @@ def submit_workflow_plan(
         submit=submit,
         confirmation=confirmation,
     )
-
-    if not submit:
-        # Dry-run is the normal path; it returns intended actions without kubectl create.
-        return JobSubmissionResult(
-            namespace=resolved_namespace,
-            dry_run=True,
-            records=[
-                JobSubmissionRecord(
-                    node=planned.candidate.node,
-                    job_name=planned.rendered_job.job_name,
-                    action="dry-run",
-                    submitted=False,
-                )
-                for planned in plan.planned_jobs
-            ],
-        )
 
     kubectl = client or KubectlClient()
     records: list[JobSubmissionRecord] = []
@@ -90,13 +89,14 @@ def submit_workflow_plan(
             JobSubmissionRecord(
                 node=planned.candidate.node,
                 job_name=planned.rendered_job.job_name,
+                git_ref=planned.rendered_job.git_ref,
                 action="submitted",
                 submitted=True,
                 stdout=result.stdout.strip(),
             )
         )
 
-    return JobSubmissionResult(namespace=resolved_namespace, dry_run=False, records=records)
+    return JobSubmissionResult(namespace=resolved_namespace, records=records)
 
 
 def submission_result_to_dict(result: JobSubmissionResult) -> dict[str, object]:
@@ -104,12 +104,12 @@ def submission_result_to_dict(result: JobSubmissionResult) -> dict[str, object]:
 
     return {
         "namespace": result.namespace,
-        "dry_run": result.dry_run,
         "submitted_count": result.submitted_count,
         "jobs": [
             {
                 "node": record.node,
                 "job_name": record.job_name,
+                "git_ref": record.git_ref,
                 "action": record.action,
                 "submitted": record.submitted,
                 "stdout": record.stdout,

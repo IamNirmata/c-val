@@ -22,28 +22,9 @@ read_sysfs = false
 install_fio = true
 
 [artifacts]
-results_db_path = "validation_tests/storage/storage_results.db"
-health_classes_db_path = "validation_tests/storage/storage_health_classes.db"
 summary_filename = "summary.txt"
 
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "ingest", "health", "baseline", "export"]
-
-[health]
-enabled = true
-policy_version = "storage.health.v1"
-strategy = "declarative"
-min_samples = 8
-min_new_results = 10
-target_class_count = 5
-combination_factors = ["image_name", "cuda_version", "pytorch_version"]
-auto_activate = false
-
-[[health.metrics]]
-name = "storage-performance"
-source = "storage_performance"
-direction = "low_bad"
-units = "mixed"
-tolerance_pct = 10.0
+capabilities = ["config", "baseline", "export"]

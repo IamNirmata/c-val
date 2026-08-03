@@ -21,7 +21,6 @@ from cval.validation.operational_targets import (
 
 BASELINE_DB_FILENAMES = {
     "storage": "test-storage-baselines.db",
-    "nccl": "test-nccl-baselines.db",
 }
 
 DL_BASELINE_DB_FILENAMES = {
@@ -31,7 +30,32 @@ DL_BASELINE_DB_FILENAMES = {
     "overlap_performance": "dltest_overlap_performance-baselines.db",
 }
 
-CLASSIFICATION_DB_FILENAME = "classification-results.db"
+CLASSIFICATION_DB_FILENAMES = {
+    "storage": "storage-classifications.db",
+    "dltest": "dltest-classifications.db",
+    "dltest-numerical": "dltest-numerical-classifications.db",
+    "dltest-compute": "dltest-compute-classifications.db",
+    "dltest-collective": "dltest-collective-classifications.db",
+    "dltest-overlap": "dltest-overlap-classifications.db",
+}
+GLOBAL_CLASSIFICATION_DB_FILENAME = "classification-results.db"
+
+CLASSIFICATION_RESULTS_COLUMNS = (
+    ("classified_at", "INTEGER", 1, None, 1),
+    ("node", "TEXT", 1, None, 2),
+    ("test_type", "TEXT", 1, None, 3),
+    ("baseline_id", "TEXT", 1, None, 4),
+    ("status", "TEXT", 1, None, 0),
+    ("passed", "INTEGER", 1, None, 0),
+    ("n_compared", "INTEGER", 1, None, 0),
+    ("n_degraded", "INTEGER", 1, None, 0),
+    ("n_improved", "INTEGER", 1, None, 0),
+    ("n_band_degraded", "INTEGER", 1, "0", 0),
+    ("degraded_metric_fraction", "REAL", 1, "0.0", 0),
+    ("worst_pct_diff", "REAL", 1, "0.0", 0),
+    ("metrics_json", "TEXT", 1, None, 0),
+)
+CLASSIFICATION_RESULTS_INDEX_NAME = "idx_classification_node_test_time"
 
 
 def baseline_root_path(config=None) -> Path:
@@ -50,6 +74,8 @@ def default_dynamic_baseline_db_path(
 
     root = baseline_root_path(config)
     baseline_test_type = normalize_baseline_test_type(test_type)
+    if baseline_test_type == "nccl":
+        raise ValueError("NCCL baselines are managed only by cval.nccl_eval PostgreSQL")
     component = source_table or dl_component_for_test_type(test_type)
     if baseline_test_type == "dltest":
         if not component:
@@ -80,10 +106,33 @@ def default_dynamic_baseline_db_paths(test_type: str, config=None) -> list[Path]
     return [default_dynamic_baseline_db_path(baseline_test_type, config=config)]
 
 
-def default_classification_db_path(config=None) -> Path:
-    """Return the default classification-result DB path."""
+def default_classification_db_path(test_type: str, config=None) -> Path:
+    """Return the deterministic classification DB for one target."""
 
-    return baseline_root_path(config) / CLASSIFICATION_DB_FILENAME
+    target = validate_operational_target_name(test_type)
+    if target == "nccl":
+        raise ValueError("NCCL classifications are managed only by cval.nccl_eval PostgreSQL")
+    filename = CLASSIFICATION_DB_FILENAMES.get(
+        target, f"plugin-{target}-classifications.db"
+    )
+    return baseline_root_path(config) / filename
+
+
+def default_classification_db_paths(config=None) -> dict[str, Path]:
+    """Return enabled classification target paths in registry order."""
+
+    active_config = config or load_config()
+    catalog = build_operational_target_catalog(active_config.tests.registry)
+    return {
+        target.name: default_classification_db_path(target.name, active_config)
+        for target in catalog.for_operation("classifications-export")
+    }
+
+
+def global_classification_db_path(config=None) -> Path:
+    """Return the retained read-only global classification DB during cutover."""
+
+    return baseline_root_path(config) / GLOBAL_CLASSIFICATION_DB_FILENAME
 
 
 def validate_default_baseline_db_paths(config=None) -> None:
@@ -92,16 +141,24 @@ def validate_default_baseline_db_paths(config=None) -> None:
     active_config = config or load_config()
     catalog = build_operational_target_catalog(active_config.tests.registry)
     owners: dict[Path, str] = {}
-    classification_path = default_classification_db_path(active_config).absolute()
+    classification_owners: dict[Path, str] = {}
+    for target, path in default_classification_db_paths(active_config).items():
+        lexical = path.expanduser().absolute()
+        previous = classification_owners.setdefault(lexical, target)
+        if previous != target:
+            raise ValueError(
+                f"Classification targets {previous!r} and {target!r} collide at {lexical}"
+            )
     for target in catalog.for_operation(BASELINE_LIST):
         for path in default_dynamic_baseline_db_paths(
             target.name,
             config=active_config,
         ):
             lexical = path.expanduser().absolute()
-            if lexical == classification_path:
+            if lexical in classification_owners:
                 raise ValueError(
-                    f"Baseline target {target.name!r} collides with classification DB"
+                    f"Baseline target {target.name!r} collides with classification DB "
+                    f"for {classification_owners[lexical]!r}"
                 )
             previous = owners.setdefault(lexical, target.name)
             if previous != target.name:
@@ -154,26 +211,28 @@ def _ensure_baselines_schema(connection: sqlite3.Connection) -> None:
 def _store_dynamic_baseline_in_db(record: dict, db_path: str | Path, status: str) -> str:
     """Store one dynamic baseline record in one SQLite DB."""
 
-    from cval.validation.operations import validate_compatibility_baseline_record
+    from cval.validation.operations import validate_baseline_record
 
     baseline_id = record["baseline_id"]
     test_type = record["test_type"]
     if status != "candidate":
-        raise ValueError("New compatibility baselines must be stored as candidates")
+        raise ValueError("New evaluator baselines must be stored as candidates")
     validation_record = dict(record)
     component = validation_record.pop("component", None)
-    validate_compatibility_baseline_record(
+    validate_baseline_record(
         validation_record,
         expected_test_type=test_type,
     )
+    if not record.get("metrics"):
+        raise ValueError("Evaluator baseline metrics must be non-empty")
     if component is not None:
         if test_type != "dltest" or component not in DL_BASELINE_DB_FILENAMES:
-            raise ValueError("Compatibility baseline component projection is invalid")
+            raise ValueError("Evaluator baseline component projection is invalid")
         if any(
             metric.get("source_table") != component
             for metric in record["metrics"].values()
         ):
-            raise ValueError("Compatibility baseline component contains foreign metrics")
+            raise ValueError("Evaluator baseline component contains foreign metrics")
     record_json = json.dumps(
         record,
         sort_keys=True,
@@ -223,7 +282,7 @@ def _store_dynamic_baseline_in_db(record: dict, db_path: str | Path, status: str
                 (baseline_id, test_type),
             ).fetchone()
             if existing is None:
-                raise RuntimeError("Compatibility baseline insert produced no durable row")
+                raise RuntimeError("Evaluator baseline insert produced no durable row")
             try:
                 existing_record = json.loads(existing[0])
                 existing_json = json.dumps(
@@ -234,11 +293,11 @@ def _store_dynamic_baseline_in_db(record: dict, db_path: str | Path, status: str
                 )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RuntimeError(
-                    "Stored compatibility baseline content is invalid"
+                    "Stored evaluator baseline content is invalid"
                 ) from exc
             if existing_json != record_json:
                 raise ValueError(
-                    f"Compatibility baseline ID {baseline_id!r} already has different content"
+                    f"Evaluator baseline ID {baseline_id!r} already has different content"
                 )
             expected_columns = (
                 int(record.get("timestamp", record.get("created_at", 0))),
@@ -252,7 +311,7 @@ def _store_dynamic_baseline_in_db(record: dict, db_path: str | Path, status: str
             )
             if tuple(existing[1:]) != expected_columns:
                 raise ValueError(
-                    f"Compatibility baseline ID {baseline_id!r} has inconsistent stored identity"
+                    f"Evaluator baseline ID {baseline_id!r} has inconsistent stored identity"
                 )
             connection.commit()
         except BaseException:
@@ -272,6 +331,8 @@ def _split_dl_record_for_config(record: dict, config=None) -> list[tuple[Path, d
             for metric_name, metric_stat in metrics.items()
             if metric_stat.get("source_table") == source_table
         }
+        if not component_metrics:
+            continue
         component_record = dict(record)
         component_record["metrics"] = component_metrics
         component_record["component"] = source_table
@@ -319,22 +380,34 @@ def store_dynamic_baseline(
     re-baseline itself; call :func:`activate_baseline` to promote.
     """
 
-    from cval.validation.operations import validate_compatibility_baseline_record
+    from cval.validation.operations import validate_baseline_record
 
-    validate_compatibility_baseline_record(
+    active_config = config or load_config()
+    if (
+        isinstance(record, dict)
+        and isinstance(record.get("test_type"), str)
+        and normalize_baseline_test_type(record["test_type"]) == "nccl"
+    ):
+        raise ValueError("NCCL baselines are managed only by cval.nccl_eval PostgreSQL")
+    validate_baseline_record(
         record,
         expected_test_type=record.get("test_type") if isinstance(record, dict) else "",
+        min_samples=active_config.baseline.min_samples,
     )
 
     if db_path is not None:
         return _store_dynamic_baseline_in_db(record, db_path, status)
 
     if record["test_type"] == "dltest":
-        for target_path, component_record in _split_dl_record_for_config(record, config=config):
+        for target_path, component_record in _split_dl_record_for_config(
+            record, config=active_config
+        ):
             _store_dynamic_baseline_in_db(component_record, target_path, status)
         return record["baseline_id"]
 
-    target_path = default_dynamic_baseline_db_path(record["test_type"], config=config)
+    target_path = default_dynamic_baseline_db_path(
+        record["test_type"], config=active_config
+    )
     return _store_dynamic_baseline_in_db(record, target_path, status)
 
 
@@ -342,22 +415,47 @@ def _activate_baseline_in_db(
     baseline_id: str,
     test_type: str,
     db_path: str | Path,
+    *,
+    min_samples: int,
 ) -> bool:
     """Promote one baseline in one DB."""
 
     baseline_test_type = normalize_baseline_test_type(test_type)
+    if not Path(db_path).exists():
+        return False
     with closing(_connect_writable(db_path)) as connection:
         try:
             connection.execute("BEGIN IMMEDIATE")
             _ensure_baselines_schema(connection)
             row = connection.execute(
-                "SELECT stratum_key FROM baselines WHERE baseline_id = ? AND test_type = ?",
+                "SELECT stratum_key, n_samples, metrics_json FROM baselines "
+                "WHERE baseline_id = ? AND test_type = ?",
                 (baseline_id, baseline_test_type),
             ).fetchone()
             if row is None:
                 connection.commit()
                 return False
-            stratum_key = row[0]
+            stratum_key, n_samples, metrics_json = row
+            try:
+                stored_record = json.loads(metrics_json or "null")
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("Stored evaluator baseline content is invalid") from exc
+            validation_record = (
+                dict(stored_record) if isinstance(stored_record, dict) else stored_record
+            )
+            if isinstance(validation_record, dict):
+                validation_record.pop("component", None)
+            from cval.validation.operations import validate_baseline_record
+
+            validate_baseline_record(
+                validation_record,
+                expected_test_type=baseline_test_type,
+                min_samples=min_samples,
+            )
+            if n_samples < min_samples:
+                raise ValueError(
+                    "Stored evaluator baseline n_samples is below the configured minimum"
+                )
             connection.execute(
                 """
                 UPDATE baselines SET status = 'superseded'
@@ -390,12 +488,25 @@ def activate_baseline(
     Returns False when the baseline_id does not exist.
     """
 
+    if normalize_baseline_test_type(test_type) == "nccl":
+        raise ValueError("NCCL baselines are managed only by cval.nccl_eval PostgreSQL")
+    active_config = config or load_config()
     if db_path is not None:
-        return _activate_baseline_in_db(baseline_id, test_type, db_path)
+        return _activate_baseline_in_db(
+            baseline_id,
+            test_type,
+            db_path,
+            min_samples=active_config.baseline.min_samples,
+        )
 
     activated_any = False
-    for path in default_dynamic_baseline_db_paths(test_type, config=config):
-        activated_any = _activate_baseline_in_db(baseline_id, test_type, path) or activated_any
+    for path in default_dynamic_baseline_db_paths(test_type, config=active_config):
+        activated_any = _activate_baseline_in_db(
+            baseline_id,
+            test_type,
+            path,
+            min_samples=active_config.baseline.min_samples,
+        ) or activated_any
     return activated_any
 
 
@@ -430,6 +541,8 @@ def load_dynamic_baseline(
 ) -> dict | None:
     """Load a full baseline record (with per-metric stats) by id."""
 
+    if normalize_baseline_test_type(test_type) == "nccl":
+        raise ValueError("NCCL baselines are managed only by cval.nccl_eval PostgreSQL")
     if db_path is not None:
         return _load_dynamic_baseline_from_db(baseline_id, test_type, db_path)
 
@@ -478,6 +591,8 @@ def get_active_baseline(
 ) -> dict | None:
     """Return the active baseline record for a test type / stratum, if any."""
 
+    if normalize_baseline_test_type(test_type) == "nccl":
+        raise ValueError("NCCL baselines are managed only by cval.nccl_eval PostgreSQL")
     if db_path is not None:
         return _get_active_baseline_from_db(test_type, stratum_key, db_path)
 
@@ -518,22 +633,22 @@ def _validate_loaded_baseline_record(
     baseline_id: str,
     test_type: str,
 ) -> None:
-    from cval.validation.operations import validate_compatibility_baseline_record
+    from cval.validation.operations import validate_baseline_record
 
     if not isinstance(record, dict):
-        raise ValueError("Stored compatibility baseline must be a JSON object")
+        raise ValueError("Stored evaluator baseline must be a JSON object")
     validation_record = dict(record)
     component = validation_record.pop("component", None)
-    validate_compatibility_baseline_record(
+    validate_baseline_record(
         validation_record,
         expected_test_type=test_type,
     )
     if validation_record["baseline_id"] != baseline_id:
-        raise ValueError("Stored compatibility baseline identity does not match its row")
+        raise ValueError("Stored evaluator baseline identity does not match its row")
     if component is not None and (
         test_type != "dltest" or component not in DL_BASELINE_DB_FILENAMES
     ):
-        raise ValueError("Stored compatibility baseline component is invalid")
+        raise ValueError("Stored evaluator baseline component is invalid")
 
 
 def list_dynamic_baselines(
@@ -543,6 +658,8 @@ def list_dynamic_baselines(
 ) -> list[tuple]:
     """List dynamic baselines as (id, test_type, status, stratum, n, created_at)."""
 
+    if test_type is not None and normalize_baseline_test_type(test_type) == "nccl":
+        raise ValueError("NCCL baselines are managed only by cval.nccl_eval PostgreSQL")
     active_config = config or load_config()
     catalog = build_operational_target_catalog(active_config.tests.registry)
     enabled_test_types = {
@@ -580,7 +697,7 @@ def store_classification_results(
     validation pass/fail rows stay untouched in validation.db.
     """
 
-    from cval.validation.operations import validate_compatibility_classification_verdicts
+    from cval.validation.operations import validate_classification_verdicts
 
     active_config = config or load_config()
     catalog = build_operational_target_catalog(active_config.tests.registry)
@@ -590,6 +707,17 @@ def store_classification_results(
         if not isinstance(verdict, dict) or not isinstance(verdict.get("test_type"), str):
             raise TypeError("Classification persistence requires validated verdict dictionaries")
         grouped.setdefault(verdict["test_type"], []).append(verdict)
+    explicit_path = Path(db_path).expanduser().absolute() if db_path is not None else None
+    if explicit_path is not None:
+        retained_global = global_classification_db_path(
+            active_config
+        ).expanduser().absolute()
+        if explicit_path == retained_global:
+            raise ValueError("The retained global classification DB is read-only")
+        if len(grouped) > 1:
+            raise ValueError(
+                "An explicit classification DB may contain only one target group"
+            )
     for test_type, group in grouped.items():
         target = by_name.get(test_type)
         if target is None:
@@ -597,14 +725,35 @@ def store_classification_results(
         baseline_ids = {verdict.get("baseline_id") for verdict in group}
         if len(baseline_ids) != 1:
             raise ValueError("Classification persistence requires one baseline identity per target")
-        validate_compatibility_classification_verdicts(
+        validate_classification_verdicts(
             group,
             target=target,
             expected_baseline_id=next(iter(baseline_ids)),
         )
 
-    db_path = db_path or default_classification_db_path(active_config)
     classified_at = int(time.time()) if classified_at is None else int(classified_at)
+    if db_path is not None:
+        return _store_classification_group(
+            verdicts, db_path, classified_at=classified_at
+        )
+    count = 0
+    for test_type, group in grouped.items():
+        count += _store_classification_group(
+            group,
+            default_classification_db_path(test_type, active_config),
+            classified_at=classified_at,
+        )
+    return count
+
+
+def _store_classification_group(
+    verdicts: list[dict],
+    db_path: str | Path,
+    *,
+    classified_at: int,
+) -> int:
+    """Store one already-validated target group in its SQLite database."""
+
     with closing(_connect_writable(db_path)) as connection:
         try:
             connection.execute("BEGIN IMMEDIATE")

@@ -1,8 +1,8 @@
 """Structured validation result schema helpers.
 
-Validation pods write one `cval.results.v1` JSON artifact per run. This module
-validates that artifact and converts it to legacy env-style status variables
-used by `db-update.sh`.
+Validation pods write one canonical ``cval.results`` JSON artifact per run.
+Strict historical ``cval.results.v1`` and ``cval.results.v2`` readers remain so
+existing evidence is never rewritten.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from cval.validation.compatibility import (
-    LEGACY_ENABLE_ENV,
-    LEGACY_RESULT_ENV,
-    LEGACY_RESULT_PROJECTION_KEYS,
-    LEGACY_TEST_IDS,
+from cval.validation.builtins import (
+    BUILTIN_ENABLE_ENV,
+    BUILTIN_RESULT_ENV,
+    RESULT_PROJECTION_KEYS,
+    BUILTIN_TEST_IDS,
 )
 
 
@@ -75,7 +75,7 @@ class ValidationResult:
 
 @dataclass(frozen=True)
 class TestResultV2:
-    """Execution state and artifact paths for one registered v2 test."""
+    """Execution state and artifact paths for one registered current test."""
 
     display_name: str
     enabled: bool
@@ -100,7 +100,7 @@ class TestResultV2:
 
 @dataclass(frozen=True)
 class ValidationResultV2:
-    """Parsed dynamic result envelope for one modular validation run."""
+    """Parsed canonical dynamic result envelope for one validation run."""
 
     schema_version: str
     run_id: str
@@ -122,8 +122,8 @@ class ValidationResultV2:
 ValidationResultLike = ValidationResult | ValidationResultV2
 
 
-RESULT_ENV_KEYS = LEGACY_RESULT_ENV
-RESULT_ENABLED_ENV_KEYS = LEGACY_ENABLE_ENV
+RESULT_ENV_KEYS = BUILTIN_RESULT_ENV
+RESULT_ENABLED_ENV_KEYS = BUILTIN_ENABLE_ENV
 
 
 def load_validation_result(path: Path) -> ValidationResultLike:
@@ -132,7 +132,7 @@ def load_validation_result(path: Path) -> ValidationResultLike:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("c-val result payload must be a JSON object")
-    if payload.get("schema_version") == "cval.results.v2":
+    if payload.get("schema_version") in {"cval.results", "cval.results.v2"}:
         return parse_validation_result_v2(payload)
     return parse_validation_result(payload)
 
@@ -147,7 +147,7 @@ def parse_validation_result(payload: dict[str, Any]) -> ValidationResult:
         raise ValueError("c-val result payload must contain a tests object")
 
     tests: dict[str, TestResult] = {}
-    for name in LEGACY_TEST_IDS:
+    for name in BUILTIN_TEST_IDS:
         raw = tests_raw.get(name)
         # All three validation layers are required so aggregate status is meaningful.
         if not isinstance(raw, dict):
@@ -194,7 +194,7 @@ def parse_validation_result(payload: dict[str, Any]) -> ValidationResult:
 
 
 def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
-    """Validate and parse one dynamic ``cval.results.v2`` envelope."""
+    """Validate canonical or historical-v2 dynamic result envelopes."""
 
     allowed_top_level = {
         "schema_version",
@@ -213,9 +213,10 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
         "tests",
         "errors",
     }
-    _reject_unknown(payload, allowed_top_level, "cval.results.v2")
-    if payload.get("schema_version") != "cval.results.v2":
-        raise ValueError("Unsupported c-val v2 result schema_version")
+    schema_version = payload.get("schema_version")
+    _reject_unknown(payload, allowed_top_level, "cval.results")
+    if schema_version not in {"cval.results", "cval.results.v2"}:
+        raise ValueError("Unsupported c-val result schema_version")
 
     run_id = _required_str(payload, "run_id")
     if not RUN_ID_PATTERN.fullmatch(run_id) or run_id in {".", ".."}:
@@ -238,26 +239,26 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
 
     overall = _required_str(payload, "overall")
     if overall not in VALID_STATUSES:
-        raise ValueError(f"Invalid v2 overall status: {overall}")
+        raise ValueError(f"Invalid current overall status: {overall}")
     global_config_digest = _required_str(payload, "global_config_digest")
     if not DIGEST_PATTERN.fullmatch(global_config_digest):
         raise ValueError("global_config_digest must be a sha256 digest")
 
     tests_raw = payload.get("tests")
     if not isinstance(tests_raw, dict) or not tests_raw:
-        raise ValueError("cval.results.v2 tests must be a non-empty object")
+        raise ValueError("cval.results tests must be a non-empty object")
     tests: dict[str, TestResultV2] = {}
     selected_orders: dict[int, str] = {}
     for test_id, raw in tests_raw.items():
         if not isinstance(test_id, str) or not TEST_ID_PATTERN.fullmatch(test_id):
-            raise ValueError(f"Invalid v2 test ID: {test_id!r}")
+            raise ValueError(f"Invalid current test ID: {test_id!r}")
         if not isinstance(raw, dict):
-            raise ValueError(f"v2 test {test_id!r} must be an object")
+            raise ValueError(f"current test {test_id!r} must be an object")
         test = _parse_v2_test(test_id, raw)
         if test.selected:
             if test.order in selected_orders:
                 raise ValueError(
-                    "Selected v2 tests must have unique order: "
+                    "Selected current tests must have unique order: "
                     f"{selected_orders[test.order]!r} and {test_id!r}"
                 )
             selected_orders[test.order] = test_id
@@ -274,7 +275,7 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
         expected_overall = "incomplete"
     if overall != expected_overall:
         raise ValueError(
-            f"v2 overall must be {expected_overall!r} for the provided tests"
+            f"current overall must be {expected_overall!r} for the provided tests"
         )
 
     run_terminal = all(test.phase in TERMINAL_V2_PHASES for test in participating)
@@ -292,11 +293,11 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
 
     errors_raw = payload.get("errors")
     if not isinstance(errors_raw, list):
-        raise ValueError("cval.results.v2 errors must be an array")
+        raise ValueError("cval.results errors must be an array")
     errors = [_parse_v2_error(raw, index) for index, raw in enumerate(errors_raw)]
 
     return ValidationResultV2(
-        schema_version="cval.results.v2",
+        schema_version=str(schema_version),
         run_id=run_id,
         node=node,
         timestamp=timestamp,
@@ -335,7 +336,7 @@ def validation_result_to_env(result: ValidationResultLike) -> dict[str, str]:
             for test_name, env_key in RESULT_ENABLED_ENV_KEYS.items()
         }
     )
-    keys = LEGACY_RESULT_PROJECTION_KEYS
+    keys = RESULT_PROJECTION_KEYS
     values[keys["overall"]] = result.overall
     values[keys["image_name"]] = result.image_name
     values[keys["pytorch_version"]] = result.pytorch_version
@@ -423,14 +424,14 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
         "artifacts",
         "message",
     }
-    _reject_unknown(raw, allowed, f"v2 test {test_id!r}")
+    _reject_unknown(raw, allowed, f"current test {test_id!r}")
     enabled = _required_bool(raw, "enabled", test_id)
     selected = _required_bool(raw, "selected", test_id)
     if selected and not enabled:
-        raise ValueError(f"Disabled v2 test {test_id!r} cannot be selected")
+        raise ValueError(f"Disabled current test {test_id!r} cannot be selected")
     order = _required_int(raw, "order")
     if order < 0:
-        raise ValueError(f"v2 test {test_id!r} order must be non-negative")
+        raise ValueError(f"current test {test_id!r} order must be non-negative")
     status = _required_str(raw, "status")
     if status not in VALID_STATUSES:
         raise ValueError(f"Invalid v2 status for {test_id}: {status}")
@@ -439,7 +440,7 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
         raise ValueError(f"Invalid v2 phase for {test_id}: {phase}")
     if not selected and (status != "incomplete" or phase != "not_selected"):
         raise ValueError(
-            f"Non-selected v2 test {test_id!r} must be incomplete/not_selected"
+            f"Non-selected current test {test_id!r} must be incomplete/not_selected"
         )
 
     started_at = _nullable_str(raw, "started_at")
@@ -449,70 +450,70 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
     if completed_at is not None:
         _validate_timestamp(completed_at, f"{test_id}.completed_at")
     if completed_at is not None and started_at is None:
-        raise ValueError(f"v2 test {test_id!r} completed without starting")
+        raise ValueError(f"current test {test_id!r} completed without starting")
     if started_at and completed_at:
         if _parse_timestamp(completed_at) < _parse_timestamp(started_at):
-            raise ValueError(f"v2 test {test_id!r} completed before it started")
+            raise ValueError(f"current test {test_id!r} completed before it started")
 
     duration_ms = _nullable_int(raw, "duration_ms")
     if duration_ms is not None and duration_ms < 0:
-        raise ValueError(f"v2 test {test_id!r} duration_ms must be non-negative")
+        raise ValueError(f"current test {test_id!r} duration_ms must be non-negative")
     exit_code = _nullable_int(raw, "exit_code")
 
     if phase == "not_selected":
         if selected or status != "incomplete":
             raise ValueError(
-                f"not_selected v2 test {test_id!r} must be unselected/incomplete"
+                f"not_selected current test {test_id!r} must be unselected/incomplete"
             )
         if any(
             value is not None
             for value in (started_at, completed_at, duration_ms, exit_code)
         ):
             raise ValueError(
-                f"Non-selected v2 test {test_id!r} cannot have execution state"
+                f"Non-selected current test {test_id!r} cannot have execution state"
             )
     elif phase == "pending":
         if any(
             value is not None
             for value in (started_at, completed_at, duration_ms, exit_code)
         ):
-            raise ValueError(f"Pending v2 test {test_id!r} has impossible state")
+            raise ValueError(f"Pending current test {test_id!r} has impossible state")
         if status != "incomplete":
-            raise ValueError(f"Pending v2 test {test_id!r} must be incomplete")
+            raise ValueError(f"Pending current test {test_id!r} must be incomplete")
     elif phase in {"setup", "running"}:
         if started_at is None or completed_at is not None:
-            raise ValueError(f"Active v2 test {test_id!r} needs only started_at")
+            raise ValueError(f"Active current test {test_id!r} needs only started_at")
         if status != "incomplete" or duration_ms is not None or exit_code is not None:
-            raise ValueError(f"Active v2 test {test_id!r} has terminal values")
+            raise ValueError(f"Active current test {test_id!r} has terminal values")
     elif phase == "finished":
         if status not in {"pass", "fail"} or completed_at is None:
-            raise ValueError(f"Finished v2 test {test_id!r} needs terminal status/time")
+            raise ValueError(f"Finished current test {test_id!r} needs terminal status/time")
         if status == "pass" and exit_code != 0:
-            raise ValueError(f"Passing v2 test {test_id!r} must have exit_code 0")
+            raise ValueError(f"Passing current test {test_id!r} must have exit_code 0")
         if status == "fail" and (exit_code is None or exit_code == 0):
-            raise ValueError(f"Failed v2 test {test_id!r} needs non-zero exit_code")
+            raise ValueError(f"Failed current test {test_id!r} needs non-zero exit_code")
     elif phase in {"setup_failed", "timed_out", "framework_error"}:
         if status != "fail" or completed_at is None:
-            raise ValueError(f"v2 test {test_id!r} {phase} must be failed/terminal")
+            raise ValueError(f"current test {test_id!r} {phase} must be failed/terminal")
         if phase == "setup_failed" and (exit_code is None or exit_code == 0):
             raise ValueError(
-                f"setup_failed v2 test {test_id!r} needs non-zero exit_code"
+                f"setup_failed current test {test_id!r} needs non-zero exit_code"
             )
         if phase == "timed_out" and exit_code == 0:
-            raise ValueError(f"timed_out v2 test {test_id!r} cannot have exit_code 0")
+            raise ValueError(f"timed_out current test {test_id!r} cannot have exit_code 0")
         if phase == "framework_error" and exit_code == 0:
             raise ValueError(
-                f"framework_error v2 test {test_id!r} cannot have exit_code 0"
+                f"framework_error current test {test_id!r} cannot have exit_code 0"
             )
     elif phase == "interrupted":
         if status != "incomplete" or completed_at is None:
-            raise ValueError(f"Interrupted v2 test {test_id!r} must be incomplete")
+            raise ValueError(f"Interrupted current test {test_id!r} must be incomplete")
     if phase in TERMINAL_V2_PHASES - {"not_selected"} and duration_ms is None:
-        raise ValueError(f"Terminal v2 test {test_id!r} requires duration_ms")
+        raise ValueError(f"Terminal current test {test_id!r} requires duration_ms")
 
     config_digest = _required_str(raw, "config_digest")
     if not DIGEST_PATTERN.fullmatch(config_digest):
-        raise ValueError(f"v2 test {test_id!r} config_digest must be sha256")
+        raise ValueError(f"current test {test_id!r} config_digest must be sha256")
     path_values = {
         "config_path": _required_str(raw, "config_path"),
         **{
@@ -529,12 +530,12 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
     }
     for key, value in path_values.items():
         if "\x00" in value:
-            raise ValueError(f"v2 test {test_id!r} {key} contains NUL")
+            raise ValueError(f"current test {test_id!r} {key} contains NUL")
     if selected:
         missing_paths = [key for key, value in path_values.items() if not value]
         if missing_paths:
             raise ValueError(
-                f"Selected v2 test {test_id!r} has empty paths: "
+                f"Selected current test {test_id!r} has empty paths: "
                 f"{', '.join(missing_paths)}"
             )
 
@@ -614,7 +615,7 @@ def _nullable_str(data: dict[str, Any], key: str) -> str | None:
 def _required_bool(data: dict[str, Any], key: str, test_id: str) -> bool:
     value = data.get(key)
     if not isinstance(value, bool):
-        raise ValueError(f"v2 test {test_id!r} {key} must be a boolean")
+        raise ValueError(f"current test {test_id!r} {key} must be a boolean")
     return value
 
 

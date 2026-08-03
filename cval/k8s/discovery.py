@@ -348,10 +348,8 @@ def node_is_cordoned(node_map: Mapping[str, object]) -> bool:
 def node_is_ready(node_map: Mapping[str, object]) -> bool:
     """Return the kubelet Ready state.
 
-    A node is treated as ready unless a `Ready` condition is present with a
-    status other than ``"True"`` (``False``/``Unknown`` means NotReady). A
-    missing condition is treated as ready so partial fixtures do not read as
-    unhealthy.
+    Only an explicit ``Ready=True`` condition is accepted. Missing, false, or
+    unknown readiness is ineligible for a real targeted validation job.
     """
 
     status = _mapping(node_map.get("status"))
@@ -359,7 +357,7 @@ def node_is_ready(node_map: Mapping[str, object]) -> bool:
         condition_map = _mapping(condition)
         if condition_map.get("type") == "Ready":
             return condition_map.get("status") == "True"
-    return True
+    return False
 
 
 def describe_node_from_outputs(
@@ -395,6 +393,10 @@ def describe_node_from_outputs(
     is_gpu_node = capacity > 0
     node_map = _node_map_by_name(node_payload, node_name)
     cordoned = node_is_cordoned(node_map)
+    if cordoned:
+        # Targeted validation explicitly tolerates the cordon taint. Rolling
+        # discovery still excludes cordoned nodes through unschedulable_node_names.
+        schedulable = True
     ready = node_is_ready(node_map) if found else False
     fully_free = (
         found
@@ -416,7 +418,7 @@ def describe_node_from_outputs(
         reason = "node kubelet reports NotReady"
     elif cordoned:
         status_label = "cordoned"
-        reason = "node is cordoned (spec.unschedulable); validation can still target it"
+        reason = "node is cordoned and eligible for explicit targeted validation"
     elif not schedulable:
         status_label = "unschedulable"
         reason = "node carries a blocking NoSchedule taint"

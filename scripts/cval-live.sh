@@ -113,7 +113,7 @@ Environment overrides:
     CVAL_BATCH_SIZE=<positive-integer>
     CVAL_DAYS_THRESHOLD=<days>
     CVAL_PENDING_START_TIMEOUT_SECONDS=<seconds>
-    CVAL_GIT_REF=<commit-or-branch>                # explicit session pin only
+    CVAL_GIT_REF=<40-hex-commit>                   # explicit session pin only
     CVAL_KUBECTL_TIMEOUT_SECONDS=120
     CVAL_PLAN_LIMIT=50
   CVAL_TMUX_SESSION=$SESSION_NAME
@@ -350,7 +350,6 @@ with open(plan_path, encoding="utf-8") as handle:
 if not isinstance(data, dict):
     raise ValueError("plan JSON must be an object")
 expected_keys = {
-    "dry_run",
     "batch_size",
     "days_threshold",
     "free_nodes_count",
@@ -359,9 +358,6 @@ expected_keys = {
 }
 if set(data) != expected_keys:
     raise ValueError("plan JSON has an unexpected top-level shape")
-if data["dry_run"] is not True:
-    raise ValueError("plan JSON dry_run must be exactly true")
-
 def positive_int(name, value):
     if type(value) is not int or value <= 0:
         raise ValueError(f"plan JSON {name} must be a positive integer")
@@ -403,16 +399,25 @@ expected_job_keys = {
     "last_tested_timestamp",
     "age_days",
     "job_name",
+    "git_ref",
 }
 for job in planned_jobs:
     if not isinstance(job, dict) or set(job) != expected_job_keys:
         raise ValueError("plan JSON contains a planned job with an unexpected shape")
     node = job["node"]
     job_name = job["job_name"]
+    git_ref = job["git_ref"]
     if not isinstance(node, str) or not node.strip():
         raise ValueError("plan JSON contains an invalid planned job node")
     if not isinstance(job_name, str) or not job_name.strip():
         raise ValueError("plan JSON contains an invalid planned job name")
+    if (
+        not isinstance(git_ref, str)
+        or len(git_ref) != 40
+        or any(character not in "0123456789abcdef" for character in git_ref)
+        or git_ref == "0" * 40
+    ):
+        raise ValueError("plan JSON contains an invalid exact git_ref")
     positive_int("planned job priority", job["priority"])
     if not isinstance(job["reason"], str) or not job["reason"].strip():
         raise ValueError("plan JSON contains an invalid planned job reason")
@@ -512,7 +517,7 @@ import sys
 payload = {
     "schema": "cval.live-audit.v1",
     "mode": "audit",
-    "action": "dry-run",
+    "action": "audit",
     "cluster_mutations": 0,
     "git_ref": git_ref,
     "git_ref_source": git_ref_source,
@@ -1016,7 +1021,7 @@ run_audit_cycle() {
     enter_runner_worktree "audit" || return "$?"
     local plan_file="$cycle_dir/audit-plan.json"
     local plan_error="$cycle_dir/audit-plan.stderr"
-    log "audit action=dry-run: discovery -> latest_status -> priority -> render -> slot selection"
+    log "audit action=inspect: discovery -> latest_status -> priority -> render -> slot selection"
     local inputs_rc=0
     collect_plan_inputs "$cycle_dir" audit "$git_ref" || inputs_rc=$?
     if (( inputs_rc != 0 )); then
@@ -1067,11 +1072,11 @@ run_audit_cycle() {
     log "audit component=discovery-and-status status=ok free_nodes_count=$free_nodes_count"
     log "audit component=priority-and-render status=ok queue_count=$queue_count planned_count=$planned_count"
     if [[ -n "$selected_nodes" ]]; then
-        log "audit action=dry-run selected_nodes=$selected_nodes submitted_count=0"
+        log "audit action=inspect selected_nodes=$selected_nodes submitted_count=0"
     elif (( free_nodes_count == 0 )); then
-        log "audit state=no-free-nodes action=dry-run submitted_count=0"
+        log "audit state=no-free-nodes action=inspect submitted_count=0"
     else
-        log "audit state=no-due-candidates action=dry-run submitted_count=0"
+        log "audit state=no-due-candidates action=inspect submitted_count=0"
     fi
     write_audit_summary \
         "$cycle_dir/audit-summary.json" \
@@ -1254,7 +1259,7 @@ run_submit_cycle() {
                 leave_runner_worktree "submit" "$inputs_rc" || return "$?"
                 return "$inputs_rc"
             fi
-            local plan_file="$cycle_dir/dry-run-$(date -u +%H%M%S)-slot-$slots.json"
+            local plan_file="$cycle_dir/plan-$(date -u +%H%M%S)-slot-$slots.json"
             log "rebuilding live ranked list for one open slot ($slots slot(s) available)"
             local plan_rc=0
             assert_runner_worktree "submit-slot-plan-before" "$git_ref" || {

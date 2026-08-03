@@ -14,7 +14,6 @@ import time
 from typing import Any
 
 from cval.config import CvalConfig, load_config
-from cval.baselines.storage import default_classification_db_path
 from cval.jobs.monitor import JobPhase, list_job_phases
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
@@ -138,7 +137,6 @@ def build_overview(
             client=client,
             namespace=namespace,
             pod=config.cluster.pvc_access_pod,
-            db_path=str(default_classification_db_path(config)),
             config=config,
         )
         enabled_classification_targets = set(

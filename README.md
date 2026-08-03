@@ -1,112 +1,108 @@
 # c-val
 
-For adding, updating, disabling, or proposing removal of a validation test, use
-the dry-run-first scaffold and approval rules in
-[docs/test-lifecycle.md](docs/test-lifecycle.md). U12A compatibility removals
-remain blocked on U11 live acceptance and the compatibility period.
+c-val is a deterministic continuous-validation framework for GPU clusters. It
+discovers free nodes, prioritizes stale coverage, runs real Volcano validation
+jobs from exact commits, supervises registered checks, ingests current result databases, and
+classifies nodes with robust baselines.
 
-Evaluator state is intentionally separated from shared validation evidence.
-`runtime.validation_root` remains a multi-consumer shared root and is never
-chmod/chown'ed by c-val; U7/U8 DBs, activation keys, and locks resolve under the
-fixed-owner `health_evaluator.state_root`. Live state-root provisioning,
-fixed-UID/GID ingestion, DB activation, image/deployment work, and U11 cutover
-remain unapproved. The current validation workload identity is unspecified, so
-enabling U7 before a fixed-identity ingestion path is deployed fails closed.
+## Safety defaults
 
-c-val is a dry-run-first continuous validation framework for GPU clusters. It discovers schedulable free GPU nodes, prioritizes stale or never-tested nodes, renders Volcano validation jobs, gates real submission behind explicit approval, monitors jobs read-only, and ingests deterministic storage, NCCL, and DL test results into SQLite metadata. It also builds robust statistical baselines (median/MAD) from result history, classifies nodes as normal, degraded, or improved, and exports both raw pass/fail status and baseline health verdicts.
+- Development validation runs directly on one eligible cluster node from an
+  exact published commit and requires `--submit --confirm submit`.
+- `plan --git-ref <40-hex-commit>` remains a read-only queue-inspection command;
+  it is not a local test gate.
+- The source-controlled Git ref is an all-zero fail-closed placeholder; every
+  real submission supplies an exact published nonzero commit.
+- Status, overview, results, classifications, baseline reads, and job monitoring
+  are read-only.
+- A degraded verdict never mutates Kubernetes or a node.
+- No credentials, kubeconfigs, or tokens are embedded in manifests.
+- Backup and classification split helpers provide nonwriting inspection and
+  explicit apply confirmations; they never delete source data.
 
-## Why `c-val` and `cval` Both Exist
+## Current data model
 
-- `c-val/` is the repository checkout and runtime clone directory. The hyphen is fine for a Git repository name and for in-pod paths such as `/workspace/c-val`.
-- `cval/` is the Python package imported by the CLI. Python import names cannot contain hyphens, so the package is intentionally named `cval`.
+Raw DBs under `/data/continuous_validation/metadata/`:
 
-There is not a nested duplicate repository; the repo root contains an importable package plus validation assets.
+- `validation.db` — authoritative pass/fail and latest status;
+- `test-storage.db`;
+- `test-nccl.db`;
+- four `dltest_*.db` component metric files.
 
-## Active Repository Layout
+The median/MAD baseline engine is the sole storage/DL evaluator. Baselines are stored per
+storage/DL component and move through
+`candidate → active → superseded`. Classification is stored in deterministic
+per-target DBs and reported as `normal`, `degraded`, or `improved`.
+
+## Quick start
 
 ```text
-cval/                  Python package and CLI orchestration code
-docs/                  Architecture, workflow, operations, and result docs
-config/                TOML defaults for cluster, scheduling, jobs, and policy
-skills/                Hermes skill package for safe c-val operation
-tests/                 Unit tests for planning, rendering, status, and ingestion
-validation-tests/      Scripts and workloads executed inside validation pods
-ymls/                  Active Kubernetes/Volcano templates
-pyproject.toml         Package metadata and `cval` console entry point
+python -m cval.cli status
+python -m cval.cli validate --node <node> --git-ref <40-hex-commit> --submit --confirm submit
+python -m cval.cli baseline classify --test-type storage --store-results
+python -m cval.cli classifications --test all --type csv
 ```
 
-Generated job YAML, old notebooks, backups, committed reports, and legacy helper scripts are intentionally not part of the active tree.
+## Validation tests
 
-## Quick Start
+The generic runner loads repository-local `cval.test.v1` descriptors. A new
+test can remain pass/fail-only or declare baseline/export hooks. Unique
+persistence is designed and implemented by that test; c-val does not create a
+generic per-test common DB.
 
-Use the CLI module directly from the repo checkout:
+New runs emit canonical `cval.results`. Historical `cval.results.v1` and
+`cval.results.v2` artifacts remain readable.
 
-```bash
-python -m cval.cli --help
-python -m cval.cli config
-python -m cval.cli nodes --output table
-python -m cval.cli status --output table
-```
+## Evaluator workload
 
-Build a dry-run plan:
+`deploy/cval-evaluator/` contains one fail-closed always-on CPU Deployment named
+`cval-evaluator`. The pod runs storage/DL baseline and classification loops plus
+NCCL outbox ingestion, PostgreSQL baseline building, recovery, and evaluation.
+It uses `python:3.12-slim`, clones/fetches configurable
+`CVAL_GIT_REPO` and a reviewed commit in `CVAL_GIT_REF`, verify exact checkout,
+install c-val, and validate the registry. They request no GPU/RDMA and contain
+no `kubectl`. Source manifests retain fail-closed commit/storage placeholders;
+reviewed NCCL runtime images and Python wheels are pinned by digest/hash.
 
-```bash
-python -m cval.cli run \
-  --live-status \
-  --threshold-days 4 \
-  --batch-size 1 \
-  --git-ref main \
-  --output json
-```
+The base Deployment and PostgreSQL StatefulSet both have zero replicas. No
+manifest is applied or scaled automatically.
 
-Real submission is explicit and policy-gated:
+## Optional NCCL PostgreSQL evaluator
 
-```bash
-python -m cval.cli run \
-  --live-status \
-  --threshold-days 4 \
-  --batch-size 1 \
-  --git-ref <commit-or-tag> \
-  --submit \
-  --confirm submit
-```
+NCCL is the explicit exception to the storage/DL `cval.baselines` evaluator
+rule. Its opt-in PostgreSQL implementation follows the checked-in NCCL spec;
+the current compatibility SQLite NCCL DB remains retained raw evidence.
 
-## Safety Model
+The unpublished `cval.nccl_eval` subsystem is isolated from the current raw
+SQLite path and remains disabled by the NCCL descriptor. It uses one
+PostgreSQL database with append-only raw rows, immutable median-centered
+baseline versions, and fenced durable queue claims. Its database mutations
+remain separately exact-confirmation gated.
 
-- Read-only commands are the default for discovery, status, job phase checks, and monitoring.
-- Planning and rendering are dry-run by default.
-- Kubernetes job creation requires `--submit --confirm submit`.
-- Read-only commands, including `jobs --watch`, never delete or cancel jobs.
-  The separately started `cval-live` service defaults to audit mode. Submit
-  requires exact `CVAL_LIVE_CONFIRM=submit`; stale-`Pending` pruning is off
-  unless independently confirmed with `CVAL_PRUNE_CONFIRM=delete-pending`.
-- The live loop resolves fresh `origin/main` to an exact commit each cycle by
-  default. Set `CVAL_GIT_REF` on a new session only for a deliberate pin.
+Validation jobs have no PostgreSQL credentials. When explicitly enabled they
+write immutable `pending/<run>.json` before current SQLite writes, then expose
+it with a digest-bound `committed/<run>.json` marker only after those writes
+commit. The credentialed NCCL process in the resident evaluator ingests each
+file idempotently and retains it. PostgreSQL and evaluator source replicas are
+zero. NCCL images are pinned to
+reviewed digests; Git commits and the RWO storage class remain fail-closed
+placeholders. The complete Python 3.12 dependency lock is hash-pinned and its
+exact bootstrap has been verified in the pinned image. Reviewed phased
+overlays do not grant live apply approval. See
+[docs/evals/nccl-rollout.md](docs/evals/nccl-rollout.md).
+
+Evaluator latency is canonicalized to microseconds. Native ingestion requires
+material `test_config.latency_unit = "us"`; copied legacy `IB_HEALTH.LATENCY`
+is milliseconds and is multiplied by 1000 (`628.2` becomes `628200.0 us`).
+Legacy profiles retain explicit source-unit/conversion evidence. Iterations,
+nullable samples, and warmup count are part of the type-aware profile
+fingerprint, so materially different workloads never share a baseline.
+
+See [docs/evals/nccl-eval-process.md](docs/evals/nccl-eval-process.md) for the
+schema, claim fencing, health-band derivation, role grants, and test contract.
 
 ## Documentation
 
-Start with [docs/README.md](docs/README.md), then use:
-
-- [docs/configuration.md](docs/configuration.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/workflow.md](docs/workflow.md)
-- [docs/cli-reference.md](docs/cli-reference.md)
-- [docs/operations-runbook.md](docs/operations-runbook.md)
-- [docs/result-schema.md](docs/result-schema.md)
-- [docs/result-schema-v2.md](docs/result-schema-v2.md)
-- [docs/modular-validation-contract.md](docs/modular-validation-contract.md)
-- [docs/run-history.md](docs/run-history.md)
-- [docs/baselines.md](docs/baselines.md)
-- [docs/dl-test.md](docs/dl-test.md)
-- [docs/hermes-integration.md](docs/hermes-integration.md)
-- [docs/troubleshooting.md](docs/troubleshooting.md)
-
-## Validation
-
-Before pushing changes, run:
-
-```bash
-find scripts validation-tests -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
-python -m unittest discover -s tests -p 'test_*.py'
-python -m compileall -q cval tests skills/c-val-hpc-engineer/scripts
-```
+See [docs/README.md](docs/README.md), especially architecture, CLI,
+configuration, operations, baselines, result schema, lifecycle, and the current
+remaining-live-actions tracker.

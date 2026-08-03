@@ -15,7 +15,7 @@ def main() -> int:
     data = json.loads(text)
 
     if isinstance(data, dict) and "planned_jobs" in data:
-        print(f"dry_run: {data.get('dry_run')}")
+        print("mode: read-only-plan")
         print(f"free_nodes_count: {data.get('free_nodes_count')}")
         print(f"queue_count: {data.get('queue_count')}")
         print(f"planned_jobs: {len(data.get('planned_jobs', []))}")

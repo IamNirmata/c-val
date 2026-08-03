@@ -167,19 +167,19 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
                 exit 0
             fi
             if [[ "$FAKE_PLAN_DUE" == "1" ]]; then
-                printf '{"dry_run":true,"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE"
+                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123","git_ref":"%s"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
             else
-                printf '{"dry_run":true,"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
+                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
             fi
             ;;
         run)
             if [[ " $* " == *" --submit "* ]]; then
-                printf '{"namespace":"test","dry_run":false,"submitted_count":1,"jobs":[{"node":"%s","job_name":"cval-%s-123","action":"submitted","submitted":true,"stdout":"created"}]}\n' "$FAKE_NODE" "$FAKE_NODE"
+                printf '{"namespace":"test","submitted_count":1,"jobs":[{"node":"%s","job_name":"cval-%s-123","git_ref":"%s","action":"submitted","submitted":true,"stdout":"created"}]}\n' "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
             else
                 if [[ "$FAKE_PLAN_DUE" == "1" ]]; then
-                    printf '{"dry_run":true,"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE"
+                    printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123","git_ref":"%s"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
                 else
-                    printf '{"dry_run":true,"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
+                    printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
                 fi
             fi
             ;;
@@ -353,7 +353,7 @@ class CvalLiveTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_default_audit_is_complete_dry_run_without_resume_or_mutation(self) -> None:
+    def test_default_audit_is_complete_read_only_inspection_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = self._environment(root)
@@ -392,7 +392,7 @@ class CvalLiveTests(unittest.TestCase):
         self.assertNotIn(" apply ", joined)
         self.assertNotIn(" create ", joined)
         self.assertEqual(summary["mode"], "audit")
-        self.assertEqual(summary["action"], "dry-run")
+        self.assertEqual(summary["action"], "audit")
         self.assertEqual(summary["cluster_mutations"], 0)
         self.assertEqual(summary["selected_nodes"], [NODE])
         self.assertIn("free_nodes_count=1", completed.stdout)
@@ -832,9 +832,9 @@ class CvalLiveTests(unittest.TestCase):
             "last_tested_timestamp": 0,
             "age_days": None,
             "job_name": f"cval-{NODE}-123",
+            "git_ref": ORIGIN_SHA,
         }
         valid_plan = {
-            "dry_run": True,
             "batch_size": 9,
             "days_threshold": 7,
             "free_nodes_count": 1,
@@ -843,9 +843,8 @@ class CvalLiveTests(unittest.TestCase):
         }
         malformed: list[tuple[str, object]] = [
             ("not-object", []),
-            ("missing-key", {key: value for key, value in valid_plan.items() if key != "dry_run"}),
+            ("missing-key", {key: value for key, value in valid_plan.items() if key != "batch_size"}),
             ("extra-key", valid_plan | {"submitted_count": 0}),
-            ("non-dry", valid_plan | {"dry_run": False}),
             ("bool-batch", valid_plan | {"batch_size": True}),
             ("zero-batch", valid_plan | {"batch_size": 0}),
             ("batch-request-mismatch", valid_plan | {"batch_size": 1}),
@@ -860,6 +859,10 @@ class CvalLiveTests(unittest.TestCase):
             ("jobs-not-list", valid_plan | {"planned_jobs": {}}),
             ("blank-node", valid_plan | {"planned_jobs": [valid_job | {"node": ""}]}),
             ("blank-job-name", valid_plan | {"planned_jobs": [valid_job | {"job_name": " "}]}),
+            ("missing-git-ref", valid_plan | {"planned_jobs": [{key: value for key, value in valid_job.items() if key != "git_ref"}]}),
+            ("moving-git-ref", valid_plan | {"planned_jobs": [valid_job | {"git_ref": "main"}]}),
+            ("uppercase-git-ref", valid_plan | {"planned_jobs": [valid_job | {"git_ref": "A" * 40}]}),
+            ("zero-git-ref", valid_plan | {"planned_jobs": [valid_job | {"git_ref": "0" * 40}]}),
             ("bool-priority", valid_plan | {"planned_jobs": [valid_job | {"priority": True}]}),
             ("submitted-field", valid_plan | {"planned_jobs": [valid_job | {"submitted": False}]}),
             (

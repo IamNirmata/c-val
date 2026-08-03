@@ -1,9 +1,8 @@
-"""Generic compatibility baseline, classification, and export dispatch.
+"""Canonical baseline, classification, and export dispatch.
 
-These extension points deliberately remain separate from U7/U8/U9.  Built-in
-adapters continue reading the established metadata metric databases and writing
-the established baseline/classification databases; registry capabilities only
-select and dispatch operator-facing targets.
+Built-in adapters read the current metadata metric databases and write the
+per-target baseline/classification databases. Registry capabilities select and
+dispatch operator-facing targets for the sole evaluator.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ def resolve_operational_target(
 	return build_operational_target_catalog(config.tests.registry).require(name, operation)
 
 
-def build_compatibility_baseline(
+def build_evaluator_baseline(
 	config: CvalConfig,
 	target_name: str,
 	*,
@@ -53,7 +52,7 @@ def build_compatibility_baseline(
 	test_plan: str | None = None,
 	baseline_id: str | None = None,
 ) -> dict[str, Any]:
-	"""Invoke one target owner's compatibility baseline builder."""
+	"""Invoke one target owner's baseline builder."""
 
 	target = resolve_operational_target(config, target_name, BASELINE_BUILD)
 	registered, plugin = _operational_plugin(config, target)
@@ -69,15 +68,16 @@ def build_compatibility_baseline(
 		test_plan=test_plan,
 		baseline_id=baseline_id,
 	)
-	record = plugin.build_compatibility_baseline(context)
-	validate_compatibility_baseline_record(
+	record = plugin.build_baseline(context)
+	validate_baseline_record(
 		record,
 		expected_test_type=target.baseline_test_type,
+		min_samples=min_samples,
 	)
 	return record
 
 
-def classify_compatibility_target(
+def classify_evaluator_target(
 	config: CvalConfig,
 	target_name: str,
 	baseline: dict[str, Any],
@@ -86,14 +86,14 @@ def classify_compatibility_target(
 	source_db: str | None = None,
 	node: str | None = None,
 ) -> list[dict[str, Any]]:
-	"""Invoke one target owner's compatibility classifier."""
+	"""Invoke one target owner's classifier."""
 
 	target = resolve_operational_target(config, target_name, BASELINE_CLASSIFY)
 	validation_baseline = dict(baseline) if isinstance(baseline, dict) else baseline
 	if isinstance(validation_baseline, dict):
 		validation_baseline.pop("component", None)
 		validation_baseline.pop("components", None)
-	validate_compatibility_baseline_record(
+	validate_baseline_record(
 		validation_baseline,
 		expected_test_type=target.baseline_test_type,
 	)
@@ -106,16 +106,16 @@ def classify_compatibility_target(
 		source_db=source_db,
 		node=node,
 	)
-	verdicts = plugin.classify_compatibility(context, baseline)
+	verdicts = plugin.classify(context, baseline)
 	if not isinstance(verdicts, tuple):
 		raise TypeError(
-			f"Adapter {target.owner_test_id!r} classify_compatibility must return a tuple"
+			f"Adapter {target.owner_test_id!r} classify must return a tuple"
 		)
 	normalized = list(verdicts)
 	baseline_id = baseline.get("baseline_id") if isinstance(baseline, dict) else None
 	if not isinstance(baseline_id, str) or not baseline_id:
-		raise ValueError("Compatibility classification baseline_id is invalid")
-	validate_compatibility_classification_verdicts(
+		raise ValueError("Classification baseline_id is invalid")
+	validate_classification_verdicts(
 		normalized,
 		target=target,
 		expected_baseline_id=baseline_id,
@@ -123,7 +123,7 @@ def classify_compatibility_target(
 	return normalized
 
 
-def export_compatibility_rows(
+def export_evaluator_rows(
 	config: CvalConfig,
 	target_name: str,
 	context: ExportContext,
@@ -211,39 +211,50 @@ _DL_COMPONENTS = frozenset(
 )
 
 
-def validate_compatibility_baseline_record(
+def validate_baseline_record(
 	record: object,
 	*,
 	expected_test_type: str,
+	min_samples: int | None = None,
 ) -> None:
-	"""Validate the exact persisted ``cval.baseline.v2`` compatibility shape."""
+	"""Validate the exact persisted baseline shape."""
 
 	if not isinstance(record, dict):
-		raise TypeError("Compatibility baseline hooks must return a dictionary")
-	_require_exact_fields(record, _BASELINE_FIELDS, "Compatibility baseline record")
+		raise TypeError("Evaluator baseline hooks must return a dictionary")
+	_require_exact_fields(record, _BASELINE_FIELDS, "Evaluator baseline record")
 	if record["schema_version"] != "cval.baseline.v2":
-		raise ValueError("Compatibility baseline schema_version is invalid")
+		raise ValueError("Evaluator baseline schema_version is invalid")
 	if record["test_type"] != expected_test_type:
-		raise ValueError("Compatibility baseline record has the wrong test_type")
-	_nonempty_string(record["baseline_id"], "Compatibility baseline_id")
-	_string(record["test_type"], "Compatibility baseline test_type")
-	_string(record["stratum_key"], "Compatibility baseline stratum_key")
-	_nonempty_string(record["method"], "Compatibility baseline method")
+		raise ValueError("Evaluator baseline record has the wrong test_type")
+	_nonempty_string(record["baseline_id"], "Evaluator baseline_id")
+	_string(record["test_type"], "Evaluator baseline test_type")
+	_string(record["stratum_key"], "Evaluator baseline stratum_key")
+	_nonempty_string(record["method"], "Evaluator baseline method")
 	if not isinstance(record["metrics"], dict):
-		raise TypeError("Compatibility baseline metrics must be a dictionary")
+		raise TypeError("Evaluator baseline metrics must be a dictionary")
+	if not record["metrics"]:
+		raise ValueError("Evaluator baseline metrics must be non-empty")
 	for field in ("window_days", "created_at", "timestamp", "n_samples"):
-		_non_negative_integer(record[field], f"Compatibility baseline {field}")
+		_non_negative_integer(record[field], f"Evaluator baseline {field}")
 	if record["window_days"] <= 0:
-		raise ValueError("Compatibility baseline window_days must be positive")
+		raise ValueError("Evaluator baseline window_days must be positive")
 	if record["timestamp"] != record["created_at"]:
-		raise ValueError("Compatibility baseline timestamp must equal created_at")
+		raise ValueError("Evaluator baseline timestamp must equal created_at")
+	if min_samples is not None:
+		_non_negative_integer(min_samples, "Evaluator baseline minimum samples")
+		if min_samples <= 0:
+			raise ValueError("Evaluator baseline minimum samples must be positive")
+		if record["n_samples"] < min_samples:
+			raise ValueError(
+				"Evaluator baseline n_samples is below the configured minimum"
+			)
 	for metric_name, metric in record["metrics"].items():
-		_nonempty_string(metric_name, "Compatibility baseline metric key")
+		_nonempty_string(metric_name, "Evaluator baseline metric key")
 		_validate_metric_stat(metric_name, metric)
-	_require_json_safe(record, "Compatibility baseline record")
+	_require_json_safe(record, "Evaluator baseline record")
 
 
-def validate_compatibility_classification_verdicts(
+def validate_classification_verdicts(
 	verdicts: list[dict[str, Any]],
 	*,
 	target: OperationalTarget,
@@ -254,14 +265,14 @@ def validate_compatibility_classification_verdicts(
 	seen_nodes: set[str] = set()
 	for verdict in verdicts:
 		if not isinstance(verdict, dict):
-			raise TypeError("Compatibility classification verdicts must be dictionaries")
+			raise TypeError("Evaluator classification verdicts must be dictionaries")
 		expected_fields = _VERDICT_FIELDS
 		if target.baseline_test_type == "dltest":
 			expected_fields |= _DL_VERDICT_FIELDS
 		_require_exact_fields(
 			verdict,
 			expected_fields,
-			"Compatibility classification verdict",
+			"Evaluator classification verdict",
 		)
 		node = verdict["node"]
 		if not isinstance(node, str) or not node or node in seen_nodes:
@@ -289,6 +300,10 @@ def validate_compatibility_classification_verdicts(
 			raise ValueError("Classification verdict n_metrics does not match metrics")
 		if verdict["n_compared"] != verdict["n_metrics"]:
 			raise ValueError("Classification verdict n_compared does not match metrics")
+		if verdict["n_compared"] == 0:
+			raise ValueError(
+				"Classification verdict must compare at least one metric"
+			)
 		if not (
 			0 <= verdict["n_degraded"] <= verdict["n_band_degraded"] <= verdict["n_compared"]
 		):
@@ -339,36 +354,36 @@ def validate_compatibility_classification_verdicts(
 			abs_tol=1e-12,
 		):
 			raise ValueError("Classification worst_pct_diff does not match metrics")
-		_require_json_safe(verdict, "Compatibility classification verdict")
+		_require_json_safe(verdict, "Evaluator classification verdict")
 
 
 def _validate_metric_stat(metric_name: str, metric: object) -> None:
 	if not isinstance(metric, dict):
-		raise TypeError("Compatibility baseline metric values must be dictionaries")
+		raise TypeError("Evaluator baseline metric values must be dictionaries")
 	_require_exact_fields(metric, _METRIC_STAT_FIELDS, f"Baseline metric {metric_name!r}")
 	if metric["metric"] != metric_name:
-		raise ValueError("Compatibility baseline metric identity does not match its key")
+		raise ValueError("Evaluator baseline metric identity does not match its key")
 	if metric["direction"] not in stats.VALID_DIRECTIONS:
-		raise ValueError("Compatibility baseline metric direction is invalid")
-	_nonempty_string(metric["source_table"], "Compatibility baseline metric source_table")
-	_nonempty_string(metric["method"], "Compatibility baseline metric method")
-	_non_negative_integer(metric["n"], "Compatibility baseline metric n")
+		raise ValueError("Evaluator baseline metric direction is invalid")
+	_nonempty_string(metric["source_table"], "Evaluator baseline metric source_table")
+	_nonempty_string(metric["method"], "Evaluator baseline metric method")
+	_non_negative_integer(metric["n"], "Evaluator baseline metric n")
 	if metric["n"] <= 0:
-		raise ValueError("Compatibility baseline metric n must be positive")
-	_non_negative_integer(metric["n_excluded"], "Compatibility baseline metric n_excluded")
+		raise ValueError("Evaluator baseline metric n must be positive")
+	_non_negative_integer(metric["n_excluded"], "Evaluator baseline metric n_excluded")
 	if not isinstance(metric["deterministic"], bool):
-		raise TypeError("Compatibility baseline metric deterministic must be boolean")
+		raise TypeError("Evaluator baseline metric deterministic must be boolean")
 	for field in (
 		"median", "mad", "mad_sigma", "iqr", "p01", "p05", "p25", "p50",
 		"p75", "p95", "p99", "minimum", "maximum", "skewness", "kurtosis",
 		"ci_low", "ci_high",
 	):
-		_number(metric[field], f"Compatibility baseline metric {field}")
+		_number(metric[field], f"Evaluator baseline metric {field}")
 	for field in ("lower_bound", "upper_bound"):
-		_optional_number(metric[field], f"Compatibility baseline metric {field}")
+		_optional_number(metric[field], f"Evaluator baseline metric {field}")
 	for field in ("mad", "mad_sigma", "iqr"):
 		if float(metric[field]) < 0.0:
-			raise ValueError(f"Compatibility baseline metric {field} must be non-negative")
+			raise ValueError(f"Evaluator baseline metric {field} must be non-negative")
 	ordered = [
 		float(metric[field])
 		for field in ("minimum", "p01", "p05", "p25", "p50", "p75", "p95", "p99", "maximum")
@@ -377,29 +392,29 @@ def _validate_metric_stat(metric_name: str, metric: object) -> None:
 		left > right and not math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-12)
 		for left, right in zip(ordered, ordered[1:])
 	):
-		raise ValueError("Compatibility baseline metric percentiles are unordered")
+		raise ValueError("Evaluator baseline metric percentiles are unordered")
 	if not math.isclose(
 		float(metric["median"]),
 		float(metric["p50"]),
 		rel_tol=1e-12,
 		abs_tol=1e-12,
 	):
-		raise ValueError("Compatibility baseline metric median does not equal p50")
+		raise ValueError("Evaluator baseline metric median does not equal p50")
 	if float(metric["ci_low"]) > float(metric["ci_high"]):
-		raise ValueError("Compatibility baseline metric confidence interval is inverted")
+		raise ValueError("Evaluator baseline metric confidence interval is inverted")
 	direction = metric["direction"]
 	if direction == stats.DIRECTION_LOW_BAD and metric["upper_bound"] is not None:
-		raise ValueError("low_bad compatibility metric must have an unbounded upper side")
+		raise ValueError("low_bad evaluator metric must have an unbounded upper side")
 	if direction == stats.DIRECTION_HIGH_BAD and metric["lower_bound"] is not None:
-		raise ValueError("high_bad compatibility metric must have an unbounded lower side")
+		raise ValueError("high_bad evaluator metric must have an unbounded lower side")
 	if direction == stats.DIRECTION_TWO_SIDED and (
 		metric["lower_bound"] is None or metric["upper_bound"] is None
 	):
-		raise ValueError("two_sided compatibility metric must have two finite bounds")
+		raise ValueError("two_sided evaluator metric must have two finite bounds")
 	if metric["lower_bound"] is not None and float(metric["lower_bound"]) > float(metric["median"]):
-		raise ValueError("Compatibility baseline lower bound exceeds its median")
+		raise ValueError("Evaluator baseline lower bound exceeds its median")
 	if metric["upper_bound"] is not None and float(metric["upper_bound"]) < float(metric["median"]):
-		raise ValueError("Compatibility baseline upper bound is below its median")
+		raise ValueError("Evaluator baseline upper bound is below its median")
 
 
 def _validate_metric_reports(metrics: list[object]) -> dict[str, int | float]:
@@ -575,7 +590,7 @@ def _derive_dl_summary(
 	minimum: int,
 	fraction_threshold: float,
 ) -> dict[str, int | float | str]:
-	"""Derive compatibility DL aggregation from validated metric reports."""
+	"""Derive evaluator DL aggregation from validated metric reports."""
 
 	n_compared = len(metrics)
 	n_degraded = sum(
@@ -678,10 +693,10 @@ def _require_json_safe(value: object, label: str) -> None:
 
 
 __all__ = [
-	"build_compatibility_baseline",
-	"classify_compatibility_target",
-	"export_compatibility_rows",
+	"build_evaluator_baseline",
+	"classify_evaluator_target",
+	"export_evaluator_rows",
 	"resolve_operational_target",
-	"validate_compatibility_baseline_record",
-	"validate_compatibility_classification_verdicts",
+	"validate_baseline_record",
+	"validate_classification_verdicts",
 ]

@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
-from cval.validation.compatibility import DEFAULT_TEST_REGISTRATIONS
+from cval.validation.builtins import DEFAULT_TEST_REGISTRATIONS
 
 
 TEST_SCHEMA_VERSION = "cval.test.v1"
@@ -30,14 +30,7 @@ RESOURCE_QUANTITY_PATTERN = re.compile(
     r"(?P<suffix>m|u|n|[EPTGMK]i?|[eE][+-]?\d+)?$"
 )
 ALLOWED_PLUGIN_CAPABILITIES = frozenset(
-    {"config", "ingest", "health", "baseline", "export"}
-)
-ALLOWED_HEALTH_STRATEGIES = frozenset({"declarative", "custom"})
-COMMON_HEALTH_COMBINATION_FACTORS = frozenset(
-    {"image_name", "cuda_version", "pytorch_version"}
-)
-ALLOWED_METRIC_DIRECTIONS = frozenset(
-    {"low_bad", "high_bad", "two_sided", "absolute"}
+    {"config", "baseline", "export"}
 )
 
 class FrozenMapping(Mapping[str, Any]):
@@ -117,10 +110,8 @@ class TestRequirements:
 
 @dataclass(frozen=True)
 class TestArtifacts:
-    """Validation-root-relative persistence paths declared by a test."""
+    """Test artifact settings used by the generic runner."""
 
-    results_db_path: str
-    health_classes_db_path: str = ""
     summary_filename: str = "summary.json"
 
 
@@ -135,34 +126,6 @@ class TestPlugin:
 
 
 @dataclass(frozen=True)
-class HealthMetric:
-    """One declarative health metric rule."""
-
-    name: str
-    source: str
-    direction: str
-    tolerance_pct: float
-    units: str = ""
-    weight: float = 1.0
-
-
-@dataclass(frozen=True)
-class TestHealth:
-    """Optional health-class configuration."""
-
-    enabled: bool
-    policy_version: str = ""
-    strategy: str = "declarative"
-    min_samples: int = 8
-    min_new_results: int = 1
-    target_class_count: int = 5
-    combination_factors: tuple[str, ...] = ()
-    auto_activate: bool = False
-    robust_z_threshold: float | None = None
-    metrics: tuple[HealthMetric, ...] = ()
-
-
-@dataclass(frozen=True)
 class ValidationTestDefinition:
     """A fully validated repository-local test descriptor."""
 
@@ -172,7 +135,6 @@ class ValidationTestDefinition:
     artifacts: TestArtifacts
     settings: Mapping[str, Any] = field(default_factory=dict)
     plugin: TestPlugin | None = None
-    health: TestHealth | None = None
 
 
 @dataclass(frozen=True)
@@ -360,7 +322,6 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
         "settings",
         "artifacts",
         "plugin",
-        "health",
     }
     _reject_unknown(data, allowed_root, str(path))
     schema_version = _strict_str(data.get("schema_version"), "schema_version")
@@ -439,33 +400,18 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
     )
 
     settings = _optional_table(data, "settings", path)
-    artifacts_raw = _required_table(data, "artifacts", path)
+    artifacts_raw = _optional_table(data, "artifacts", path)
     _reject_unknown(
         artifacts_raw,
-        {"results_db_path", "health_classes_db_path", "summary_filename"},
+        {"summary_filename"},
         f"{path} [artifacts]",
     )
-    results_db_path = _validation_root_test_path(
-        artifacts_raw.get("results_db_path"), test_id, "artifacts.results_db_path"
-    )
-    health_db_path = ""
-    if "health_classes_db_path" in artifacts_raw:
-        health_db_path = _validation_root_test_path(
-            artifacts_raw["health_classes_db_path"],
-            test_id,
-            "artifacts.health_classes_db_path",
-        )
     summary_filename = _optional_str(artifacts_raw, "summary_filename", "summary.json")
     if Path(summary_filename).name != summary_filename or summary_filename in {"", ".", ".."}:
         raise ValueError("artifacts.summary_filename must be a basename")
-    artifacts = TestArtifacts(results_db_path, health_db_path, summary_filename)
+    artifacts = TestArtifacts(summary_filename)
 
     plugin = _parse_plugin(data, path)
-    health = _parse_health(data, path, plugin, artifacts, settings)
-    if plugin is not None and "health" in plugin.capabilities and (
-        health is None or not health.enabled
-    ):
-        raise ValueError("plugin health capability requires enabled [health] config")
 
     return ValidationTestDefinition(
         schema_version=schema_version,
@@ -483,7 +429,6 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
         artifacts=artifacts,
         settings=_freeze_json_like(settings),
         plugin=plugin,
-        health=health,
     )
 
 
@@ -590,171 +535,6 @@ def _parse_plugin(
             require_file=True,
         )
     return TestPlugin(adapter, api_version, capabilities, support_files)
-
-
-def _parse_health(
-    data: Mapping[str, Any],
-    path: Path,
-    plugin: TestPlugin | None,
-    artifacts: TestArtifacts,
-    settings: Mapping[str, Any],
-) -> TestHealth | None:
-    if "health" not in data:
-        return None
-    raw = _required_table(data, "health", path)
-    _reject_unknown(
-        raw,
-        {
-            "enabled",
-            "policy_version",
-            "strategy",
-            "min_samples",
-            "min_new_results",
-            "target_class_count",
-            "combination_factors",
-            "auto_activate",
-            "robust_z_threshold",
-            "metrics",
-        },
-        f"{path} [health]",
-    )
-    enabled = _strict_bool(raw.get("enabled"), "health.enabled")
-    policy_version = _optional_str(raw, "policy_version", "")
-    if enabled and not re.fullmatch(
-        r"[a-z][a-z0-9_.-]*\.v[1-9][0-9]*",
-        policy_version,
-    ):
-        raise ValueError(
-            "Enabled health configuration requires a versioned health.policy_version"
-        )
-    strategy = _optional_str(raw, "strategy", "declarative")
-    if strategy not in ALLOWED_HEALTH_STRATEGIES:
-        raise ValueError(f"health.strategy must be one of {sorted(ALLOWED_HEALTH_STRATEGIES)}")
-    min_samples = _optional_int(raw, "min_samples", 8)
-    if min_samples < 3:
-        raise ValueError("health.min_samples must be at least 3")
-    min_new_results = _optional_int(raw, "min_new_results", 1)
-    if min_new_results <= 0:
-        raise ValueError("health.min_new_results must be positive")
-    target_class_count = _optional_int(raw, "target_class_count", 5)
-    if target_class_count != 5:
-        raise ValueError("cval.test.v1 requires health.target_class_count=5")
-    factors = _strict_str_tuple(raw.get("combination_factors", ()), "health.combination_factors")
-    if enabled and not factors:
-        raise ValueError("Enabled health configuration requires combination_factors")
-    if len(set(factors)) != len(factors):
-        raise ValueError("health.combination_factors must not contain duplicates")
-    unavailable_factors = sorted(
-        factor
-        for factor in factors
-        if factor not in COMMON_HEALTH_COMBINATION_FACTORS and factor not in settings
-    )
-    if unavailable_factors:
-        raise ValueError(
-            "health.combination_factors are not common fields or top-level settings: "
-            + ", ".join(unavailable_factors)
-        )
-    for factor in factors:
-        value = settings.get(factor) if factor in settings else None
-        if factor in COMMON_HEALTH_COMBINATION_FACTORS:
-            continue
-        if value is None or isinstance(value, (Mapping, list, tuple)) or not isinstance(
-            value, (str, bool, int, float)
-        ):
-            raise ValueError(
-                f"health combination setting {factor!r} must be a non-null scalar"
-            )
-        if isinstance(value, str) and not value.strip():
-            raise ValueError(f"health combination setting {factor!r} must not be empty")
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError(f"health combination setting {factor!r} must be finite")
-    auto_activate = _optional_bool(raw, "auto_activate", False)
-    if auto_activate:
-        raise ValueError(
-            "cval.test.v1 does not support health.auto_activate=true; "
-            "use deliberate, approval-gated activation"
-        )
-    robust_z: float | None = None
-    if "robust_z_threshold" in raw:
-        robust_z = _strict_float(raw["robust_z_threshold"], "health.robust_z_threshold")
-        if robust_z <= 0:
-            raise ValueError("health.robust_z_threshold must be positive")
-
-    metrics_raw = raw.get("metrics", [])
-    if not isinstance(metrics_raw, list):
-        raise ValueError("health.metrics must be an array of tables")
-    metrics: list[HealthMetric] = []
-    names: set[str] = set()
-    sources: set[str] = set()
-    for index, metric_raw in enumerate(metrics_raw):
-        if not isinstance(metric_raw, Mapping):
-            raise ValueError(f"health.metrics[{index}] must be a table")
-        _reject_unknown(
-            metric_raw,
-            {"name", "source", "direction", "units", "tolerance_pct", "weight"},
-            f"{path} health.metrics[{index}]",
-        )
-        name = _strict_str(metric_raw.get("name"), f"health.metrics[{index}].name")
-        if name in names:
-            raise ValueError(f"Duplicate health metric name: {name}")
-        names.add(name)
-        direction = _strict_str(
-            metric_raw.get("direction"), f"health.metrics[{index}].direction"
-        )
-        if direction not in ALLOWED_METRIC_DIRECTIONS:
-            raise ValueError(
-                f"health metric direction must be one of {sorted(ALLOWED_METRIC_DIRECTIONS)}"
-            )
-        tolerance = _strict_float(
-            metric_raw.get("tolerance_pct"), f"health.metrics[{index}].tolerance_pct"
-        )
-        if tolerance < 0:
-            raise ValueError("health metric tolerance_pct must be non-negative")
-        weight = _optional_float(metric_raw, "weight", 1.0)
-        if weight <= 0:
-            raise ValueError("health metric weight must be positive")
-        source = _strict_str(
-            metric_raw.get("source"), f"health.metrics[{index}].source"
-        )
-        if source in sources:
-            raise ValueError(f"Duplicate health metric source: {source}")
-        sources.add(source)
-        metrics.append(
-            HealthMetric(
-                name=name,
-                source=source,
-                direction=direction,
-                tolerance_pct=tolerance,
-                units=_optional_str(metric_raw, "units", ""),
-                weight=weight,
-            )
-        )
-
-    if enabled:
-        if not artifacts.health_classes_db_path:
-            raise ValueError(
-                "Enabled health configuration requires artifacts.health_classes_db_path"
-            )
-        capabilities = set(plugin.capabilities) if plugin else set()
-        if "health" not in capabilities:
-            raise ValueError("Enabled health configuration requires plugin health capability")
-        if strategy == "custom" and "health" not in capabilities:
-            raise ValueError("Custom health strategy requires plugin health capability")
-        if not metrics:
-            raise ValueError("Enabled health strategy requires at least one health metric")
-
-    return TestHealth(
-        enabled=enabled,
-        policy_version=policy_version,
-        strategy=strategy,
-        min_samples=min_samples,
-        min_new_results=min_new_results,
-        target_class_count=target_class_count,
-        combination_factors=factors,
-        auto_activate=auto_activate,
-        robust_z_threshold=robust_z,
-        metrics=tuple(metrics),
-    )
 
 
 def _validation_root_test_path(value: Any, test_id: str, field_name: str) -> str:

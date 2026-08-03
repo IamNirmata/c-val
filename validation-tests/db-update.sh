@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Ingest one validation run into metadata databases.
-# The structured result JSON is authoritative when available; env files are a
-# compatibility fallback for older runtime artifacts.
+# The structured result JSON is authoritative when available; env files remain
+# a historical fallback for older runtime artifacts.
 
 # main db update
 echo "Updating main db with all test results"
@@ -11,11 +11,10 @@ CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
 CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
 CVAL_CONFIG_PATH=${CVAL_CONFIG_PATH:-$CVAL_REPO_DIR/config/cval.toml}
 CVAL_VALIDATION_DB_PATH=${CVAL_VALIDATION_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/validation.db}
-CVAL_RUN_HISTORY_ENABLED=${CVAL_RUN_HISTORY_ENABLED:-false}
-CVAL_PER_TEST_INGESTION_ENABLED=${CVAL_PER_TEST_INGESTION_ENABLED:-false}
-CVAL_RUN_HISTORY_DB_PATH=${CVAL_RUN_HISTORY_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/node-run-history.db}
 CVAL_STORAGE_DB_PATH=${CVAL_STORAGE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-storage.db}
 CVAL_NCCL_DB_PATH=${CVAL_NCCL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-nccl.db}
+CVAL_NCCL_OUTBOX_ROOT=${CVAL_NCCL_OUTBOX_ROOT:-$CVAL_VALIDATION_ROOT/nccl_eval/outbox}
+CVAL_NCCL_EVALUATION_ENABLED=${CVAL_NCCL_EVALUATION_ENABLED:-false}
 CVAL_DL_NUMERICAL_DB_PATH=${CVAL_DL_NUMERICAL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_numerical_correctness.db}
 CVAL_DL_COMPUTE_DB_PATH=${CVAL_DL_COMPUTE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_compute_performance.db}
 CVAL_DL_COLLECTIVE_DB_PATH=${CVAL_DL_COLLECTIVE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_collective_performance.db}
@@ -88,13 +87,6 @@ valid_boolean() {
     esac
 }
 
-strict_boolean() {
-    case "$1" in
-        true|false) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 assert_snapshot_runtime() {
     if [[ -z "${CVAL_CONFIG_SNAPSHOT_B64:-}" ]]; then
         echo "CVAL_CONFIG_SNAPSHOT_B64 is required for v2 database writes" >&2
@@ -104,6 +96,7 @@ assert_snapshot_runtime() {
         RESULT_DIGEST="$result_digest" \
         RESULT_SCHEMA_VERSION="$result_schema_version" \
         PYTHONPATH="$CVAL_REPO_DIR" python3 - <<'PY'
+import json
 import os
 from pathlib import Path
 
@@ -126,39 +119,87 @@ runtime = config.runtime
 expected = {
     "CVAL_VALIDATION_ROOT": runtime.validation_root,
     "CVAL_VALIDATION_DB_PATH": storage.validation_db_path,
-    "CVAL_RUN_HISTORY_DB_PATH": storage.run_history_db_path,
     "CVAL_STORAGE_DB_PATH": storage.storage_db_path,
     "CVAL_NCCL_DB_PATH": storage.nccl_db_path,
     "CVAL_DL_NUMERICAL_DB_PATH": storage.dl_numerical_db_path,
     "CVAL_DL_COMPUTE_DB_PATH": storage.dl_compute_db_path,
     "CVAL_DL_COLLECTIVE_DB_PATH": storage.dl_collective_db_path,
     "CVAL_DL_OVERLAP_DB_PATH": storage.dl_overlap_db_path,
-    "CVAL_RUN_HISTORY_ENABLED": str(storage.run_history_enabled).lower(),
-    "CVAL_PER_TEST_INGESTION_ENABLED": str(
-        storage.per_test_ingestion_enabled
-    ).lower(),
 }
 expected_digest = effective_config_digest(config)
 expected["CVAL_CONFIG_DIGEST"] = expected_digest
 nccl = config.tests.registry.get("nccl")
 if nccl is not None:
-    expected["CVAL_NCCL_ITERATIONS"] = str(nccl.definition.settings["iterations"])
+    settings = nccl.definition.settings
+    expected["CVAL_NCCL_ITERATIONS"] = str(settings["iterations"])
     expected["CVAL_IBBW_ENABLED"] = str(
-        nccl.definition.settings["ibbw_enabled"]
+        settings["ibbw_enabled"]
     ).lower()
+    expected.update(
+        {
+            "CVAL_NCCL_OUTBOX_ROOT": f"{runtime.validation_root.rstrip('/')}/nccl_eval/outbox",
+            "CVAL_NCCL_EVALUATION_ENABLED": str(settings["evaluation_enabled"]).lower(),
+            "CVAL_NCCL_EVALUATION_TEST_NAME": str(settings["evaluation_test_name"]),
+            "CVAL_NCCL_EVALUATION_TEST_DEFINITION_VERSION": str(
+                settings["evaluation_test_definition_version"]
+            ),
+            "CVAL_NCCL_EVALUATION_COLLECTIVE": str(settings["evaluation_collective"]),
+            "CVAL_NCCL_EVALUATION_DATATYPE": str(settings["evaluation_datatype"]),
+            "CVAL_NCCL_EVALUATION_REDUCTION": str(settings["evaluation_reduction"]),
+            "CVAL_NCCL_EVALUATION_MESSAGE_SIZE_BYTES": str(
+                settings["evaluation_message_size_bytes"]
+            ),
+            "CVAL_NCCL_EVALUATION_WARMUP_ITERATIONS": str(
+                settings["evaluation_warmup_iterations"]
+            ),
+            "CVAL_NCCL_EVALUATION_SAMPLES_PER_RESULT": str(
+                settings["evaluation_samples_per_result"]
+            ),
+            "CVAL_NCCL_EVALUATION_ITERATION_SEMANTICS": str(
+                settings["evaluation_iteration_semantics"]
+            ),
+            "CVAL_NCCL_EVALUATION_SAMPLE_SEMANTICS": str(
+                settings["evaluation_sample_semantics"]
+            ),
+            "CVAL_NCCL_EVALUATION_LATENCY_UNIT": str(
+                settings["evaluation_latency_unit"]
+            ),
+            "CVAL_NCCL_EVALUATION_LATENCY_SOURCE_UNIT": str(
+                settings["evaluation_latency_source_unit"]
+            ),
+            "CVAL_NCCL_EVALUATION_LATENCY_CONVERSION": str(
+                settings["evaluation_latency_conversion"]
+            ),
+            "CVAL_NCCL_EVALUATION_DRIVER_GROUP_SOURCE": str(
+                settings["evaluation_driver_group_source"]
+            ),
+            "CVAL_NCCL_EVALUATION_TOPOLOGY_CLASS_SOURCE": str(
+                settings["evaluation_topology_class_source"]
+            ),
+        }
+    )
 for name, value in expected.items():
     if os.environ.get(name) != str(value):
         raise SystemExit(
             f"Runtime value {name} does not match the effective configuration snapshot"
         )
 if (
-    os.environ.get("RESULT_SCHEMA_VERSION") == "cval.results.v2"
+    os.environ.get("RESULT_SCHEMA_VERSION") in {"cval.results", "cval.results.v2"}
     and os.environ.get("RESULT_GLOBAL_CONFIG_DIGEST") != expected_digest
 ):
     raise SystemExit(
         "Result global_config_digest does not match the effective configuration snapshot"
     )
-result = load_validation_result(Path(os.environ["CVAL_RESULT_JSON_FILE"]))
+raw_layout = os.environ.get("CVAL_SECURE_RUN_LAYOUT_JSON")
+if raw_layout:
+    layout = json.loads(raw_layout)
+    result_file_fd = layout.get("result_file_fd")
+    if isinstance(result_file_fd, bool) or not isinstance(result_file_fd, int):
+        raise SystemExit("Secure result file descriptor is required for current ingestion")
+    result_path = Path(f"/proc/self/fd/{result_file_fd}")
+else:
+    result_path = Path(os.environ["CVAL_RESULT_JSON_FILE"])
+result = load_validation_result(result_path)
 actual_result_digest = (
     validation_result_v2_digest(result)
     if isinstance(result, ValidationResultV2)
@@ -171,26 +212,71 @@ PY
 
 bind_result_digest() {
     RESULT_DIGEST="$result_digest" python3 - <<'PY'
+import json
 import os
+import stat
 from pathlib import Path
 
-log_dir = Path(os.environ["CVAL_JOB_LOG_DIR"])
-marker = log_dir / ".ingestion-result-digest"
 digest = os.environ["RESULT_DIGEST"] + "\n"
-if marker.is_symlink():
-    raise SystemExit(f"Ingestion digest marker is a symlink: {marker}")
-try:
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(marker, flags, 0o600)
-except FileExistsError:
-    if marker.read_text(encoding="utf-8") != digest:
-        raise SystemExit("Run was already ingested with a different result digest")
+raw_layout = os.environ.get("CVAL_SECURE_RUN_LAYOUT_JSON")
+if raw_layout:
+    try:
+        layout = json.loads(raw_layout)
+        run_dir_fd = layout["run_dir_fd"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise SystemExit("Secure run descriptor is required for digest binding") from exc
+    if isinstance(run_dir_fd, bool) or not isinstance(run_dir_fd, int):
+        raise SystemExit("Secure run descriptor is invalid")
+    try:
+        inherited = {int(value) for value in os.environ["CVAL_SECURE_RUN_FDS"].split(",")}
+    except (KeyError, ValueError) as exc:
+        raise SystemExit("Secure inherited descriptor list is invalid") from exc
+    if run_dir_fd not in inherited:
+        raise SystemExit("Secure run descriptor was not inherited")
+    marker = ".ingestion-result-digest"
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker, flags, 0o600, dir_fd=run_dir_fd)
+    except FileExistsError:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker, flags, dir_fd=run_dir_fd)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            marker_stat = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(marker_stat.st_mode)
+                or stat.S_IMODE(marker_stat.st_mode) != 0o600
+                or marker_stat.st_uid != os.geteuid()
+                or marker_stat.st_nlink != 1
+                or marker_stat.st_size != len(digest)
+            ):
+                raise SystemExit("Existing ingestion digest marker is unsafe")
+            existing = handle.read()
+        if existing != digest:
+            raise SystemExit("Run was already ingested with a different result digest")
+    else:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(digest)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.fsync(run_dir_fd)
 else:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(digest)
-        handle.flush()
-        os.fsync(handle.fileno())
+    marker = Path(os.environ["CVAL_JOB_LOG_DIR"]) / ".ingestion-result-digest"
+    if marker.is_symlink():
+        raise SystemExit(f"Ingestion digest marker is a symlink: {marker}")
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker, flags, 0o600)
+    except FileExistsError:
+        if marker.read_text(encoding="utf-8") != digest:
+            raise SystemExit("Run was already ingested with a different result digest")
+    else:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(digest)
+            handle.flush()
+            os.fsync(handle.fileno())
 PY
 }
 
@@ -198,6 +284,9 @@ STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/
 echo "Storage Output dir: $STORAGE_OUTPUT_DIR"
 NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID/artifacts}
 echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
+NCCL_RUN_DIR=${NCCL_RUN_DIR:-$(dirname "$NCCL_OUTPUT_DIR")}
+NCCL_SUMMARY_FILE=${NCCL_SUMMARY_FILE:-$NCCL_RUN_DIR/summary.json}
+NCCL_RUNTIME_EVIDENCE_FILE=${NCCL_RUNTIME_EVIDENCE_FILE:-$NCCL_OUTPUT_DIR/runtime-evidence.json}
 
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
@@ -351,57 +440,67 @@ if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
                 echo "NCCL_SUMMARY_FILE does not match the validated v2 result" >&2
                 exit 1
         fi
+        if [[ -n "${CVAL_CONFIG_SNAPSHOT_B64:-}" && -n "$result_nccl_summary" ]]; then
+            expected_runtime_evidence="$(dirname "$result_nccl_summary")/artifacts/runtime-evidence.json"
+            if [[ "${CVAL_CANONICAL_NCCL_RUNTIME_EVIDENCE_FILE:-${NCCL_RUNTIME_EVIDENCE_FILE:-}}" != "$expected_runtime_evidence" ]]; then
+                echo "NCCL_RUNTIME_EVIDENCE_FILE does not match the validated v2 result" >&2
+                exit 1
+            fi
+            NCCL_SUMMARY_FILE="$result_nccl_summary"
+            NCCL_RUNTIME_EVIDENCE_FILE="$expected_runtime_evidence"
+        fi
     assert_snapshot_runtime
-    strict_boolean "$CVAL_RUN_HISTORY_ENABLED" || {
-        echo "CVAL_RUN_HISTORY_ENABLED must be true or false" >&2
-        exit 1
-    }
-    strict_boolean "$CVAL_PER_TEST_INGESTION_ENABLED" || {
-        echo "CVAL_PER_TEST_INGESTION_ENABLED must be true or false" >&2
-        exit 1
-    }
 fi
 
-# Validate result/config provenance and every compatibility target before events.
+# Validate result/config provenance and every current raw DB target before events.
 if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
     PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli \
-        db-preflight-compatibility-result \
+        db-preflight-result \
         --result-json "$CVAL_RESULT_JSON_FILE" \
         --result-digest "$result_digest"
 fi
 
-# Validate every test/config/evidence path and every configured legacy,
-# run-history, DL-rebuild, and canonical target before the first v2 DB write.
-if [[ "$result_schema_version" == "cval.results.v2" ]]; then
-    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli \
-        db-preflight-test-results \
-        --result-json "$CVAL_RESULT_JSON_FILE" \
-        --result-digest "$result_digest"
+# Bind the complete result digest before the first current DB write.
+if [[ "$result_schema_version" == "cval.results" || "$result_schema_version" == "cval.results.v2" ]]; then
     bind_result_digest
 fi
 
 trap on_ingestion_exit EXIT
 emit_cval_event "ingestion_started" "incomplete"
 
-# Record every completed v2 execution before test-specific metric ingestion.
-# This write is idempotent by run_id and does not imply metric ingestion passed.
-if [[ "$result_schema_version" == "cval.results.v2" ]] && \
-   is_enabled "$CVAL_RUN_HISTORY_ENABLED"; then
-    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-upsert-run-history \
-        --result-json "$CVAL_RESULT_JSON_FILE" \
-        --result-digest "$result_digest" \
-        --db-path "$CVAL_RUN_HISTORY_DB_PATH"
-elif [[ "$result_schema_version" == "cval.results.v2" ]]; then
-    echo "Node run-history write skipped (run_history_enabled=false)."
+# Two-phase NCCL outbox: write the complete immutable pending batch before any
+# compatibility DB mutation. No PostgreSQL credentials enter this process.
+NCCL_OUTBOX_PENDING_FILE="$CVAL_NCCL_OUTBOX_ROOT/pending/$CVAL_RUN_ID.json"
+NCCL_OUTBOX_PENDING_EMITTED=false
+if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED" && is_enabled "$RUN_NCCL"; then
+    if [[ -f "$NCCL_RUNTIME_EVIDENCE_FILE" ]]; then
+        echo "Emitting immutable NCCL pending outbox before compatibility DB writes."
+        if ! PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli nccl-eval emit-outbox \
+            --result-json "${CVAL_CANONICAL_RESULT_JSON_FILE:-$CVAL_RESULT_JSON_FILE}" \
+            --result-digest "$result_digest" \
+            --summary "$NCCL_SUMMARY_FILE" \
+            --runtime-evidence "$NCCL_RUNTIME_EVIDENCE_FILE" \
+            --outbox-root "$CVAL_NCCL_OUTBOX_ROOT" \
+            --apply --confirm emit-outbox --output json; then
+            echo "NCCL pending outbox emission failed; refusing compatibility DB writes." >&2
+            emit_cval_event "nccl_outbox_pending" "fail" "no compatibility DB writes attempted" || true
+            exit 1
+        fi
+        NCCL_OUTBOX_PENDING_EMITTED=true
+        emit_cval_event "nccl_outbox_pending" "pass"
+    elif [[ "$GCRRESULT2" == "pass" ]]; then
+        echo "Passing NCCL result is missing required runtime evidence; refusing compatibility DB writes." >&2
+        emit_cval_event "nccl_outbox_pending" "fail" "no compatibility DB writes attempted" || true
+        exit 1
+    else
+        echo "Skipping NCCL PostgreSQL outbox because the failed test produced no runtime evidence."
+        emit_cval_event "nccl_outbox_skipped" "incomplete" "failure occurred before runtime evidence collection"
+    fi
 fi
 
 # Storage metrics are valid only when the storage phase itself passed.
 if is_enabled "$RUN_STORAGE" && [ "$GCRRESULT1" = "pass" ]; then
     echo "Updating storage db with test results"
-    storage_run_id_args=()
-    if is_enabled "$CVAL_PER_TEST_INGESTION_ENABLED"; then
-        storage_run_id_args=(--run-id "$CVAL_RUN_ID")
-    fi
     PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-storage-result \
         "$GCRNODE" \
         "$GCRTIME" \
@@ -410,7 +509,6 @@ if is_enabled "$RUN_STORAGE" && [ "$GCRRESULT1" = "pass" ]; then
         --result-json "$CVAL_RESULT_JSON_FILE" \
         --result-digest "$result_digest" \
         --immutable \
-        "${storage_run_id_args[@]}" \
         --db-path "$CVAL_STORAGE_DB_PATH"
     echo "Storage DB update completed."
 else
@@ -432,11 +530,7 @@ if is_enabled "$RUN_NCCL" && [ "$GCRRESULT2" = "pass" ]; then
     fi
     # Persist one consolidated row: aggregate all-reduce BUS_BW/LATENCY plus
     # each HCA port's maximum observed bandwidth (mlx5_0..mlx5_13).
-    nccl_run_id_args=()
     nccl_hca_args=()
-    if is_enabled "$CVAL_PER_TEST_INGESTION_ENABLED"; then
-        nccl_run_id_args=(--run-id "$CVAL_RUN_ID")
-    fi
     if is_enabled "$CVAL_IBBW_ENABLED"; then
         nccl_hca_args=(--require-hca-samples)
     fi
@@ -452,7 +546,6 @@ if is_enabled "$RUN_NCCL" && [ "$GCRRESULT2" = "pass" ]; then
         --result-digest "$result_digest" \
         --immutable \
         "${nccl_hca_args[@]}" \
-        "${nccl_run_id_args[@]}" \
         --db-path "$CVAL_NCCL_DB_PATH"
 
     echo "NCCL IB_HEALTH DB update completed."
@@ -460,7 +553,7 @@ else
     echo "Skipping NCCL metrics DB update because result is $GCRRESULT2."
 fi
 
-# Commit fixed compatibility status rows only after all required metric
+# Commit fixed built-in status rows only after all required metric
 # artifacts validate and their DB writes succeed. This is one SQLite transaction.
 echo "Updating main db with test results"
 PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-run-results \
@@ -478,17 +571,25 @@ PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-run-results \
     --db-path "$CVAL_VALIDATION_DB_PATH"
 echo "Main DB update completed."
 
-# U7 canonical per-test persistence is an independently activated dual-write.
-# Compatibility raw status is already durable, so one isolated adapter failure
-# cannot leave current readers showing stale execution state.
-if [[ "$result_schema_version" == "cval.results.v2" ]] && \
-   is_enabled "$CVAL_PER_TEST_INGESTION_ENABLED"; then
-    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli \
-        db-ingest-test-results \
-        --result-json "$CVAL_RESULT_JSON_FILE" \
-        --result-digest "$result_digest"
-elif [[ "$result_schema_version" == "cval.results.v2" ]]; then
-    echo "Canonical per-test DB writes skipped (per_test_ingestion_enabled=false)."
+# After all compatibility writes are durable, expose the pending batch by
+# creating its immutable commit marker. Marker creation is byte-idempotent and
+# may be retried with nccl-eval commit-outbox after a partial durable failure.
+if [[ "$NCCL_OUTBOX_PENDING_EMITTED" == true ]]; then
+    echo "Committing NCCL evaluation outbox after durable compatibility DB writes."
+    if ! PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli nccl-eval commit-outbox \
+        --outbox-root "$CVAL_NCCL_OUTBOX_ROOT" \
+        --pending "$NCCL_OUTBOX_PENDING_FILE" \
+        --result-digest "$result_digest" \
+        --apply --confirm commit-outbox --output json; then
+        echo "NCCL commit marker failed after compatibility DB writes; retry commit-outbox with the same pending file and result digest." >&2
+        emit_cval_event "nccl_outbox_committed" "fail" "partial durable compatibility DB; pending retained for retry" || true
+        exit 1
+    fi
+    emit_cval_event "nccl_outbox_committed" "pass"
+elif ! is_enabled "$CVAL_NCCL_EVALUATION_ENABLED" || ! is_enabled "$RUN_NCCL"; then
+    echo "NCCL evaluation outbox disabled; no outbox directories or files created."
+else
+    echo "NCCL evaluation outbox skipped for a pre-evidence failure."
 fi
 
 emit_cval_event "ingestion_finished" "pass"

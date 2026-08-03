@@ -17,7 +17,7 @@ from cval.models import ClassificationResultRow, LatestStatusRow, NcclHealthMetr
 from cval.storage.classification_status import classification_rows_by_node_test
 from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
 from cval.validation.operational_targets import (
-    normalize_compatibility_target,
+    normalize_operational_target,
     validate_operational_target_name,
 )
 from cval.validation.plugins import ExportRows
@@ -84,7 +84,7 @@ def normalize_result_test(test_name: str) -> str:
     normalized = test_name.strip().lower()
     if normalized in {"overall", "all"}:
         return "all"
-    return normalize_compatibility_target(validate_operational_target_name(normalized))
+    return normalize_operational_target(validate_operational_target_name(normalized))
 
 
 def display_result_test(test_name: str) -> str:

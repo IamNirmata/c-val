@@ -28,12 +28,12 @@ from cval.validation.operational_targets import (
     build_operational_target_catalog,
 )
 from cval.validation.operations import (
-    build_compatibility_baseline,
-    classify_compatibility_target,
-    export_compatibility_rows,
+    build_evaluator_baseline,
+    classify_evaluator_target,
+    export_evaluator_rows,
     resolve_operational_target,
-    validate_compatibility_baseline_record,
-    validate_compatibility_classification_verdicts,
+    validate_baseline_record,
+    validate_classification_verdicts,
 )
 from cval.validation.plugins import ExportContext, ExportRows
 from cval.validation.registry import ValidationTestRegistry, load_test_registry
@@ -54,7 +54,7 @@ class SyntheticPlugin:
     plugin_id = "synthetic"
     capabilities = frozenset({"baseline", "export"})
 
-    def build_compatibility_baseline(self, context):
+    def build_baseline(self, context):
         if not context.source_db:
             raise ValueError("synthetic source DB is required")
         connection = connect_sqlite_file(context.source_db, mode="ro")
@@ -89,7 +89,7 @@ class SyntheticPlugin:
             "metrics": {"throughput": metric},
         }
 
-    def classify_compatibility(self, context, baseline):
+    def classify(self, context, baseline):
         if not context.source_db:
             raise ValueError("synthetic source DB is required")
         connection = connect_sqlite_file(context.source_db, mode="ro")
@@ -184,7 +184,6 @@ setup = "setup.sh"
 timeout_seconds = 30
 
 [artifacts]
-results_db_path = "validation_tests/synthetic/synthetic_results.db"
 summary_filename = "summary.json"
 
 [plugin]
@@ -246,7 +245,7 @@ capabilities = ["baseline", "export"]
             )
             self.assertFalse(baseline_path.exists())
 
-            baseline = build_compatibility_baseline(
+            baseline = build_evaluator_baseline(
                 config,
                 "synthetic",
                 window_days=30,
@@ -262,7 +261,7 @@ capabilities = ["baseline", "export"]
             self.assertEqual(active["baseline_id"], baseline["baseline_id"])
             self.assertEqual(active["metrics"], baseline["metrics"])
 
-            verdicts = classify_compatibility_target(
+            verdicts = classify_evaluator_target(
                 config,
                 "synthetic",
                 active,
@@ -273,7 +272,7 @@ capabilities = ["baseline", "export"]
                 {row["node"]: row["status"] for row in verdicts},
                 {"node-bad": "degraded", "node-good": "normal"},
             )
-            classification_db = root / "baselines/classification-results.db"
+            classification_db = root / "baselines/synthetic-classifications.db"
             self.assertEqual(
                 store_classification_results(
                     verdicts,
@@ -318,7 +317,7 @@ capabilities = ["baseline", "export"]
                 source_db_paths=(("synthetic", str(source_db)),),
                 include_metrics=False,
             )
-            exported = export_compatibility_rows(config, "synthetic", context)
+            exported = export_evaluator_rows(config, "synthetic", context)
             self.assertIsInstance(exported, ExportRows)
             self.assertEqual(exported.columns, ("node", "test", "result", "classification_status"))
             self.assertEqual(len(exported.rows), 2)
@@ -348,7 +347,7 @@ capabilities = ["baseline", "export"]
             config = self._make_config(root)
             source_db = root / "synthetic.db"
             self._make_source(source_db)
-            baseline = build_compatibility_baseline(
+            baseline = build_evaluator_baseline(
                 config,
                 "synthetic",
                 window_days=30,
@@ -357,7 +356,7 @@ capabilities = ["baseline", "export"]
                 node="node-good",
                 baseline_id="synthetic-good-1",
             )
-            verdicts = classify_compatibility_target(
+            verdicts = classify_evaluator_target(
                 config,
                 "synthetic",
                 baseline,
@@ -386,7 +385,7 @@ capabilities = ["baseline", "export"]
                 with self.subTest(kind="baseline", value=malformed), self.assertRaises(
                     (TypeError, ValueError)
                 ):
-                    validate_compatibility_baseline_record(
+                    validate_baseline_record(
                         malformed,
                         expected_test_type="synthetic",
                     )
@@ -411,7 +410,7 @@ capabilities = ["baseline", "export"]
                 with self.subTest(kind="verdict", value=malformed), self.assertRaises(
                     (TypeError, ValueError)
                 ):
-                    validate_compatibility_classification_verdicts(
+                    validate_classification_verdicts(
                         [malformed],
                         target=target,
                         expected_baseline_id="synthetic-good-1",

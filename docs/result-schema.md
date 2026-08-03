@@ -1,177 +1,40 @@
-# Result Schema
+# Result and database schema
 
-> **Legacy compatibility schema:** New generic-runner jobs emit
-> `cval.results.v2` under the canonical global job-log directory. This v1
-> reader remains supported for historical artifacts and pinned old jobs. See
-> [Structured Result Schema v2](result-schema-v2.md).
-> The generic v2 runner also writes a separate fixed `result.env` compatibility
-> projection for current storage/NCCL/DL ingestion consumers. Those
-> `GCRRESULT*`/`RUN_*` fields are not members of the dynamic v2 JSON schema.
-> Result JSON and artifacts remain shared evidence under
-> `runtime.validation_root`; canonical U7/U8 SQLite state is separately rooted
-> at `health_evaluator.state_root`.
+## Canonical result envelope
 
-c-val 2.0 historically wrote one structured result JSON per node validation run.
+New validation runs write one `cval.results` JSON object under:
 
-Path:
+`logs/job_logs/<node>/<run-id>/result.json`
 
-```text
-/data/continuous_validation/results/<node>/cval-results-<node>-<timestamp>.json
-```
+The envelope contains run identity, timestamps, image/framework versions,
+checked-out Git ref, effective configuration digest, aggregate status, errors,
+and a dynamic test map. Each test records enabled/selected state, order, phase,
+status, times, duration, exit code, descriptor identity, logs, summary, result,
+artifacts, and message.
 
-Schema version:
+The runner validates and atomically replaces the envelope at each transition.
+The emitted shape is the proven dynamic schema previously called v2; only the
+public schema name changed. Readers continue to accept historical
+`cval.results.v2` and fixed `cval.results.v1` artifacts. Historical files are
+never rewritten or deleted.
 
-```text
-cval.results.v1
-```
+## Current raw databases
 
-## Example
+- `metadata/validation.db` — `runs` plus `latest_status`, authoritative pass/fail;
+- `metadata/test-storage.db` — storage metrics;
+- `metadata/test-nccl.db` — consolidated `IB_HEALTH` metrics and current views;
+- four `metadata/dltest_*.db` files — component metrics rebuilt from canonical
+  rank JSON.
 
-```json
-{
-  "schema_version": "cval.results.v1",
-  "node": "slc01-cl02-hgx-0204",
-  "image_name": "pytorch:26.05-py3",
-  "pytorch_version": "2.8.0a0+gitabc123",
-  "cuda_version": "12.9",
-  "timestamp": "1781134840",
-  "generated_at": "2026-06-10T23:47:42.103216Z",
-  "overall": "pass",
-  "tests": {
-    "storage": {
-      "enabled": true,
-      "status": "pass",
-      "log": "/data/continuous_validation/storage/.../storage.log",
-      "summary": "/data/continuous_validation/storage/.../storage-summary.txt"
-    },
-    "nccl": {
-      "enabled": true,
-      "status": "pass",
-      "log": "/data/continuous_validation/nccl/.../nccl.log",
-      "summary": "/data/continuous_validation/nccl/.../nccl-summary.json"
-    },
-    "dltest": {
-      "enabled": true,
-      "status": "pass",
-      "log": "/data/continuous_validation/dltest/.../dltest.log",
-      "summary": "/data/continuous_validation/dltest/.../dltest-summary.json"
-    }
-  }
-}
-```
+`validation-tests/db-update.sh` validates result/config provenance and writes
+only these current surfaces.
 
-## Rules
+## Baseline and classification databases
 
-- Valid statuses: `pass`, `fail`, `incomplete`.
-- `image_name` records the validation image identity used for the run.
-- `pytorch_version` and `cuda_version` are detected from the running image in
-  `0-env.sh` (`torch.__version__` and `torch.version.cuda`) and are best-effort:
-  they are empty strings when torch is unavailable.
-- Every test has an `enabled` boolean. A disabled test is not executed and is
-  recorded as `status="incomplete", enabled=false`.
-- `overall` is `pass` only when every enabled test passes. It is `incomplete`
-  when no tests are enabled (the config loader normally rejects that case).
-- `db-update.sh` prefers JSON and falls back to the legacy env file if JSON is missing.
-- DB writes use package-native `cval db-add-*` commands inside the validation pod and store `image_name`, `pytorch_version`, and `cuda_version` with the `runs` validation rows.
-- `cval.validation.results` validates schema version, required tests, valid statuses, and aggregate consistency.
-- V1 remains a compatibility-write surface only. Registry-driven canonical
-  per-test ingestion accepts finalized `cval.results.v2` exclusively and is
-  independently gated by `storage.per_test_ingestion_enabled=false` by default.
+Baseline DBs store immutable baseline JSON plus lifecycle/provenance columns.
+Classification rows store timestamp, node, target, baseline identity, verdict,
+metric counts/fraction/worst deviation, and detailed metric JSON.
 
-## DB Rows
-
-Each run should write four latest-status rows in `validation.db` `runs`, each
-carrying `image_name`, `pytorch_version`, and `cuda_version`:
-
-```text
-<node> storage <timestamp> <status>  <image_name> <pytorch_version> <cuda_version>
-<node> nccl    <timestamp> <status>  <image_name> <pytorch_version> <cuda_version>
-<node> dltest  <timestamp> <status>  <image_name> <pytorch_version> <cuda_version>
-<node> all     <timestamp> <overall> <image_name> <pytorch_version> <cuda_version>
-```
-
-## Baseline Classification
-
-These latest-status rows and the storage/NCCL/DL metric DBs are the inputs to
-dynamic baseline building and node classification. See
-[Baselines and Node Classification](baselines.md).
-
-## DL metric DB iterations
-
-Every metric table in the four DL metadata DBs contains an `iterations`
-column:
-
-```text
-dltest_numerical_correctness.db → numerical_correctness
-dltest_compute_performance.db → compute_performance
-dltest_collective_performance.db → collective_performance
-dltest_overlap_performance.db → overlap_performance
-```
-
-The value is repeated on every metric row for its run so results produced with
-different workload iteration counts can be filtered and stratified. Ingestion
-reads the value from `dltest-summary-*.json`. Artifacts without a summary are
-historical and use `20`, the prior c-val default. Normal ingestion lazily adds
-the column when an older restored DB lacks it. New validation jobs default to
-`100` DL iterations; changing the runtime default does not rewrite historical
-rows.
-
-## NCCL and IB health (`test-nccl.db`)
-
-The NCCL phase runs `ibbw.sh`, which **auto-detects every IB device and port**
-under `/sys/class/infiniband/` (an optional numeric range still restricts it to
-`mlx5_<start>..mlx5_<end>`). It samples each port's `port_xmit_data` counter
-during the all-reduce. `single-node-allreduce.py` summarizes those samples per
-port under `GCR_IB_PORT_BW_GBPS` and records `GCR_ITERATIONS`, aggregate
-`GCR_BUSBW`, and aggregate `GCR_LATENCY`:
-
-```json
-"GCR_IB_PORT_BW_GBPS": {
-  "mlx5_4":   {"avg_gbps": 20.285, "max_gbps": 46.236, "last_gbps": 46.1, "samples": 26},
-  "mlx5_13":  {"avg_gbps": 20.330, "max_gbps": 46.308, "last_gbps": 46.2, "samples": 26},
-  "mlx5_5.2": {"avg_gbps": 12.000, "max_gbps": 24.000, "last_gbps": 23.0, "samples": 26}
-}
-```
-
-Port labels use the bare device name for port 1 (`mlx5_4`). `db-update.sh`
-ingests the summary via `cval db-add-nccl-health` into `IB_HEALTH`, with exactly
-**one row per node/test run**. Only each port's `max_gbps` is retained:
-
-```text
-Node, timestamp, la_timestamp, iterations, image_name, cuda, pytorch, samples,
-BUS_BW, LATENCY, mlx5_0, mlx5_1, ... mlx5_13
-```
-
-- `BUS_BW` (GB/s) and `LATENCY` (ms) are the aggregate 8-GPU all-reduce values.
-- `mlx5_0` ... `mlx5_13` are maximum observed transmit bandwidths in GB/s.
-- `samples` is the number of HCA counter samples collected during the run.
-- `la_timestamp` is ISO-8601 in `America/Los_Angeles`.
-- `cuda` / `pytorch` are the versions detected inside the validation image.
-
-Dynamic NCCL baselines and `cval results --test nccl` read `IB_HEALTH`.
-The export mirrors the same wide one-row-per-node shape and appends
-classification columns. Legacy tables are renamed to
-`OLD_nccl_performance` and `OLD_nccl_ib_port_performance` for rollback and are
-not read or written by normal operations. New installations create `IB_HEALTH`
-and its views automatically on the first NCCL result write.
-
-### NCCL operational views
-
-`LATEST_NODE_STATUS` contains the complete latest `IB_HEALTH` record for each
-node (maximum `timestamp` per `Node`).
-
-`NODE_RANKING` averages each node's latest five `IB_HEALTH` records. If fewer
-than five exist, all available records are used. Its columns are:
-
-```text
-node, bus_bw, bus_bw_pctl, latency, latency_pctl, mlx5_0, ... mlx5_13
-```
-
-- `bus_bw`, `latency`, and every `mlx5_*` value are rolling averages.
-- `bus_bw_pctl` is `PERCENT_RANK() × 100` ordered by `bus_bw`: a low value is a
-  low fleet bandwidth percentile (rounded to two decimals).
-- `latency_pctl` is `PERCENT_RANK() × 100` ordered by `latency`: a low value is
-  a low (better) fleet latency percentile (rounded to two decimals).
-- Rows are ordered by `bus_bw` ascending, then node name.
-- SQLite `AVG` ignores missing historical port values; real zero values remain
-  part of the average.
+Classifications are stored in separate target files under `baselines/`; readers
+merge the latest row for each `(node, test_type)`. See `baselines.md` for exact
+filenames and split preparation.

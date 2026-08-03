@@ -1,24 +1,22 @@
-"""Command-line interface for c-val 2.0.
+"""Command-line interface for c-val.
 
 This file is the main human/Hermes entry point. It exposes read-only status and
-discovery commands, dry-run planning, approval-gated submission, read-only
-monitoring, and structured result inspection. Handlers are intentionally thin:
+discovery commands, nonmutating queue inspection, approval-gated cluster
+validation, read-only monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
-Public commands: config, tests, compatibility, nodes, validate, status, history,
-plan, run, jobs, result, results, classifications, health, baseline, and overview.
+Public commands: config, tests, nodes, validate, status, plan, run, jobs, result,
+results, classifications, baseline, nccl-eval, and overview.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import sys
-from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 
 from cval.config import (
@@ -26,6 +24,7 @@ from cval.config import (
     REPO_ROOT,
     config_to_dict,
     encode_config_snapshot,
+    is_exact_commit,
     load_config,
     load_config_snapshot,
 )
@@ -65,32 +64,18 @@ from cval.validation.operational_targets import (
 )
 
 
-_STRICT_JSON_COMMANDS = frozenset(
-    {
-        "evaluator-preflight",
-        "evaluator-parity",
-        "evaluator-backup",
-        "evaluator-service",
-    }
-)
-
-
 def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments, dispatch to a handler, and return a process code."""
 
     raw_argv = sys.argv[1:] if argv is None else argv
-    if _is_compatibility_command(raw_argv):
-        return _dispatch_compatibility_command(raw_argv)
-    strict_json = any(command in raw_argv for command in _STRICT_JSON_COMMANDS)
+    try:
+        _preflight_nccl_mutation_gate(raw_argv)
+    except PolicyViolation as exc:
+        print(f"Policy violation: {exc}", file=sys.stderr)
+        return 2
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
-    parsed_bootstrap = _parse_cli_arguments(
-        lambda: bootstrap.parse_known_args(raw_argv),
-        strict_json=strict_json,
-    )
-    if parsed_bootstrap is None:
-        return 2
-    config_args, _ = parsed_bootstrap
+    config_args, _ = bootstrap.parse_known_args(raw_argv)
     try:
         snapshot = os.environ.get("CVAL_CONFIG_SNAPSHOT_B64")
         runtime_repo_root = os.environ.get("CVAL_TEST_REPO_ROOT") or os.environ.get(
@@ -109,19 +94,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-        if strict_json:
-            _print_strict_json({"ok": False, "error": _single_line_error(exc)})
-            return 2
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
     parser = build_parser(config)
-    args = _parse_cli_arguments(
-        lambda: parser.parse_args(raw_argv),
-        strict_json=strict_json,
-    )
-    if args is None:
-        return 2
+    args = parser.parse_args(raw_argv)
     args.cval_config = config
     try:
         return args.handler(args)
@@ -148,56 +125,44 @@ def _tests_descriptor_only_command(argv: list[str]) -> bool:
     return index + 1 < len(argv) and argv[index + 1] in {"list", "describe"}
 
 
-def _is_compatibility_command(argv: list[str]) -> bool:
-    """Recognize the config-independent command at the top-level position."""
+def _preflight_nccl_mutation_gate(argv: list[str]) -> None:
+    """Reject malformed NCCL apply confirmation before config/plugin loading."""
 
-    index = 0
-    if index < len(argv) and argv[index] == "--config":
-        index += 2
-    elif index < len(argv) and argv[index].startswith("--config="):
-        index += 1
-    return index < len(argv) and argv[index] == "compatibility"
-
-
-def _dispatch_compatibility_command(argv: list[str]) -> int:
-    """Parse and run offline compatibility tools without loading configuration."""
-
-    parser = argparse.ArgumentParser(prog="cval")
-    parser.add_argument("--config", type=Path, help=argparse.SUPPRESS)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    _add_compatibility_parser(subparsers)
-    args = parser.parse_args(argv)
-    return args.handler(args)
-
-
-def _add_compatibility_parser(
-    subparsers: argparse._SubParsersAction,
-) -> None:
-    compatibility = subparsers.add_parser(
-        "compatibility",
-        help="Inventory or offline-audit retained compatibility surfaces",
-    )
-    compatibility_sub = compatibility.add_subparsers(
-        dest="compatibility_command", required=True
-    )
-    compatibility_inventory = compatibility_sub.add_parser(
-        "inventory", help="Print the immutable compatibility surface catalog"
-    )
-    compatibility_inventory.add_argument(
-        "--output", choices=["table", "json"], default="table"
-    )
-    compatibility_inventory.set_defaults(handler=handle_compatibility_inventory)
-
-    compatibility_audit = compatibility_sub.add_parser(
-        "audit", help="Scan only explicitly named local copied files under fixed bounds"
-    )
-    compatibility_audit.add_argument(
-        "--input", type=Path, action="append", required=True, dest="inputs"
-    )
-    compatibility_audit.add_argument(
-        "--output", choices=["table", "json"], default="table"
-    )
-    compatibility_audit.set_defaults(handler=handle_compatibility_audit)
+    try:
+        index = argv.index("nccl-eval")
+    except ValueError:
+        return
+    if index + 1 >= len(argv) or "--apply" not in argv[index + 1 :]:
+        return
+    command = argv[index + 1]
+    expected = {
+        "schema": "schema",
+        "grant-runtime": "grant-runtime",
+        "ingest": "ingest",
+        "emit-outbox": "emit-outbox",
+        "commit-outbox": "commit-outbox",
+        "ingest-outbox": "ingest-outbox",
+        "migrate-legacy": "migrate-legacy",
+        "calibration": "calibration",
+        "build-baselines": "build-baselines",
+        "evaluate": "evaluate",
+        "worker": "worker",
+        "recover": "recover",
+    }
+    if command not in expected:
+        return
+    confirmation = None
+    for position, value in enumerate(argv[index + 2 :], start=index + 2):
+        if value == "--confirm" and position + 1 < len(argv):
+            confirmation = argv[position + 1]
+            break
+        if value.startswith("--confirm="):
+            confirmation = value.split("=", 1)[1]
+            break
+    if confirmation != expected[command]:
+        raise PolicyViolation(
+            f"NCCL mutation requires --apply --confirm {expected[command]}"
+        )
 
 
 def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
@@ -218,8 +183,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         dest="command",
         required=True,
         metavar=(
-            "{config,tests,compatibility,nodes,validate,status,history,plan,run,jobs,result,"
-            "results,classifications,health,baseline,overview}"
+            "{config,tests,nodes,validate,status,plan,run,jobs,result,results,"
+            "classifications,baseline,nccl-eval,overview}"
         ),
     )
 
@@ -254,7 +219,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     tests_scaffold = tests_sub.add_parser(
         "scaffold",
-        help="Plan or create a disabled pass/fail-only test scaffold",
+        help="Inspect or create a disabled pass/fail-only test scaffold",
     )
     tests_scaffold.add_argument("test_id")
     tests_scaffold.add_argument("--order", type=int, required=True)
@@ -264,8 +229,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     tests_scaffold.add_argument("--confirm")
     tests_scaffold.add_argument("--output", choices=["table", "json"], default="table")
     tests_scaffold.set_defaults(handler=handle_tests_scaffold)
-
-    _add_compatibility_parser(subparsers)
 
     # Machine-only catalog used by background loops. It is intentionally
     # omitted from public help and emits data, never shell assignments.
@@ -285,11 +248,21 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     validate = subparsers.add_parser(
         "validate",
-        help="Submit, live-track, classify, and report validation for one node",
+        help="Run a confirmed real-cluster validation for one node",
     )
     validate.add_argument("--node", required=True, help="Target node name to validate")
     validate.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    validate.add_argument("--git-ref", default=active_config.job.git_ref)
+    validate.add_argument(
+        "--git-ref",
+        required=True,
+        help="Exact lowercase 40-hex commit published to the configured repository",
+    )
+    validate.add_argument(
+        "--submit",
+        action="store_true",
+        help="Authorize creation of the single validation job",
+    )
+    validate.add_argument("--confirm")
     validate.add_argument(
         "--timestamp", type=int, help="Override the run timestamp (defaults to now)"
     )
@@ -309,46 +282,14 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Warn if the job is still Pending after N seconds (it stays queued)",
     )
     validate.add_argument(
-        "--window-days", type=int, default=active_config.baseline.window_days
-    )
-    validate.add_argument(
         "--pvc-pod",
         default=active_config.cluster.pvc_access_pod,
-        help="PVC access pod used to run classification",
-    )
-    validate.add_argument(
-        "--pod-repo-dir",
-        default="/tmp/c-val",
-        help="c-val checkout directory inside the PVC pod",
-    )
-    validate.add_argument(
-        "--pod-config",
-        help="Config path inside the PVC pod; defaults to <pod-repo-dir>/config/cval.toml",
-    )
-    validate.add_argument(
-        "--skip-dl-rebuild",
-        action="store_true",
-        help="Do not refresh DL metric DBs for the node before classifying",
-    )
-    validate.add_argument(
-        "--dl-rebuild-timeout",
-        type=float,
-        default=300.0,
-        help="Dedicated timeout (s) for the scoped DL metric refresh",
-    )
-    validate.add_argument(
-        "--dl-lock-wait",
-        type=float,
-        default=120.0,
-        help="Max seconds to wait for the shared DL metric lock before skipping refresh",
-    )
-    validate.add_argument(
-        "--dry-run", action="store_true", help="Render only; do not submit a job"
+        help="PVC access pod used to verify fresh raw status",
     )
     validate.add_argument(
         "--download",
         action="store_true",
-        help="Save this run's logs, results, and baseline comparison as a local zip",
+        help="Save this run's logs, results, and raw report as a local zip",
     )
     validate.add_argument(
         "--download-dir",
@@ -369,24 +310,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
     status.set_defaults(handler=handle_status)
 
-    history = subparsers.add_parser(
-        "history", help="Read normalized node run history from the PVC access pod"
-    )
-    history.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
-    history.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    history.add_argument("--db-path", default=active_config.storage.run_history_db_path)
-    history.add_argument("--run-id")
-    history.add_argument("--node")
-    history.add_argument("--test")
-    history.add_argument(
-        "--status", choices=["pass", "fail", "incomplete"]
-    )
-    history.add_argument("--limit", type=int, default=100)
-    history.add_argument("--output", choices=["table", "json"], default="table")
-    history.set_defaults(handler=handle_history)
-
     plan = subparsers.add_parser(
-        "plan", help="Build a detailed dry-run queue and rendered job plan"
+        "plan", help="Inspect the detailed queue and rendered job plan"
     )
     _add_plan_inputs(plan, active_config)
     plan.add_argument(
@@ -399,7 +324,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="Plan a validation batch and optionally submit it",
+        help="Submit a validation batch after exact confirmation",
     )
     _add_plan_inputs(run, active_config)
     run.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
@@ -448,7 +373,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     results.add_argument("--db-path", default=active_config.storage.validation_db_path)
     results.add_argument(
         "--classification-db-path",
-        help="Override classification-results DB path; defaults to baseline_root_path DB",
+        help="Override one classification DB; defaults to per-target DBs",
     )
     results.add_argument(
         "--no-classification",
@@ -488,74 +413,9 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     classifications.add_argument(
         "--db-path",
         default=None,
-        help="Override classification-results DB path; defaults to baseline_root_path DB",
+        help="Override one classification DB; defaults to per-target DBs",
     )
     classifications.set_defaults(handler=handle_classifications)
-
-    health = subparsers.add_parser(
-        "health", help="Dry-run or apply registry-driven U8 health evaluation"
-    )
-    health_sub = health.add_subparsers(dest="health_command", required=True)
-
-    health_evaluate = health_sub.add_parser(
-        "evaluate", help="Evaluate enabled health+ingest tests (dry-run by default)"
-    )
-    health_evaluate.add_argument(
-        "--apply", action="store_true", help="Write candidates/history after safety gates"
-    )
-    health_evaluate.add_argument("--confirm")
-    health_evaluate.add_argument("--output", choices=["table", "json"], default="table")
-    health_evaluate.set_defaults(handler=handle_health_evaluate)
-
-    health_activate = health_sub.add_parser(
-        "activate", help="Preflight or deliberately activate one named candidate"
-    )
-    health_activate.add_argument("test_id")
-    health_activate.add_argument("baseline_id")
-    health_activate.add_argument(
-        "--apply", action="store_true", help="Perform activation after safety gates"
-    )
-    health_activate.add_argument("--confirm")
-    health_activate.add_argument("--output", choices=["table", "json"], default="table")
-    health_activate.set_defaults(handler=handle_health_activate)
-
-    # U11 machine-only service/deployment preparation commands. They are
-    # intentionally absent from public help and emit exactly one JSON value.
-    evaluator_preflight = subparsers.add_parser("evaluator-preflight")
-    evaluator_preflight.add_argument("--access", choices=["ro", "rw"], default="ro")
-    evaluator_preflight.add_argument(
-        "--state-root",
-        "--validation-root",
-        dest="state_root",
-        type=Path,
-    )
-    evaluator_preflight.set_defaults(handler=handle_evaluator_preflight)
-
-    evaluator_parity = subparsers.add_parser("evaluator-parity")
-    evaluator_parity.add_argument("--u8-json", type=Path, action="append", default=[])
-    evaluator_parity.add_argument("--u8-db", type=Path, action="append", default=[])
-    evaluator_parity.add_argument(
-        "--compatibility-json", type=Path, action="append", default=[]
-    )
-    evaluator_parity.add_argument(
-        "--compatibility-db", type=Path, action="append", default=[]
-    )
-    evaluator_parity.set_defaults(handler=handle_evaluator_parity)
-
-    evaluator_backup = subparsers.add_parser("evaluator-backup")
-    evaluator_backup.add_argument("--source-root", type=Path, required=True)
-    evaluator_backup.add_argument("--destination", type=Path, required=True)
-    evaluator_backup.add_argument("--apply", action="store_true")
-    evaluator_backup.add_argument("--confirm")
-    evaluator_backup.set_defaults(handler=handle_evaluator_backup)
-
-    evaluator_service = subparsers.add_parser("evaluator-service")
-    evaluator_service.add_argument("--apply", action="store_true")
-    evaluator_service.add_argument("--confirm")
-    evaluator_service.add_argument("--write-enabled", action="store_true")
-    evaluator_service.add_argument("--expected-commit")
-    evaluator_service.add_argument("--image-ref")
-    evaluator_service.set_defaults(handler=handle_evaluator_service)
 
     # In-pod ingestion commands; added without `help` so they stay out of --help.
     db_add_result = subparsers.add_parser("db-add-result")
@@ -586,28 +446,10 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_run.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_run.set_defaults(handler=handle_db_add_run_results)
 
-    db_upsert_history = subparsers.add_parser("db-upsert-run-history")
-    db_upsert_history.add_argument("--result-json", type=Path, required=True)
-    db_upsert_history.add_argument("--result-digest", required=True)
-    db_upsert_history.add_argument(
-        "--db-path", default=active_config.storage.run_history_db_path
-    )
-    db_upsert_history.set_defaults(handler=handle_db_upsert_run_history)
-
-    db_ingest_tests = subparsers.add_parser("db-ingest-test-results")
-    db_ingest_tests.add_argument("--result-json", type=Path, required=True)
-    db_ingest_tests.add_argument("--result-digest", required=True)
-    db_ingest_tests.set_defaults(handler=handle_db_ingest_test_results)
-
-    db_preflight_tests = subparsers.add_parser("db-preflight-test-results")
-    db_preflight_tests.add_argument("--result-json", type=Path, required=True)
-    db_preflight_tests.add_argument("--result-digest", required=True)
-    db_preflight_tests.set_defaults(handler=handle_db_preflight_test_results)
-
-    db_preflight_compat = subparsers.add_parser("db-preflight-compatibility-result")
+    db_preflight_compat = subparsers.add_parser("db-preflight-result")
     db_preflight_compat.add_argument("--result-json", type=Path, required=True)
     db_preflight_compat.add_argument("--result-digest", required=True)
-    db_preflight_compat.set_defaults(handler=handle_db_preflight_compatibility_result)
+    db_preflight_compat.set_defaults(handler=handle_db_preflight_result)
 
     db_add_storage = subparsers.add_parser("db-add-storage-result")
     db_add_storage.add_argument("node")
@@ -682,10 +524,10 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_build.add_argument(
         "--min-samples", type=int, default=active_config.baseline.min_samples
     )
-    baseline_build.add_argument("--image-name", help="Stratify storage/NCCL by image")
-    baseline_build.add_argument("--node", help="Restrict storage/NCCL to one node")
+    baseline_build.add_argument("--image-name", help="Stratify storage by image")
+    baseline_build.add_argument("--node", help="Restrict storage to one node")
     baseline_build.add_argument("--test-plan", help="Stratify DL by test plan")
-    baseline_build.add_argument("--source-db", help="Override source DB (storage/NCCL)")
+    baseline_build.add_argument("--source-db", help="Override source result DB")
     baseline_build.add_argument("--baseline-id", help="Explicit baseline id")
     baseline_build.add_argument(
         "--db-path",
@@ -740,7 +582,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "--window-days", type=int, default=active_config.baseline.window_days
     )
     baseline_classify.add_argument(
-        "--source-db", help="Override source result DB (storage/NCCL)"
+        "--source-db", help="Override source result DB"
     )
     baseline_classify.add_argument(
         "--db-path",
@@ -749,14 +591,189 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     baseline_classify.add_argument(
         "--store-results",
         action="store_true",
-        help="Persist classification decisions to classification-results.db",
+        help="Persist decisions to the target classification DB",
     )
     baseline_classify.add_argument(
         "--classification-db-path",
-        help="Override classification-results DB path",
+        help="Override the target classification DB path",
     )
     baseline_classify.add_argument("--output", choices=["table", "json"], default="table")
     baseline_classify.set_defaults(handler=handle_baseline_classify)
+
+    nccl_eval = subparsers.add_parser(
+        "nccl-eval",
+        help="Operate the focused PostgreSQL NCCL evaluation subsystem",
+    )
+    nccl_sub = nccl_eval.add_subparsers(dest="nccl_eval_command", required=True)
+
+    nccl_schema = nccl_sub.add_parser(
+        "schema", help="Plan or apply packaged PostgreSQL schema migrations"
+    )
+    _add_nccl_mutation_gate(nccl_schema)
+    nccl_schema.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_schema.set_defaults(handler=handle_nccl_eval_schema)
+
+    nccl_grant_runtime = nccl_sub.add_parser(
+        "grant-runtime", help="Provision the least-privilege PostgreSQL runtime role"
+    )
+    _add_nccl_mutation_gate(nccl_grant_runtime)
+    nccl_grant_runtime.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_grant_runtime.set_defaults(handler=handle_nccl_eval_grant_runtime)
+
+    nccl_ingest = nccl_sub.add_parser(
+        "ingest", help="Validate or atomically ingest one normalized JSON batch"
+    )
+    nccl_ingest.add_argument("--input", type=Path, required=True)
+    _add_nccl_mutation_gate(nccl_ingest)
+    nccl_ingest.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_ingest.set_defaults(handler=handle_nccl_eval_ingest)
+
+    nccl_emit_outbox = nccl_sub.add_parser(
+        "emit-outbox",
+        help="Validate or atomically emit one native NCCL PVC outbox file",
+    )
+    nccl_emit_outbox.add_argument("--result-json", type=Path, required=True)
+    nccl_emit_outbox.add_argument("--summary", type=Path, required=True)
+    nccl_emit_outbox.add_argument("--runtime-evidence", type=Path, required=True)
+    nccl_emit_outbox.add_argument("--result-digest", required=True)
+    nccl_emit_outbox.add_argument("--outbox-root", type=Path, required=True)
+    _add_nccl_mutation_gate(nccl_emit_outbox)
+    nccl_emit_outbox.add_argument(
+        "--output", choices=["table", "json"], default="table"
+    )
+    nccl_emit_outbox.set_defaults(handler=handle_nccl_eval_emit_outbox)
+
+    nccl_commit_outbox = nccl_sub.add_parser(
+        "commit-outbox", help="Create the final retryable marker after SQLite commits"
+    )
+    nccl_commit_outbox.add_argument("--outbox-root", type=Path, required=True)
+    nccl_commit_outbox.add_argument("--pending", type=Path, required=True)
+    nccl_commit_outbox.add_argument("--result-digest", required=True)
+    _add_nccl_mutation_gate(nccl_commit_outbox)
+    nccl_commit_outbox.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_commit_outbox.set_defaults(handler=handle_nccl_eval_commit_outbox)
+
+    nccl_ingest_outbox = nccl_sub.add_parser(
+        "ingest-outbox",
+        help="Scan or durably ingest immutable NCCL PVC outbox files",
+    )
+    nccl_ingest_outbox.add_argument("--outbox-root", type=Path, required=True)
+    nccl_ingest_outbox.add_argument("--limit", type=int, default=100)
+    nccl_ingest_outbox.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue after a per-file database error; fail closed by default",
+    )
+    _add_nccl_mutation_gate(nccl_ingest_outbox)
+    nccl_ingest_outbox.add_argument(
+        "--output", choices=["table", "json"], default="table"
+    )
+    nccl_ingest_outbox.set_defaults(handler=handle_nccl_eval_ingest_outbox)
+
+    nccl_legacy = nccl_sub.add_parser(
+        "migrate-legacy",
+        help="Inspect or explicitly normalize a copied legacy IB_HEALTH SQLite DB",
+    )
+    nccl_legacy.add_argument("--sqlite", type=Path, required=True)
+    nccl_legacy.add_argument("--profile-metadata", type=Path)
+    nccl_legacy.add_argument("--test-name")
+    nccl_legacy.add_argument("--test-definition-version")
+    nccl_legacy.add_argument("--gpu-model")
+    nccl_legacy.add_argument("--gpus-per-node", type=int)
+    nccl_legacy.add_argument("--compiled-nccl-version")
+    nccl_legacy.add_argument("--runtime-nccl-package-version")
+    nccl_legacy.add_argument("--driver-version")
+    nccl_legacy.add_argument("--driver-version-group")
+    nccl_legacy.add_argument("--topology-class")
+    nccl_legacy.add_argument("--cuda-version")
+    nccl_legacy.add_argument("--pytorch-version")
+    nccl_legacy.add_argument("--collective")
+    nccl_legacy.add_argument("--datatype")
+    nccl_legacy.add_argument("--reduction")
+    nccl_legacy.add_argument("--message-size")
+    nccl_legacy.add_argument("--warmup-iterations", type=int)
+    nccl_legacy.add_argument(
+        "--allow-configured-live-source",
+        action="store_true",
+        help="Allow the configured raw SQLite path only with a second exact confirmation",
+    )
+    nccl_legacy.add_argument("--confirm-live-source")
+    _add_nccl_mutation_gate(nccl_legacy)
+    nccl_legacy.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_legacy.set_defaults(handler=handle_nccl_eval_migrate_legacy)
+
+    nccl_calibration = nccl_sub.add_parser(
+        "calibration", help="Plan, append, or inspect immutable calibration decisions"
+    )
+    calibration_sub = nccl_calibration.add_subparsers(
+        dest="nccl_calibration_command", required=True
+    )
+    calibration_plan = calibration_sub.add_parser("plan")
+    calibration_plan.add_argument("--input", type=Path, required=True)
+    calibration_plan.add_argument("--output", choices=["table", "json"], default="table")
+    calibration_plan.set_defaults(handler=handle_nccl_eval_calibration)
+    calibration_apply = calibration_sub.add_parser("apply")
+    calibration_apply.add_argument("--input", type=Path, required=True)
+    _add_nccl_mutation_gate(calibration_apply)
+    calibration_apply.add_argument("--output", choices=["table", "json"], default="table")
+    calibration_apply.set_defaults(handler=handle_nccl_eval_calibration)
+    for calibration_command in ("list", "status"):
+        calibration_read = calibration_sub.add_parser(calibration_command)
+        calibration_read.add_argument("--limit", type=int, default=100)
+        calibration_read.add_argument("--output", choices=["table", "json"], default="table")
+        calibration_read.set_defaults(handler=handle_nccl_eval_calibration)
+
+    nccl_build = nccl_sub.add_parser(
+        "build-baselines", help="Report eligibility or build due immutable baselines"
+    )
+    _add_nccl_mutation_gate(nccl_build)
+    nccl_build.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_build.set_defaults(handler=handle_nccl_eval_build_baselines)
+
+    nccl_evaluate = nccl_sub.add_parser(
+        "evaluate", help="Report the queue or evaluate one claimed batch"
+    )
+    from cval.nccl_eval.repository import default_worker_id
+
+    nccl_evaluate.add_argument("--worker-id", default=default_worker_id())
+    nccl_evaluate.add_argument("--batch-size", type=int)
+    _add_nccl_mutation_gate(nccl_evaluate)
+    nccl_evaluate.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_evaluate.set_defaults(handler=handle_nccl_eval_evaluate)
+
+    nccl_worker = nccl_sub.add_parser(
+        "worker", help="Run the graceful continuous NCCL evaluator worker"
+    )
+    nccl_worker.add_argument("--worker-id", default=default_worker_id())
+    nccl_worker.add_argument("--recover-every-cycles", type=int, default=12)
+    _add_nccl_mutation_gate(nccl_worker)
+    nccl_worker.add_argument("--output", choices=["table", "json"], default="json")
+    nccl_worker.set_defaults(handler=handle_nccl_eval_worker)
+
+    nccl_resident = nccl_sub.add_parser(
+        "resident", help="Run ingestion, baseline, recovery, and evaluation continuously"
+    )
+    nccl_resident.add_argument("--worker-id", default=default_worker_id())
+    nccl_resident.add_argument("--outbox-root", type=Path, required=True)
+    nccl_resident.add_argument("--ingest-limit", type=int, default=5000)
+    nccl_resident.add_argument("--recover-every-cycles", type=int, default=12)
+    _add_nccl_mutation_gate(nccl_resident)
+    nccl_resident.add_argument("--output", choices=["json"], default="json")
+    nccl_resident.set_defaults(handler=handle_nccl_eval_resident)
+
+    nccl_recover = nccl_sub.add_parser(
+        "recover", help="Report or recover expired evaluator claims"
+    )
+    _add_nccl_mutation_gate(nccl_recover)
+    nccl_recover.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_recover.set_defaults(handler=handle_nccl_eval_recover)
+
+    nccl_status = nccl_sub.add_parser(
+        "status", help="Read NCCL queue, profile, and latest evaluation summaries"
+    )
+    nccl_status.add_argument("--latest-limit", type=int, default=20)
+    nccl_status.add_argument("--output", choices=["table", "json"], default="table")
+    nccl_status.set_defaults(handler=handle_nccl_eval_status)
 
     overview = subparsers.add_parser(
         "overview", help="One-screen status: free nodes, freshness, queue, and jobs"
@@ -915,7 +932,7 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
 
 
 def handle_tests_scaffold(args: argparse.Namespace) -> int:
-    """Plan or safely create one disabled pass/fail-only test directory."""
+    """Inspect or safely create one disabled pass/fail-only test directory."""
 
     from cval.validation.scaffold import scaffold_validation_test
 
@@ -942,53 +959,6 @@ def handle_tests_scaffold(args: argparse.Namespace) -> int:
         print(f"  - {step}")
     return 0
 
-
-def handle_compatibility_inventory(args: argparse.Namespace) -> int:
-    """Print the central immutable compatibility inventory without I/O."""
-
-    from cval.validation.compatibility import compatibility_inventory
-
-    payload = compatibility_inventory()
-    if args.output == "json":
-        print(json.dumps(payload, indent=2))
-        return 0
-    print(
-        f"Compatibility surfaces: {len(payload['surfaces'])} | "
-        "removal eligible: false"
-    )
-    print(f"{'SURFACE':<34} {'CATEGORY':<18} BLOCKERS")
-    for surface in payload["surfaces"]:
-        print(
-            f"{surface['surface_id']:<34} {surface['category']:<18} "
-            + ",".join(surface["blockers"])
-        )
-    return 0
-
-
-def handle_compatibility_audit(args: argparse.Namespace) -> int:
-    """Run the bounded, explicit-input-only offline compatibility audit."""
-
-    from cval.validation.compatibility import audit_compatibility_inputs
-
-    try:
-        payload = audit_compatibility_inputs(args.inputs)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"Compatibility audit error: {exc}", file=sys.stderr)
-        return 2
-    if args.output == "json":
-        print(json.dumps(payload, indent=2))
-        return 0
-    observed = sum(1 for surface in payload["surfaces"] if surface["observed"])
-    print(
-        f"Offline compatibility audit: {len(payload['inputs'])} explicit inputs, "
-        f"{payload['total_bytes']} bytes, {observed} observed surfaces"
-    )
-    print("Removal eligible: false")
-    print("Global blockers: " + ", ".join(payload["global_blockers"]))
-    for surface in payload["surfaces"]:
-        marker = "observed" if surface["observed"] else "not-observed"
-        print(f"  {surface['surface_id']}: {marker}; " + ", ".join(surface["blockers"]))
-    return 0
 
 
 def handle_operational_targets(args: argparse.Namespace) -> int:
@@ -1042,43 +1012,17 @@ def handle_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_history(args: argparse.Namespace) -> int:
-    """Read normalized node run history without mutating SQLite."""
-
-    from cval.storage.run_history import (
-        get_run_history_rows,
-        run_history_rows_to_dicts,
-    )
-
-    rows = get_run_history_rows(
-        pod=args.pod,
-        namespace=args.namespace,
-        db_path=args.db_path,
-        run_id=args.run_id,
-        node=args.node,
-        test_id=args.test,
-        status=args.status,
-        limit=args.limit,
-        config=args.cval_config,
-    )
-    if args.output == "json":
-        print(json.dumps(run_history_rows_to_dicts(rows), indent=2))
-        return 0
-
-    print(f"Node run history rows: {len(rows)}")
-    print(f"{'STARTED':>12} {'NODE':<30} {'STATUS':<10} {'TESTS':<28} RUN_ID")
-    for row in rows:
-        print(
-            f"{row.started_timestamp:>12} {row.node:<30} "
-            f"{row.overall_status:<10} {row.tests_ran:<28} {row.run_id}"
-        )
-    return 0
-
 
 def handle_plan(args: argparse.Namespace) -> int:
-    """Build and print a dry-run workflow plan."""
+    """Build and print a nonmutating workflow plan."""
 
     from cval.orchestrator.workflow import workflow_plan_to_dict
+
+    if not is_exact_commit(args.git_ref):
+        raise PolicyViolation(
+            "Plan inspection requires --git-ref to be an exact lowercase "
+            "40-hex commit"
+        )
 
     plan = _build_plan_from_args(args)
 
@@ -1091,7 +1035,7 @@ def handle_plan(args: argparse.Namespace) -> int:
         )
         return 0
 
-    print("Dry-run workflow plan")
+    print("Validation workflow plan (read-only)")
     print(
         f"Free nodes: {len(plan.free_nodes)} | Queue: {len(plan.queue)} | "
         f"Batch: {len(plan.planned_jobs)}"
@@ -1107,7 +1051,18 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 
 def handle_run(args: argparse.Namespace) -> int:
-    """Dry-run or explicitly submit a planned validation batch."""
+    """Explicitly submit a planned validation batch."""
+
+    if not args.submit:
+        raise PolicyViolation(
+            "run performs real cluster validation and requires --submit --confirm submit; "
+            "use plan for read-only queue inspection"
+        )
+    if not is_exact_commit(args.git_ref):
+        raise PolicyViolation(
+            "Real cluster submission requires --git-ref to be an exact lowercase "
+            "40-hex commit"
+        )
 
     plan = _build_plan_from_args(args)
     config: CvalConfig = args.cval_config
@@ -1128,8 +1083,7 @@ def handle_run(args: argparse.Namespace) -> int:
         print(json.dumps(submission_result_to_dict(result), indent=2))
         return 0
 
-    mode = "submitted" if args.submit else "dry-run"
-    print(f"Validation job submission plan ({mode})")
+    print("Validation job submission (submitted)")
     print(f"Namespace: {result.namespace} | Jobs: {len(result.records)}")
     for record in result.records:
         print(f"  {record.node} -> {record.job_name} [{record.action}]")
@@ -1191,7 +1145,7 @@ def handle_results(args: argparse.Namespace) -> int:
     )
     from cval.storage.classification_status import get_latest_classification_rows
     from cval.validation.operations import (
-        export_compatibility_rows,
+        export_evaluator_rows,
         resolve_operational_target,
     )
     from cval.validation.plugins import ExportContext
@@ -1207,10 +1161,14 @@ def handle_results(args: argparse.Namespace) -> int:
     )
     classifications = []
     if not args.no_classification:
+        selected_test = args.test.lower()
         classifications = get_latest_classification_rows(
             pod=args.pod,
             namespace=args.namespace,
             db_path=args.classification_db_path,
+            test_type=(
+                None if selected_test in {"all", "overall"} else selected_test
+            ),
             config=args.cval_config,
         )
 
@@ -1260,7 +1218,7 @@ def handle_results(args: argparse.Namespace) -> int:
             ),
             include_metrics=not args.no_metrics,
         )
-        export = export_compatibility_rows(args.cval_config, test, context)
+        export = export_evaluator_rows(args.cval_config, test, context)
         output_path = write_export_rows_csv(
             export,
             target.name,
@@ -1295,6 +1253,7 @@ def handle_classifications(args: argparse.Namespace) -> int:
         pod=args.pod,
         namespace=args.namespace,
         db_path=args.db_path,
+        test_type=(None if args.test == "all" else args.test),
         config=args.cval_config,
     )
     if args.test == "all":
@@ -1306,194 +1265,19 @@ def handle_classifications(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_health_evaluate(args: argparse.Namespace) -> int:
-    """Run one local/PVC-only evaluator cycle without Kubernetes access."""
-
-    from cval.health.evaluator import evaluate_health_cycle
-
-    try:
-        report = evaluate_health_cycle(
-            args.cval_config,
-            apply=args.apply,
-            confirmation=args.confirm,
-        )
-    except Exception as exc:  # noqa: BLE001 - public CLI safety boundary
-        message = " ".join((str(exc).strip() or exc.__class__.__name__).splitlines())
-        if args.output == "json":
-            print(json.dumps({"ok": False, "error": message}, indent=2))
-        else:
-            print(f"Health evaluator error: {message}", file=sys.stderr)
-        return 2
-    if args.output == "json":
-        print(json.dumps(report.to_dict(), indent=2))
-    else:
-        print(
-            f"Health evaluator cycle: {report.mode} | tests={len(report.tests)} | "
-            f"ok={str(report.ok).lower()}"
-        )
-        for test in report.tests:
-            print(
-                f"  {test.test_id:<18} {test.status:<9} results={test.result_count:<4} "
-                f"candidate_sources={test.candidate_source_count:<4} "
-                f"classifications={test.classification_selected_count:<3} "
-                f"deferred={test.deferred_count:<4} "
-                f"backlog={test.classification_backlog:<4} "
-                f"remaining={test.classification_remaining:<4} "
-                f"truncated={str(test.classification_truncated).lower()}"
-            )
-            print(
-                f"    migrated_to_v2={str(test.migrated_to_v2).lower()} "
-                f"candidates={len(test.candidates)} "
-                f"candidate_inserted={test.candidates_inserted} "
-                f"candidate_idempotent={test.candidates_idempotent} "
-                f"history_inserted={test.history_inserted} "
-                f"history_idempotent={test.history_idempotent} "
-                f"partial_durable_writes={str(test.partial_writes).lower()}"
-            )
-            if test.error:
-                print(
-                    f"    stage={test.error_stage or 'unknown'} "
-                    f"atomicity={test.write_atomicity}: {test.error}"
-                )
-    return 0 if report.ok else 1
-
-
-def handle_health_activate(args: argparse.Namespace) -> int:
-    """Preflight or explicitly activate one U8 candidate."""
-
-    from cval.health.evaluator import activate_health_candidate
-
-    try:
-        report = activate_health_candidate(
-            args.cval_config,
-            args.test_id,
-            args.baseline_id,
-            apply=args.apply,
-            confirmation=args.confirm,
-        )
-    except Exception as exc:  # noqa: BLE001 - public CLI safety boundary
-        message = " ".join((str(exc).strip() or exc.__class__.__name__).splitlines())
-        if args.output == "json":
-            print(json.dumps({"ok": False, "error": message}, indent=2))
-        else:
-            print(f"Health activation error: {message}", file=sys.stderr)
-        return 2
-    if args.output == "json":
-        print(json.dumps(report.to_dict(), indent=2))
-    else:
-        print(
-            f"Health activation {report.mode}: {report.baseline_id} | "
-            f"state={report.lifecycle} ready={str(report.activation_ready).lower()} "
-            f"activated={str(report.activated).lower()}"
-        )
-    return 0
-
-
-def handle_evaluator_preflight(args: argparse.Namespace) -> int:
-    """Emit one read-only U11 deployment-preflight JSON object."""
-
-    try:
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            from cval.evaluator.preflight import run_deployment_preflight
-
-            config = args.cval_config
-            if args.state_root is not None:
-                config = replace(
-                    config,
-                    health_evaluator=replace(
-                        config.health_evaluator,
-                        state_root=str(args.state_root),
-                    ),
-                )
-            report = run_deployment_preflight(config, access=args.access)
-        _print_strict_json(report)
-        return 0 if report["ok"] else 1
-    except KeyboardInterrupt:
-        raise
-    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
-        _print_strict_evaluator_error("evaluator preflight", exc)
-        return 2
-
-
-def handle_evaluator_parity(args: argparse.Namespace) -> int:
-    """Emit one deterministic shadow-parity JSON object from copied inputs."""
-
-    try:
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            from cval.evaluator.parity import build_shadow_parity_report
-
-            report = build_shadow_parity_report(
-                u8_json_paths=args.u8_json,
-                u8_db_paths=args.u8_db,
-                compatibility_json_paths=args.compatibility_json,
-                compatibility_db_paths=args.compatibility_db,
-                registered_test_ids=(
-                    registered.id
-                    for registered in args.cval_config.tests.registry.tests
-                ),
-            )
-        _print_strict_json(report)
-        return 0
-    except KeyboardInterrupt:
-        raise
-    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
-        _print_strict_evaluator_error("evaluator parity", exc)
-        return 2
-
-
-def handle_evaluator_backup(args: argparse.Namespace) -> int:
-    """Plan or execute a separately gated backup of a disposable local copy."""
-
-    try:
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            from cval.evaluator.backup import backup_local_evaluator_state
-
-            report = backup_local_evaluator_state(
-                args.cval_config,
-                source_root=args.source_root,
-                destination=args.destination,
-                apply=args.apply,
-                confirmation=args.confirm,
-            )
-        _print_strict_json(report)
-        return 0 if report["ok"] else 1
-    except KeyboardInterrupt:
-        raise
-    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
-        _print_strict_evaluator_error("evaluator backup", exc)
-        return 2
-
-
-def handle_evaluator_service(args: argparse.Namespace) -> int:
-    """Run one startup-verified evaluator cycle and emit one stdout envelope."""
-
-    try:
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            from cval.evaluator.service import run_evaluator_service
-
-            report = run_evaluator_service(
-                args.cval_config,
-                apply=args.apply,
-                confirmation=args.confirm,
-                write_enabled=args.write_enabled,
-                expected_commit=args.expected_commit,
-                image_ref=args.image_ref,
-            )
-            exit_code = int(report["exit_code"])
-        _print_strict_json(report)
-        return exit_code
-    except KeyboardInterrupt:
-        raise
-    except BaseException as exc:  # noqa: BLE001 - strict machine boundary
-        category = "SystemExit" if isinstance(exc, SystemExit) else exc.__class__.__name__
-        _print_strict_json(
-            {"ok": False, "error": f"evaluator service failed ({category})"}
-        )
-        return 2
-
 
 def handle_validate(args: argparse.Namespace) -> int:
-    """Submit one node, live-track it, classify the fresh result, and report."""
+    """Submit one exact-commit cluster job, live-track it, and report raw evidence."""
+    if not args.submit:
+        raise PolicyViolation(
+            "validate performs real cluster validation and requires explicit "
+            "--submit --confirm submit"
+        )
+    if not is_exact_commit(args.git_ref):
+        raise PolicyViolation(
+            "Cluster validation requires --git-ref to be an exact lowercase "
+            "40-hex commit"
+        )
     from cval.orchestrator.validate import run_node_validation
 
     report = run_node_validation(
@@ -1505,26 +1289,19 @@ def handle_validate(args: argparse.Namespace) -> int:
         poll_interval=args.poll_interval,
         overall_timeout=args.timeout_seconds,
         pending_timeout=args.pending_timeout,
-        skip_dl_rebuild=args.skip_dl_rebuild,
-        dl_rebuild_timeout=args.dl_rebuild_timeout,
-        dl_lock_wait=args.dl_lock_wait,
         pod=args.pvc_pod,
-        pod_repo_dir=args.pod_repo_dir,
-        pod_config_path=args.pod_config,
-        window_days=args.window_days,
-        dry_run=args.dry_run,
+        submit=args.submit,
+        confirmation=args.confirm,
         download=args.download,
         download_dir=args.download_dir,
         verbose=(args.output == "table"),
     )
     if args.output == "json":
         print(json.dumps(report, indent=2))
-    if report.get("dry_run"):
-        return 0
     return 0 if report.get("ok", False) else 1
 
 
-def _compatibility_write_authorization(args: argparse.Namespace):
+def _raw_write_authorization(args: argparse.Namespace):
     from cval.storage.write_provenance import authorize_result_write
 
     authorization = authorize_result_write(
@@ -1537,7 +1314,7 @@ def _compatibility_write_authorization(args: argparse.Namespace):
     if args.node != result.node or parse_timestamp(args.timestamp) != parse_timestamp(
         result.timestamp
     ):
-        raise ValueError("Compatibility writer identity does not match validated result")
+        raise ValueError("Raw DB writer identity does not match validated result")
     for argument_name, result_value in (
         ("image_name", result.image_name),
         ("pytorch_version", result.pytorch_version),
@@ -1545,7 +1322,7 @@ def _compatibility_write_authorization(args: argparse.Namespace):
     ):
         if hasattr(args, argument_name) and getattr(args, argument_name) != result_value:
             raise ValueError(
-                f"Compatibility writer {argument_name} does not match validated result"
+                f"Raw DB writer {argument_name} does not match validated result"
             )
     if (
         isinstance(result, ValidationResultV2)
@@ -1553,7 +1330,7 @@ def _compatibility_write_authorization(args: argparse.Namespace):
         and args.run_id
         and args.run_id != result.run_id
     ):
-        raise ValueError("Compatibility writer run_id does not match validated result")
+        raise ValueError("Raw DB writer run_id does not match validated result")
     return authorization
 
 
@@ -1563,14 +1340,14 @@ def _require_v2_db_target(authorization, db_path: str | Path, config_field: str)
     expected = Path(getattr(authorization.config.storage, config_field)).expanduser()
     if Path(db_path).expanduser() != expected:
         raise ValueError(
-            f"Compatibility DB target does not match snapshot storage.{config_field}"
+            f"Raw DB target does not match snapshot storage.{config_field}"
         )
 
 
 def handle_db_add_result(args: argparse.Namespace) -> int:
     """Append one validation result row to the main SQLite DB."""
 
-    authorization = _compatibility_write_authorization(args)
+    authorization = _raw_write_authorization(args)
     values = validation_result_to_env(authorization.result)
     expected_result = (
         values["overall_result"]
@@ -1580,7 +1357,7 @@ def handle_db_add_result(args: argparse.Namespace) -> int:
         else None
     )
     if expected_result != args.result:
-        raise ValueError("Compatibility status row does not match validated result")
+        raise ValueError("Raw DB status row does not match validated result")
     _require_v2_db_target(authorization, args.db_path, "validation_db_path")
     timestamp = add_validation_result(
         args.node,
@@ -1598,25 +1375,25 @@ def handle_db_add_result(args: argparse.Namespace) -> int:
 
 
 def handle_db_add_run_results(args: argparse.Namespace) -> int:
-    """Atomically append fixed compatibility status rows for one run."""
+    """Atomically append fixed built-in status rows for one run."""
 
-    authorization = _compatibility_write_authorization(args)
+    authorization = _raw_write_authorization(args)
     projected = validation_result_to_env(authorization.result)
-    from cval.validation.compatibility import (
-        LEGACY_AGGREGATE_TEST_ID,
-        LEGACY_TEST_PROJECTIONS,
-        project_legacy_statuses,
+    from cval.validation.builtins import (
+        BUILTIN_AGGREGATE_TEST_ID,
+        BUILTIN_TEST_PROJECTIONS,
+        project_builtin_statuses,
     )
 
-    expected_results = project_legacy_statuses(projected)
+    expected_results = project_builtin_statuses(projected)
     actual_results = {
         item.test_id: getattr(args, f"{item.test_id}_result")
-        for item in LEGACY_TEST_PROJECTIONS
+        for item in BUILTIN_TEST_PROJECTIONS
     } | {
-        LEGACY_AGGREGATE_TEST_ID: args.overall_result,
+        BUILTIN_AGGREGATE_TEST_ID: args.overall_result,
     }
     if actual_results != expected_results:
-        raise ValueError("Compatibility status set does not match validated result")
+        raise ValueError("Raw DB status set does not match validated result")
     _require_v2_db_target(authorization, args.db_path, "validation_db_path")
     timestamp = add_validation_run_results(
         args.node,
@@ -1632,62 +1409,9 @@ def handle_db_add_run_results(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_db_upsert_run_history(args: argparse.Namespace) -> int:
-    """Persist one validated v2 result into normalized run history."""
 
-    from cval.storage.run_history import ingest_run_history_file
-
-    run_id = ingest_run_history_file(
-        args.result_json,
-        db_path=args.db_path,
-        config=args.cval_config,
-        result_digest=args.result_digest,
-        config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
-    )
-    print(f"Upserted node run history: {run_id}")
-    return 0
-
-
-def handle_db_ingest_test_results(args: argparse.Namespace) -> int:
-    """Persist common raw rows and declared metrics from one finalized v2 run."""
-
-    from cval.validation.ingestion import ingest_test_results_file
-
-    try:
-        report = ingest_test_results_file(
-            args.result_json,
-            config=args.cval_config,
-            result_digest=args.result_digest,
-            config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
-        )
-    except Exception as exc:  # noqa: BLE001 - hidden in-pod command boundary
-        print(f"Modular per-test ingestion failed: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps(report.to_dict(), sort_keys=True))
-    return 0 if report.ok else 1
-
-
-def handle_db_preflight_test_results(args: argparse.Namespace) -> int:
-    """Validate modular evidence/targets without creating or changing files."""
-
-    from cval.validation.ingestion import preflight_test_results_file
-
-    try:
-        run_id = preflight_test_results_file(
-            args.result_json,
-            config=args.cval_config,
-            result_digest=args.result_digest,
-            config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
-        )
-    except Exception as exc:  # noqa: BLE001 - hidden in-pod command boundary
-        print(f"Modular per-test preflight failed: {exc}", file=sys.stderr)
-        return 1
-    print(f"Modular per-test preflight passed: {run_id}")
-    return 0
-
-
-def handle_db_preflight_compatibility_result(args: argparse.Namespace) -> int:
-    """Validate v1/v2 compatibility provenance and targets without writing."""
+def handle_db_preflight_result(args: argparse.Namespace) -> int:
+    """Validate result provenance and current raw DB targets without writing."""
 
     from cval.storage.write_provenance import authorize_result_write
 
@@ -1699,10 +1423,10 @@ def handle_db_preflight_compatibility_result(args: argparse.Namespace) -> int:
             config=args.cval_config,
         )
     except Exception as exc:  # noqa: BLE001 - hidden in-pod boundary
-        print(f"Compatibility write preflight failed: {exc}", file=sys.stderr)
+        print(f"Raw DB write preflight failed: {exc}", file=sys.stderr)
         return 1
     print(
-        f"Compatibility write preflight passed: "
+        f"Raw DB write preflight passed: "
         f"{authorization.result.node}-{authorization.result.timestamp}"
     )
     return 0
@@ -1711,7 +1435,7 @@ def handle_db_preflight_compatibility_result(args: argparse.Namespace) -> int:
 def handle_db_add_storage_result(args: argparse.Namespace) -> int:
     """Parse storage artifacts and write one storage metrics row."""
 
-    authorization = _compatibility_write_authorization(args)
+    authorization = _raw_write_authorization(args)
     if isinstance(authorization.result, ValidationResultV2):
         test = authorization.result.tests.get("storage")
         if test is None or test.status != "pass" or Path(test.artifacts) != args.results_dir:
@@ -1734,7 +1458,7 @@ def handle_db_add_storage_result(args: argparse.Namespace) -> int:
 def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
     """Ingest one consolidated NCCL/IB health row from a summary JSON."""
 
-    authorization = _compatibility_write_authorization(args)
+    authorization = _raw_write_authorization(args)
     if not args.summary_json.exists():
         print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
         return 1
@@ -1849,11 +1573,11 @@ def handle_baseline_build(args: argparse.Namespace) -> int:
         default_dynamic_baseline_db_paths,
         store_dynamic_baseline,
     )
-    from cval.validation.operations import build_compatibility_baseline
+    from cval.validation.operations import build_evaluator_baseline
 
     config: CvalConfig = args.cval_config
     try:
-        record = build_compatibility_baseline(
+        record = build_evaluator_baseline(
             config,
             args.test_type,
             window_days=args.window_days,
@@ -1864,8 +1588,8 @@ def handle_baseline_build(args: argparse.Namespace) -> int:
             test_plan=args.test_plan,
             baseline_id=args.baseline_id,
         )
-    except FileNotFoundError as exc:
-        print(f"Source DB not found: {exc}", file=sys.stderr)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        print(f"Baseline build failed: {exc}", file=sys.stderr)
         return 1
 
     stored = False
@@ -1916,12 +1640,17 @@ def handle_baseline_activate(args: argparse.Namespace) -> int:
         args.cval_config, args.test_type, BASELINE_ACTIVATE
     )
 
-    if not activate_baseline(
-        args.baseline_id,
-        args.test_type,
-        db_path=args.db_path,
-        config=args.cval_config,
-    ):
+    try:
+        activated = activate_baseline(
+            args.baseline_id,
+            args.test_type,
+            db_path=args.db_path,
+            config=args.cval_config,
+        )
+    except (TypeError, ValueError) as exc:
+        print(f"Baseline activation failed: {exc}", file=sys.stderr)
+        return 1
+    if not activated:
         print(
             f"Baseline not found: {args.baseline_id} ({args.test_type})",
             file=sys.stderr,
@@ -1984,7 +1713,7 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
         store_classification_results,
     )
     from cval.validation.operations import (
-        classify_compatibility_target,
+        classify_evaluator_target,
         resolve_operational_target,
     )
 
@@ -2007,29 +1736,38 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
         )
         return 1
 
-    verdicts = classify_compatibility_target(
-        config,
-        args.test_type,
-        baseline,
-        node=args.node,
-        source_db=args.source_db,
-        window_days=args.window_days,
-    )
+    try:
+        verdicts = classify_evaluator_target(
+            config,
+            args.test_type,
+            baseline,
+            node=args.node,
+            source_db=args.source_db,
+            window_days=args.window_days,
+        )
+    except (TypeError, ValueError) as exc:
+        print(f"Classification failed: {exc}", file=sys.stderr)
+        return 1
 
     stored_count = 0
     if args.store_results:
-        stored_count = store_classification_results(
-            verdicts,
-            db_path=args.classification_db_path,
-            config=config,
-        )
+        try:
+            stored_count = store_classification_results(
+                verdicts,
+                db_path=args.classification_db_path,
+                config=config,
+            )
+        except (TypeError, ValueError) as exc:
+            print(f"Classification storage failed: {exc}", file=sys.stderr)
+            return 1
 
     if args.output == "json":
         payload = {
             "verdicts": verdicts,
             "stored_count": stored_count,
             "classification_db_path": str(
-                args.classification_db_path or default_classification_db_path(config)
+                args.classification_db_path
+                or default_classification_db_path(args.test_type, config)
             ) if args.store_results else "",
         }
         print(json.dumps(payload if args.store_results else verdicts, indent=2))
@@ -2037,7 +1775,9 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
 
     print(f"Classification vs baseline {baseline.get('baseline_id')} ({args.test_type})")
     if args.store_results:
-        target_db = args.classification_db_path or default_classification_db_path(config)
+        target_db = args.classification_db_path or default_classification_db_path(
+            args.test_type, config
+        )
         print(f"Stored {stored_count} classification row(s) in {target_db}")
     if not verdicts:
         print("No nodes found in the window.")
@@ -2057,6 +1797,463 @@ def handle_baseline_classify(args: argparse.Namespace) -> int:
     if degraded:
         print(f"Degraded nodes: {', '.join(degraded)}")
     return 0
+
+
+def handle_nccl_eval_schema(args: argparse.Namespace) -> int:
+    """Plan packaged migrations or apply them after the exact schema gate."""
+
+    if args.apply:
+        _require_nccl_apply(args, "schema")
+    else:
+        from cval.nccl_eval.schema import migration_plan
+
+        _print_nccl_payload(migration_plan(), args.output)
+        return 0
+    return _run_nccl_db_action(args, "apply_schema")
+
+
+def handle_nccl_eval_grant_runtime(args: argparse.Namespace) -> int:
+    """Provision the runtime login from Secret-backed environment only."""
+
+    if args.apply:
+        _require_nccl_apply(args, "grant-runtime")
+    else:
+        _print_nccl_payload(
+            {
+                "mode": "dry-run",
+                "required_environment": [
+                    "DATABASE_URL",
+                    "CVAL_POSTGRES_RUNTIME_USERNAME",
+                    "CVAL_POSTGRES_RUNTIME_PASSWORD",
+                ],
+                "ownership_granted": False,
+            },
+            args.output,
+        )
+        return 0
+    try:
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import grant_runtime
+
+        username = os.environ.get("CVAL_POSTGRES_RUNTIME_USERNAME", "")
+        password = os.environ.get("CVAL_POSTGRES_RUNTIME_PASSWORD", "")
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        _print_nccl_payload(
+            grant_runtime(config, username=username, password=password), args.output
+        )
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_ingest(args: argparse.Namespace) -> int:
+    """Validate normalized input without a DB, or ingest it atomically."""
+
+    if args.apply:
+        _require_nccl_apply(args, "ingest")
+    try:
+        from cval.nccl_eval.models import IngestionBatch
+        from cval.nccl_eval.profile import build_profile_identity
+
+        raw = json.loads(args.input.read_text(encoding="utf-8"))
+        batch = IngestionBatch.from_dict(raw)
+        if not args.apply:
+            profile = build_profile_identity(batch.test_run)
+            _print_nccl_payload(
+                {
+                    "mode": "dry-run",
+                    "valid": True,
+                    "run_id": str(batch.test_run.run_id),
+                    "profile_id": str(profile.profile_id),
+                    "profile_key": profile.profile_key,
+                    "node_count": len(batch.node_results),
+                    "nic_count": sum(len(node.nics) for node in batch.node_results),
+                },
+                args.output,
+            )
+            return 0
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import ingest
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        _print_nccl_payload(ingest(config, batch), args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_emit_outbox(args: argparse.Namespace) -> int:
+    """Build a descriptor-bound native batch and optionally emit it once."""
+
+    if args.apply:
+        _require_nccl_apply(args, "emit-outbox")
+    try:
+        from cval.nccl_eval.outbox import (
+            build_ingestion_batch,
+            emission_plan,
+            emit_outbox,
+        )
+
+        batch = build_ingestion_batch(
+            result_json=args.result_json,
+            summary=args.summary,
+            runtime_evidence=args.runtime_evidence,
+            result_digest=args.result_digest,
+            config=args.cval_config,
+        )
+        payload = (
+            emit_outbox(args.outbox_root, batch.test_run.cval_run_id, batch)
+            if args.apply
+            else emission_plan(args.outbox_root, batch.test_run.cval_run_id, batch)
+        )
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - immutable-file CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_commit_outbox(args: argparse.Namespace) -> int:
+    """Validate or write the final committed marker for one pending payload."""
+
+    if args.apply:
+        _require_nccl_apply(args, "commit-outbox")
+    try:
+        from cval.nccl_eval.outbox import commit_outbox, commit_outbox_plan
+
+        payload = (
+            commit_outbox(
+                args.outbox_root,
+                pending=args.pending,
+                result_digest=args.result_digest,
+            )
+            if args.apply
+            else commit_outbox_plan(
+                args.outbox_root,
+                pending=args.pending,
+                result_digest=args.result_digest,
+            )
+        )
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - immutable-file CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_ingest_outbox(args: argparse.Namespace) -> int:
+    """Scan before any database setup, then ingest each exact valid file."""
+
+    if args.apply:
+        _require_nccl_apply(args, "ingest-outbox")
+    try:
+        from cval.nccl_eval.outbox import ingest_outbox_progression, scan_outbox
+
+        scan = scan_outbox(args.outbox_root, limit=args.limit)
+        if not args.apply:
+            _print_nccl_payload(scan.public_dict(), args.output)
+            return 0
+        from cval.nccl_eval.config import NcclEvaluationConfig
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        payload = ingest_outbox_progression(
+            config,
+            args.outbox_root,
+            limit=args.limit,
+            continue_on_error=args.continue_on_error,
+        )
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_calibration(args: argparse.Namespace) -> int:
+    """Plan/apply exact decision IDs or inspect the append-only ledger."""
+
+    try:
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.repository import parse_calibration_input
+        from cval.nccl_eval.service import (
+            apply_calibration,
+            calibration_plan,
+            calibration_report,
+        )
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        command = args.nccl_calibration_command
+        if command in {"list", "status"}:
+            payload = calibration_report(config, limit=args.limit)
+        else:
+            raw = json.loads(args.input.read_text(encoding="utf-8"))
+            decisions = parse_calibration_input(raw)
+            if command == "apply":
+                _require_nccl_apply(args, "calibration")
+                payload = apply_calibration(config, decisions)
+            else:
+                payload = calibration_plan(config, decisions)
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_migrate_legacy(args: argparse.Namespace) -> int:
+    """Read only a copied SQLite source and optionally ingest normalized batches."""
+
+    if args.apply:
+        _require_nccl_apply(args, "migrate-legacy")
+    configured_source = Path(args.cval_config.storage.nccl_db_path).expanduser().resolve()
+    selected_source = args.sqlite.expanduser().resolve()
+    if selected_source == configured_source and not (
+        args.allow_configured_live_source and args.confirm_live_source == "copied-sqlite"
+    ):
+        print(
+            "NCCL evaluation error: configured raw SQLite path requires "
+            "--allow-configured-live-source --confirm-live-source copied-sqlite",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        from cval.nccl_eval.legacy import (
+            LegacyProfileMetadata,
+            legacy_summary,
+            read_legacy_batches,
+        )
+
+        metadata = LegacyProfileMetadata.from_dict(_legacy_metadata_from_args(args))
+        batches = read_legacy_batches(selected_source, metadata)
+        summary = legacy_summary(batches, selected_source)
+        if not args.apply:
+            _print_nccl_payload(summary, args.output)
+            return 0
+
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import open_repository
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        receipts = []
+        with open_repository(config) as repository:
+            for batch in batches:
+                receipts.append(repository.ingest_batch(batch))
+        _print_nccl_payload(
+            summary | {"mode": "apply", "ingested_batches": receipts},
+            args.output,
+        )
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_build_baselines(args: argparse.Namespace) -> int:
+    """Report baseline eligibility or run the approval-gated builder once."""
+
+    if args.apply:
+        _require_nccl_apply(args, "build-baselines")
+    return _run_nccl_db_action(
+        args, "build_baselines" if args.apply else "baseline_report"
+    )
+
+
+def handle_nccl_eval_evaluate(args: argparse.Namespace) -> int:
+    """Report ready jobs or claim and evaluate a short batch."""
+
+    if args.apply:
+        _require_nccl_apply(args, "evaluate")
+    try:
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import evaluate_once, queue_report
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        payload = (
+            evaluate_once(
+                config, worker_id=args.worker_id, batch_size=args.batch_size
+            )
+            if args.apply
+            else queue_report(config)
+        )
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_worker(args: argparse.Namespace) -> int:
+    """Run the signal-aware evaluator service until graceful shutdown."""
+
+    if args.apply:
+        _require_nccl_apply(args, "worker")
+    try:
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import queue_report, worker
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        payload = (
+            worker(
+                config,
+                worker_id=args.worker_id,
+                recover_every_cycles=args.recover_every_cycles,
+            )
+            if args.apply
+            else queue_report(config)
+        )
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_resident(args: argparse.Namespace) -> int:
+    """Run all recurring NCCL evaluator tasks in one resident process."""
+
+    if args.apply:
+        _require_nccl_apply(args, "resident")
+    try:
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import queue_report, resident
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        if not args.apply:
+            _print_nccl_payload(queue_report(config), args.output)
+            return 0
+
+        def emit(payload: dict[str, object]) -> None:
+            print(json.dumps(payload, sort_keys=True), flush=True)
+
+        payload = resident(
+            config,
+            worker_id=args.worker_id,
+            outbox_root=args.outbox_root,
+            ingest_limit=args.ingest_limit,
+            recover_every_cycles=args.recover_every_cycles,
+            event_sink=emit,
+        )
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def handle_nccl_eval_recover(args: argparse.Namespace) -> int:
+    """Report or approval-gate stale processing claim recovery."""
+
+    if args.apply:
+        _require_nccl_apply(args, "recover")
+    return _run_nccl_db_action(args, "recover" if args.apply else "stale_report")
+
+
+def handle_nccl_eval_status(args: argparse.Namespace) -> int:
+    """Read subsystem status without mutations."""
+
+    try:
+        from cval.nccl_eval.config import NcclEvaluationConfig
+        from cval.nccl_eval.service import status
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        _print_nccl_payload(
+            status(config, latest_limit=args.latest_limit), args.output
+        )
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def _add_nccl_mutation_gate(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--confirm")
+
+
+def _require_nccl_apply(args: argparse.Namespace, phrase: str) -> None:
+    if not args.apply or args.confirm != phrase:
+        raise PolicyViolation(
+            f"NCCL mutation requires --apply --confirm {phrase}"
+        )
+
+
+def _run_nccl_db_action(args: argparse.Namespace, action: str) -> int:
+    try:
+        from cval.nccl_eval import service
+        from cval.nccl_eval.config import NcclEvaluationConfig
+
+        config = NcclEvaluationConfig.from_env(require_database=True)
+        payload = getattr(service, action)(config)
+        _print_nccl_payload(payload, args.output)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
+        return _report_nccl_error(exc)
+
+
+def _legacy_metadata_from_args(args: argparse.Namespace) -> dict[str, object]:
+    data: dict[str, object] = {}
+    if args.profile_metadata is not None:
+        loaded = json.loads(args.profile_metadata.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("--profile-metadata must contain a JSON object")
+        data.update(loaded)
+    fields = (
+        "test_name",
+        "test_definition_version",
+        "gpu_model",
+        "gpus_per_node",
+        "compiled_nccl_version",
+        "runtime_nccl_package_version",
+        "driver_version",
+        "driver_version_group",
+        "topology_class",
+        "cuda_version",
+        "pytorch_version",
+    )
+    for field in fields:
+        value = getattr(args, field)
+        if value is not None:
+            data[field] = value
+    test_config = dict(data.get("test_config", {}))
+    for field in (
+        "collective",
+        "datatype",
+        "reduction",
+        "message_size",
+        "warmup_iterations",
+    ):
+        value = getattr(args, field)
+        if value is not None:
+            test_config[field] = value
+    if test_config:
+        data["test_config"] = test_config
+    return data
+
+
+def _print_nccl_payload(payload: dict[str, object], output: str) -> None:
+    if output == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print("NCCL PostgreSQL evaluation")
+    for key, value in payload.items():
+        if isinstance(value, list | dict):
+            print(f"{key}: {json.dumps(value, sort_keys=True)}")
+        else:
+            print(f"{key}: {value}")
+
+
+def _report_nccl_error(exc: BaseException) -> int:
+    import re
+
+    message = str(exc).replace("\n", " ").replace("\r", " ")
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        message = message.replace(database_url, "[DATABASE_URL REDACTED]")
+    message = re.sub(
+        r"(postgres(?:ql)?://)[^\s/@:]+(?::[^\s/@]*)?@",
+        r"\1[REDACTED]@",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = re.sub(
+        r"\b(user|password|passfile|sslkey)=('(?:[^']|'')*'|\S+)",
+        r"\1=[REDACTED]",
+        message,
+        flags=re.IGNORECASE,
+    )
+    print(f"NCCL evaluation error: {message[:1000]}", file=sys.stderr)
+    return 2
 
 
 def handle_overview(args: argparse.Namespace) -> int:
@@ -2158,40 +2355,6 @@ def _parse_csv(value: str) -> list[str]:
 
     return [item.strip() for item in value.split(",") if item.strip()]
 
-
-def _single_line_error(exc: BaseException) -> str:
-    return " ".join((str(exc).strip() or exc.__class__.__name__).splitlines())
-
-
-def _print_strict_json(value: object) -> None:
-    print(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
-
-
-def _print_strict_evaluator_error(operation: str, exc: BaseException) -> None:
-    if isinstance(exc, Exception):
-        message = _single_line_error(exc)
-    else:
-        category = "SystemExit" if isinstance(exc, SystemExit) else "BaseException"
-        message = f"{operation} failed ({category})"
-    _print_strict_json({"ok": False, "error": message})
-
-
-def _parse_cli_arguments(parser_call, *, strict_json: bool):
-    if not strict_json:
-        return parser_call()
-    errors = io.StringIO()
-    try:
-        with redirect_stderr(errors):
-            return parser_call()
-    except SystemExit as exc:
-        if exc.code == 0:
-            raise
-        lines = [line.strip() for line in errors.getvalue().splitlines() if line.strip()]
-        message = lines[-1] if lines else "invalid evaluator command arguments"
-        if message.startswith("cval: error: "):
-            message = message.removeprefix("cval: error: ")
-        _print_strict_json({"ok": False, "error": message})
-        return None
 
 
 def _load_db_status(args: argparse.Namespace) -> dict[str, int]:

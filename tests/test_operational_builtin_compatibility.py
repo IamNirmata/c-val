@@ -16,14 +16,14 @@ from cval.baselines.classify import classify_node
 from cval.config import load_config
 from cval.storage.ingest import STORAGE_METRIC_COLUMNS
 from cval.validation.operations import (
-    build_compatibility_baseline,
-    classify_compatibility_target,
+    build_evaluator_baseline,
+    classify_evaluator_target,
     resolve_operational_target,
-    validate_compatibility_classification_verdicts,
+    validate_classification_verdicts,
 )
 from cval.validation.operational_targets import BASELINE_CLASSIFY
-from tests.test_baseline_build import NOW, _make_nccl_db, _make_storage_db
-from tests.test_baseline_classify import _make_nccl_two_nodes, _make_storage_two_nodes
+from tests.test_baseline_build import NOW, _make_storage_db
+from tests.test_baseline_classify import _make_storage_two_nodes
 
 
 class BuiltinOperationalCompatibilityTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class BuiltinOperationalCompatibilityTests(unittest.TestCase):
                     node="node-a",
                     baseline_id="storage-fixture",
                 )
-                actual = build_compatibility_baseline(
+                actual = build_evaluator_baseline(
                     self.config,
                     "storage",
                     source_db=str(source),
@@ -74,7 +74,7 @@ class BuiltinOperationalCompatibilityTests(unittest.TestCase):
                 db_path=two_nodes,
                 window_days=365,
             )
-            actual_verdict = classify_compatibility_target(
+            actual_verdict = classify_evaluator_target(
                 self.config,
                 "storage",
                 baseline,
@@ -84,59 +84,9 @@ class BuiltinOperationalCompatibilityTests(unittest.TestCase):
             )[0]
             self.assertEqual(actual_verdict, expected_verdict)
 
-    def test_nccl_baseline_and_classification_match_exactly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source = Path(tmpdir) / "nccl.db"
-            _make_nccl_db(source)
-            with patch("cval.baselines.build.time.time", return_value=NOW):
-                expected = build.build_nccl_baseline(
-                    config=self.config,
-                    db_path=source,
-                    window_days=365,
-                    min_samples=5,
-                    image_name="img:1",
-                    node="node-a",
-                    baseline_id="nccl-fixture",
-                )
-                actual = build_compatibility_baseline(
-                    self.config,
-                    "nccl",
-                    source_db=str(source),
-                    window_days=365,
-                    min_samples=5,
-                    image_name="img:1",
-                    node="node-a",
-                    baseline_id="nccl-fixture",
-                )
-            self.assertEqual(actual, expected)
-
-            two_nodes = Path(tmpdir) / "nccl-two.db"
-            _make_nccl_two_nodes(two_nodes)
-            baseline = build.build_nccl_baseline(
-                config=self.config,
-                db_path=two_nodes,
-                window_days=365,
-                min_samples=5,
-                node="node-good",
-                baseline_id="nccl-classify",
-            )
-            expected_verdict = classify_node(
-                "nccl",
-                "node-bad",
-                baseline,
-                config=self.config,
-                db_path=two_nodes,
-                window_days=365,
-            )
-            actual_verdict = classify_compatibility_target(
-                self.config,
-                "nccl",
-                baseline,
-                source_db=str(two_nodes),
-                node="node-bad",
-                window_days=365,
-            )[0]
-            self.assertEqual(actual_verdict, expected_verdict)
+    def test_nccl_generic_baseline_and_classification_are_not_operational_targets(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not support"):
+            resolve_operational_target(self.config, "nccl", BASELINE_CLASSIFY)
 
     def test_four_dl_aliases_and_aggregate_match_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -179,7 +129,7 @@ class BuiltinOperationalCompatibilityTests(unittest.TestCase):
                         config=config,
                         window_days=365,
                     )
-                    actual = classify_compatibility_target(
+                    actual = classify_evaluator_target(
                         config,
                         target,
                         baseline,
@@ -222,7 +172,7 @@ class BuiltinOperationalCompatibilityTests(unittest.TestCase):
                 window_days=365,
             )
             target = resolve_operational_target(config, "dltest", BASELINE_CLASSIFY)
-            validate_compatibility_classification_verdicts(
+            validate_classification_verdicts(
                 [verdict],
                 target=target,
                 expected_baseline_id=baseline["baseline_id"],
@@ -264,7 +214,7 @@ class BuiltinOperationalCompatibilityTests(unittest.TestCase):
                     ValueError,
                     "DL|Classification",
                 ):
-                    validate_compatibility_classification_verdicts(
+                    validate_classification_verdicts(
                         [value],
                         target=target,
                         expected_baseline_id=baseline["baseline_id"],

@@ -12,6 +12,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cval.cli import main
+from cval.baselines import stats
+from cval.baselines.storage import (
+    activate_baseline,
+    get_active_baseline,
+    store_dynamic_baseline,
+)
+from cval.config import load_config
 from cval.models import ClassificationResultRow, LatestStatusRow
 from cval.validation.plugins import ExportRows
 
@@ -27,13 +34,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
         self.assertIn(
-            "{config,tests,compatibility,nodes,validate,status,history,plan,run,jobs,result,results,"
-            "classifications,health,baseline,overview}",
+            "{config,tests,nodes,validate,status,plan,run,jobs,result,results,"
+            "classifications,baseline,nccl-eval,overview}",
             help_text,
         )
         self.assertNotIn("prioritize", help_text)
         self.assertNotIn("run-batch", help_text)
         self.assertNotIn("db-add-result", help_text)
+        for removed in ("history", "compatibility", "health", "evaluator-preflight"):
+            self.assertNotIn(f"    {removed}", help_text)
 
     def test_results_command_writes_csv(self) -> None:
         output = io.StringIO()
@@ -49,7 +58,7 @@ class CliTests(unittest.TestCase):
             ), patch(
                 "cval.storage.classification_status.get_latest_classification_rows",
                 return_value=[],
-            ):
+            ) as classification_reader:
                 with redirect_stdout(output):
                     exit_code = main(
                         [
@@ -68,6 +77,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(files), 1)
         self.assertIn("Wrote 2 overall latest result row(s)", output.getvalue())
+        classification_reader.assert_called_once()
 
     def test_plugin_results_command_reports_export_row_count(self) -> None:
         output = io.StringIO()
@@ -78,7 +88,7 @@ class CliTests(unittest.TestCase):
                 "cval.cli.get_latest_status_rows",
                 return_value=[LatestStatusRow("node-a", "storage", 100, "pass")],
             ), patch(
-                "cval.validation.operations.export_compatibility_rows",
+                "cval.validation.operations.export_evaluator_rows",
                 return_value=exported,
             ):
                 with redirect_stdout(output):
@@ -139,33 +149,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(files), 1)
         self.assertIn("Wrote 1 storage classification row(s)", output.getvalue())
 
-    def test_run_command_defaults_to_dry_run(self) -> None:
-        output = io.StringIO()
-
-        with redirect_stdout(output):
-            exit_code = main(
-                [
-                    "run",
-                    "--free-nodes",
-                    "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
-                    "--batch-size",
-                    "1",
-                    "--timestamp",
-                    "12345",
-                    "--output",
-                    "json",
-                ]
-            )
-
-        self.assertEqual(exit_code, 0)
-        result = json.loads(output.getvalue())
-        self.assertTrue(result["dry_run"])
-        self.assertEqual(result["submitted_count"], 0)
-        self.assertEqual(
-            result["jobs"][0]["job_name"],
-            "cval-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
-        )
-
     def test_config_command_prints_effective_config(self) -> None:
         output = io.StringIO()
 
@@ -215,6 +198,97 @@ class CliTests(unittest.TestCase):
         self.assertTrue(result["valid"])
         self.assertEqual(result["registered_count"], 3)
         self.assertEqual(result["enabled_count"], 3)
+
+    def test_empty_baseline_build_fails_nonzero_and_preserves_active(self) -> None:
+        from cval.storage.ingest import STORAGE_METRIC_COLUMNS
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "storage.db"
+            columns = STORAGE_METRIC_COLUMNS
+            with closing(sqlite3.connect(source)) as connection:
+                connection.execute(
+                    "CREATE TABLE storage_performance (node TEXT, timestamp INTEGER, "
+                    "image_name TEXT, "
+                    + ", ".join(f"{name} REAL" for name in columns)
+                    + ")"
+                )
+                connection.execute(
+                    "INSERT INTO storage_performance VALUES (?,?,?,"
+                    + ",".join("?" for _ in columns)
+                    + ")",
+                    ("node-a", 2_000_000_000, "img", *([100.0] * len(columns))),
+                )
+                connection.commit()
+            baseline_root = root / "baselines"
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                f'[baseline]\nbaseline_root_path = "{baseline_root}"\nmin_samples = 5\n',
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            metric = stats.summarize_metric(
+                columns[0],
+                [100.0] * 8,
+                direction="low_bad",
+                tolerance_pct=10.0,
+                bootstrap=False,
+            ).to_dict()
+            metric["source_table"] = "storage_performance"
+            active = {
+                "schema_version": "cval.baseline.v2", "baseline_id": "active-1",
+                "test_type": "storage", "stratum_key": "", "window_days": 30,
+                "created_at": 1, "timestamp": 1, "n_samples": 8,
+                "method": "robust_mad", "metrics": {columns[0]: metric},
+            }
+            store_dynamic_baseline(active, config=config)
+            activate_baseline("active-1", "storage", config=config)
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "--config", str(config_path), "baseline", "build",
+                        "--test-type", "storage", "--source-db", str(source),
+                        "--window-days", "365", "--min-samples", "5",
+                        "--activate", "--output", "json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("metrics must be non-empty", stderr.getvalue())
+            self.assertEqual(
+                get_active_baseline("storage", config=config)["baseline_id"],
+                "active-1",
+            )
+
+    def test_classify_cli_rejects_retained_global_store_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                f'[baseline]\nbaseline_root_path = "{root / "baselines"}"\n',
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with patch(
+                "cval.validation.operations.classify_evaluator_target",
+                return_value=[],
+            ), patch(
+                "cval.baselines.storage.get_active_baseline",
+                return_value={"baseline_id": "active", "metrics": {"x": {}}},
+            ), redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "--config", str(config_path), "baseline", "classify",
+                        "--test-type", "storage", "--store-results",
+                        "--classification-db-path",
+                        str(root / "baselines/classification-results.db"),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("global classification DB is read-only", stderr.getvalue())
 
     def test_invalid_config_is_reported_without_traceback(self) -> None:
         stderr = io.StringIO()
@@ -321,11 +395,13 @@ job_prefix = "custom"
                     [
                         "--config",
                         str(config_path),
-                        "run",
+                        "plan",
                         "--free-nodes",
                         "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
                         "--timestamp",
                         "12345",
+                        "--git-ref",
+                        "a" * 40,
                         "--output",
                         "json",
                     ]
@@ -333,164 +409,26 @@ job_prefix = "custom"
 
         self.assertEqual(exit_code, 0)
         result = json.loads(output.getvalue())
-        self.assertEqual(len(result["jobs"]), 1)
+        self.assertEqual(len(result["planned_jobs"]), 1)
         self.assertEqual(
-            result["jobs"][0]["job_name"],
+            result["planned_jobs"][0]["job_name"],
             "custom-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
         )
 
-    def test_history_command_writes_read_only_json(self) -> None:
-        from cval.storage.run_history import RunHistoryRow
-
-        output = io.StringIO()
-        row = RunHistoryRow(
-            run_id="node-a-123",
-            node="node-a",
-            started_timestamp=123,
-            started_timestamp_la="1969-12-31T16:02:03-08:00",
-            completed_timestamp=124,
-            overall_status="pass",
-            tests_ran="storage,nccl",
-            image_name="image",
-            pytorch_version="2.8",
-            cuda_version="12.9",
-            git_ref="abc",
-            global_config_digest="sha256:" + "a" * 64,
-            result_path="/data/result.json",
-            created_at=125,
-            updated_at=125,
-        )
-        with patch(
-            "cval.storage.run_history.get_run_history_rows",
-            return_value=[row],
-        ) as get_rows:
-            with redirect_stdout(output):
-                exit_code = main(
-                    [
-                        "history",
-                        "--node",
-                        "node-a",
-                        "--test",
-                        "nccl",
-                        "--output",
-                        "json",
-                    ]
-                )
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(output.getvalue())[0]["run_id"], "node-a-123")
-        self.assertEqual(get_rows.call_args.kwargs["node"], "node-a")
-        self.assertEqual(get_rows.call_args.kwargs["test_id"], "nccl")
-
-    def test_db_upsert_run_history_command_is_idempotent(self) -> None:
-        from cval.config import encode_config_snapshot, load_config
-        from cval.validation.registry import validation_test_config_digest
-        from cval.validation.results import (
-            parse_validation_result_v2,
-            validation_result_v2_digest,
-        )
-        from cval.validation.runtime import effective_config_digest
-        from tests.test_results_v2 import payload
-
-        output = io.StringIO()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config_path = root / "cval.toml"
-            config_path.write_text(
-                f'''
-[storage]
-run_history_enabled = true
-run_history_db_path = "{root / 'history.db'}"
-
-[runtime]
-validation_root = "{root}"
-''',
-                encoding="utf-8",
-            )
-            config = load_config(config_path)
-            value = payload()
-            del value["tests"]["smoke"]  # type: ignore[index]
-            value["global_config_digest"] = effective_config_digest(config)
-            for registered in config.tests.registry.tests:
-                state = value["tests"][registered.id]  # type: ignore[index]
-                state["display_name"] = registered.definition.metadata.display_name
-                state["config_path"] = registered.config_path
-                state["config_digest"] = validation_test_config_digest(registered)
-                run_dir = (
-                    root
-                    / "validation_tests"
-                    / registered.id
-                    / "runs/node-a/node-a-123"
-                )
-                log_dir = root / "logs" / registered.id / "node-a/node-a-123"
-                (run_dir / "artifacts").mkdir(parents=True)
-                log_dir.mkdir(parents=True)
-                for filename in ("stdout.log", "stderr.log", "events.jsonl"):
-                    (log_dir / filename).touch()
-                state.update(
-                    {
-                        "stdout": str(log_dir / "stdout.log"),
-                        "stderr": str(log_dir / "stderr.log"),
-                        "log": str(log_dir / "events.jsonl"),
-                        "summary": str(
-                            run_dir
-                            / registered.definition.artifacts.summary_filename
-                        ),
-                        "result": str(run_dir / "result.json"),
-                        "artifacts": str(run_dir / "artifacts"),
-                    }
-                )
-                (run_dir / "result.json").write_text(
-                    json.dumps(
-                        {
-                            "schema_version": "cval.test-result.v1",
-                            "test_id": registered.id,
-                            "status": state["status"],
-                            "phase": state["phase"],
-                            "started_at": state["started_at"],
-                            "completed_at": state["completed_at"],
-                            "duration_ms": state["duration_ms"],
-                            "exit_code": state["exit_code"],
-                            "summary": state["summary"],
-                            "artifacts": state["artifacts"],
-                            "message": state["message"],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-            result = parse_validation_result_v2(value)
-            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
-            result_path.parent.mkdir(parents=True)
-            db_path = Path(tmpdir) / "history.db"
-            result_path.write_text(json.dumps(value), encoding="utf-8")
-            environment = {
-                "CVAL_CONFIG_SNAPSHOT_B64": encode_config_snapshot(config),
-                "CVAL_REPO_DIR": str(Path(__file__).resolve().parents[1]),
-            }
-            with patch.dict(os.environ, environment, clear=False):
-                for _ in range(2):
-                    with redirect_stdout(output):
-                        exit_code = main(
-                            [
-                                "--config",
-                                str(config_path),
-                                "db-upsert-run-history",
-                                "--result-json",
-                                str(result_path),
-                                "--result-digest",
-                                validation_result_v2_digest(result),
-                                "--db-path",
-                                str(db_path),
-                            ]
-                        )
-            with closing(sqlite3.connect(db_path)) as connection:
-                counts = (
-                    connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0],
-                    connection.execute("SELECT COUNT(*) FROM run_tests").fetchone()[0],
-                )
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(counts, (1, 3))
+    def test_removed_commands_are_not_parseable(self) -> None:
+        for command in (
+            "history",
+            "db-upsert-run-history",
+            "db-ingest-test-results",
+            "db-preflight-test-results",
+            "health",
+            "evaluator-preflight",
+            "compatibility",
+        ):
+            with self.subTest(command=command), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as exc:
+                    main([command])
+                self.assertEqual(exc.exception.code, 2)
 
     def test_plan_command_uses_provided_free_nodes(self) -> None:
         output = io.StringIO()
@@ -505,6 +443,8 @@ validation_root = "{root}"
                     "1",
                     "--timestamp",
                     "12345",
+                    "--git-ref",
+                    "a" * 40,
                     "--output",
                     "json",
                 ]
@@ -512,7 +452,16 @@ validation_root = "{root}"
 
         self.assertEqual(exit_code, 0)
         plan = json.loads(output.getvalue())
-        self.assertTrue(plan["dry_run"])
+        self.assertEqual(
+            set(plan),
+            {
+                "batch_size",
+                "days_threshold",
+                "free_nodes_count",
+                "queue_count",
+                "planned_jobs",
+            },
+        )
         self.assertEqual(plan["free_nodes_count"], 2)
         self.assertEqual(plan["queue_count"], 2)
         self.assertEqual(len(plan["planned_jobs"]), 1)
@@ -531,6 +480,8 @@ validation_root = "{root}"
                         "1",
                         "--timestamp",
                         "12345",
+                        "--git-ref",
+                        "a" * 40,
                         "--output",
                         "json",
                     ]
@@ -561,6 +512,8 @@ validation_root = "{root}"
                         "2",
                         "--timestamp",
                         "12345",
+                        "--git-ref",
+                        "a" * 40,
                         "--output",
                         "json",
                     ]
@@ -572,29 +525,29 @@ validation_root = "{root}"
         self.assertEqual(plan["planned_jobs"][0]["node"], "slc01-cl02-hgx-0002")
         self.assertEqual(plan["planned_jobs"][0]["reason"], "never-tested")
 
-    def test_submit_plan_defaults_to_dry_run(self) -> None:
-        output = io.StringIO()
+    def test_plan_rejects_fail_closed_default_commit(self) -> None:
+        stderr = io.StringIO()
 
-        with redirect_stdout(output):
+        with redirect_stderr(stderr):
+            exit_code = main(["plan", "--free-nodes", ""])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("exact lowercase 40-hex commit", stderr.getvalue())
+
+    def test_run_without_submit_is_rejected(self) -> None:
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
             exit_code = main(
                 [
                     "run",
                     "--free-nodes",
-                    "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
-                    "--batch-size",
-                    "1",
-                    "--timestamp",
-                    "12345",
-                    "--output",
-                    "json",
+                    "slc01-cl02-hgx-0001",
                 ]
             )
 
-        self.assertEqual(exit_code, 0)
-        result = json.loads(output.getvalue())
-        self.assertTrue(result["dry_run"])
-        self.assertEqual(result["submitted_count"], 0)
-        self.assertFalse(result["jobs"][0]["submitted"])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("use plan for read-only queue inspection", stderr.getvalue())
 
     def test_submit_plan_submit_requires_confirmation(self) -> None:
         stderr = io.StringIO()
@@ -605,12 +558,60 @@ validation_root = "{root}"
                     "run",
                     "--free-nodes",
                     "slc01-cl02-hgx-0001",
+                    "--git-ref",
+                    "a" * 40,
                     "--submit",
                 ]
             )
 
         self.assertEqual(exit_code, 2)
         self.assertIn("Policy violation", stderr.getvalue())
+
+    def test_run_submit_rejects_moving_ref(self) -> None:
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = main(
+                [
+                    "run",
+                    "--free-nodes",
+                    "slc01-cl02-hgx-0001",
+                    "--git-ref",
+                    "main",
+                    "--submit",
+                    "--confirm",
+                    "submit",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("exact lowercase 40-hex commit", stderr.getvalue())
+
+    def test_validate_requires_git_ref_at_parse_time(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
+            main(["validate", "--node", "node-x", "--submit", "--confirm", "submit"])
+
+        self.assertEqual(exc.exception.code, 2)
+
+    def test_validate_without_submit_never_enters_orchestration(self) -> None:
+        stderr = io.StringIO()
+
+        with patch(
+            "cval.orchestrator.validate.run_node_validation"
+        ) as run_validation, redirect_stderr(stderr):
+            exit_code = main(
+                [
+                    "validate",
+                    "--node",
+                    "node-x",
+                    "--git-ref",
+                    "a" * 40,
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        run_validation.assert_not_called()
+        self.assertIn("explicit --submit", stderr.getvalue())
 
     def test_result_command_prints_status_assignments(self) -> None:
         payload = {

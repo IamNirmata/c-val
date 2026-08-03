@@ -38,18 +38,6 @@ class PluginLoadError(PluginError):
     """Raised when a declared adapter cannot satisfy its frozen contract."""
 
 
-class IngestionError(PluginError):
-    """Raised when an adapter cannot ingest valid current-run evidence."""
-
-
-class IngestionConflictError(IngestionError):
-    """Raised when a run ID is retried with different raw or metric evidence."""
-
-
-class IngestionDisabledError(IngestionError):
-    """Raised when modular per-test persistence has not been activated."""
-
-
 @dataclass(frozen=True)
 class ConfigIssue:
     """One deterministic adapter-owned descriptor validation issue."""
@@ -59,73 +47,8 @@ class ConfigIssue:
 
 
 @dataclass(frozen=True)
-class RunContext:
-    """Immutable identity and environment for one completed c-val run."""
-
-    run_id: str
-    node: str
-    started_timestamp: int
-    started_timestamp_la: str
-    completed_timestamp: int | None
-    image_name: str
-    pytorch_version: str
-    cuda_version: str
-    git_ref: str
-    global_config_digest: str
-    result_digest: str
-    validation_root: Path
-    result_path: Path
-
-
-@dataclass(frozen=True)
-class TestExecutionResult:
-    """Immutable terminal state and confined evidence for one selected test."""
-
-    test_id: str
-    status: str
-    phase: str
-    started_timestamp: int | None
-    completed_timestamp: int | None
-    duration_ms: int | None
-    exit_code: int | None
-    result_path: Path
-    summary_path: Path
-    artifacts_path: Path
-    stdout_path: Path
-    stderr_path: Path
-    log_path: Path
-    message: str
-    config_digest: str
-    raw_result_json: str
-
-
-@dataclass(frozen=True)
-class IngestionContext:
-    """Only the validated values an ingestion adapter may need."""
-
-    definition: ValidationTestDefinition
-    run: RunContext
-    execution: TestExecutionResult
-    result_db_path: Path
-
-
-@dataclass(frozen=True)
-class IngestionReceipt:
-    """Deterministic result returned by one metric adapter invocation."""
-
-    test_id: str
-    run_id: str
-    inserted_count: int
-    updated_count: int
-    metric_names: tuple[str, ...]
-    evidence_digest: str
-    created_at: int
-    message: str = ""
-
-
-@dataclass(frozen=True)
 class BaselineBuildContext:
-    """Immutable inputs for one compatibility baseline build hook."""
+    """Immutable inputs for one canonical baseline build hook."""
 
     target: OperationalTarget
     definition: ValidationTestDefinition
@@ -155,7 +78,7 @@ class BaselineBuildContext:
 
 @dataclass(frozen=True)
 class BaselineClassificationContext:
-    """Immutable inputs for one compatibility classification hook."""
+    """Immutable inputs for one canonical classification hook."""
 
     target: OperationalTarget
     definition: ValidationTestDefinition
@@ -403,9 +326,7 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
 
     required_methods: dict[str, tuple[str, ...]] = {
         "config": ("validate_config",),
-        "ingest": ("validate_schema", "ingest"),
-        "health": ("metric_specs", "load_observations"),
-        "baseline": ("build_compatibility_baseline", "classify_compatibility"),
+        "baseline": ("build_baseline", "classify"),
         "export": ("export_rows",),
     }
     for capability in sorted(declared):
@@ -418,31 +339,6 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
             raise PluginLoadError(
                 f"Adapter {registered_test.id!r} capability {capability!r} is missing "
                 f"method(s): {', '.join(missing)}"
-            )
-    health = registered_test.definition.health
-    if "health" in declared:
-        assert health is not None and health.enabled
-        policy_version = getattr(plugin, "health_policy_version", None)
-        if policy_version != health.policy_version:
-            raise PluginLoadError(
-                f"Adapter {registered_test.id!r} health_policy_version must equal "
-                f"descriptor policy {health.policy_version!r}"
-            )
-        if callable(getattr(plugin, "build_candidate", None)):
-            raise PluginLoadError(
-                "Health candidate construction is framework-owned; custom adapters "
-                "may customize only verdict aggregation"
-            )
-    if "health" in declared and health is not None and health.strategy == "custom":
-        missing = [
-            method
-            for method in ("classify",)
-            if not callable(getattr(plugin, method, None))
-        ]
-        if missing:
-            raise PluginLoadError(
-                f"Custom health adapter {registered_test.id!r} is missing method(s): "
-                f"{', '.join(missing)}"
             )
     return plugin
 
@@ -478,42 +374,5 @@ def validate_registry_plugins(
                 raise PluginLoadError(
                     f"Adapter {registered_test.id!r} configuration is invalid: {rendered}"
                 )
-        if "health" in declaration.capabilities:
-            from cval.health.engine import validate_metric_specs
-
-            try:
-                specs = plugin.metric_specs(registered_test.definition)
-            except BaseException as exc:  # noqa: BLE001 - fail-closed hook boundary
-                raise PluginLoadError(
-                    f"Adapter {registered_test.id!r} metric_specs failed: {exc}"
-                ) from exc
-            if not isinstance(specs, tuple):
-                raise PluginLoadError(
-                    f"Adapter {registered_test.id!r} metric_specs must return a tuple"
-                )
-            try:
-                validate_metric_specs(specs, registered_test.definition)
-            except (TypeError, ValueError) as exc:
-                raise PluginLoadError(
-                    f"Adapter {registered_test.id!r} health metric specs are invalid: {exc}"
-                ) from exc
         loaded.append(registered_test.id)
     return tuple(loaded)
-
-
-def validate_ingestion_artifact_tree(root: Path) -> None:
-    """Reject symlinks or resolved escapes before an adapter reads descendants."""
-
-    lexical_root = root.expanduser()
-    if not lexical_root.is_dir() or lexical_root.is_symlink():
-        raise IngestionError(f"Adapter artifact root is not a regular directory: {root}")
-    resolved_root = lexical_root.resolve()
-    for child in lexical_root.rglob("*"):
-        if child.is_symlink():
-            raise IngestionError(f"Adapter artifact tree contains a symlink: {child}")
-        try:
-            child.resolve().relative_to(resolved_root)
-        except ValueError as exc:
-            raise IngestionError(
-                f"Adapter artifact path escapes its assigned root: {child}"
-            ) from exc

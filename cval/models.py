@@ -2,7 +2,7 @@
 
 The rest of the package passes these immutable dataclasses between discovery,
 priority, rendering, submission, monitoring, and result-status flows. Keeping
-the shape explicit makes dry-run output and tests easy to reason about.
+the shape explicit makes queue inspection and cluster evidence easy to reason about.
 """
 
 from __future__ import annotations
@@ -11,21 +11,21 @@ from dataclasses import dataclass
 
 from cval.validation.operational_targets import (
     DL_COMPONENT_TEST_TYPES,
-    compatibility_component,
-    normalize_compatibility_target,
+    operational_component,
+    normalize_operational_target,
 )
 
 
 def normalize_baseline_test_type(test_type: str) -> str:
     """Map component aliases to the logical baseline test type."""
 
-    return normalize_compatibility_target(test_type)
+    return normalize_operational_target(test_type)
 
 
 def dl_component_for_test_type(test_type: str) -> str | None:
     """Return the DL metric component selected by a test alias, if any."""
 
-    return compatibility_component(test_type)
+    return operational_component(test_type)
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,7 @@ class RenderedJob:
     job_name: str
     node_name: str
     timestamp: int
+    git_ref: str
     yaml_text: str
 
 
@@ -110,14 +111,13 @@ class PlannedJob:
 
 @dataclass(frozen=True)
 class WorkflowPlan:
-    """Dry-run workflow plan produced before any Kubernetes create call."""
+    """Nonmutating workflow plan used for inspection or confirmed submission."""
 
     free_nodes: list[str]
     queue: list[QueueCandidate]
     planned_jobs: list[PlannedJob]
     batch_size: int
     days_threshold: float
-    dry_run: bool = True
 
 
 @dataclass(frozen=True)

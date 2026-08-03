@@ -10,7 +10,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cval.config import config_to_dict, load_config
-from cval.health.models import HealthContext, SourceSnapshot
 from cval.validation.operational_targets import (
     BASELINE_BUILD,
     BASELINE_CLASSIFY,
@@ -21,9 +20,6 @@ from cval.validation.plugins import (
     BaselineBuildContext,
     BaselineClassificationContext,
     ExportContext,
-    IngestionContext,
-    RunContext,
-    TestExecutionResult,
 )
 from cval.validation.registry import load_test_registry, parse_resource_quantity
 
@@ -34,23 +30,8 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.job.job_prefix, "cval")
         self.assertEqual(config.cluster.namespace, "gcr-admin")
+        self.assertEqual(config.cluster.pvc_access_pod, "gcr-admin-pvc-access")
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
-        self.assertEqual(
-            config.storage.run_history_db_path,
-            "/data/continuous_validation/metadata/node-run-history.db",
-        )
-        self.assertFalse(config.storage.run_history_enabled)
-        self.assertFalse(config.storage.per_test_ingestion_enabled)
-        self.assertFalse(config.health_evaluator.write_enabled)
-        self.assertEqual(config.health_evaluator.lock_timeout_seconds, 30)
-        self.assertEqual(config.health_evaluator.max_classifications_per_test, 250)
-        self.assertEqual(
-            config.health_evaluator.state_root,
-            "/data/continuous_validation/evaluator_state",
-        )
-        self.assertEqual(config.health_evaluator.state_owner_uid, 65532)
-        self.assertEqual(config.health_evaluator.state_owner_gid, 65532)
-        self.assertEqual(config.health_evaluator.validation_root_mode, "0700")
         self.assertEqual(
             config.runtime.dl_results_root_path,
             "/data/continuous_validation/validation_tests/dltest/runs",
@@ -64,7 +45,6 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(nccl_settings.get("ibbw_start_device"))
         self.assertIsNone(nccl_settings.get("ibbw_end_device"))
         self.assertEqual(dltest_settings["iterations"], 100)
-        self.assertEqual(config.baseline.nccl_peer_tolerance_pct, 5.0)
         self.assertEqual(config.baseline.storage_peer_tolerance_pct, 10.0)
         self.assertEqual(config.baseline.dl_compute_tolerance_pct, 3.0)
         self.assertEqual(config.baseline.dl_numerical_tolerance_pct, 0.1)
@@ -92,7 +72,14 @@ class ConfigTests(unittest.TestCase):
                 f"validation-tests/{test_id}/test_config.toml",
             )
 
-        self.assertFalse(data["storage"]["per_test_ingestion_enabled"])
+        self.assertEqual(
+            set(data["storage"]),
+            {
+                "validation_db_path", "storage_db_path", "nccl_db_path",
+                "dl_numerical_db_path", "dl_compute_db_path",
+                "dl_collective_db_path", "dl_overlap_db_path",
+            },
+        )
 
     def test_loads_partial_override_with_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -125,7 +112,7 @@ enabled = false
         )
         self.assertFalse(config.tests.registry.require("dltest").enabled)
         self.assertTrue(config.tests.registry.require("storage").enabled)
-        self.assertEqual(config.job.git_ref, "main")
+        self.assertEqual(config.job.git_ref, "0" * 40)
 
     def test_load_config_runs_plugin_config_validation_for_all_declared_tests(self) -> None:
         repository = Path(__file__).resolve().parents[1]
@@ -159,6 +146,52 @@ config_path = "validation-tests/dltest/test_config.toml"
                 ):
                     load_config(config_path)
 
+    def test_nccl_evaluation_requires_exact_commit_and_image_digest(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shutil.copytree(repository / "validation-tests", root / "validation-tests")
+            descriptor = root / "validation-tests/nccl/test_config.toml"
+            descriptor.write_text(
+                descriptor.read_text(encoding="utf-8").replace(
+                    "evaluation_enabled = false", "evaluation_enabled = true"
+                ),
+                encoding="utf-8",
+            )
+
+            def write_config(git_ref: str, image: str) -> Path:
+                path = root / "cval.toml"
+                path.write_text(
+                    f'''[job]
+git_ref = "{git_ref}"
+[job_template]
+container_image = "{image}"
+[tests.nccl]
+enabled = true
+config_path = "validation-tests/nccl/test_config.toml"
+''',
+                    encoding="utf-8",
+                )
+                return path
+
+            with patch("cval.config.REPO_ROOT", root), self.assertRaisesRegex(
+                ValueError, "exact lowercase 40-hex commit"
+            ):
+                load_config(write_config("main", "image@sha256:" + "b" * 64))
+            with patch("cval.config.REPO_ROOT", root), self.assertRaisesRegex(
+                ValueError, "pinned with @sha256"
+            ):
+                load_config(write_config("a" * 40, "image:latest"))
+            with patch("cval.config.REPO_ROOT", root):
+                loaded = load_config(
+                    write_config("a" * 40, "image@sha256:" + "b" * 64)
+                )
+            self.assertTrue(
+                loaded.tests.registry.require("nccl").definition.settings[
+                    "evaluation_enabled"
+                ]
+            )
+
     def test_rejects_all_tests_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "cval.toml"
@@ -175,81 +208,6 @@ enabled = false
             )
             with self.assertRaisesRegex(ValueError, "At least one test"):
                 load_config(config_path)
-
-    def test_write_activation_gates_require_toml_booleans(self) -> None:
-        for key, value in (
-            ("run_history_enabled", "1"),
-            ("per_test_ingestion_enabled", "2"),
-            ("per_test_ingestion_enabled", '"yes"'),
-            ("per_test_ingestion_enabled", "[1]"),
-        ):
-            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as tmpdir:
-                config_path = Path(tmpdir) / "cval.toml"
-                config_path.write_text(
-                    f"[storage]\n{key} = {value}\n",
-                    encoding="utf-8",
-                )
-
-                with self.assertRaisesRegex(ValueError, "TOML boolean"):
-                    load_config(config_path)
-
-    def test_health_evaluator_config_is_strict_and_positive(self) -> None:
-        variants = (
-            'write_enabled = "yes"',
-            "lock_timeout_seconds = true",
-            "lock_timeout_seconds = 0",
-            "max_classifications_per_test = 0",
-            'validation_root_mode = "0770"',
-            'validation_root_mode = "700"',
-            'validation_root_mode = "0600"',
-            'state_root = "relative/state"',
-            'state_root = "/data/../unsafe"',
-            "state_owner_uid = 0",
-            "state_owner_gid = -1",
-            "state_owner_uid = 2147483648",
-            "unknown = 1",
-        )
-        for value in variants:
-            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmpdir:
-                config_path = Path(tmpdir) / "cval.toml"
-                config_path.write_text(
-                    f"[health_evaluator]\n{value}\n",
-                    encoding="utf-8",
-                )
-                with self.assertRaises(ValueError):
-                    load_config(config_path)
-
-    def test_health_evaluator_state_root_relation_matrix(self) -> None:
-        cases = (
-            ("/tmp/cval-shared", "/tmp/cval-shared", False),
-            ("/tmp/cval-state/shared", "/tmp/cval-state", False),
-            ("/tmp/cval-shared", "/tmp/cval-shared/evaluator-state", True),
-            ("/tmp/cval-shared", "/tmp/cval-separate-state", True),
-        )
-        for validation_root, state_root, accepted in cases:
-            with self.subTest(
-                validation_root=validation_root,
-                state_root=state_root,
-            ), tempfile.TemporaryDirectory() as tmpdir:
-                config_path = Path(tmpdir) / "cval.toml"
-                config_path.write_text(
-                    "[runtime]\n"
-                    f'validation_root = "{validation_root}"\n'
-                    "[health_evaluator]\n"
-                    f'state_root = "{state_root}"\n',
-                    encoding="utf-8",
-                )
-                if accepted:
-                    self.assertEqual(
-                        load_config(config_path).health_evaluator.state_root,
-                        state_root,
-                    )
-                else:
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        "must not equal or contain",
-                    ):
-                        load_config(config_path)
 
     def test_config_to_dict_is_json_ready(self) -> None:
         data = config_to_dict(load_config())
@@ -319,7 +277,7 @@ labels = ["first", "second"]
 mode = "strict"
 items = [{name = "one"}, {name = "two"}]
 [artifacts]
-results_db_path = "validation_tests/smoke/smoke_results.db"
+summary_filename = "summary.json"
 """,
                 encoding="utf-8",
             )
@@ -346,42 +304,7 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                     {BASELINE_BUILD, BASELINE_CLASSIFY, RESULTS_EXPORT}
                 ),
             )
-            run = RunContext(
-                run_id="smoke-run",
-                node="node-a",
-                started_timestamp=1,
-                started_timestamp_la="1970-01-01 00:00:01 PST",
-                completed_timestamp=2,
-                image_name="image",
-                pytorch_version="",
-                cuda_version="",
-                git_ref="main",
-                global_config_digest="sha256:config",
-                result_digest="sha256:result",
-                validation_root=root,
-                result_path=root / "result.json",
-            )
-            execution = TestExecutionResult(
-                test_id="smoke",
-                status="pass",
-                phase="completed",
-                started_timestamp=1,
-                completed_timestamp=2,
-                duration_ms=1000,
-                exit_code=0,
-                result_path=root / "test-result.json",
-                summary_path=root / "summary.json",
-                artifacts_path=root / "artifacts",
-                stdout_path=root / "stdout.log",
-                stderr_path=root / "stderr.log",
-                log_path=root / "test.log",
-                message="",
-                config_digest="sha256:test",
-                raw_result_json="{}",
-            )
             contexts = (
-                IngestionContext(definition, run, execution, root / "results.db"),
-                HealthContext(definition, root / "results.db", None, SourceSnapshot(())),
                 BaselineBuildContext(target, definition, config, 30, 3),
                 BaselineClassificationContext(target, definition, config, 30),
                 ExportContext(
@@ -448,6 +371,32 @@ results_db_path = "validation_tests/smoke/smoke_results.db"
                     include_defaults=False,
                     require_enabled=False,
                 )
+
+    def test_descriptor_rejects_removed_database_artifact_fields(self) -> None:
+        for field in ("database_path", "results_db_path"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                self._write_test_descriptor(root, "smoke", order=40)
+                descriptor = root / "validation-tests/smoke/test_config.toml"
+                descriptor.write_text(
+                    descriptor.read_text(encoding="utf-8").replace(
+                        'summary_filename = "summary.json"',
+                        f'{field} = "removed.db"\nsummary_filename = "summary.json"',
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, field):
+                    load_test_registry(
+                        {
+                            "smoke": {
+                                "enabled": False,
+                                "config_path": "validation-tests/smoke/test_config.toml",
+                            }
+                        },
+                        repo_root=root,
+                        include_defaults=False,
+                        require_enabled=False,
+                    )
 
     def test_registry_rejects_mismatched_test_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -587,7 +536,7 @@ setup = "setup.sh"
 timeout_seconds = 30
 
 [artifacts]
-results_db_path = "validation_tests/{test_id}/{test_id}_results.db"
+summary_filename = "summary.json"
 """,
             encoding="utf-8",
         )

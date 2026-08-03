@@ -14,7 +14,7 @@ TEMPLATE = (
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_builds_dry_run_workflow_plan(self) -> None:
+    def test_builds_read_only_workflow_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = Path(tmpdir) / "job.yml"
             template_path.write_text(TEMPLATE, encoding="utf-8")
@@ -29,7 +29,6 @@ class WorkflowTests(unittest.TestCase):
                 now=datetime.fromtimestamp(1_000_000, tz=timezone.utc),
             )
 
-        self.assertTrue(plan.dry_run)
         self.assertEqual(len(plan.queue), 2)
         self.assertEqual(len(plan.planned_jobs), 1)
         self.assertEqual(plan.planned_jobs[0].candidate.node, "slc01-cl02-hgx-0001")
@@ -51,7 +50,18 @@ class WorkflowTests(unittest.TestCase):
 
         data = workflow_plan_to_dict(plan)
 
+        self.assertEqual(
+            set(data),
+            {
+                "batch_size",
+                "days_threshold",
+                "free_nodes_count",
+                "queue_count",
+                "planned_jobs",
+            },
+        )
         self.assertEqual(data["queue_count"], 1)
+        self.assertIn("git_ref", data["planned_jobs"][0])
         self.assertNotIn("yaml_text", data["planned_jobs"][0])
 
 

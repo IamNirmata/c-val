@@ -23,7 +23,7 @@ from cval.config import StorageConfig
 from cval.storage.paths import safe_writable_file_path
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
-    validate_compatibility_write,
+    validate_current_write,
 )
 
 VALID_STATUSES = {"pass", "fail", "incomplete"}
@@ -149,7 +149,7 @@ def _create_nccl_health_views(
 
 
 def nccl_health_view_sql() -> dict[str, str]:
-    """Return the exact stable SQL definitions of both compatibility views."""
+    """Return the exact stable SQL definitions of both current views."""
 
     latest = f"""
         CREATE VIEW IF NOT EXISTS {NCCL_LATEST_STATUS_VIEW} AS
@@ -289,7 +289,7 @@ def add_nccl_health_result(
 ) -> int:
     """Upsert one consolidated ``IB_HEALTH`` row for an NCCL validation run."""
 
-    authorization = validate_compatibility_write(
+    authorization = validate_current_write(
         _authorization,
         operation="nccl",
         node=node,
@@ -426,7 +426,7 @@ def add_nccl_health_from_summary(
 ) -> int:
     """Parse an NCCL summary JSON and upsert one consolidated health row."""
 
-    authorization = validate_compatibility_write(
+    authorization = validate_current_write(
         _authorization,
         operation="nccl",
         node=node,
@@ -580,7 +580,7 @@ def add_validation_result(
 ) -> int:
     """Append one validation result row and return the parsed timestamp."""
 
-    validate_compatibility_write(
+    validate_current_write(
         _authorization,
         operation="validation-result",
         node=node,
@@ -640,16 +640,16 @@ def add_validation_run_results(
     db_path: str | Path = DEFAULT_VALIDATION_DB_PATH,
     _authorization: ResultWriteAuthorization | None = None,
 ) -> int:
-    """Atomically append the current fixed compatibility rows for one run."""
+    """Atomically append the current fixed current rows for one run."""
 
-    from cval.validation.compatibility import LEGACY_STATUS_TEST_IDS
+    from cval.validation.builtins import BUILTIN_STATUS_TEST_IDS
 
-    required_tests = LEGACY_STATUS_TEST_IDS
+    required_tests = BUILTIN_STATUS_TEST_IDS
     if set(results) != set(required_tests):
         raise ValueError(
             "results must contain exactly storage, nccl, dltest, and all"
         )
-    validate_compatibility_write(
+    validate_current_write(
         _authorization,
         operation="validation-run",
         node=node,
@@ -766,7 +766,7 @@ def add_storage_result(
 ) -> int:
     """Parse fio JSON artifacts and upsert one row into the storage metrics DB."""
 
-    validate_compatibility_write(
+    validate_current_write(
         _authorization,
         operation="storage",
         node=node,

@@ -7,8 +7,8 @@
 - `cval.storage.status`: read-only latest validation status through the PVC access pod.
 - `cval.scheduler.priority`: stale and never-tested node prioritization.
 - `cval.jobs.renderer`: Volcano validation job manifest rendering.
-- `cval.orchestrator.workflow`: dry-run workflow planning.
-- `cval.jobs.manager`: dry-run by default, policy-gated submission.
+- `cval.orchestrator.workflow`: read-only queue planning.
+- `cval.jobs.manager`: policy-gated real cluster submission.
 - `cval.jobs.monitor`: read-only Volcano job phase polling and timeout classification.
 - `cval.validation.results`: structured result schema parsing.
 - `cval.storage.ingest`: package-native SQLite writes from validation pods.
@@ -17,8 +17,9 @@
 
 1. `status` reads latest validation history.
 2. `nodes` reads live GPU availability.
-3. `run` builds the priority queue and renders planned jobs.
-4. `run --submit --confirm submit` explicitly submits the plan.
+3. `plan` inspects the priority queue and rendered jobs.
+4. `validate --git-ref <exact-commit> --submit --confirm submit` runs targeted
+	development validation; `run --submit --confirm submit` operates batches.
 5. `jobs --watch` reads phases until terminal or timeout.
 6. In-pod scripts write structured JSON result artifacts.
 7. `db-update.sh` ingests per-test results and metrics.

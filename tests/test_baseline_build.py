@@ -1,5 +1,6 @@
 """Tests for dynamic baseline building from result DBs and versioned storage."""
 
+import json
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from cval.baselines.storage import (
     default_classification_db_path,
     default_dynamic_baseline_db_path,
     get_active_baseline,
+    global_classification_db_path,
     list_dynamic_baselines,
     load_dynamic_baseline,
     store_classification_results,
@@ -57,31 +59,6 @@ def _make_storage_db(path: Path, n_rows: int = 14) -> None:
                 VALUES (?, ?, ?, {placeholders})
                 """,
                 ("node-a", NOW - i * 60, "img:1", *values),
-            )
-        connection.commit()
-
-
-def _make_nccl_db(path: Path, n_rows: int = 12) -> None:
-    with closing(sqlite3.connect(path)) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IB_HEALTH (
-                Node TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                image_name TEXT NOT NULL DEFAULT '',
-                BUS_BW REAL,
-                LATENCY REAL,
-                PRIMARY KEY (Node, timestamp)
-            )
-            """
-        )
-        for i in range(n_rows):
-            busbw = 500.0 + (i % 5 - 2) * 1.0
-            latency = 25.0 + (i % 5 - 2) * 0.1
-            connection.execute(
-                "INSERT INTO IB_HEALTH (Node, timestamp, image_name, BUS_BW, LATENCY) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("node-a", NOW - i * 60, "img:1", busbw, latency),
             )
         connection.commit()
 
@@ -154,22 +131,19 @@ class TestBuildStorageBaseline(unittest.TestCase):
             self.assertIsNone(first["upper_bound"])  # higher is better
             self.assertAlmostEqual(first["median"], 1000.0, delta=50.0)
 
-
-class TestBuildNcclBaseline(unittest.TestCase):
-    def test_busbw_and_latency_directions(self):
+    def test_insufficient_storage_samples_are_rejected_before_storage(self):
         config = load_config()
         with TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "nccl.db"
-            _make_nccl_db(db_path)
-
-            record = build.build_nccl_baseline(
+            db_path = Path(tmpdir) / "storage.db"
+            output = Path(tmpdir) / "baseline.db"
+            _make_storage_db(db_path, n_rows=2)
+            record = build.build_storage_baseline(
                 config=config, db_path=db_path, window_days=365, min_samples=5
             )
-
-            self.assertIn("busbw", record["metrics"])
-            self.assertIn("latency", record["metrics"])
-            self.assertIsNone(record["metrics"]["busbw"]["upper_bound"])
-            self.assertIsNone(record["metrics"]["latency"]["lower_bound"])
+            self.assertEqual(record["metrics"], {})
+            with self.assertRaisesRegex(ValueError, "metrics must be non-empty"):
+                store_dynamic_baseline(record, db_path=output, config=config)
+            self.assertFalse(output.exists())
 
 
 class TestBuildDlBaseline(unittest.TestCase):
@@ -246,6 +220,9 @@ class TestBuildDlBaseline(unittest.TestCase):
                 min_samples=5,
             )
             self.assertEqual(record["metrics"], {})
+            with self.assertRaisesRegex(ValueError, "metrics must be non-empty"):
+                store_dynamic_baseline(record, config=config)
+            self.assertEqual(list(Path(tmpdir).glob("*-baselines.db")), [])
 
 
 class TestVersionedBaselineStorage(unittest.TestCase):
@@ -261,7 +238,7 @@ class TestVersionedBaselineStorage(unittest.TestCase):
         return {
             "schema_version": "cval.baseline.v2",
             "baseline_id": baseline_id,
-            "test_type": "nccl",
+            "test_type": "storage",
             "stratum_key": "",
             "window_days": 30,
             "created_at": NOW,
@@ -277,14 +254,14 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             store_dynamic_baseline(self._record("nccl-all-1"), db_path=db_path)
 
             # Stored as candidate -> no active baseline yet.
-            self.assertIsNone(get_active_baseline("nccl", db_path=db_path))
+            self.assertIsNone(get_active_baseline("storage", db_path=db_path))
 
-            listed = list_dynamic_baselines("nccl", db_path=db_path)
+            listed = list_dynamic_baselines("storage", db_path=db_path)
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0][2], "candidate")
 
-            self.assertTrue(activate_baseline("nccl-all-1", "nccl", db_path=db_path))
-            active = get_active_baseline("nccl", db_path=db_path)
+            self.assertTrue(activate_baseline("nccl-all-1", "storage", db_path=db_path))
+            active = get_active_baseline("storage", db_path=db_path)
             self.assertIsNotNone(active)
             self.assertEqual(active["baseline_id"], "nccl-all-1")
 
@@ -294,24 +271,78 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             store_dynamic_baseline(self._record("nccl-all-1"), db_path=db_path)
             store_dynamic_baseline(self._record("nccl-all-2"), db_path=db_path)
 
-            activate_baseline("nccl-all-1", "nccl", db_path=db_path)
-            activate_baseline("nccl-all-2", "nccl", db_path=db_path)
+            activate_baseline("nccl-all-1", "storage", db_path=db_path)
+            activate_baseline("nccl-all-2", "storage", db_path=db_path)
 
-            active = get_active_baseline("nccl", db_path=db_path)
+            active = get_active_baseline("storage", db_path=db_path)
             self.assertEqual(active["baseline_id"], "nccl-all-2")
 
             statuses = {
                 row[0]: row[2]
-                for row in list_dynamic_baselines("nccl", db_path=db_path)
+                for row in list_dynamic_baselines("storage", db_path=db_path)
             }
             self.assertEqual(statuses["nccl-all-1"], "superseded")
             self.assertEqual(statuses["nccl-all-2"], "active")
+
+    def test_rejected_candidate_preserves_existing_active_baseline(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "validation.db"
+            active = self._record("nccl-active")
+            store_dynamic_baseline(active, db_path=db_path)
+            activate_baseline("nccl-active", "storage", db_path=db_path)
+            invalid = self._record("nccl-empty")
+            invalid["metrics"] = {}
+            invalid["n_samples"] = 0
+
+            with self.assertRaisesRegex(ValueError, "metrics must be non-empty"):
+                store_dynamic_baseline(invalid, db_path=db_path)
+
+            self.assertEqual(
+                get_active_baseline("storage", db_path=db_path)["baseline_id"],
+                "nccl-active",
+            )
+            self.assertEqual(len(list_dynamic_baselines("storage", db_path=db_path)), 1)
+
+    def test_store_rejects_nonempty_baseline_below_configured_minimum(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "validation.db"
+            record = self._record("nccl-too-small")
+            record["n_samples"] = load_config().baseline.min_samples - 1
+
+            with self.assertRaisesRegex(ValueError, "below the configured minimum"):
+                store_dynamic_baseline(record, db_path=db_path)
+
+            self.assertFalse(db_path.exists())
+
+    def test_activation_rejects_empty_candidate_and_preserves_active(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "validation.db"
+            store_dynamic_baseline(self._record("nccl-active"), db_path=db_path)
+            store_dynamic_baseline(self._record("nccl-invalid"), db_path=db_path)
+            activate_baseline("nccl-active", "storage", db_path=db_path)
+            with closing(sqlite3.connect(db_path)) as connection:
+                invalid = self._record("nccl-invalid")
+                invalid["metrics"] = {}
+                connection.execute(
+                    "UPDATE baselines SET metrics_json=? "
+                    "WHERE baseline_id='nccl-invalid' AND test_type='storage'",
+                    (json.dumps(invalid),),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(ValueError, "metrics must be non-empty"):
+                activate_baseline("nccl-invalid", "storage", db_path=db_path)
+
+            self.assertEqual(
+                get_active_baseline("storage", db_path=db_path)["baseline_id"],
+                "nccl-active",
+            )
 
     def test_load_dynamic_baseline_roundtrip(self):
         with TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "validation.db"
             store_dynamic_baseline(self._record("nccl-all-1"), db_path=db_path)
-            loaded = load_dynamic_baseline("nccl-all-1", "nccl", db_path=db_path)
+            loaded = load_dynamic_baseline("nccl-all-1", "storage", db_path=db_path)
             self.assertEqual(loaded["metrics"]["busbw"]["median"], 500.0)
 
     def test_exact_retry_preserves_active_lifecycle_and_changed_id_conflicts(self):
@@ -319,13 +350,13 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             db_path = Path(tmpdir) / "validation %?#.db"
             record = self._record("nccl-all-1")
             store_dynamic_baseline(record, db_path=db_path)
-            self.assertTrue(activate_baseline("nccl-all-1", "nccl", db_path=db_path))
+            self.assertTrue(activate_baseline("nccl-all-1", "storage", db_path=db_path))
 
             self.assertEqual(
                 store_dynamic_baseline(record, db_path=db_path),
                 "nccl-all-1",
             )
-            statuses = list_dynamic_baselines("nccl", db_path=db_path)
+            statuses = list_dynamic_baselines("storage", db_path=db_path)
             self.assertEqual(statuses[0][2], "active")
 
             changed = dict(record)
@@ -333,7 +364,7 @@ class TestVersionedBaselineStorage(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different content"):
                 store_dynamic_baseline(changed, db_path=db_path)
             self.assertEqual(
-                list_dynamic_baselines("nccl", db_path=db_path)[0][2],
+                list_dynamic_baselines("storage", db_path=db_path)[0][2],
                 "active",
             )
 
@@ -358,7 +389,7 @@ class TestVersionedBaselineStorage(unittest.TestCase):
                 with closing(sqlite3.connect(db_path)) as connection:
                     rows = connection.execute(
                         "SELECT baseline_id, status, metrics_json FROM baselines "
-                        "WHERE baseline_id=? AND test_type='nccl'",
+                        "WHERE baseline_id=? AND test_type='storage'",
                         (baseline_id,),
                     ).fetchall()
                     columns = [
@@ -383,7 +414,25 @@ class TestVersionedBaselineStorage(unittest.TestCase):
 
             rows = list_dynamic_baselines(db_path=db_path, config=load_config())
 
-        self.assertEqual({row[1] for row in rows}, {"nccl"})
+        self.assertEqual({row[1] for row in rows}, {"storage"})
+
+    def test_generic_sqlite_api_rejects_nccl_case_variants_and_explicit_paths(self):
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "legacy-nccl-baselines.db"
+            record = self._record("legacy-nccl")
+            record["test_type"] = "NCCL"
+            with self.assertRaisesRegex(ValueError, "only by cval.nccl_eval"):
+                store_dynamic_baseline(record, db_path=db_path)
+            self.assertFalse(db_path.exists())
+            for operation in (
+                lambda: load_dynamic_baseline("legacy", "NcCl", db_path=db_path),
+                lambda: get_active_baseline("NCCL", db_path=db_path),
+                lambda: list_dynamic_baselines("nccl", db_path=db_path),
+            ):
+                with self.subTest(operation=operation), self.assertRaisesRegex(
+                    ValueError, "only by cval.nccl_eval"
+                ):
+                    operation()
 
 
 class TestBaselineRootStorage(unittest.TestCase):
@@ -400,10 +449,10 @@ class TestBaselineRootStorage(unittest.TestCase):
                 default_dynamic_baseline_db_path("storage", config=config),
                 Path(tmpdir) / "test-storage-baselines.db",
             )
-            self.assertEqual(
-                default_dynamic_baseline_db_path("nccl", config=config),
-                Path(tmpdir) / "test-nccl-baselines.db",
-            )
+            with self.assertRaisesRegex(ValueError, "only by cval.nccl_eval"):
+                default_dynamic_baseline_db_path("nccl", config=config)
+            with self.assertRaisesRegex(ValueError, "only by cval.nccl_eval"):
+                default_classification_db_path("nccl", config=config)
             self.assertEqual(
                 default_dynamic_baseline_db_path(
                     "dltest", "numerical_correctness", config=config
@@ -411,8 +460,8 @@ class TestBaselineRootStorage(unittest.TestCase):
                 Path(tmpdir) / "dltest_numerical_correctness-baselines.db",
             )
             self.assertEqual(
-                default_classification_db_path(config),
-                Path(tmpdir) / "classification-results.db",
+                default_classification_db_path("storage", config),
+                Path(tmpdir) / "storage-classifications.db",
             )
 
     def test_generic_plugin_names_are_prefixed_and_default_paths_are_unique(self):
@@ -431,7 +480,16 @@ class TestBaselineRootStorage(unittest.TestCase):
     def test_default_path_collision_validation_fails_closed(self):
         with patch.dict(
             "cval.baselines.storage.BASELINE_DB_FILENAMES",
-            {"storage": "same.db", "nccl": "same.db"},
+            {"storage": "same.db"},
+            clear=True,
+        ), patch.dict(
+            "cval.baselines.storage.DL_BASELINE_DB_FILENAMES",
+            {
+                "numerical_correctness": "same.db",
+                "compute_performance": "dl-compute.db",
+                "collective_performance": "dl-collective.db",
+                "overlap_performance": "dl-overlap.db",
+            },
             clear=True,
         ), self.assertRaisesRegex(ValueError, "collide"):
             validate_default_baseline_db_paths(load_config())
@@ -512,6 +570,42 @@ class TestBaselineRootStorage(unittest.TestCase):
                 "overlap_performance",
             ]))
 
+    def test_dl_store_omits_components_without_metrics(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            metric = stats.summarize_metric(
+                "nn/layer/fp_gpu_time",
+                [10.0] * 8,
+                direction="high_bad",
+                tolerance_pct=10.0,
+                bootstrap=False,
+            ).to_dict()
+            metric["source_table"] = "compute_performance"
+            record = {
+                "schema_version": "cval.baseline.v2",
+                "baseline_id": "dl-compute-only",
+                "test_type": "dltest",
+                "stratum_key": "",
+                "window_days": 30,
+                "created_at": NOW,
+                "timestamp": NOW,
+                "n_samples": 12,
+                "method": "robust_mad",
+                "metrics": {"nn/layer/fp_gpu_time": metric},
+            }
+
+            store_dynamic_baseline(record, config=config)
+            activate_baseline("dl-compute-only", "dltest", config=config)
+
+            self.assertEqual(
+                {path.name for path in Path(tmpdir).glob("*.db")},
+                {"dltest_compute_performance-baselines.db"},
+            )
+            self.assertEqual(
+                get_active_baseline("dltest", config=config)["components"],
+                ["compute_performance"],
+            )
+
     def test_store_classification_results(self):
         with TemporaryDirectory() as tmpdir:
             config = self._config(tmpdir)
@@ -576,12 +670,81 @@ class TestBaselineRootStorage(unittest.TestCase):
 
             self.assertEqual(count, 2)
             with closing(
-                sqlite3.connect(default_classification_db_path(config))
+                sqlite3.connect(default_classification_db_path("storage", config))
             ) as connection:
                 rows = connection.execute(
                     "SELECT node, status, passed FROM classification_results ORDER BY node"
                 ).fetchall()
             self.assertEqual(rows, [("node-a", "normal", 1), ("node-b", "degraded", 0)])
+
+    def test_store_classifications_uses_operational_target_database(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            metric = {
+                "metric": "busbw", "component": "", "value": 100.0,
+                "median": 100.0, "status": "normal", "pct_diff": 0.0,
+                "abs_pct_diff": 0.0, "counts_for_degraded_status": False,
+                "direction": "low_bad", "lower_bound": 95.0, "upper_bound": None,
+            }
+            verdict = {
+                "node": "node-a", "baseline_test_type": "storage", "dl_component": "",
+                "baseline_id": "storage-1", "status": "normal", "n_metrics": 1,
+                "n_compared": 1, "n_degraded": 0, "n_band_degraded": 0,
+                "n_improved": 0, "degraded_metric_fraction": 0.0,
+                "degraded_metric_percent": 0.0, "worst_pct_diff": 0.0,
+                "metrics": [metric],
+            }
+            store_classification_results(
+                [verdict | {"test_type": "storage"}],
+                classified_at=NOW,
+                config=config,
+            )
+
+            self.assertTrue(default_classification_db_path("storage", config).exists())
+            with self.assertRaisesRegex(ValueError, "only by cval.nccl_eval"):
+                default_classification_db_path("nccl", config)
+            self.assertFalse((Path(tmpdir) / "nccl-classifications.db").exists())
+
+    def test_retained_global_and_multi_target_explicit_writes_are_rejected(self):
+        with TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            metric = {
+                "metric": "x", "component": "", "value": 100.0,
+                "median": 100.0, "status": "normal", "pct_diff": 0.0,
+                "abs_pct_diff": 0.0, "counts_for_degraded_status": False,
+                "direction": "low_bad", "lower_bound": 90.0, "upper_bound": None,
+            }
+            base = {
+                "node": "node-a", "baseline_id": "one", "status": "normal",
+                "n_metrics": 1, "n_compared": 1, "n_degraded": 0,
+                "n_band_degraded": 0, "n_improved": 0,
+                "degraded_metric_fraction": 0.0, "degraded_metric_percent": 0.0,
+                "worst_pct_diff": 0.0, "metrics": [metric], "dl_component": "",
+            }
+            storage_verdict = base | {
+                "test_type": "storage", "baseline_test_type": "storage"
+            }
+            with self.assertRaisesRegex(ValueError, "global.*read-only"):
+                store_classification_results(
+                    [storage_verdict],
+                    db_path=global_classification_db_path(config),
+                    config=config,
+                )
+            self.assertFalse(global_classification_db_path(config).exists())
+
+            nccl_metric = dict(metric, component="IB_HEALTH", metric="busbw")
+            nccl_verdict = base | {
+                "node": "node-b", "test_type": "nccl",
+                "baseline_test_type": "nccl", "metrics": [nccl_metric],
+            }
+            explicit = Path(tmpdir) / "mixed.db"
+            with self.assertRaisesRegex(ValueError, "only one target group"):
+                store_classification_results(
+                    [storage_verdict, nccl_verdict],
+                    db_path=explicit,
+                    config=config,
+                )
+            self.assertFalse(explicit.exists())
 
 
 if __name__ == "__main__":

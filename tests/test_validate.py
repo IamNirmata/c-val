@@ -24,9 +24,8 @@ from cval.orchestrator.validate import (
     render_test_progress_line,
     render_validation_report,
     run_node_validation,
-    _run_pod_cval,
-    _parse_classify_verdict,
 )
+from cval.policy import PolicyViolation
 from cval.validation.registry import ValidationTestRegistry
 
 
@@ -155,28 +154,6 @@ class TestRawResults(unittest.TestCase):
         self.assertFalse(log_signals_db_updated(text))
 
 
-class TestPodCvalCommand(unittest.TestCase):
-    def test_explicit_timeout_is_forwarded(self):
-        calls = []
-
-        class Client:
-            def run(self, args, check=True, input_text=None, timeout=None):
-                calls.append((args, check, timeout))
-                return CommandResult(args=args, stdout="", stderr="", returncode=0)
-
-        _run_pod_cval(
-            Client(),
-            "gcr-admin",
-            "pvc-pod",
-            "/tmp/c-val",
-            "/tmp/c-val/config/cval.toml",
-            ["tests", "validate"],
-            timeout=321,
-        )
-
-        self.assertEqual(calls[0][2], 321)
-
-
 class TestDegradedMetrics(unittest.TestCase):
     def test_sorted_and_limited(self):
         verdict = {
@@ -192,20 +169,6 @@ class TestDegradedMetrics(unittest.TestCase):
 
     def test_none_verdict(self):
         self.assertEqual(degraded_metrics_from_verdict(None), [])
-
-
-class TestParseClassifyVerdict(unittest.TestCase):
-    def test_payload_dict(self):
-        payload = {"verdicts": [{"node": "n", "status": "normal"}], "stored_count": 1}
-        verdict = _parse_classify_verdict(json.dumps(payload))
-        self.assertEqual(verdict["status"], "normal")
-
-    def test_plain_list(self):
-        verdict = _parse_classify_verdict(json.dumps([{"node": "n", "status": "degraded"}]))
-        self.assertEqual(verdict["status"], "degraded")
-
-    def test_bad_json(self):
-        self.assertIsNone(_parse_classify_verdict("not json"))
 
 
 class TestBuildAndRenderReport(unittest.TestCase):
@@ -268,19 +231,6 @@ class TestBuildAndRenderReport(unittest.TestCase):
         text = render_validation_report(report)
         for token in ("validation report", "node-x", "storage", "nccl", "dltest", "DL components", "instance_norm"):
             self.assertIn(token, text)
-
-    def test_dry_run_render(self):
-        report = build_validation_report(
-            node="node-x",
-            timestamp=123,
-            job_name="cval-node-x-123",
-            job_phase="DryRun",
-            schedulability={"fully_free": True, "schedulable": True, "resource_ready": True, "reason": "free"},
-            raw_results={},
-            verdicts={"storage": None, "nccl": None, "dltest": None},
-            dry_run=True,
-        )
-        self.assertIn("DRY RUN", render_validation_report(report))
 
     def test_completed_job_with_failed_raw_result_is_not_ok(self):
         report = build_validation_report(
@@ -370,8 +320,8 @@ class TestDescribeNode(unittest.TestCase):
             self._nodes_json("node-x", unschedulable=True),
             self._config(),
         )
-        self.assertFalse(status.schedulable)
-        self.assertFalse(status.fully_free)
+        self.assertTrue(status.schedulable)
+        self.assertTrue(status.fully_free)
         self.assertTrue(status.cordoned)
         self.assertEqual(status.status_label, "cordoned")
 
@@ -427,6 +377,7 @@ class FakeValidateClient:
                     "metadata": {"name": "node-x"},
                     "spec": {},
                     "status": {
+                        "conditions": [{"type": "Ready", "status": "True"}],
                         "allocatable": {
                             "cpu": "110",
                             "memory": "3036180572Ki",
@@ -520,18 +471,120 @@ class FakeValidateClient:
 
 
 class TestRunNodeValidation(unittest.TestCase):
-    def test_dry_run_does_not_submit(self):
+    COMMIT = "a" * 40
+
+    def test_missing_submission_gate_does_not_submit(self):
         client = FakeValidateClient()
-        report = run_node_validation(
-            "node-x",
-            client=client,
-            dry_run=True,
-            verbose=False,
-            sleeper=lambda _s: None,
-        )
-        self.assertTrue(report["dry_run"])
-        self.assertTrue(report["job_name"].startswith("cval-node-x-"))
+
+        with self.assertRaises(PolicyViolation):
+            run_node_validation(
+                "node-x",
+                client=client,
+                git_ref=self.COMMIT,
+                verbose=False,
+                sleeper=lambda _s: None,
+            )
+
         self.assertFalse(any(" ".join(call).startswith("create") for call in client.calls))
+
+    def test_moving_or_invalid_ref_does_not_submit(self):
+        for ref in ("main", "abc123", "A" * 40, "0" * 40):
+            client = FakeValidateClient()
+            with self.subTest(ref=ref), self.assertRaises(PolicyViolation):
+                run_node_validation(
+                    "node-x",
+                    client=client,
+                    git_ref=ref,
+                    submit=True,
+                    confirmation="submit",
+                    verbose=False,
+                )
+            self.assertFalse(
+                any(" ".join(call).startswith("create") for call in client.calls)
+            )
+
+    def test_wrong_confirmation_does_not_submit(self):
+        client = FakeValidateClient()
+
+        with self.assertRaises(PolicyViolation):
+            run_node_validation(
+                "node-x",
+                client=client,
+                git_ref=self.COMMIT,
+                submit=True,
+                confirmation="wrong",
+                verbose=False,
+            )
+
+        self.assertFalse(
+            any(" ".join(call).startswith("create") for call in client.calls)
+        )
+
+    def test_ineligible_node_does_not_submit(self):
+        scenarios = {
+            "missing": ("other 8 8", {"items": []}, {"items": []}),
+            "busy": (
+                "node-x 8 8",
+                {
+                    "items": [
+                        {
+                            "spec": {
+                                "nodeName": "node-x",
+                                "containers": [
+                                    {
+                                        "resources": {
+                                            "requests": {"nvidia.com/gpu": "1"}
+                                        }
+                                    }
+                                ],
+                            },
+                            "status": {"phase": "Running"},
+                        }
+                    ]
+                },
+                FakeValidateClient().nodes_json,
+            ),
+            "not-ready": (
+                "node-x 8 8",
+                {"items": []},
+                {
+                    "items": [
+                        {
+                            "metadata": {"name": "node-x"},
+                            "spec": {},
+                            "status": {
+                                "conditions": [
+                                    {"type": "Ready", "status": "False"}
+                                ],
+                                "allocatable": {
+                                    "cpu": "110",
+                                    "memory": "3036180572Ki",
+                                    "nvidia.com/gpu": "8",
+                                    "rdma/rdma_shared_device_a": "63",
+                                },
+                            },
+                        }
+                    ]
+                },
+            ),
+        }
+        for label, (table, pods, nodes) in scenarios.items():
+            client = FakeValidateClient()
+            client.nodes_table = table
+            client.pods_json = pods
+            client.nodes_json = nodes
+            with self.subTest(label=label), self.assertRaises(PolicyViolation):
+                run_node_validation(
+                    "node-x",
+                    client=client,
+                    git_ref=self.COMMIT,
+                    submit=True,
+                    confirmation="submit",
+                    verbose=False,
+                )
+            self.assertFalse(
+                any(" ".join(call).startswith("create") for call in client.calls)
+            )
 
     def test_full_happy_path(self):
         client = FakeValidateClient()
@@ -539,6 +592,9 @@ class TestRunNodeValidation(unittest.TestCase):
         report = run_node_validation(
             "node-x",
             client=client,
+            git_ref=self.COMMIT,
+            submit=True,
+            confirmation="submit",
             timestamp=123,
             poll_interval=0.001,
             verbose=False,
@@ -546,24 +602,45 @@ class TestRunNodeValidation(unittest.TestCase):
             sleeper=lambda _s: None,
         )
         self.assertEqual(report["job_phase"], "Completed")
+        self.assertEqual(report["git_ref"], self.COMMIT)
         self.assertTrue(report["ok"])
         self.assertEqual(report["raw_overall"], "pass")
-        self.assertEqual(report["classification"]["storage"]["status"], "normal")
-        self.assertEqual(report["classification"]["dltest"]["status"], "degraded")
-        self.assertEqual(report["health"], "degraded")
-        # A job was created and classification ran for all three tests.
+        self.assertEqual(report["classification"]["storage"]["status"], "unknown")
+        self.assertEqual(report["classification"]["dltest"]["status"], "unknown")
+        self.assertEqual(report["health"], "unknown")
+        # One real job was created; derived writes were not coupled to validation.
         self.assertTrue(any(" ".join(call).startswith("create -n") for call in client.calls))
         self.assertTrue(
             any("--tail=2000" in call for call in client.calls if call and call[0] == "logs")
         )
         classify_calls = [c for c in client.calls if "baseline" in c and "classify" in c]
-        self.assertEqual(len(classify_calls), 3)
-        dl_classify_call = next(
-            call
-            for call in classify_calls
-            if call[call.index("--test-type") + 1] == "dltest"
+        self.assertEqual(classify_calls, [])
+        self.assertFalse(
+            any("db-rebuild-dltest-metrics" in call for call in client.calls)
         )
-        self.assertIn("flock", dl_classify_call)
+
+    def test_fully_free_cordoned_node_is_eligible(self):
+        client = FakeValidateClient()
+        client.nodes_json["items"][0]["spec"] = {"unschedulable": True}
+        ticks = iter(range(0, 100))
+
+        report = run_node_validation(
+            "node-x",
+            client=client,
+            git_ref=self.COMMIT,
+            submit=True,
+            confirmation="submit",
+            timestamp=123,
+            poll_interval=0.001,
+            verbose=False,
+            clock=lambda: next(ticks),
+            sleeper=lambda _s: None,
+        )
+
+        self.assertEqual(report["schedulability"]["status_label"], "cordoned")
+        self.assertTrue(
+            any(" ".join(call).startswith("create -n") for call in client.calls)
+        )
 
     def test_stale_status_rows_do_not_produce_success_or_classification(self):
         client = FakeValidateClient()
@@ -572,6 +649,9 @@ class TestRunNodeValidation(unittest.TestCase):
         report = run_node_validation(
             "node-x",
             client=client,
+            git_ref=self.COMMIT,
+            submit=True,
+            confirmation="submit",
             timestamp=124,
             poll_interval=0.001,
             verbose=False,
@@ -601,14 +681,8 @@ class TestRunNodeValidation(unittest.TestCase):
                     display_name="Smoke",
                     order=40,
                 ),
-                artifacts=replace(
-                    storage.definition.artifacts,
-                    results_db_path="validation_tests/smoke/smoke_results.db",
-                    health_classes_db_path="",
-                ),
                 settings={},
                 plugin=None,
-                health=None,
             ),
         )
         registry = ValidationTestRegistry(base.tests.registry.tests + (smoke,))
@@ -632,6 +706,9 @@ class TestRunNodeValidation(unittest.TestCase):
             "node-x",
             config=config,
             client=client,
+            git_ref=self.COMMIT,
+            submit=True,
+            confirmation="submit",
             timestamp=123,
             poll_interval=0.001,
             verbose=False,
