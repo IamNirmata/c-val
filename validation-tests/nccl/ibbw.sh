@@ -23,6 +23,13 @@ interval_seconds=${3:-1}
 
 IB_SYS_ROOT=${IB_SYS_ROOT:-/sys/class/infiniband}
 
+# The parent NCCL runner stops this monitor with SIGTERM and waits for it. Bash
+# otherwise exits immediately while a foreground sleep/counter helper can remain
+# in the validation process group, causing the generic runner to reject an
+# otherwise successful workload as having leftover descendants. A trap defers
+# shell exit until the foreground helper is reaped.
+trap 'exit 0' INT TERM HUP
+
 if ! [[ "$interval_seconds" =~ ^[1-9][0-9]*$ ]]; then
     echo "Usage: $0 [start_device] [end_device] [interval_seconds]" >&2
     exit 2

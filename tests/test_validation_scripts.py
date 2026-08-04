@@ -4,6 +4,7 @@ import unittest
 import subprocess
 import json
 import os
+import signal
 import sqlite3
 import stat
 import tempfile
@@ -454,6 +455,71 @@ exec {os.sys.executable} "$@"
             },
         )
         self.assertEqual(published_mode, 0o600)
+
+    def test_nccl_runner_reaps_enabled_ibbw_monitor_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake_torchrun = bin_dir / "torchrun"
+            fake_torchrun.write_text(
+                """#!/bin/bash
+set -e
+result_file=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--result-file" ]]; then
+        result_file="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
+""",
+                encoding="utf-8",
+            )
+            fake_torchrun.chmod(0o755)
+            counter = root / "infiniband/mlx5_0/ports/1/counters/port_xmit_data"
+            counter.parent.mkdir(parents=True)
+            counter.write_text("100\n", encoding="utf-8")
+            output_dir = root / "output"
+            process = subprocess.Popen(
+                [
+                    "bash",
+                    str(REPO_ROOT / "validation-tests/nccl/run-test.sh"),
+                ],
+                env=os.environ
+                | {
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "CVAL_REPO_DIR": str(REPO_ROOT),
+                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                    "CVAL_IBBW_ENABLED": "true",
+                    "CVAL_NCCL_EVALUATION_ENABLED": "false",
+                    "IB_SYS_ROOT": str(root / "infiniband"),
+                    "GCRNODE": "node-a",
+                    "GCRTIME": "123",
+                    "NCCL_OUTPUT_DIR": str(output_dir),
+                    "NCCL_LOG_FILE": str(output_dir / "nccl.log"),
+                    "NCCL_SUMMARY_FILE": str(output_dir / "summary.json"),
+                    "NCCL_IBBW_LOG_FILE": str(output_dir / "ibbw.log"),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = process.communicate(timeout=15)
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                descendants_remain = False
+            else:
+                descendants_remain = True
+                os.killpg(process.pid, signal.SIGKILL)
+
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertIn("NCCL summary published", stdout)
+        self.assertFalse(descendants_remain)
 
     def test_nccl_runner_rejects_missing_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
