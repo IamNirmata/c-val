@@ -18,6 +18,7 @@ from cval.storage.write_provenance import authorize_result_write
 from cval.validation.registry import load_test_registry
 from cval.validation.results import load_validation_result, validation_result_digest
 from cval.validation.runtime import build_runtime_environment
+from cval.validation.secure_fs import publish_test_summary
 from cval.validation.supervisor import (
     reserve_secure_run_layout,
     supervise_validation_run,
@@ -39,6 +40,91 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SecureRunSupervisorTests(unittest.TestCase):
+    def test_summary_publisher_uses_retained_fd_and_never_overwrites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            validation_root = root / "data"
+            stage_dir = root / "stage"
+            validation_root.mkdir()
+            stage_dir.mkdir(mode=0o700)
+            staged = stage_dir / "summary.json"
+            staged.write_bytes(b'{"ok":true}\n')
+            staged.chmod(0o600)
+            layout = reserve_secure_run_layout(
+                validation_root,
+                "node-a",
+                "node-a-123",
+                registry_json=REGISTRY,
+            )
+            try:
+                secure_environment = layout.environment()
+                run_fd = layout.test_fds["smoke"][1]
+                destination = f"/proc/self/fd/{run_fd}/summary.json"
+                publish_test_summary(
+                    staged,
+                    destination,
+                    test_id="smoke",
+                    summary_name="summary.json",
+                    environ=secure_environment,
+                )
+                summary = (
+                    validation_root
+                    / "validation_tests/smoke/runs/node-a/node-a-123/summary.json"
+                )
+                self.assertEqual(summary.read_bytes(), b'{"ok":true}\n')
+                self.assertEqual(stat.S_IMODE(summary.stat().st_mode), 0o600)
+                with self.assertRaises(FileExistsError):
+                    publish_test_summary(
+                        staged,
+                        destination,
+                        test_id="smoke",
+                        summary_name="summary.json",
+                        environ=secure_environment,
+                    )
+            finally:
+                layout.close()
+
+    def test_summary_publisher_rejects_unlisted_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            validation_root = root / "data"
+            stage_dir = root / "stage"
+            validation_root.mkdir()
+            stage_dir.mkdir(mode=0o700)
+            staged = stage_dir / "summary.json"
+            staged.write_bytes(b'{"ok":true}\n')
+            staged.chmod(0o600)
+            layout = reserve_secure_run_layout(
+                validation_root,
+                "node-a",
+                "node-a-123",
+                registry_json=REGISTRY,
+            )
+            try:
+                environment = layout.environment()
+                run_fd = layout.test_fds["smoke"][1]
+                environment["CVAL_SECURE_RUN_FDS"] = ",".join(
+                    value
+                    for value in environment["CVAL_SECURE_RUN_FDS"].split(",")
+                    if value != str(run_fd)
+                )
+                with self.assertRaisesRegex(ValueError, "not inherited"):
+                    publish_test_summary(
+                        staged,
+                        f"/proc/self/fd/{run_fd}/summary.json",
+                        test_id="smoke",
+                        summary_name="summary.json",
+                        environ=environment,
+                    )
+                self.assertFalse(
+                    (
+                        validation_root
+                        / "validation_tests/smoke/runs/node-a/node-a-123/summary.json"
+                    ).exists()
+                )
+            finally:
+                layout.close()
+
     def _write_test(
         self,
         repo: Path,

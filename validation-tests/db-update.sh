@@ -501,10 +501,11 @@ fi
 # Storage metrics are valid only when the storage phase itself passed.
 if is_enabled "$RUN_STORAGE" && [ "$GCRRESULT1" = "pass" ]; then
     echo "Updating storage db with test results"
+    storage_ingest_dir=${CVAL_CANONICAL_STORAGE_OUTPUT_DIR:-$STORAGE_OUTPUT_DIR}
     PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-storage-result \
         "$GCRNODE" \
         "$GCRTIME" \
-        "$STORAGE_OUTPUT_DIR" \
+        "$storage_ingest_dir" \
         --image-name "$CVAL_IMAGE_NAME" \
         --result-json "$CVAL_RESULT_JSON_FILE" \
         --result-digest "$result_digest" \

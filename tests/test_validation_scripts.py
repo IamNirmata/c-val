@@ -5,6 +5,7 @@ import subprocess
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import tomllib
 from contextlib import closing
@@ -367,6 +368,13 @@ summary_filename = "summary.txt"
             fake_torchrun.write_text(
                 """#!/bin/bash
 set -e
+# Model a nested launcher that does not preserve supervisor-owned descriptors.
+for fd_path in /proc/$$/fd/*; do
+    fd=${fd_path##*/}
+    if [[ "$fd" =~ ^[0-9]+$ && "$fd" -gt 2 ]]; then
+        eval "exec ${fd}>&-" 2>/dev/null || true
+    fi
+done
 result_file=""
 while [[ $# -gt 0 ]]; do
     if [[ "$1" == "--result-file" ]]; then
@@ -427,9 +435,25 @@ exec {os.sys.executable} "$@"
                 stderr=subprocess.PIPE,
                 check=True,
             )
+            published_summary = json.loads(
+                (output_dir / "summary.json").read_text(encoding="utf-8")
+            )
+            published_mode = stat.S_IMODE((output_dir / "summary.json").stat().st_mode)
 
         self.assertIn("IBBW monitor disabled by config", completed.stdout)
         self.assertIn("fake torchrun", completed.stdout)
+        self.assertEqual(
+            published_summary,
+            {
+                "GCR_ITERATIONS": 20,
+                "GCR_DATA_SIZE_GB": 8,
+                "GCR_LATENCY": 1.0,
+                "GCR_ALGBW": 10.0,
+                "GCR_BUSBW": 20.0,
+                "GCR_IB_PORT_BW_GBPS": {},
+            },
+        )
+        self.assertEqual(published_mode, 0o600)
 
     def test_nccl_runner_rejects_missing_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -928,6 +952,11 @@ JSON
             encoding="utf-8"
         )
 
+        self.assertIn(
+            "${CVAL_CANONICAL_STORAGE_OUTPUT_DIR:-$STORAGE_OUTPUT_DIR}",
+            script,
+        )
+        self.assertIn('"$storage_ingest_dir"', script)
         self.assertIn("db-add-nccl-health", script)
         self.assertIn('"$NCCL_SUMMARY_FILE"', script)
         self.assertIn('--iterations "$CVAL_NCCL_ITERATIONS"', script)

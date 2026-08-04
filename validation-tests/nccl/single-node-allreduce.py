@@ -118,11 +118,22 @@ def main() -> None:
                 "GCR_IBBW_LOG_FILE": args.ibbw_log_file or "",
             }
 
-            os.makedirs(os.path.dirname(os.path.abspath(args.result_file)), exist_ok=True)
-
-            with open(args.result_file, "w", encoding="utf-8") as handle:
+            result_path = Path(args.result_file)
+            if not result_path.parent.is_dir():
+                raise FileNotFoundError(
+                    f"NCCL staged result directory does not exist: {result_path.parent}"
+                )
+            descriptor = os.open(
+                result_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
                 json.dump(metrics, handle, indent=4, sort_keys=True)
                 handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
 
             print(f"Metrics saved to: {args.result_file}")
 

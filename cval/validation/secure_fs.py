@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import errno
+import json
 import os
 import stat
 from pathlib import Path
@@ -13,6 +15,7 @@ _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
 _DIRECTORY_FLAGS |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY_FLAGS |= getattr(os, "O_NONBLOCK", 0)
 _RENAME_NOREPLACE = 1
+_MAX_TEST_SUMMARY_BYTES = 2 * 1024 * 1024
 
 
 def lexical_absolute(path: str | Path) -> Path:
@@ -138,6 +141,105 @@ def write_file_at(parent_fd: int, name: str, payload: bytes, mode: int) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def publish_test_summary(
+    staged_path: str | Path,
+    destination_path: str | Path,
+    *,
+    test_id: str,
+    summary_name: str,
+    environ: dict[str, str] | None = None,
+) -> None:
+    """Publish a staged summary once through its supervisor-owned directory.
+
+    Distributed launchers may close inherited descriptors in rank processes,
+    so the rank writes only a private staged file. The descriptor-owning parent
+    calls this function after the launcher exits and validation succeeds.
+    """
+
+    if not test_id or "/" in test_id or test_id in {".", ".."}:
+        raise ValueError("test_id must be a safe path segment")
+    if "/" in summary_name or summary_name in {"", ".", ".."}:
+        raise ValueError("summary_name must be a safe basename")
+    source = lexical_absolute(staged_path)
+    source_parent, source_fd = open_directory_no_symlinks(source.parent)
+    del source_parent
+    try:
+        payload = read_regular_file_at(
+            source_fd,
+            source.name,
+            max_bytes=_MAX_TEST_SUMMARY_BYTES,
+            require_current_owner=True,
+            reject_group_world_write=True,
+        )
+    finally:
+        os.close(source_fd)
+
+    environment = os.environ if environ is None else environ
+    raw_layout = environment.get("CVAL_SECURE_RUN_LAYOUT_JSON", "")
+    destination = os.fspath(destination_path)
+    if raw_layout:
+        try:
+            layout = json.loads(raw_layout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("CVAL_SECURE_RUN_LAYOUT_JSON is invalid") from exc
+        tests = layout.get("tests") if isinstance(layout, dict) else None
+        values = tests.get(test_id) if isinstance(tests, dict) else None
+        if not isinstance(values, dict):
+            raise ValueError(f"Secure run layout has no test {test_id!r}")
+        run_fd = values.get("run_dir_fd")
+        if isinstance(run_fd, bool) or not isinstance(run_fd, int) or run_fd < 0:
+            raise ValueError("Secure test run descriptor is invalid")
+        inherited_text = environment.get("CVAL_SECURE_RUN_FDS", "")
+        try:
+            inherited = {int(value) for value in inherited_text.split(",") if value}
+        except ValueError as exc:
+            raise ValueError("CVAL_SECURE_RUN_FDS is malformed") from exc
+        if run_fd not in inherited:
+            raise ValueError("Secure test run descriptor is not inherited")
+        try:
+            metadata = os.fstat(run_fd)
+        except OSError as exc:
+            raise ValueError("Secure test run descriptor is not open") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("Secure test run descriptor is not a directory")
+        expected = f"/proc/self/fd/{run_fd}/{summary_name}"
+        if destination != expected:
+            raise ValueError("Summary destination does not match secure run layout")
+        write_file_at(run_fd, summary_name, payload, 0o600)
+        os.fsync(run_fd)
+        return
+
+    destination_path_value = lexical_absolute(destination)
+    if destination_path_value.name != summary_name:
+        raise ValueError("Summary destination basename is invalid")
+    _parent_path, parent_fd = open_directory_no_symlinks(
+        destination_path_value.parent
+    )
+    try:
+        write_file_at(parent_fd, summary_name, payload, 0o600)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Publish one validated test summary through its retained directory"
+    )
+    parser.add_argument("--staged", type=Path, required=True)
+    parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--test-id", required=True)
+    parser.add_argument("--summary-name", required=True)
+    args = parser.parse_args(argv)
+    publish_test_summary(
+        args.staged,
+        args.destination,
+        test_id=args.test_id,
+        summary_name=args.summary_name,
+    )
+    return 0
 
 
 def read_regular_file_at(
@@ -285,9 +387,14 @@ __all__ = [
     "mkdir_exact_at",
     "open_directory_at",
     "open_directory_no_symlinks",
+    "publish_test_summary",
     "read_regular_file_at",
     "remove_tree_at",
     "rename_noreplace_at",
     "safe_relative_parts",
     "write_file_at",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

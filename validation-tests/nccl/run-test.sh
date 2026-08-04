@@ -44,8 +44,24 @@ NCCL_RUNTIME_EVIDENCE_FILE=${NCCL_RUNTIME_EVIDENCE_FILE:-$NCCL_OUTPUT_DIR/runtim
 NCCL_RUNTIME_EVIDENCE_POST_FILE=${NCCL_RUNTIME_EVIDENCE_POST_FILE:-${NCCL_RUNTIME_EVIDENCE_FILE%.json}.post.json}
 NCCL_SCRIPT="$CVAL_VALIDATION_TESTS_DIR/nccl/single-node-allreduce.py"
 IBBW_PID=""
+NCCL_SUMMARY_STAGE_DIR=""
+NCCL_SUMMARY_STAGE_FILE=""
 
 mkdir -p "$NCCL_OUTPUT_DIR"
+
+prepare_summary_stage() {
+    NCCL_SUMMARY_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cval-nccl-summary.XXXXXX")
+    chmod 700 "$NCCL_SUMMARY_STAGE_DIR"
+    NCCL_SUMMARY_STAGE_FILE="$NCCL_SUMMARY_STAGE_DIR/summary.json"
+}
+
+cleanup_summary_stage() {
+    if [[ -n "$NCCL_SUMMARY_STAGE_DIR" && -d "$NCCL_SUMMARY_STAGE_DIR" ]]; then
+        rm -rf -- "$NCCL_SUMMARY_STAGE_DIR"
+    fi
+    NCCL_SUMMARY_STAGE_DIR=""
+    NCCL_SUMMARY_STAGE_FILE=""
+}
 
 start_ibbw_monitor() {
     local ibbw_script="$CVAL_VALIDATION_TESTS_DIR/nccl/ibbw.sh"
@@ -86,10 +102,17 @@ append_ibbw_log_to_nccl_log() {
     fi
 }
 
-trap stop_ibbw_monitor EXIT INT TERM
+on_exit() {
+    stop_ibbw_monitor
+    cleanup_summary_stage
+}
+
+trap on_exit EXIT INT TERM
+
+prepare_summary_stage
 
 args=(
-    --result-file "$NCCL_SUMMARY_FILE"
+    --result-file "$NCCL_SUMMARY_STAGE_FILE"
     --ibbw-log-file "$NCCL_IBBW_LOG_FILE"
     --iterations "$CVAL_NCCL_ITERATIONS"
     --data-size-gb "$CVAL_NCCL_DATA_SIZE_GB"
@@ -121,7 +144,6 @@ rc=$?
 
 stop_ibbw_monitor
 append_ibbw_log_to_nccl_log
-trap - EXIT INT TERM
 if [[ $rc -ne 0 ]]; then
     exit "$rc"
 fi
@@ -138,7 +160,7 @@ if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED"; then
     fi
 fi
 
-if ! python3 - "$NCCL_SUMMARY_FILE" "$CVAL_NCCL_ITERATIONS" "$CVAL_NCCL_DATA_SIZE_GB" <<'PY'
+if ! python3 - "$NCCL_SUMMARY_STAGE_FILE" "$CVAL_NCCL_ITERATIONS" "$CVAL_NCCL_DATA_SIZE_GB" <<'PY'
 import json
 import math
 import sys
@@ -174,8 +196,22 @@ if not isinstance(ports, dict):
     raise SystemExit("NCCL summary HCA port metrics must be an object")
 PY
 then
-    echo "NCCL summary validation FAILED: $NCCL_SUMMARY_FILE" >&2
+    echo "NCCL summary validation FAILED: $NCCL_SUMMARY_STAGE_FILE" >&2
     exit 1
 fi
+
+if ! PYTHONPATH="$CVAL_REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m cval.validation.secure_fs \
+        --staged "$NCCL_SUMMARY_STAGE_FILE" \
+        --destination "$NCCL_SUMMARY_FILE" \
+        --test-id nccl \
+        --summary-name summary.json; then
+    echo "NCCL summary publication FAILED: $NCCL_SUMMARY_FILE" >&2
+    exit 1
+fi
+echo "NCCL summary published to: $NCCL_SUMMARY_FILE"
+
+trap - EXIT INT TERM
+cleanup_summary_stage
 
 exit 0
