@@ -13,7 +13,6 @@ import datetime as dt
 import json
 import sqlite3
 from contextlib import closing
-from dataclasses import asdict
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -428,9 +427,3 @@ def write_classifications_csv(
         writer.writeheader()
         writer.writerows(classification_rows_to_csv_records(selected))
     return output_path
-
-
-def classification_row_to_dict(row: ClassificationResultRow) -> dict:
-    """Return a JSON-serializable classification row dict."""
-
-    return asdict(row)

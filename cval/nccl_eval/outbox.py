@@ -270,7 +270,7 @@ def outbox_payload(batch: IngestionBatch) -> bytes:
 
 
 def emit_outbox(outbox_root: Path, cval_run_id: str, batch: IngestionBatch) -> dict[str, object]:
-    """Create ``pending/<c-val-run-id>.json`` before compatibility DB writes."""
+    """Create ``pending/<c-val-run-id>.json`` before authoritative raw DB writes."""
 
     if not isinstance(cval_run_id, str) or not RUN_ID_PATTERN.fullmatch(cval_run_id):
         raise ValueError("c-val run ID is not a safe outbox filename")
@@ -317,7 +317,7 @@ def commit_outbox(
     pending: Path,
     result_digest: str,
 ) -> dict[str, object]:
-    """Create the retryable final marker only after compatibility writes commit."""
+    """Create the retryable final marker only after raw SQLite writes commit."""
 
     validated = _validate_pending_commit(outbox_root, pending, result_digest)
     committed_root = _ensure_outbox_root(Path(outbox_root) / "committed")

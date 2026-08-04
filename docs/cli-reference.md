@@ -74,6 +74,6 @@ first error unless `--continue-on-error` is explicit.
 due baseline builds, stale-claim recovery, and queue evaluation in one
 signal-aware process. Mutation requires `--apply --confirm resident`.
 
-The other exact gates are `schema`, `grant-runtime`, `ingest`,
-`migrate-legacy`, `calibration`, `build-baselines`, `evaluate`, `worker`, and
-`recover`.
+The other exact gates are `schema`, `grant-runtime`, `ingest`, `calibration`,
+`build-baselines`, `evaluate`, `worker`, and `recover`. Copied-SQLite migration
+is removed; PostgreSQL accepts native exact-provenance ingestion only.

@@ -531,7 +531,10 @@ class NcclEvalPostgresIntegrationTests(unittest.TestCase):
             self.pool, allow_disposable_test_database=True
         )
         self.assertEqual(replay["applied"], [])
-        self.assertEqual(replay["already_applied"], ["001_initial.sql"])
+        self.assertEqual(
+            replay["already_applied"],
+            ["001_initial.sql", "002_native_only_ingestion.sql"],
+        )
 
         original = migrations()[0]
         altered = Migration(original.migration_id, "0" * 64, original.sql)

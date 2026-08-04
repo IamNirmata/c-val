@@ -46,17 +46,17 @@ provided; PostgreSQL is the sole NCCL evaluator.
 
 The historical workload and SQLite column report `GCR_LATENCY`/`LATENCY` in
 milliseconds (`duration * 1000`). The optional PostgreSQL evaluator uses
-canonical microseconds. Its copied-legacy converter multiplies valid values by
-1000, so `628.2 ms` becomes `628200.0 us`; the descriptor records canonical
-unit `us`, source unit `ms`, and conversion `ms_to_us_x1000` explicitly.
+canonical microseconds. Native outbox emission multiplies valid values by 1000,
+so `628.2 ms` becomes `628200.0 us`; the descriptor records canonical unit
+`us`, source unit `ms`, and conversion `ms_to_us_x1000` explicitly.
 
 When enabled and runtime evidence exists, `db-update.sh` creates immutable
-`pending/<c-val-run-id>.json` before current compatibility SQLite writes, then
+`pending/<c-val-run-id>.json` before authoritative raw SQLite writes, then
 creates a digest-bound `committed/<c-val-run-id>.json` marker only after those
 writes complete. Exact retries must be byte-equal; conflicts fail closed.
 Failed selected NCCL tests with runtime evidence emit a `TEST_ERROR` or
 `NO_RESULT` batch with null metrics and an exact error code. Setup failures that
-occur before evidence collection still persist raw compatibility status but do
+occur before evidence collection still persist authoritative raw status but do
 not emit an incomplete outbox. The credentialed NCCL process in the resident
 evaluator consumes committed pairs idempotently and does not mutate or delete
 them.
@@ -84,11 +84,10 @@ cval nccl-eval status
 
 `DATABASE_URL` is required only by commands that connect to PostgreSQL and is
 never included in receipts. The production database name must be `cval`.
-Legacy migration accepts a **copied** SQLite DB in read-only mode. Supplying the
-configured current `test-nccl.db` path is rejected unless the separate
-`--allow-configured-live-source --confirm-live-source copied-sqlite` gate is
-also present. Source deployment manifests remain non-runnable until a reviewed
-phased rollout replaces placeholders and receives separate live approval.
+Copied-SQLite evaluator migration is removed; new PostgreSQL ingestion accepts
+only native exact-provenance batches. Source deployment manifests remain
+non-runnable until a reviewed phased rollout replaces placeholders and receives
+separate live approval.
 
 ## Troubleshooting
 

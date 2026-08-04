@@ -269,33 +269,19 @@ NCCL_HEALTH_CSV_COLUMNS = (
     "BUS_BW",
     "LATENCY",
     *NCCL_IB_PORT_COLUMNS,
-    "classification_status",
-    "classification_passed",
-    "classification_baseline_id",
-    "classified_timestamp",
-    "classified_time_los_angeles",
-    "n_compared",
-    "n_degraded",
-    "n_band_degraded",
-    "degraded_metric_fraction",
-    "degraded_metric_percent",
-    "worst_pct_diff",
 )
 
 
 def nccl_health_rows_to_csv_records(
     rows: list[LatestStatusRow],
     health_metrics: dict[str, NcclHealthMetric] | None = None,
-    classifications: list[ClassificationResultRow] | None = None,
 ) -> list[dict[str, str]]:
-    """Build one wide NCCL/IB health record per node."""
+    """Build one authoritative raw NCCL/IB health record per node."""
 
     health_by_node = health_metrics or {}
-    by_node_test = classification_rows_by_node_test(classifications or [])
     records: list[dict[str, str]] = []
 
     for row in rows:
-        classification = by_node_test.get((row.node, "nccl"))
         health = health_by_node.get(row.node)
         timestamp = health.timestamp if health and health.timestamp is not None else row.latest_timestamp
         record = {
@@ -313,25 +299,6 @@ def nccl_health_rows_to_csv_records(
             "samples": "" if health is None or health.samples is None else str(health.samples),
             "BUS_BW": "" if health is None or health.bus_bw is None else f"{health.bus_bw:.4f}",
             "LATENCY": "" if health is None or health.latency is None else f"{health.latency:.4f}",
-            "classification_status": classification.status if classification else "",
-            "classification_passed": "" if classification is None else str(classification.passed).lower(),
-            "classification_baseline_id": classification.baseline_id if classification else "",
-            "classified_timestamp": ""
-            if classification is None
-            else str(classification.classified_at),
-            "classified_time_los_angeles": ""
-            if classification is None
-            else timestamp_to_los_angeles(classification.classified_at),
-            "n_compared": "" if classification is None else str(classification.n_compared),
-            "n_degraded": "" if classification is None else str(classification.n_degraded),
-            "n_band_degraded": "" if classification is None else str(classification.n_band_degraded),
-            "degraded_metric_fraction": ""
-            if classification is None
-            else f"{classification.degraded_metric_fraction:.6f}",
-            "degraded_metric_percent": ""
-            if classification is None
-            else f"{classification.degraded_metric_fraction * 100.0:.3f}",
-            "worst_pct_diff": "" if classification is None else f"{classification.worst_pct_diff:.3f}",
         }
         for column in NCCL_IB_PORT_COLUMNS:
             value = health.port_max_gbps.get(column) if health else None
@@ -339,27 +306,3 @@ def nccl_health_rows_to_csv_records(
         records.append(record)
 
     return records
-
-
-def write_nccl_health_results_csv(
-    rows: list[LatestStatusRow],
-    output_dir: str | Path = ".",
-    now: dt.datetime | None = None,
-    health_metrics: dict[str, NcclHealthMetric] | None = None,
-    classifications: list[ClassificationResultRow] | None = None,
-) -> Path:
-    """Write one wide NCCL/IB health row per node to a local CSV."""
-
-    selected = latest_result_rows(rows, "nccl")
-    directory = Path(output_dir).expanduser().resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    output_path = directory / default_results_filename("nccl", now)
-
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=NCCL_HEALTH_CSV_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(
-            nccl_health_rows_to_csv_records(selected, health_metrics, classifications)
-        )
-
-    return output_path

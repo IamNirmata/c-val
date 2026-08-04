@@ -146,30 +146,14 @@ Before apply, retain read-only evidence that no old evaluator Job/CronJob/tmux
 loop is active. If an old CronJob exists, suspend it first; deletion is a
 separate optional cleanup approval and is not required for rollback safety.
 
-## Phase 3 — copied legacy calibration import
+## Phase 3 — native calibration
 
-Use only a copied SQLite file covered by the verified backup manifest. First
-supply reviewed profile metadata and inspect without writes:
-
-```text
-python -m cval.cli nccl-eval migrate-legacy \
-  --sqlite /data/cval-backups/<BACKUP_DIR>/metadata/test-nccl.db \
-  --profile-metadata /secure/cval/nccl-legacy-profile.json
-```
-
-**APPROVAL REQUIRED — copied source import:**
-
-```text
-python -m cval.cli nccl-eval migrate-legacy \
-  --sqlite /data/cval-backups/<BACKUP_DIR>/metadata/test-nccl.db \
-  --profile-metadata /secure/cval/nccl-legacy-profile.json \
-  --apply --confirm migrate-legacy
-```
-
-Legacy and native rows have no calibration decision and are excluded. Submit
-exact result IDs through `nccl-eval calibration plan --input decisions.json`,
-then append only after review with `calibration apply --apply --confirm
-calibration`. Revocation appends `REVOKE`; raw rows are never mutated.
+Copied-SQLite import is removed. Only native outbox results with exact runtime,
+commit, image, and result provenance can enter PostgreSQL. New native rows have
+no calibration decision and are excluded until reviewed. Submit exact result
+IDs through `nccl-eval calibration plan --input decisions.json`, then append
+only after review with `calibration apply --apply --confirm calibration`.
+Revocation appends `REVOKE`; raw rows are never mutated.
 The first event for a result must be version 1 `APPROVE`; later versions are
 contiguous and alternate action. Runtime callers have no direct INSERT on the
 ledger and invoke a security-definer function. Revoking a sample included in
@@ -202,11 +186,11 @@ kubectl -n gcr-admin exec <EXACT_EVALUATOR_POD> -c nccl-evaluator -- \
 Set `evaluation_enabled=true` only in a
 reviewed validation-job release pinned to an exact source commit and image
 digest. Ingestion creates immutable `pending/<run>.json` before any SQLite
-write, performs all compatibility writes, then creates
+write, performs all authoritative raw writes, then creates
 `committed/<run>.json` binding the pending and result digests. The scanner
 ignores pending files without markers. If marker creation fails after SQLite,
 retry `nccl-eval commit-outbox` with the same pending file and result digest.
-If setup fails before runtime evidence can be collected, raw compatibility
+If setup fails before runtime evidence can be collected, authoritative raw
 status is still recorded and no incomplete PostgreSQL outbox is emitted.
 Passing results and failures with runtime evidence remain fail-closed on outbox
 validation. Outbox files and PostgreSQL receipts are retained permanently.

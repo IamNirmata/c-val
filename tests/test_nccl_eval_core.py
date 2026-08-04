@@ -168,6 +168,16 @@ class NcclEvalModelProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown"):
             IngestionBatch.from_dict(payload)
 
+    def test_legacy_source_ingestion_is_rejected(self) -> None:
+        payload = IngestionBatch(
+            test_run(),
+            (NodeResult("node-a", datetime.now(UTC), 1.0, 1.0),),
+        ).to_dict()
+        payload["test_run"]["legacy_source"] = True
+
+        with self.assertRaisesRegex(ValueError, "copied SQLite ingestion is removed"):
+            IngestionBatch.from_dict(payload)
+
     def test_fingerprint_is_canonical_and_profile_identity_is_deterministic(self) -> None:
         left = {
             "message_size": "16GiB",

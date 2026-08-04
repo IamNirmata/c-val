@@ -647,9 +647,3 @@ def _validate_timestamp(value: str, field_name: str) -> None:
 def _parse_timestamp(value: str) -> datetime:
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     return datetime.fromisoformat(normalized)
-
-
-def validation_timestamp_to_epoch(value: str | None) -> int | None:
-    """Convert one validated RFC 3339 result timestamp to Unix seconds."""
-
-    return None if value is None else int(_parse_timestamp(value).timestamp())

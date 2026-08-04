@@ -142,7 +142,6 @@ def _preflight_nccl_mutation_gate(argv: list[str]) -> None:
         "emit-outbox": "emit-outbox",
         "commit-outbox": "commit-outbox",
         "ingest-outbox": "ingest-outbox",
-        "migrate-legacy": "migrate-legacy",
         "calibration": "calibration",
         "build-baselines": "build-baselines",
         "evaluate": "evaluate",
@@ -670,38 +669,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     nccl_ingest_outbox.set_defaults(handler=handle_nccl_eval_ingest_outbox)
 
-    nccl_legacy = nccl_sub.add_parser(
-        "migrate-legacy",
-        help="Inspect or explicitly normalize a copied legacy IB_HEALTH SQLite DB",
-    )
-    nccl_legacy.add_argument("--sqlite", type=Path, required=True)
-    nccl_legacy.add_argument("--profile-metadata", type=Path)
-    nccl_legacy.add_argument("--test-name")
-    nccl_legacy.add_argument("--test-definition-version")
-    nccl_legacy.add_argument("--gpu-model")
-    nccl_legacy.add_argument("--gpus-per-node", type=int)
-    nccl_legacy.add_argument("--compiled-nccl-version")
-    nccl_legacy.add_argument("--runtime-nccl-package-version")
-    nccl_legacy.add_argument("--driver-version")
-    nccl_legacy.add_argument("--driver-version-group")
-    nccl_legacy.add_argument("--topology-class")
-    nccl_legacy.add_argument("--cuda-version")
-    nccl_legacy.add_argument("--pytorch-version")
-    nccl_legacy.add_argument("--collective")
-    nccl_legacy.add_argument("--datatype")
-    nccl_legacy.add_argument("--reduction")
-    nccl_legacy.add_argument("--message-size")
-    nccl_legacy.add_argument("--warmup-iterations", type=int)
-    nccl_legacy.add_argument(
-        "--allow-configured-live-source",
-        action="store_true",
-        help="Allow the configured raw SQLite path only with a second exact confirmation",
-    )
-    nccl_legacy.add_argument("--confirm-live-source")
-    _add_nccl_mutation_gate(nccl_legacy)
-    nccl_legacy.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_legacy.set_defaults(handler=handle_nccl_eval_migrate_legacy)
-
     nccl_calibration = nccl_sub.add_parser(
         "calibration", help="Plan, append, or inspect immutable calibration decisions"
     )
@@ -1159,9 +1126,10 @@ def handle_results(args: argparse.Namespace) -> int:
         db_path=args.db_path,
         config=args.cval_config,
     )
+    test = args.test.lower()
     classifications = []
-    if not args.no_classification:
-        selected_test = args.test.lower()
+    if not args.no_classification and test != "nccl":
+        selected_test = test
         classifications = get_latest_classification_rows(
             pod=args.pod,
             namespace=args.namespace,
@@ -1172,7 +1140,6 @@ def handle_results(args: argparse.Namespace) -> int:
             config=args.cval_config,
         )
 
-    test = args.test.lower()
     if test in {"overall", "all"}:
         from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
 
@@ -1996,53 +1963,6 @@ def handle_nccl_eval_calibration(args: argparse.Namespace) -> int:
         return _report_nccl_error(exc)
 
 
-def handle_nccl_eval_migrate_legacy(args: argparse.Namespace) -> int:
-    """Read only a copied SQLite source and optionally ingest normalized batches."""
-
-    if args.apply:
-        _require_nccl_apply(args, "migrate-legacy")
-    configured_source = Path(args.cval_config.storage.nccl_db_path).expanduser().resolve()
-    selected_source = args.sqlite.expanduser().resolve()
-    if selected_source == configured_source and not (
-        args.allow_configured_live_source and args.confirm_live_source == "copied-sqlite"
-    ):
-        print(
-            "NCCL evaluation error: configured raw SQLite path requires "
-            "--allow-configured-live-source --confirm-live-source copied-sqlite",
-            file=sys.stderr,
-        )
-        return 2
-    try:
-        from cval.nccl_eval.legacy import (
-            LegacyProfileMetadata,
-            legacy_summary,
-            read_legacy_batches,
-        )
-
-        metadata = LegacyProfileMetadata.from_dict(_legacy_metadata_from_args(args))
-        batches = read_legacy_batches(selected_source, metadata)
-        summary = legacy_summary(batches, selected_source)
-        if not args.apply:
-            _print_nccl_payload(summary, args.output)
-            return 0
-
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import open_repository
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        receipts = []
-        with open_repository(config) as repository:
-            for batch in batches:
-                receipts.append(repository.ingest_batch(batch))
-        _print_nccl_payload(
-            summary | {"mode": "apply", "ingested_batches": receipts},
-            args.output,
-        )
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
 def handle_nccl_eval_build_baselines(args: argparse.Namespace) -> int:
     """Report baseline eligibility or run the approval-gated builder once."""
 
@@ -2179,46 +2099,6 @@ def _run_nccl_db_action(args: argparse.Namespace, action: str) -> int:
         return 0
     except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
         return _report_nccl_error(exc)
-
-
-def _legacy_metadata_from_args(args: argparse.Namespace) -> dict[str, object]:
-    data: dict[str, object] = {}
-    if args.profile_metadata is not None:
-        loaded = json.loads(args.profile_metadata.read_text(encoding="utf-8"))
-        if not isinstance(loaded, dict):
-            raise ValueError("--profile-metadata must contain a JSON object")
-        data.update(loaded)
-    fields = (
-        "test_name",
-        "test_definition_version",
-        "gpu_model",
-        "gpus_per_node",
-        "compiled_nccl_version",
-        "runtime_nccl_package_version",
-        "driver_version",
-        "driver_version_group",
-        "topology_class",
-        "cuda_version",
-        "pytorch_version",
-    )
-    for field in fields:
-        value = getattr(args, field)
-        if value is not None:
-            data[field] = value
-    test_config = dict(data.get("test_config", {}))
-    for field in (
-        "collective",
-        "datatype",
-        "reduction",
-        "message_size",
-        "warmup_iterations",
-    ):
-        value = getattr(args, field)
-        if value is not None:
-            test_config[field] = value
-    if test_config:
-        data["test_config"] = test_config
-    return data
 
 
 def _print_nccl_payload(payload: dict[str, object], output: str) -> None:

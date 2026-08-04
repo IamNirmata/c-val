@@ -49,7 +49,8 @@ targets and merge latest rows.
 Historical SQLite NCCL baseline/classification files may remain as retained
 compatibility evidence, but generic NCCL baseline/classification helpers and
 operational targets are removed. Raw `cval results --test nccl` export remains
-available.
+available but does not join those classifications; current NCCL verdicts come
+only from PostgreSQL `nccl-eval` reporting.
 
 ## Lifecycle
 

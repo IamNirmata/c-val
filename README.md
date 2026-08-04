@@ -71,7 +71,7 @@ manifest is applied or scaled automatically.
 
 NCCL is the explicit exception to the storage/DL `cval.baselines` evaluator
 rule. Its opt-in PostgreSQL implementation follows the checked-in NCCL spec;
-the current compatibility SQLite NCCL DB remains retained raw evidence.
+`metadata/test-nccl.db` remains authoritative raw evidence, not an evaluator.
 
 The unpublished `cval.nccl_eval` subsystem is isolated from the current raw
 SQLite path and remains disabled by the NCCL descriptor. It uses one
@@ -91,11 +91,10 @@ exact bootstrap has been verified in the pinned image. Reviewed phased
 overlays do not grant live apply approval. See
 [docs/evals/nccl-rollout.md](docs/evals/nccl-rollout.md).
 
-Evaluator latency is canonicalized to microseconds. Native ingestion requires
-material `test_config.latency_unit = "us"`; copied legacy `IB_HEALTH.LATENCY`
-is milliseconds and is multiplied by 1000 (`628.2` becomes `628200.0 us`).
-Legacy profiles retain explicit source-unit/conversion evidence. Iterations,
-nullable samples, and warmup count are part of the type-aware profile
+Evaluator latency is canonicalized to microseconds. Native outbox ingestion
+converts the raw `IB_HEALTH.LATENCY` summary value from milliseconds to
+microseconds (`628.2` becomes `628200.0 us`). Iterations, nullable samples, and
+warmup count are part of the type-aware profile
 fingerprint, so materially different workloads never share a baseline.
 
 See [docs/evals/nccl-eval-process.md](docs/evals/nccl-eval-process.md) for the

@@ -50,3 +50,12 @@ component.
 - Torchrun failure: inspect every rank log/result for the first failing task.
 - Summary failure: check missing/invalid rank JSON and task statuses.
 - No classification: verify metric DB refresh, active compatible baseline, and combination factors.
+
+Useful rank output signals include `status`, `norm_output`, weight/bias gradient
+norms, forward/backward CPU and GPU timings, collective CPU/GPU timings, and
+overlap `coll_*`/`layer_*` statistics. A healthy run has completed task states,
+finite stable numerical values, and no traceback, exception, failure, NaN, Inf,
+or mismatch markers. Keep failure classification specific to DL correctness,
+runtime bootstrap, GPU execution, or collective behavior; compare storage and
+NCCL results from the same canonical result before declaring a general node
+failure.

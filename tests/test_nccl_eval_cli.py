@@ -72,17 +72,11 @@ class NcclEvalCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             batch_path = self.input_file(root)
-            sqlite_path = root / "copy.db"
-            sqlite_path.write_bytes(b"not-read-because-gate-fails")
             commands = (
                 ["nccl-eval", "schema", "--apply", "--confirm", "wrong"],
                 ["nccl-eval", "grant-runtime", "--apply", "--confirm", "wrong"],
                 [
                     "nccl-eval", "ingest", "--input", str(batch_path),
-                    "--apply", "--confirm", "wrong",
-                ],
-                [
-                    "nccl-eval", "migrate-legacy", "--sqlite", str(sqlite_path),
                     "--apply", "--confirm", "wrong",
                 ],
                 ["nccl-eval", "build-baselines", "--apply", "--confirm", "wrong"],
@@ -201,25 +195,11 @@ class NcclEvalCliTests(unittest.TestCase):
         self.assertNotIn("private-password", stderr.getvalue())
         self.assertIn("REDACTED", stderr.getvalue())
 
-    def test_configured_legacy_source_requires_separate_exact_allowance(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "configured.db"
-            source.write_bytes(b"must-not-be-opened")
-            config_path = root / "cval.toml"
-            config_path.write_text(
-                f'[storage]\nnccl_db_path = "{source}"\n', encoding="utf-8"
-            )
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                code = main(
-                    [
-                        "--config", str(config_path), "nccl-eval", "migrate-legacy",
-                        "--sqlite", str(source),
-                    ]
-                )
-        self.assertEqual(code, 2)
-        self.assertIn("copied-sqlite", stderr.getvalue())
+    def test_migrate_legacy_command_is_removed(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
+            main(["nccl-eval", "migrate-legacy"])
+
+        self.assertEqual(exc.exception.code, 2)
 
     def test_worker_id_is_bounded_and_nonsecret(self) -> None:
         stderr = io.StringIO()

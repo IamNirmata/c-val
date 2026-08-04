@@ -35,7 +35,6 @@ from cval.storage.results_export import (
     normalize_result_test,
     rows_to_csv_records,
     write_latest_results_csv,
-    write_nccl_health_results_csv,
 )
 
 
@@ -474,7 +473,7 @@ class ResultsExportTests(unittest.TestCase):
         self.assertEqual(records[0]["BUS_BW"], "")
         self.assertEqual(records[0]["mlx5_0"], "")
 
-    def test_write_nccl_health_csv(self) -> None:
+    def test_nccl_health_records_ignore_sqlite_classifications(self) -> None:
         rows = [LatestStatusRow("node-a", "nccl", 1781748000, "pass")]
         health = {
             "node-a": NcclHealthMetric(
@@ -483,18 +482,12 @@ class ResultsExportTests(unittest.TestCase):
                 {"mlx5_0": 46.1, "mlx5_13": 46.3},
             )
         }
-        now = dt.datetime(2026, 6, 18, 3, 0, 0, tzinfo=dt.timezone.utc)
+        records = nccl_health_rows_to_csv_records(rows, health)
 
-        with TemporaryDirectory() as tmpdir:
-            path = write_nccl_health_results_csv(
-                rows, output_dir=tmpdir, now=now, health_metrics=health
-            )
-            text = Path(path).read_text(encoding="utf-8")
-
-        self.assertTrue(str(path).endswith("cval_nccl_20260617_200000_PDT.csv"))
         self.assertEqual(NCCL_HEALTH_CSV_COLUMNS[0], "node")
-        self.assertIn("BUS_BW,LATENCY,mlx5_0,mlx5_1", text)
-        self.assertIn("44.5000,628.2000,46.1000", text)
+        self.assertNotIn("classification_status", NCCL_HEALTH_CSV_COLUMNS)
+        self.assertEqual(records[0]["BUS_BW"], "44.5000")
+        self.assertEqual(records[0]["LATENCY"], "628.2000")
 
     def test_parse_nccl_health_json(self) -> None:
         raw = (

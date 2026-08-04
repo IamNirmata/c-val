@@ -16,7 +16,6 @@ _NIC_DEVICE = re.compile(r"^mlx5_\d+(?:\.\d+)?$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_LEGACY_SENTINEL = re.compile(r"^legacy:[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 
 
 class ResultStatus(str, Enum):
@@ -30,28 +29,6 @@ class EvaluationScope(str, Enum):
     OUT_OF_SAMPLE = "OUT_OF_SAMPLE"
     IN_SAMPLE = "IN_SAMPLE"
     REEVALUATION = "REEVALUATION"
-
-
-class EvaluationJobStatus(str, Enum):
-    PENDING = "PENDING"
-    WAITING_FOR_BASELINE = "WAITING_FOR_BASELINE"
-    PROCESSING = "PROCESSING"
-    RETRY = "RETRY"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
-class ProfileStatus(str, Enum):
-    COLLECTING = "COLLECTING"
-    ACTIVE = "ACTIVE"
-    DISABLED = "DISABLED"
-
-
-class BaselineStatus(str, Enum):
-    BUILDING = "BUILDING"
-    ACTIVE = "ACTIVE"
-    SUPERSEDED = "SUPERSEDED"
-    FAILED = "FAILED"
 
 
 @dataclass(frozen=True)
@@ -223,28 +200,22 @@ class TestRun:
         ):
             _nonempty(getattr(self, name), name, maximum=256)
         _optional_text(self.image_name, "image_name", maximum=1000)
-        if not isinstance(self.legacy_source, bool):
-            raise TypeError("legacy_source must be boolean")
+        if self.legacy_source is not False:
+            raise ValueError(
+                "legacy_source must be false; copied SQLite ingestion is removed"
+            )
         if not _RUN_ID.fullmatch(self.cval_run_id) or self.cval_run_id in {".", ".."}:
             raise ValueError("cval_run_id must be a safe path segment")
         for name in ("cval_result_digest", "runtime_evidence_sha256"):
-            _provenance_digest(getattr(self, name), name, legacy=self.legacy_source)
+            _provenance_digest(getattr(self, name), name)
         if self.summary_sha256 is not None:
-            _provenance_digest(
-                self.summary_sha256, "summary_sha256", legacy=self.legacy_source
-            )
-        if self.legacy_source:
-            for name in ("source_commit", "image_digest", "implementation_identity"):
-                value = getattr(self, name)
-                if not isinstance(value, str) or not _LEGACY_SENTINEL.fullmatch(value):
-                    raise ValueError(f"legacy {name} must use an explicit legacy: sentinel")
-        else:
-            if not _COMMIT.fullmatch(self.source_commit):
-                raise ValueError("source_commit must be an exact lowercase 40-hex commit")
-            if not _SHA256.fullmatch(self.image_digest):
-                raise ValueError("image_digest must be an exact sha256 digest")
-            if not _SHA256.fullmatch(self.implementation_identity):
-                raise ValueError("implementation_identity must be an exact sha256 digest")
+            _provenance_digest(self.summary_sha256, "summary_sha256")
+        if not _COMMIT.fullmatch(self.source_commit):
+            raise ValueError("source_commit must be an exact lowercase 40-hex commit")
+        if not _SHA256.fullmatch(self.image_digest):
+            raise ValueError("image_digest must be an exact sha256 digest")
+        if not _SHA256.fullmatch(self.implementation_identity):
+            raise ValueError("implementation_identity must be an exact sha256 digest")
         started_at = _utc(self.started_at, "started_at")
         object.__setattr__(self, "started_at", started_at)
         if self.completed_at is not None:
@@ -567,9 +538,6 @@ def _required_bool(value: Mapping[str, Any], key: str) -> bool:
     return item
 
 
-def _provenance_digest(value: Any, field_name: str, *, legacy: bool) -> None:
-    if not isinstance(value, str) or not (
-        _SHA256.fullmatch(value) or (legacy and _LEGACY_SENTINEL.fullmatch(value))
-    ):
-        suffix = " or an explicit legacy: sentinel" if legacy else ""
-        raise ValueError(f"{field_name} must be an exact sha256 digest{suffix}")
+def _provenance_digest(value: Any, field_name: str) -> None:
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise ValueError(f"{field_name} must be an exact sha256 digest")

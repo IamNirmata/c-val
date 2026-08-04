@@ -9,7 +9,7 @@ tolerated_no_schedule_taints = ["nvidia.com/gpu", "rdma"]
 
 [scheduling]
 days_threshold = 7
-batch_size = 4
+batch_size = 2
 
 [job]
 template_path = "ymls/specific-node-job.yml"

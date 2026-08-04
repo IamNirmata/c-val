@@ -57,8 +57,8 @@ normalized run-history or alternate per-test dual-write branches.
 
 The optional NCCL PostgreSQL path is an asynchronous outbox, not a validation
 job dual-write. The GPU pod records strict runtime evidence and, only when the
-descriptor flag is enabled, writes immutable pending JSON before compatibility
-SQLite writes and a digest-bound committed marker after those writes are
+descriptor flag is enabled, writes immutable pending JSON before authoritative
+raw SQLite writes and a digest-bound committed marker after those writes are
 durable. It receives no PostgreSQL credentials. A suspended
 credentialed process in the resident evaluator scans the shared PVC
 non-recursively and ingests each file with a durable PostgreSQL receipt. Outbox

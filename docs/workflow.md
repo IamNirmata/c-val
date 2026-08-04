@@ -63,8 +63,10 @@ For every open batch slot, it rebuilds the ranked list from scratch:
 6. Repeats the same rebuild for the next open slot.
 
 If a submitted job remains `Pending` and does not reach `Running` within the
-configured pending-start timeout, the runner deletes that specific validation
-job and opens the slot for a fresh live-ranked candidate.
+configured pending-start timeout, the runner may delete that specific
+validation job and open the slot only when submit mode and the independent
+`CVAL_PRUNE_CONFIRM=delete-pending` gate are both active. Audit mode never
+deletes it.
 
 ## Execution Flow
 

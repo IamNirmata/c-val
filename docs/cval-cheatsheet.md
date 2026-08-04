@@ -161,7 +161,8 @@ cval baseline classify --test-type dltest-overlap --store-results
 ```
 
 NCCL uses the separate approval-gated PostgreSQL commands under `cval
-nccl-eval`; raw SQLite export remains `cval results --test nccl --type csv`.
+nccl-eval`; `cval results --test nccl --type csv` exports authoritative raw
+SQLite status/metrics only, without SQLite evaluator classifications.
 
 `--store-results` writes to the selected target classification DB under `/data/continuous_validation/baselines/`
 (raw pass/fail in `validation.db` stays untouched).

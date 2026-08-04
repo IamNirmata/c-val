@@ -77,15 +77,25 @@ class NcclEvalMigrationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         loaded = migrations()
-        if len(loaded) != 1:
-            raise AssertionError(f"expected one initial migration, found {len(loaded)}")
+        if [migration.migration_id for migration in loaded] != [
+            "001_initial.sql",
+            "002_native_only_ingestion.sql",
+        ]:
+            raise AssertionError("unexpected NCCL migration order")
         cls.sql = loaded[0].sql
+        cls.native_only_sql = loaded[1].sql
 
     def test_plan_has_stable_identity_without_database_connection(self) -> None:
         plan = migration_plan()
         self.assertEqual(plan["database_expected"], "cval")
         self.assertEqual(plan["schemas"], ["nccl_raw", "nccl_baseline", "nccl_validation"])
         self.assertRegex(plan["migrations"][0]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(plan["migration_count"], 2)
+
+    def test_native_only_migration_preserves_historical_rows(self) -> None:
+        self.assertIn("CHECK (NOT legacy_source) NOT VALID", self.native_only_sql)
+        self.assertNotIn("DELETE", self.native_only_sql.upper())
+        self.assertNotIn("UPDATE", self.native_only_sql.upper())
 
     def test_apply_takes_advisory_lock_before_ledger_inspection(self) -> None:
         class Result:
@@ -124,7 +134,10 @@ class NcclEvalMigrationContractTests(unittest.TestCase):
         receipt = apply_migrations(
             pool, allow_disposable_test_database=True
         )
-        self.assertEqual(receipt["applied"], ["001_initial.sql"])
+        self.assertEqual(
+            receipt["applied"],
+            ["001_initial.sql", "002_native_only_ingestion.sql"],
+        )
         lock_index = next(
             index for index, sql in enumerate(pool.connection_value.sql)
             if "pg_advisory_xact_lock" in sql

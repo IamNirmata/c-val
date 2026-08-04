@@ -18,7 +18,6 @@ from cval.models import (
 from cval.storage.results_export import (
     write_export_rows_csv,
     write_latest_results_csv,
-    write_nccl_health_results_csv,
 )
 from cval.validation.operational_targets import RESULTS_EXPORT
 from cval.validation.operations import (
@@ -135,7 +134,7 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
             )
             self.assertEqual(old.read_bytes(), new.read_bytes())
 
-    def test_nccl_wide_csv_is_byte_for_byte_compatible(self) -> None:
+    def test_nccl_plugin_exports_authoritative_raw_evidence_only(self) -> None:
         metrics = {
             "node-a": NcclHealthMetric(
                 "node-a",
@@ -157,19 +156,11 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
             export = export_evaluator_rows(
                 self.config, "nccl", self._context("nccl")
             )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            old = write_nccl_health_results_csv(
-                list(self.rows),
-                output_dir=root / "old",
-                now=self.now,
-                health_metrics=metrics,
-                classifications=list(self.classifications),
-            )
-            new = write_export_rows_csv(
-                export, "nccl", output_dir=root / "new", now=self.now
-            )
-            self.assertEqual(old.read_bytes(), new.read_bytes())
+
+        self.assertIn("BUS_BW", export.columns)
+        self.assertIn("LATENCY", export.columns)
+        self.assertNotIn("classification_status", export.columns)
+        self.assertEqual(export.rows[0][export.columns.index("BUS_BW")], "44.5000")
 
     def test_dl_alias_csv_is_byte_for_byte_compatible(self) -> None:
         export = export_evaluator_rows(

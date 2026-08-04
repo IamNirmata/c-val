@@ -31,6 +31,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.job.job_prefix, "cval")
         self.assertEqual(config.cluster.namespace, "gcr-admin")
         self.assertEqual(config.cluster.pvc_access_pod, "gcr-admin-pvc-access")
+        self.assertEqual(config.scheduling.batch_size, 2)
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
         self.assertEqual(
             config.runtime.dl_results_root_path,

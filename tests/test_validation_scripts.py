@@ -174,7 +174,7 @@ printf '%s\n' \
         self.assertIn('nccl-eval emit-outbox', script)
         self.assertIn('--apply --confirm emit-outbox', script)
         self.assertIn('CVAL_NCCL_EVALUATION_ENABLED', script)
-        self.assertIn('partial durable compatibility DB', script)
+        self.assertIn('partial durable raw evidence', script)
         self.assertNotIn('DATABASE_URL', script)
         self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", script)
         self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", script)

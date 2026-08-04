@@ -131,9 +131,7 @@ class NcclPlugin:
                 config=context.config,
             )
         selected = latest_result_rows(list(context.status_rows), context.target.name)
-        records = nccl_health_rows_to_csv_records(
-            selected, metrics, list(context.classification_rows)
-        )
+        records = nccl_health_rows_to_csv_records(selected, metrics)
         return export_rows_from_records(
             NCCL_HEALTH_CSV_COLUMNS, records, row_label="nccl IB_HEALTH"
         )

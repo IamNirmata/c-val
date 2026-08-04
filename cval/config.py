@@ -51,7 +51,7 @@ class SchedulingConfig:
     """Default prioritization and batching controls."""
 
     days_threshold: float = 7
-    batch_size: int = 5
+    batch_size: int = 2
 
 
 @dataclass(frozen=True)

@@ -469,12 +469,12 @@ trap on_ingestion_exit EXIT
 emit_cval_event "ingestion_started" "incomplete"
 
 # Two-phase NCCL outbox: write the complete immutable pending batch before any
-# compatibility DB mutation. No PostgreSQL credentials enter this process.
+# authoritative raw SQLite mutation. No PostgreSQL credentials enter this process.
 NCCL_OUTBOX_PENDING_FILE="$CVAL_NCCL_OUTBOX_ROOT/pending/$CVAL_RUN_ID.json"
 NCCL_OUTBOX_PENDING_EMITTED=false
 if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED" && is_enabled "$RUN_NCCL"; then
     if [[ -f "$NCCL_RUNTIME_EVIDENCE_FILE" ]]; then
-        echo "Emitting immutable NCCL pending outbox before compatibility DB writes."
+        echo "Emitting immutable NCCL pending outbox before raw SQLite writes."
         if ! PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli nccl-eval emit-outbox \
             --result-json "${CVAL_CANONICAL_RESULT_JSON_FILE:-$CVAL_RESULT_JSON_FILE}" \
             --result-digest "$result_digest" \
@@ -482,15 +482,15 @@ if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED" && is_enabled "$RUN_NCCL"; then
             --runtime-evidence "$NCCL_RUNTIME_EVIDENCE_FILE" \
             --outbox-root "$CVAL_NCCL_OUTBOX_ROOT" \
             --apply --confirm emit-outbox --output json; then
-            echo "NCCL pending outbox emission failed; refusing compatibility DB writes." >&2
-            emit_cval_event "nccl_outbox_pending" "fail" "no compatibility DB writes attempted" || true
+            echo "NCCL pending outbox emission failed; refusing raw SQLite writes." >&2
+            emit_cval_event "nccl_outbox_pending" "fail" "no raw SQLite writes attempted" || true
             exit 1
         fi
         NCCL_OUTBOX_PENDING_EMITTED=true
         emit_cval_event "nccl_outbox_pending" "pass"
     elif [[ "$GCRRESULT2" == "pass" ]]; then
-        echo "Passing NCCL result is missing required runtime evidence; refusing compatibility DB writes." >&2
-        emit_cval_event "nccl_outbox_pending" "fail" "no compatibility DB writes attempted" || true
+        echo "Passing NCCL result is missing required runtime evidence; refusing raw SQLite writes." >&2
+        emit_cval_event "nccl_outbox_pending" "fail" "no raw SQLite writes attempted" || true
         exit 1
     else
         echo "Skipping NCCL PostgreSQL outbox because the failed test produced no runtime evidence."
@@ -571,18 +571,18 @@ PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-run-results \
     --db-path "$CVAL_VALIDATION_DB_PATH"
 echo "Main DB update completed."
 
-# After all compatibility writes are durable, expose the pending batch by
+# After all authoritative raw writes are durable, expose the pending batch by
 # creating its immutable commit marker. Marker creation is byte-idempotent and
 # may be retried with nccl-eval commit-outbox after a partial durable failure.
 if [[ "$NCCL_OUTBOX_PENDING_EMITTED" == true ]]; then
-    echo "Committing NCCL evaluation outbox after durable compatibility DB writes."
+    echo "Committing NCCL evaluation outbox after durable raw SQLite writes."
     if ! PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli nccl-eval commit-outbox \
         --outbox-root "$CVAL_NCCL_OUTBOX_ROOT" \
         --pending "$NCCL_OUTBOX_PENDING_FILE" \
         --result-digest "$result_digest" \
         --apply --confirm commit-outbox --output json; then
-        echo "NCCL commit marker failed after compatibility DB writes; retry commit-outbox with the same pending file and result digest." >&2
-        emit_cval_event "nccl_outbox_committed" "fail" "partial durable compatibility DB; pending retained for retry" || true
+        echo "NCCL commit marker failed after raw SQLite writes; retry commit-outbox with the same pending file and result digest." >&2
+        emit_cval_event "nccl_outbox_committed" "fail" "partial durable raw evidence; pending retained for retry" || true
         exit 1
     fi
     emit_cval_event "nccl_outbox_committed" "pass"

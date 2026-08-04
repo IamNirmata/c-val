@@ -107,6 +107,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Wrote 2 storage latest result row(s)", output.getvalue())
 
+    def test_nccl_raw_export_does_not_read_sqlite_classifications(self) -> None:
+        output = io.StringIO()
+        exported = ExportRows(("node", "BUS_BW"), (("node-a", "44.0000"),))
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "cval.cli.get_latest_status_rows",
+            return_value=[LatestStatusRow("node-a", "nccl", 100, "pass")],
+        ), patch(
+            "cval.storage.classification_status.get_latest_classification_rows"
+        ) as classifications, patch(
+            "cval.validation.operations.export_evaluator_rows",
+            return_value=exported,
+        ), redirect_stdout(output):
+            exit_code = main(
+                [
+                    "results",
+                    "--test",
+                    "nccl",
+                    "--output-dir",
+                    tmpdir,
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        classifications.assert_not_called()
+
     def test_classifications_command_writes_csv(self) -> None:
         output = io.StringIO()
 

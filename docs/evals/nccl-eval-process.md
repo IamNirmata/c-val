@@ -232,9 +232,12 @@ CREATE TABLE nccl_raw.node_result (
 
 Raw results are append-only after ingestion.
 
-`SUCCESS` requires both BUS_BW and LATENCY. Non-success rows may retain partial
-diagnostic metrics but create no evaluation row; copied legacy rows missing
-either metric map to `NO_RESULT`.
+`legacy_source` remains in the initial schema for historical provenance, but a
+later additive constraint rejects new `true` rows. Current ingestion is native
+only and requires exact commit/image/evidence digests.
+
+`SUCCESS` requires both BUS_BW and LATENCY. Non-success native rows may retain
+partial diagnostic metrics but create no evaluation row.
 
 Do not store a Boolean `classified` column here.
 
@@ -1152,54 +1155,14 @@ The implementation language may be Python or Go. Prefer:
 - Parameterized SQL.
 - Bounded connection pools.
 
-## 19. Migration from the current SQLite-style table
+## 19. Native ingestion boundary
 
-Current columns resemble:
-
-```text
-Node
-timestamp
-la_timestamp
-iterations
-image_name
-cuda
-pytorch
-samples
-BUS_BW
-LATENCY
-mlx5_0 ... mlx5_13
-```
-
-Migration mapping:
-
-```text
-Shared run values
-    → nccl_raw.test_run
-
-Per-node values
-    → nccl_raw.node_result
-
-mlx5_0 ... mlx5_13
-    → nccl_raw.nic_result rows
-```
-
-For each legacy row:
-
-1. Create or reuse a deterministic `run_id`.
-2. Insert or reuse a `test_run`.
-3. Insert one `node_result`.
-4. Convert each non-null `mlx5_x` value into a `nic_result` row.
-5. Create an `evaluation_job`.
-6. Do not mark old rows as classified until an evaluation is successfully committed.
-
-The historical workload writes `LATENCY = duration * 1000` in milliseconds.
-Legacy conversion therefore multiplies every valid value by 1000 before
-writing canonical `latency_us`: legacy `628.2` becomes `628200.0 us`. The
-material test config records `latency_unit = "us"`,
-`latency_source_unit = "ms"`, and
-`latency_conversion = "ms_to_us_x1000"`. CUDA and PyTorch metadata are
-fallback-only: a nonblank row value is always preserved, while blank/null rows
-use the explicit fallback.
+Copied-SQLite conversion is not supported. Validation jobs build native
+normalized outbox payloads from canonical result, runtime evidence, and NCCL
+summary files. The raw summary latency is converted from milliseconds to
+canonical microseconds during native payload construction. PostgreSQL accepts
+only exact-provenance native payloads; historical `test-nccl.db` remains
+authoritative raw evidence and is not an evaluator input.
 
 ## 20. Database ownership and destructive guards
 
@@ -1336,7 +1299,7 @@ Git refs and the dedicated RWO storage class remain placeholders. The
 Python 3.12 lock includes exact hashes for all transitive/bootstrap versions,
 including setuptools, and has passed a clean bootstrap in the pinned image.
 Validation jobs never receive PostgreSQL credentials. They create immutable
-native `pending/<run>.json` before compatibility SQLite writes and an immutable
+native `pending/<run>.json` before authoritative raw SQLite writes and an immutable
 `committed/<run>.json` marker after all writes succeed. The non-root NCCL
 process in the resident evaluator records durable INGESTED/REJECTED receipts,
 builds due baselines, recovers stale claims, evaluates the queue, and never
@@ -1344,7 +1307,7 @@ deletes outbox files. See `docs/evals/nccl-rollout.md`.
 
 CLI operations provide nonwriting inspection. Exact apply confirmations include `schema`,
 `grant-runtime`, `ingest`, `emit-outbox`, `commit-outbox`, `ingest-outbox`,
-`migrate-legacy`, `calibration`, `build-baselines`, `evaluate`, `worker`,
+`calibration`, `build-baselines`, `evaluate`, `worker`,
 `resident`, and `recover`.
 Confirmation is checked before `DATABASE_URL` is read or a connection pool is
 created. `status` and inspection reports are read-only. Pools use explicit
@@ -1370,15 +1333,8 @@ come from runtime evidence in the ingestion payload. The descriptor's driver
 and topology source values are `runtime_evidence`; no live hardware versions
 are hard-coded.
 
-Legacy conversion opens a copied `IB_HEALTH` SQLite DB with `mode=ro`, groups
-compatible rows into deterministic UUID runs, and normalizes non-null `mlx5_*`
-columns into NIC rows. Metadata absent from the wide table—test definition,
-GPU model/count, NCCL and driver compatibility, topology, and canonical test
-configuration and explicit legacy provenance sentinels—is required. Imported
-rows have no calibration decision and remain excluded until an append-only
-APPROVE event is applied. Nonblank CUDA/PyTorch row facts are
-preserved; configured versions fill only blank/null cells. Legacy milliseconds
-are converted to microseconds with explicit source/conversion evidence.
+Native rows have no calibration decision and remain excluded until an
+append-only APPROVE event is applied.
 
 The migration creates only `nccl_raw`, `nccl_baseline`, and
 `nccl_validation` inside the connected `cval` database. It includes a checksum
