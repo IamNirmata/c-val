@@ -683,6 +683,9 @@ def _add_builtin_compatibility_paths(
             environment["NCCL_IBBW_LOG_FILE"] = (
                 f"{_fd_path(artifacts_fd)}/ibbw-{node}-{timestamp}.log"
             )
+            environment["CVAL_CANONICAL_NCCL_IBBW_LOG_FILE"] = str(
+                canonical_run / "artifacts" / f"ibbw-{node}-{timestamp}.log"
+            )
             environment["NCCL_RUNTIME_EVIDENCE_FILE"] = (
                 f"{_fd_path(artifacts_fd)}/runtime-evidence.json"
             )

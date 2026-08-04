@@ -15,6 +15,7 @@ from pathlib import Path
 
 from cval.config import load_config
 from cval.validation.registry import load_test_registry, validation_test_config_digest
+from cval.validation.nccl_summary import finalize_summary, summarize_ibbw
 from cval.validation.results import load_validation_result, validation_result_digest
 from cval.validation.results import validation_result_to_env
 from cval.validation.runtime import build_runtime_environment, effective_config_digest
@@ -24,6 +25,44 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ValidationScriptTests(unittest.TestCase):
+    def test_nccl_summary_finalizer_parses_hca_samples_and_requires_them(self) -> None:
+        self.assertEqual(
+            summarize_ibbw(
+                "00:00:01 | mlx5_0: 1024 MB/s    mlx5_4: 46.250 GB/s\n"
+                "00:00:02 | mlx5_0: 2.000 GB/s    mlx5_4: 47.250 GB/s\n"
+            ),
+            {
+                "mlx5_0": {
+                    "avg_gbps": 1.5,
+                    "max_gbps": 2.0,
+                    "last_gbps": 2.0,
+                    "samples": 2,
+                },
+                "mlx5_4": {
+                    "avg_gbps": 46.75,
+                    "max_gbps": 47.25,
+                    "last_gbps": 47.25,
+                    "samples": 2,
+                },
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metrics = root / "metrics.json"
+            ibbw = root / "ibbw.log"
+            metrics.write_text('{"GCR_BUSBW":20.0}\n', encoding="utf-8")
+            ibbw.write_text("no HCA samples\n", encoding="utf-8")
+            metrics.chmod(0o600)
+            ibbw.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "no sampled"):
+                finalize_summary(
+                    metrics,
+                    ibbw,
+                    root / "summary.json",
+                    ibbw_log_reference="/canonical/ibbw.log",
+                    require_hca_samples=True,
+                )
+
     def test_validation_scripts_have_valid_bash_syntax(self) -> None:
         bash_scripts = sorted((REPO_ROOT / "validation-tests").rglob("*.sh"))
         subprocess.run(["bash", "-n", *map(str, bash_scripts)], check=True)
@@ -452,6 +491,7 @@ exec {os.sys.executable} "$@"
                 "GCR_ALGBW": 10.0,
                 "GCR_BUSBW": 20.0,
                 "GCR_IB_PORT_BW_GBPS": {},
+                "GCR_IBBW_LOG_FILE": str(output_dir / "ibbw.log"),
             },
         )
         self.assertEqual(published_mode, 0o600)
@@ -465,6 +505,7 @@ exec {os.sys.executable} "$@"
             fake_torchrun.write_text(
                 """#!/bin/bash
 set -e
+sleep 2
 result_file=""
 while [[ $# -gt 0 ]]; do
     if [[ "$1" == "--result-file" ]]; then
@@ -509,6 +550,9 @@ printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_
                 start_new_session=True,
             )
             stdout, stderr = process.communicate(timeout=15)
+            published_summary = json.loads(
+                (output_dir / "summary.json").read_text(encoding="utf-8")
+            )
             try:
                 os.killpg(process.pid, 0)
             except ProcessLookupError:
@@ -520,6 +564,10 @@ printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_
         self.assertEqual(process.returncode, 0, stderr)
         self.assertIn("NCCL summary published", stdout)
         self.assertFalse(descendants_remain)
+        self.assertGreaterEqual(
+            published_summary["GCR_IB_PORT_BW_GBPS"]["mlx5_0"]["samples"],
+            1,
+        )
 
     def test_nccl_runner_rejects_missing_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -569,7 +617,7 @@ exec {os.sys.executable} "$@"
             )
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("summary validation FAILED", completed.stderr)
+        self.assertIn("summary finalization FAILED", completed.stderr)
 
     def test_nccl_collector_failure_never_starts_workload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

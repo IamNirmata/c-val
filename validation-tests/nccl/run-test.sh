@@ -46,6 +46,7 @@ NCCL_SCRIPT="$CVAL_VALIDATION_TESTS_DIR/nccl/single-node-allreduce.py"
 IBBW_PID=""
 NCCL_SUMMARY_STAGE_DIR=""
 NCCL_SUMMARY_STAGE_FILE=""
+NCCL_METRICS_STAGE_FILE=""
 
 mkdir -p "$NCCL_OUTPUT_DIR"
 
@@ -53,6 +54,7 @@ prepare_summary_stage() {
     NCCL_SUMMARY_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cval-nccl-summary.XXXXXX")
     chmod 700 "$NCCL_SUMMARY_STAGE_DIR"
     NCCL_SUMMARY_STAGE_FILE="$NCCL_SUMMARY_STAGE_DIR/summary.json"
+    NCCL_METRICS_STAGE_FILE="$NCCL_SUMMARY_STAGE_DIR/metrics.json"
 }
 
 cleanup_summary_stage() {
@@ -61,6 +63,7 @@ cleanup_summary_stage() {
     fi
     NCCL_SUMMARY_STAGE_DIR=""
     NCCL_SUMMARY_STAGE_FILE=""
+    NCCL_METRICS_STAGE_FILE=""
 }
 
 start_ibbw_monitor() {
@@ -112,8 +115,7 @@ trap on_exit EXIT INT TERM
 prepare_summary_stage
 
 args=(
-    --result-file "$NCCL_SUMMARY_STAGE_FILE"
-    --ibbw-log-file "$NCCL_IBBW_LOG_FILE"
+    --result-file "$NCCL_METRICS_STAGE_FILE"
     --iterations "$CVAL_NCCL_ITERATIONS"
     --data-size-gb "$CVAL_NCCL_DATA_SIZE_GB"
 )
@@ -146,6 +148,21 @@ stop_ibbw_monitor
 append_ibbw_log_to_nccl_log
 if [[ $rc -ne 0 ]]; then
     exit "$rc"
+fi
+
+finalize_args=(
+    --metrics "$NCCL_METRICS_STAGE_FILE"
+    --ibbw-log "$NCCL_IBBW_LOG_FILE"
+    --output "$NCCL_SUMMARY_STAGE_FILE"
+    --ibbw-log-reference "${CVAL_CANONICAL_NCCL_IBBW_LOG_FILE:-$NCCL_IBBW_LOG_FILE}"
+)
+if is_enabled "$CVAL_IBBW_ENABLED"; then
+    finalize_args+=(--require-hca-samples)
+fi
+if ! PYTHONPATH="$CVAL_REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m cval.validation.nccl_summary "${finalize_args[@]}"; then
+    echo "NCCL summary finalization FAILED" >&2
+    exit 1
 fi
 
 if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED"; then
