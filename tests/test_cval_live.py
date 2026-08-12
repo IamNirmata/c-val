@@ -513,11 +513,19 @@ class CvalLiveTests(unittest.TestCase):
             rows = state.read_text(encoding="utf-8").splitlines()
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        self.assertEqual(rows[0], "node_name,latest_job_submission_timestamp")
+        self.assertEqual(
+            rows[0],
+            "node_name,latest_job_submission_timestamp,"
+            "latest_job_submission_timestamp_la",
+        )
         self.assertEqual(len(rows), 2)
-        node, timestamp = rows[1].split(",")
+        node, timestamp, timestamp_la = rows[1].split(",")
         self.assertEqual(node, NODE)
         self.assertTrue(timestamp.isdigit())
+        self.assertRegex(
+            timestamp_la,
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}-0[78]:00$",
+        )
 
     def test_priority_first_checks_nodes_in_order_until_first_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -586,8 +594,9 @@ class CvalLiveTests(unittest.TestCase):
             state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
             state.parent.mkdir(parents=True)
             state.write_text(
-                "node_name,latest_job_submission_timestamp\n"
-                f"{NODE},9999999999\n",
+                "node_name,latest_job_submission_timestamp,"
+                "latest_job_submission_timestamp_la\n"
+                f"{NODE},9999999999,2286-11-20T09:46:39-08:00\n",
                 encoding="utf-8",
             )
             completed = self._run(env)

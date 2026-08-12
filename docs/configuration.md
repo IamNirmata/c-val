@@ -22,7 +22,9 @@ health-evaluator state/write sections.
 `[scheduling].node_cooldown_seconds` defaults to `14400` (four hours).
 `cval-live` excludes a node until that many seconds have elapsed since its
 latest successful Job submission. The local one-row-per-node table is
-`run-logs/cval-live/node_cool_down.csv`; it is not a raw result database.
+`run-logs/cval-live/node_cool_down.csv`. It contains `node_name`, the Unix
+`latest_job_submission_timestamp`, and the derived ISO 8601
+`latest_job_submission_timestamp_la`; it is not a raw result database.
 
 `[monitoring].pending_start_timeout_seconds` defaults to `480`. A tracked Job
 that stays `Pending` for eight minutes may be pruned only when submit mode and

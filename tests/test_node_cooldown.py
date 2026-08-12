@@ -116,8 +116,43 @@ class NodeCooldownTests(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                {"node_name": "node-a", "latest_job_submission_timestamp": "300"},
-                {"node_name": "node-b", "latest_job_submission_timestamp": "200"},
+                {
+                    "node_name": "node-a",
+                    "latest_job_submission_timestamp": "300",
+                    "latest_job_submission_timestamp_la": "1969-12-31T16:05:00-08:00",
+                },
+                {
+                    "node_name": "node-b",
+                    "latest_job_submission_timestamp": "200",
+                    "latest_job_submission_timestamp_la": "1969-12-31T16:03:20-08:00",
+                },
+            ],
+        )
+
+    def test_migrate_adds_la_timestamp_to_legacy_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = Path(tmpdir) / "node_cool_down.csv"
+            state.write_text(
+                "node_name,latest_job_submission_timestamp\nnode-a,1000\n",
+                encoding="utf-8",
+            )
+            completed = self._run(
+                "migrate",
+                "--state-file",
+                str(state),
+            )
+            with state.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "node_name": "node-a",
+                    "latest_job_submission_timestamp": "1000",
+                    "latest_job_submission_timestamp_la": "1969-12-31T16:16:40-08:00",
+                }
             ],
         )
 
@@ -126,6 +161,11 @@ class NodeCooldownTests(unittest.TestCase):
             "wrong,header\nnode-a,100\n",
             "node_name,latest_job_submission_timestamp\nnode-a,100\nnode-a,200\n",
             "node_name,latest_job_submission_timestamp\nnode-a,nope\n",
+            (
+                "node_name,latest_job_submission_timestamp,"
+                "latest_job_submission_timestamp_la\n"
+                "node-a,1000,not-the-derived-time\n"
+            ),
         ):
             with self.subTest(content=content), tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)

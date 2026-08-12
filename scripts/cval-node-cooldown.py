@@ -9,9 +9,25 @@ import fcntl
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-_HEADER = ("node_name", "latest_job_submission_timestamp")
+_HEADER = (
+    "node_name",
+    "latest_job_submission_timestamp",
+    "latest_job_submission_timestamp_la",
+)
+_LEGACY_HEADER = ("node_name", "latest_job_submission_timestamp")
+_LOS_ANGELES = ZoneInfo("America/Los_Angeles")
+
+
+def timestamp_to_la(timestamp: int) -> str:
+    """Render one Unix timestamp in Los Angeles time with its UTC offset."""
+
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(
+        _LOS_ANGELES
+    ).isoformat(timespec="seconds")
 
 
 def load_state(path: Path) -> dict[str, int]:
@@ -28,14 +44,18 @@ def load_state(path: Path) -> dict[str, int]:
             header = tuple(next(reader))
         except StopIteration as exc:
             raise ValueError("cooldown state is empty") from exc
-        if header != _HEADER:
+        if header not in {_HEADER, _LEGACY_HEADER}:
             raise ValueError(
                 "cooldown state header must be exactly " + ",".join(_HEADER)
             )
         for line_number, row in enumerate(reader, start=2):
-            if len(row) != 2:
-                raise ValueError(f"cooldown state row {line_number} must have 2 columns")
-            node, timestamp_text = row
+            expected_columns = len(header)
+            if len(row) != expected_columns:
+                raise ValueError(
+                    f"cooldown state row {line_number} must have "
+                    f"{expected_columns} columns"
+                )
+            node, timestamp_text = row[:2]
             if not node or node.strip() != node or "," in node or "\n" in node:
                 raise ValueError(f"cooldown state row {line_number} has an invalid node")
             if node in state:
@@ -48,6 +68,11 @@ def load_state(path: Path) -> dict[str, int]:
             if timestamp <= 0:
                 raise ValueError(
                     f"cooldown state row {line_number} timestamp must be positive"
+                )
+            if header == _HEADER and row[2] != timestamp_to_la(timestamp):
+                raise ValueError(
+                    f"cooldown state row {line_number} LA timestamp does not "
+                    "match the Unix timestamp"
                 )
             state[node] = timestamp
     return state
@@ -97,7 +122,7 @@ def _write_state(path: Path, state: dict[str, int]) -> None:
             writer = csv.writer(handle, lineterminator="\n")
             writer.writerow(_HEADER)
             for node in sorted(state):
-                writer.writerow((node, state[node]))
+                writer.writerow((node, state[node], timestamp_to_la(state[node])))
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
@@ -133,6 +158,20 @@ def record_submission(path: Path, node: str, timestamp: int) -> None:
         os.close(lock_fd)
 
 
+def migrate_state(path: Path) -> None:
+    """Atomically rewrite existing state using the current CSV schema."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        state = load_state(path)
+        _write_state(path, state)
+    finally:
+        os.close(lock_fd)
+
+
 def _parse_nodes(value: str) -> list[str]:
     if not value:
         return []
@@ -158,9 +197,15 @@ def main() -> int:
     record_parser.add_argument("--node", required=True)
     record_parser.add_argument("--timestamp", type=int, required=True)
 
+    migrate_parser = subparsers.add_parser("migrate")
+    migrate_parser.add_argument("--state-file", type=Path, required=True)
+
     args = parser.parse_args()
     if args.command == "record":
         record_submission(args.state_file, args.node, args.timestamp)
+        return 0
+    if args.command == "migrate":
+        migrate_state(args.state_file)
         return 0
 
     nodes = _parse_nodes(args.nodes)

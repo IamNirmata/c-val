@@ -83,9 +83,12 @@ submission policy and exact node rechecks remain the final mutation gates.
 
 The default cooldown is four hours. Its compact local state is
 `run-logs/cval-live/node_cool_down.csv`, with exactly one row per node and the
-latest successful cval-live submission timestamp. It is a scheduler guard, not
-authoritative test evidence or run history. A malformed table fails planning
-closed. Audit mode reads the table and reports exclusions but never updates it.
+latest successful cval-live submission timestamp. The table stores the Unix
+timestamp used for cooldown calculations and a derived ISO 8601 Los Angeles
+timestamp with its `-07:00` or `-08:00` offset for operator readability. It is
+a scheduler guard, not authoritative test evidence or run history. A malformed
+table fails planning closed. Audit mode reads the table and reports exclusions
+but never updates it.
 
 If a submitted job remains `Pending` and does not reach `Running` within the
 configured pending-start timeout (480 seconds by default), the runner may delete that specific
