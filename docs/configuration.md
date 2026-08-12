@@ -24,8 +24,8 @@ health-evaluator state/write sections.
 latest successful Job submission. The local one-row-per-node table is
 `run-logs/cval-live/node_cool_down.csv`; it is not a raw result database.
 
-`[monitoring].pending_start_timeout_seconds` defaults to `300`. A tracked Job
-that stays `Pending` for five minutes may be pruned only when submit mode and
+`[monitoring].pending_start_timeout_seconds` defaults to `480`. A tracked Job
+that stays `Pending` for eight minutes may be pruned only when submit mode and
 the independent `CVAL_PRUNE_CONFIRM=delete-pending` gate are both active.
 
 `[job].git_ref` is an all-zero fail-closed placeholder in source control.

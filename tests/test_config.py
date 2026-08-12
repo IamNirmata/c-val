@@ -33,7 +33,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.cluster.pvc_access_pod, "gcr-admin-pvc-access")
         self.assertEqual(config.scheduling.batch_size, 2)
         self.assertEqual(config.scheduling.node_cooldown_seconds, 14400)
-        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 300)
+        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 480)
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
         self.assertEqual(
             config.runtime.dl_results_root_path,
@@ -109,7 +109,7 @@ enabled = false
         self.assertEqual(config.cluster.namespace, "staging")
         self.assertEqual(config.scheduling.batch_size, 2)
         self.assertEqual(config.scheduling.node_cooldown_seconds, 14400)
-        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 300)
+        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 480)
         self.assertEqual(config.runtime.validation_root, "/tmp/cval")
         self.assertEqual(
             config.tests.registry.require("dltest").definition.settings["iterations"],

@@ -91,7 +91,7 @@ load_operational_settings() {
     NODE_COOLDOWN_HELPER=${CVAL_NODE_COOLDOWN_HELPER:-$SCRIPT_DIR/cval-node-cooldown.py}
     WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring timeout_seconds 3600)}
     WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
-    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 300)}
+    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
     NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
     JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
 }
@@ -441,6 +441,59 @@ record_node_submission() {
         --state-file "$NODE_COOLDOWN_STATE_FILE" \
         --node "$node" \
         --timestamp "$timestamp"
+}
+
+repair_cycle_cooldowns() {
+    local cycle_dir="$1"
+    local rows
+    if ! rows=$(python - "$cycle_dir" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+cycle_dir = Path(sys.argv[1])
+for path in sorted(cycle_dir.glob("submit-*.json")):
+    match = re.fullmatch(r"submit-([0-9]+)\.json", path.name)
+    if match is None:
+        continue
+    timestamp = int(match.group(1))
+    if timestamp <= 0:
+        raise ValueError("submission artifact has an invalid timestamp")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
+        raise ValueError("submission artifact has an invalid shape")
+    for job in payload["jobs"]:
+        if not isinstance(job, dict):
+            raise ValueError("submission artifact has an invalid job row")
+        if job.get("submitted") is not True:
+            continue
+        node = job.get("node")
+        job_name = job.get("job_name")
+        git_ref = job.get("git_ref")
+        if (
+            not isinstance(node, str)
+            or not node
+            or not isinstance(job_name, str)
+            or not job_name
+            or not isinstance(git_ref, str)
+            or re.fullmatch(r"[0-9a-f]{40}", git_ref) is None
+            or git_ref == "0" * 40
+        ):
+            raise ValueError("submission artifact has an invalid submitted job identity")
+        print(f"{node}\t{timestamp}")
+PY
+); then
+        log "cooldown repair failed for saved cycle $cycle_dir" >&2
+        return 2
+    fi
+    while IFS=$'\t' read -r node timestamp; do
+        [[ -n "$node" ]] || continue
+        if ! record_node_submission "$node" "$timestamp"; then
+            log "cooldown repair write failed for node $node" >&2
+            return 2
+        fi
+    done <<<"$rows"
 }
 
 json_plan_summary_tsv() {
@@ -1024,6 +1077,8 @@ resume_latest_cycle_if_needed() {
     if [[ -z "$cycle_dir" ]]; then
         return 1
     fi
+
+    repair_cycle_cooldowns "$cycle_dir" || return "$?"
 
     local jobs_csv
     jobs_csv=$(json_submitted_jobs_csv_from_dir "$cycle_dir")

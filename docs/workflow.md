@@ -72,7 +72,7 @@ authoritative test evidence or run history. A malformed table fails planning
 closed. Audit mode reads the table and reports exclusions but never updates it.
 
 If a submitted job remains `Pending` and does not reach `Running` within the
-configured pending-start timeout (300 seconds by default), the runner may delete that specific
+configured pending-start timeout (480 seconds by default), the runner may delete that specific
 validation job and open the slot only when submit mode and the independent
 `CVAL_PRUNE_CONFIRM=delete-pending` gate are both active. Audit mode never
 deletes it. Successfully self-pruned jobs are written to a per-cycle

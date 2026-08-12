@@ -308,7 +308,7 @@ class CvalLiveTests(unittest.TestCase):
             "CVAL_NODE_COOLDOWN_SECONDS": "0",
             "CVAL_NODE_COOLDOWN_STATE_FILE": str(root / "logs/node_cool_down.csv"),
             "CVAL_NODE_COOLDOWN_HELPER": str(REPO_ROOT / "scripts/cval-node-cooldown.py"),
-            "CVAL_PENDING_START_TIMEOUT_SECONDS": "300",
+            "CVAL_PENDING_START_TIMEOUT_SECONDS": "480",
             "CVAL_KUBECTL_TIMEOUT_SECONDS": "17",
             "CVAL_WATCH_POLL_SECONDS": "0",
             "CVAL_LOOP_SLEEP_SECONDS": "0",
@@ -635,6 +635,22 @@ class CvalLiveTests(unittest.TestCase):
         self.assertIn("state=no-due-candidates", completed.stdout)
         self.assertFalse(any(" jobs --jobs " in line for line in calls))
         self.assertFalse(any(" --submit " in f" {line} " for line in calls))
+
+    def test_resume_repairs_missing_cooldown_from_timestamped_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root, mode="submit", confirm="submit")
+            first = self._run(env)
+            state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
+            state.unlink()
+            env["FAKE_PLAN_DUE"] = "0"
+            second = self._run(env)
+            rows = state.read_text(encoding="utf-8")
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn(NODE, rows)
+        self.assertIn("latest submitted jobs are already terminal", second.stdout)
 
     def test_default_ref_fetches_origin_main_and_explicit_ref_does_not(self) -> None:
         for explicit, expected_sha, expected_source, expect_fetch in (
@@ -1153,7 +1169,7 @@ class CvalLiveTests(unittest.TestCase):
             self.assertIn("CVAL_PRUNE_CONFIRM=delete-pending", tmux_call)
             self.assertIn("CVAL_PLAN_LIMIT=9", tmux_call)
             self.assertIn("CVAL_NODE_COOLDOWN_SECONDS=0", tmux_call)
-            self.assertIn("CVAL_PENDING_START_TIMEOUT_SECONDS=300", tmux_call)
+            self.assertIn("CVAL_PENDING_START_TIMEOUT_SECONDS=480", tmux_call)
             self.assertIn("CVAL_KUBECTL_TIMEOUT_SECONDS=17", tmux_call)
             if git_ref is None:
                 self.assertNotIn("CVAL_GIT_REF=", tmux_call)
