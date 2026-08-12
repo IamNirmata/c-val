@@ -4,8 +4,8 @@ set -euo pipefail
 # Start/stop a tmux-backed c-val live runner.
 #
 # The immutable operation mode is explicit and audit-first:
-# - audit (default): discover, read latest_status, prioritize, render, and select
-#   slots without submitting, resuming, monitoring, or pruning jobs.
+# - audit (default): inventory, read latest_status, prioritize, check nodes in
+#   order, render, and select slots without submitting, monitoring, or pruning.
 # - submit: additionally requires CVAL_LIVE_CONFIRM=submit. The CLI submission
 #   remains independently gated by --submit --confirm submit.
 # - pruning is disabled unless submit mode also has
@@ -136,6 +136,16 @@ require_command() {
         echo "Required command not found: $1" >&2
         exit 1
     }
+}
+
+acquire_live_lock() {
+    mkdir -p "$LOG_DIR"
+    local lock_file="$LOG_DIR/.cval-live.lock"
+    exec {LIVE_LOCK_FD}>"$lock_file"
+    if ! flock -n "$LIVE_LOCK_FD"; then
+        echo "Another cval-live operational loop holds $lock_file" >&2
+        return 2
+    fi
 }
 
 validate_runtime_settings() {
@@ -431,7 +441,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     print(len(json.load(handle)["cooldown_excluded"]))
 PY
 )
-    log "component=node-cooldown status=ok excluded_count=$excluded_count eligible_free_nodes_count=$PLAN_FREE_NODE_COUNT period=${NODE_COOLDOWN_SECONDS}s"
+    log "component=node-cooldown status=ok excluded_count=$excluded_count priority_candidate_count=$PLAN_FREE_NODE_COUNT period=${NODE_COOLDOWN_SECONDS}s"
 }
 
 record_node_submission() {
@@ -598,30 +608,26 @@ print(f"{free_nodes_count}\t{queue_count}\t{len(planned_jobs)}\t{','.join(nodes)
 PY
 }
 
-json_discovery_summary_tsv() {
+json_inventory_summary_tsv() {
     python - "$1" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
-if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
-    raise ValueError("nodes JSON must be an object containing a nodes list")
-fully_free = []
-for item in data["nodes"]:
-    if not isinstance(item, dict):
-        raise ValueError("nodes JSON contains a non-object node")
-    name = item.get("name")
-    allocatable = item.get("allocatable")
-    free = item.get("free")
-    resource_ready = item.get("resource_ready")
+if not isinstance(data, dict) or set(data) != {"nodes", "node_count"}:
+    raise ValueError("GPU inventory JSON has an unexpected shape")
+nodes = data["nodes"]
+if not isinstance(nodes, list) or type(data["node_count"]) is not int:
+    raise ValueError("GPU inventory JSON contains invalid fields")
+if data["node_count"] != len(nodes):
+    raise ValueError("GPU inventory node_count does not match nodes")
+for name in nodes:
     if not isinstance(name, str) or not name:
-        raise ValueError("nodes JSON contains an invalid node name")
-    if not isinstance(allocatable, int) or not isinstance(free, int):
-        raise ValueError("nodes JSON contains invalid GPU counts")
-    if resource_ready is True and allocatable > 0 and free == allocatable:
-        fully_free.append(name)
-print(f"{len(data['nodes'])}\t{len(fully_free)}\t{','.join(fully_free)}")
+        raise ValueError("GPU inventory contains an invalid node name")
+if len(nodes) != len(set(nodes)):
+    raise ValueError("GPU inventory contains duplicate node names")
+print(f"{len(nodes)}\t{','.join(nodes)}")
 PY
 }
 
@@ -704,21 +710,22 @@ collect_plan_inputs() {
 
     local nodes_rc=0
     assert_runner_worktree "$stem-nodes-before" "$expected_sha" || return "$?"
-    python -m cval.cli --config "$CONFIG_PATH" nodes --output json >"$nodes_file" 2>"$nodes_error" || nodes_rc=$?
+    python -m cval.cli --config "$CONFIG_PATH" nodes --inventory-only --output json >"$nodes_file" 2>"$nodes_error" || nodes_rc=$?
     assert_runner_worktree "$stem-nodes-after" "$expected_sha" || return "$?"
     if (( nodes_rc == 0 )); then
-        local discovery_summary
-        local discovery_parse_rc=0
-        discovery_summary=$(json_discovery_summary_tsv "$nodes_file") || discovery_parse_rc=$?
-        if (( discovery_parse_rc == 0 )); then
-            IFS=$'\t' read -r PLAN_DISCOVERED_NODE_COUNT PLAN_FREE_NODE_COUNT PLAN_FREE_NODES <<<"$discovery_summary"
-            log "component=discovery status=ok discovered_node_count=$PLAN_DISCOVERED_NODE_COUNT free_nodes_count=$PLAN_FREE_NODE_COUNT"
+        local inventory_summary
+        local inventory_parse_rc=0
+        inventory_summary=$(json_inventory_summary_tsv "$nodes_file") || inventory_parse_rc=$?
+        if (( inventory_parse_rc == 0 )); then
+            IFS=$'\t' read -r PLAN_DISCOVERED_NODE_COUNT PLAN_FREE_NODES <<<"$inventory_summary"
+            PLAN_FREE_NODE_COUNT="$PLAN_DISCOVERED_NODE_COUNT"
+            log "component=gpu-inventory status=ok candidate_node_count=$PLAN_DISCOVERED_NODE_COUNT"
         else
-            log "component=discovery status=invalid-json exit_code=$discovery_parse_rc artifact=$nodes_file"
+            log "component=gpu-inventory status=invalid-json exit_code=$inventory_parse_rc artifact=$nodes_file"
             failed=1
         fi
     else
-        log "component=discovery status=failed exit_code=$nodes_rc stderr=$nodes_error"
+        log "component=gpu-inventory status=failed exit_code=$nodes_rc stderr=$nodes_error"
         [[ ! -s "$nodes_error" ]] || cat "$nodes_error" >&2
         failed=1
     fi
@@ -751,29 +758,114 @@ collect_plan_inputs() {
     apply_node_cooldown "$cycle_dir" "$stem"
 }
 
-json_selected_nodes_csv() {
-    local plan_file="$1"
-    local limit="$2"
-    shift 2
-    python - "$plan_file" "$limit" "$@" <<'PY'
+json_node_check_tsv() {
+    python - "$1" "$2" <<'PY'
 import json
 import sys
 
-plan_file = sys.argv[1]
-limit = int(sys.argv[2])
-excluded = set(sys.argv[3:])
-with open(plan_file, encoding="utf-8") as handle:
-    data = json.load(handle)
-selected = []
-for job in data.get("planned_jobs", []):
-    node = job.get("node")
-    if not node or node in excluded:
-        continue
-    selected.append(node)
-    if len(selected) >= limit:
-        break
-print(",".join(selected))
+path, expected_node = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    item = json.load(handle)
+expected = {
+    "name", "found", "is_gpu_node", "schedulable", "resource_ready",
+    "capacity", "allocatable", "used", "free", "fully_free", "reason",
+    "cordoned", "ready", "status_label", "eligible",
+}
+if not isinstance(item, dict) or set(item) != expected:
+    raise ValueError("targeted node status JSON has an unexpected shape")
+if item["name"] != expected_node:
+    raise ValueError("targeted node status identity mismatch")
+for key in (
+    "found", "is_gpu_node", "schedulable", "resource_ready", "fully_free",
+    "cordoned", "ready", "eligible",
+):
+    if not isinstance(item[key], bool):
+        raise ValueError(f"targeted node status {key} must be boolean")
+for key in ("capacity", "allocatable", "used", "free"):
+    if type(item[key]) is not int or item[key] < 0:
+        raise ValueError(f"targeted node status {key} must be non-negative integer")
+for key in ("reason", "status_label"):
+    if not isinstance(item[key], str) or not item[key]:
+        raise ValueError(f"targeted node status {key} must be non-empty")
+print(
+    f"{str(item['eligible']).lower()}\t{item['status_label']}\t"
+    f"{item['free']}\t{item['allocatable']}\t{item['reason']}"
+)
 PY
+}
+
+select_available_nodes() {
+    local plan_file="$1"
+    local limit="$2"
+    local cycle_dir="$3"
+    local stem="$4"
+    local expected_sha="$5"
+    shift 5
+    local excluded=("$@")
+    local candidate_file="$cycle_dir/$stem-priority-candidates.txt"
+    python - "$plan_file" "${excluded[@]}" >"$candidate_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+excluded = set(sys.argv[2:])
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+for job in payload.get("planned_jobs", []):
+    node = job.get("node")
+    if isinstance(node, str) and node and node not in excluded:
+        print(node)
+PY
+    SELECTED_AVAILABLE_NODES=""
+    CHECKED_NODE_NAMES=""
+    local selected_count=0
+    local node
+    while IFS= read -r node; do
+        [[ -n "$node" ]] || continue
+        local check_file="$cycle_dir/$stem-node-check-$node.json"
+        local check_error="$check_file.stderr"
+        local check_rc=0
+        assert_runner_worktree "$stem-check-$node-before" "$expected_sha" || return "$?"
+        python -m cval.cli --config "$CONFIG_PATH" nodes \
+            --check-node "$node" --output json >"$check_file" 2>"$check_error" || check_rc=$?
+        assert_runner_worktree "$stem-check-$node-after" "$expected_sha" || return "$?"
+        if (( check_rc != 0 )); then
+            log "component=node-check node=$node status=failed exit_code=$check_rc stderr=$check_error"
+            [[ ! -s "$check_error" ]] || cat "$check_error" >&2
+            return "$check_rc"
+        fi
+        local check_summary
+        local parse_rc=0
+        check_summary=$(json_node_check_tsv "$check_file" "$node") || parse_rc=$?
+        if (( parse_rc != 0 )); then
+            log "component=node-check node=$node status=invalid-json artifact=$check_file"
+            return "$parse_rc"
+        fi
+        local eligible status_label free allocatable reason
+        IFS=$'\t' read -r eligible status_label free allocatable reason <<<"$check_summary"
+        log "component=node-check node=$node status=$status_label eligible=$eligible free=$free/$allocatable reason=$reason"
+        CHECKED_NODE_NAMES=$(csv_append_unique "$CHECKED_NODE_NAMES" "$node")
+        if [[ "$eligible" == "true" ]]; then
+            SELECTED_AVAILABLE_NODES=$(csv_append_unique "$SELECTED_AVAILABLE_NODES" "$node")
+            selected_count=$((selected_count + 1))
+            if (( selected_count >= limit )); then
+                break
+            fi
+        fi
+    done <"$candidate_file"
+}
+
+exclude_nodes_from_plan_snapshot() {
+    local excluded_csv="$1"
+    [[ -n "$excluded_csv" ]] || return 0
+    PLAN_FREE_NODES=$(python - "$PLAN_FREE_NODES" "$excluded_csv" <<'PY'
+import sys
+nodes = [item for item in sys.argv[1].split(",") if item]
+excluded = {item for item in sys.argv[2].split(",") if item}
+print(",".join(node for node in nodes if node not in excluded))
+PY
+)
+    PLAN_FREE_NODE_COUNT=$(csv_count "$PLAN_FREE_NODES")
 }
 
 run_kubectl() {
@@ -1182,7 +1274,7 @@ run_audit_cycle() {
     enter_runner_worktree "audit" || return "$?"
     local plan_file="$cycle_dir/audit-plan.json"
     local plan_error="$cycle_dir/audit-plan.stderr"
-    log "audit action=inspect: discovery -> latest_status -> priority -> render -> slot selection"
+    log "audit action=inspect: gpu inventory -> latest_status -> cooldown -> priority -> targeted availability checks"
     local inputs_rc=0
     collect_plan_inputs "$cycle_dir" audit "$git_ref" || inputs_rc=$?
     if (( inputs_rc != 0 )); then
@@ -1222,20 +1314,28 @@ run_audit_cycle() {
         leave_runner_worktree "audit" "$parse_rc" || return "$?"
         return "$parse_rc"
     fi
-    local free_nodes_count queue_count planned_count planned_nodes
-    IFS=$'\t' read -r free_nodes_count queue_count planned_count planned_nodes <<<"$summary"
+    local candidate_nodes_count queue_count planned_count planned_nodes
+    IFS=$'\t' read -r candidate_nodes_count queue_count planned_count planned_nodes <<<"$summary"
     local selected_nodes=""
     if (( planned_count > 0 )); then
-        selected_nodes=$(json_selected_nodes_csv "$plan_file" "$BATCH_SIZE")
+        local selection_rc=0
+        select_available_nodes \
+            "$plan_file" "$BATCH_SIZE" "$cycle_dir" audit "$git_ref" \
+            || selection_rc=$?
+        if (( selection_rc != 0 )); then
+            leave_runner_worktree "audit" "$selection_rc" || return "$?"
+            return "$selection_rc"
+        fi
+        selected_nodes="$SELECTED_AVAILABLE_NODES"
     fi
     leave_runner_worktree "audit" 0 || return "$?"
 
-    log "audit component=discovery-and-status status=ok free_nodes_count=$free_nodes_count"
+    log "audit component=inventory-and-status status=ok candidate_node_count=$candidate_nodes_count"
     log "audit component=priority-and-render status=ok queue_count=$queue_count planned_count=$planned_count"
     if [[ -n "$selected_nodes" ]]; then
         log "audit action=inspect selected_nodes=$selected_nodes submitted_count=0"
-    elif (( free_nodes_count == 0 )); then
-        log "audit state=no-free-nodes action=inspect submitted_count=0"
+    elif (( queue_count > 0 )); then
+        log "audit state=no-currently-available-prioritized-node action=inspect submitted_count=0"
     else
         log "audit state=no-due-candidates action=inspect submitted_count=0"
     fi
@@ -1243,7 +1343,7 @@ run_audit_cycle() {
         "$cycle_dir/audit-summary.json" \
         "$git_ref" \
         "$git_ref_source" \
-        "$free_nodes_count" \
+        "$candidate_nodes_count" \
         "$queue_count" \
         "$planned_count" \
         "$selected_nodes" \
@@ -1311,7 +1411,7 @@ run_submit_cycle() {
     fi
     local preflight_free preflight_queue preflight_planned preflight_nodes
     IFS=$'\t' read -r preflight_free preflight_queue preflight_planned preflight_nodes <<<"$preflight_summary"
-    log "submit component=preflight-plan status=ok free_nodes_count=$preflight_free queue_count=$preflight_queue planned_count=$preflight_planned"
+    log "submit component=preflight-plan status=ok candidate_node_count=$preflight_free queue_count=$preflight_queue planned_count=$preflight_planned"
     if (( preflight_queue == 0 )); then
         log "submit state=no-due-candidates; preflight succeeded and no jobs will be submitted"
         leave_runner_worktree "submit" 0 || return "$?"
@@ -1422,6 +1522,12 @@ run_submit_cycle() {
                 leave_runner_worktree "submit" "$inputs_rc" || return "$?"
                 return "$inputs_rc"
             fi
+            local cycle_excluded_nodes=""
+            IFS=',' read -r -a skipped_before_plan <<< "$skipped_nodes"
+            for node in "${skipped_before_plan[@]}"; do
+                cycle_excluded_nodes=$(csv_append_unique "$cycle_excluded_nodes" "$node")
+            done
+            exclude_nodes_from_plan_snapshot "$cycle_excluded_nodes"
             local plan_file="$cycle_dir/plan-$(date -u +%H%M%S)-slot-$slots.json"
             log "rebuilding live ranked list for one open slot ($slots slot(s) available)"
             local plan_rc=0
@@ -1462,9 +1568,9 @@ run_submit_cycle() {
                 leave_runner_worktree "submit" "$parse_rc" || return "$?"
                 return "$parse_rc"
             fi
-            local free_nodes_count queue_count planned_count planned_nodes
-            IFS=$'\t' read -r free_nodes_count queue_count planned_count planned_nodes <<<"$plan_summary"
-            log "submit component=plan status=ok free_nodes_count=$free_nodes_count queue_count=$queue_count planned_count=$planned_count"
+            local candidate_nodes_count queue_count planned_count planned_nodes
+            IFS=$'\t' read -r candidate_nodes_count queue_count planned_count planned_nodes <<<"$plan_summary"
+            log "submit component=plan status=ok candidate_node_count=$candidate_nodes_count queue_count=$queue_count planned_count=$planned_count"
 
             local exclude_args=()
             IFS=',' read -r -a submitted_array <<< "$submitted_nodes"
@@ -1472,11 +1578,21 @@ run_submit_cycle() {
             IFS=',' read -r -a skipped_array <<< "$skipped_nodes"
             for node in "${skipped_array[@]}"; do [[ -n "$node" ]] && exclude_args+=("$node"); done
 
-            local nodes_csv
-            nodes_csv=$(json_selected_nodes_csv "$plan_file" 1 "${exclude_args[@]}")
+            local selection_rc=0
+            select_available_nodes \
+                "$plan_file" 1 "$cycle_dir" "$slot_stem" "$git_ref" \
+                "${exclude_args[@]}" || selection_rc=$?
+            if (( selection_rc != 0 )); then
+                leave_runner_worktree "submit" "$selection_rc" || return "$?"
+                return "$selection_rc"
+            fi
+            local nodes_csv="$SELECTED_AVAILABLE_NODES"
             if [[ -n "$nodes_csv" ]]; then
                 local run_timestamp
                 run_timestamp=$(date +%s)
+                while [[ -e "$cycle_dir/submit-$run_timestamp.json" ]]; do
+                    run_timestamp=$((run_timestamp + 1))
+                done
                 local submit_file="$cycle_dir/submit-$run_timestamp.json"
                 log "submitting node: $nodes_csv timestamp=$run_timestamp"
                 local submit_rc=0
@@ -1499,9 +1615,9 @@ run_submit_cycle() {
                 }
                 if (( submit_rc != 0 )); then
                     cat "$submit_file"
-                    log "submission failed for node $nodes_csv; skipping it for this cycle"
-                    skipped_nodes=$(csv_append_unique "$skipped_nodes" "$nodes_csv")
-                    break
+                    log "submission outcome is indeterminate for node $nodes_csv; retaining artifact and ending cycle without replacement"
+                    leave_runner_worktree "submit" "$submit_rc" || return "$?"
+                    return "$submit_rc"
                 fi
                 cat "$submit_file"
 
@@ -1529,21 +1645,31 @@ run_submit_cycle() {
                 idle_rounds=0
                 slots=$((slots - 1))
             else
+                IFS=',' read -r -a checked_array <<< "$CHECKED_NODE_NAMES"
+                for node in "${checked_array[@]}"; do
+                    [[ -n "$node" ]] && skipped_nodes=$(csv_append_unique "$skipped_nodes" "$node")
+                done
                 idle_rounds=$((idle_rounds + 1))
-                if (( free_nodes_count > 0 && queue_count == 0 )); then
+                if (( candidate_nodes_count > 0 && queue_count == 0 )); then
                     log "submit state=no-due-candidates; no additional eligible nodes for open slots"
-                elif (( free_nodes_count == 0 )); then
-                    log "submit state=no-free-nodes; no additional eligible nodes for open slots"
+                    break
+                elif (( queue_count > 0 )); then
+                    if (( planned_count < queue_count && planned_count > 0 )); then
+                        log "submit state=priority-page-busy; rebuilding without $planned_count checked node(s) to continue the queue"
+                        continue
+                    fi
+                    log "submit state=no-currently-available-prioritized-node; checked priority order without finding a free node"
+                    break
                 else
                     log "submit state=no-additional-candidates; candidates were excluded in this cycle"
+                    break
                 fi
-                break
             fi
         done
 
         active_count=$(csv_count "$active_jobs")
         if (( active_count == 0 && idle_rounds > 0 )); then
-            log "no active jobs and no eligible queued nodes; ending cycle"
+            log "no active jobs and no currently available prioritized nodes; ending cycle"
             break
         fi
 
@@ -1578,6 +1704,8 @@ run_cycle() {
 }
 
 run_once() {
+    require_command flock
+    acquire_live_lock || return "$?"
     if [[ "$LIVE_MODE" == "submit" ]]; then
         local resume_rc=0
         resume_latest_cycle_if_needed || resume_rc=$?
@@ -1594,6 +1722,8 @@ run_once() {
 }
 
 run_loop() {
+    require_command flock
+    acquire_live_lock || return "$?"
     trap 'log "received stop signal; exiting loop"; exit 0' INT TERM
     while true; do
         if [[ "$LIVE_MODE" == "submit" ]]; then

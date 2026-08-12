@@ -245,8 +245,11 @@ def resource_insufficient_node_names(
         if not isinstance(name, str) or not name:
             continue
         for resource_name, (required, parser) in requirements.items():
-            if required <= 0 or resource_name not in allocatable:
+            if required <= 0:
                 continue
+            if resource_name not in allocatable:
+                excluded.add(name)
+                break
             available = parser(allocatable.get(resource_name)) - usage_by_resource[resource_name].get(name, 0)
             if available < required:
                 excluded.add(name)
@@ -288,6 +291,40 @@ def fully_free_node_names(nodes: list[NodeResource]) -> list[str]:
     """Return node names whose allocatable GPUs are entirely free."""
 
     return [node.name for node in nodes if node.is_fully_free]
+
+
+def gpu_node_names_from_capacity_table(
+    nodes_output: str, node_name_filter: str | None = None
+) -> list[str]:
+    """Return all matching nodes with positive GPU capacity, preserving order."""
+
+    names: list[str] = []
+    for line in nodes_output.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        name = parts[0]
+        if node_name_filter and node_name_filter not in name:
+            continue
+        if parse_gpu_quantity(parts[1]) <= 0:
+            continue
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise ValueError("Kubernetes GPU node inventory contains duplicate names")
+    return names
+
+
+def discover_gpu_node_names(
+    client: KubectlClient | None = None,
+    node_name_filter: str | None = None,
+) -> list[str]:
+    """List matching GPU nodes without reading any pod inventory."""
+
+    kubectl = client or KubectlClient()
+    resolved_filter = node_name_filter or load_config().cluster.node_filter
+    return gpu_node_names_from_capacity_table(
+        kubectl.get_nodes_capacity_table(), node_name_filter=resolved_filter
+    )
 
 
 def discover_free_nodes(
@@ -360,6 +397,21 @@ def node_is_ready(node_map: Mapping[str, object]) -> bool:
     return False
 
 
+def node_has_blocking_no_schedule_taint(
+    node_map: Mapping[str, object], tolerated: set[str]
+) -> bool:
+    """Return whether one node has an untolerated NoSchedule taint."""
+
+    for taint in _list(_mapping(node_map.get("spec")).get("taints")):
+        taint_map = _mapping(taint)
+        if (
+            taint_map.get("effect") == "NoSchedule"
+            and taint_map.get("key") not in tolerated
+        ):
+            return True
+    return False
+
+
 def describe_node_from_outputs(
     node_name: str,
     pods_json: Mapping[str, object],
@@ -394,9 +446,12 @@ def describe_node_from_outputs(
     node_map = _node_map_by_name(node_payload, node_name)
     cordoned = node_is_cordoned(node_map)
     if cordoned:
-        # Targeted validation explicitly tolerates the cordon taint. Rolling
-        # discovery still excludes cordoned nodes through unschedulable_node_names.
-        schedulable = True
+        # Explicit targeted validation may tolerate cordon itself, but never an
+        # unrelated NoSchedule taint such as maintenance/quarantine.
+        schedulable = not node_has_blocking_no_schedule_taint(
+            node_map,
+            set(active_config.cluster.tolerated_no_schedule_taints),
+        )
     ready = node_is_ready(node_map) if found else False
     fully_free = (
         found
@@ -416,7 +471,7 @@ def describe_node_from_outputs(
     elif not ready:
         status_label = "not_ready"
         reason = "node kubelet reports NotReady"
-    elif cordoned:
+    elif cordoned and schedulable:
         status_label = "cordoned"
         reason = "node is cordoned and eligible for explicit targeted validation"
     elif not schedulable:
@@ -459,11 +514,34 @@ def describe_node(
 
     kubectl = client or KubectlClient()
     active_config = config or load_config()
+    if not hasattr(kubectl, "get_node_json") or not hasattr(
+        kubectl, "get_pods_for_node_json"
+    ):
+        return describe_node_from_outputs(
+            node_name,
+            kubectl.get_pods_json(),
+            kubectl.get_nodes_capacity_table(),
+            nodes_json=kubectl.get_nodes_json(),
+            config=active_config,
+        )
+    node = kubectl.get_node_json(node_name)
+    metadata = _mapping(node.get("metadata"))
+    status = _mapping(node.get("status"))
+    capacity = _mapping(status.get("capacity"))
+    allocatable = _mapping(status.get("allocatable"))
+    observed_name = metadata.get("name")
+    if observed_name != node_name:
+        raise ValueError(f"Targeted node response identity mismatch for {node_name!r}")
+    nodes_output = (
+        f"{node_name} "
+        f"{capacity.get('nvidia.com/gpu', 0)} "
+        f"{allocatable.get('nvidia.com/gpu', 0)}\n"
+    )
     return describe_node_from_outputs(
         node_name,
-        kubectl.get_pods_json(),
-        kubectl.get_nodes_capacity_table(),
-        nodes_json=kubectl.get_nodes_json(),
+        kubectl.get_pods_for_node_json(node_name),
+        nodes_output,
+        nodes_json={"items": [node]},
         config=active_config,
     )
 

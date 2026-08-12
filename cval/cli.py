@@ -30,7 +30,12 @@ from cval.config import (
 )
 from cval.jobs.manager import submission_result_to_dict, submit_workflow_plan
 from cval.jobs.monitor import get_job_phases, monitored_jobs_to_dict, monitor_jobs_until_terminal
-from cval.k8s.discovery import discover_free_nodes, fully_free_node_names
+from cval.k8s.discovery import (
+    describe_node,
+    discover_free_nodes,
+    discover_gpu_node_names,
+    fully_free_node_names,
+)
 from cval.policy import ExecutionPolicy, PolicyViolation
 from cval.storage.status import (
     get_latest_status_rows,
@@ -241,6 +246,16 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "--node-filter",
         default=active_config.cluster.node_filter,
         help="Substring filter for GPU nodes",
+    )
+    nodes_mode = nodes.add_mutually_exclusive_group()
+    nodes_mode.add_argument(
+        "--inventory-only",
+        action="store_true",
+        help="List matching GPU node names without reading pods",
+    )
+    nodes_mode.add_argument(
+        "--check-node",
+        help="Read schedulability and resources for one prioritized node",
     )
     nodes.add_argument("--output", choices=["table", "json"], default="table")
     nodes.set_defaults(handler=handle_nodes)
@@ -764,6 +779,36 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
 def handle_nodes(args: argparse.Namespace) -> int:
     """Run read-only GPU node discovery and print table or JSON output."""
+
+    if args.inventory_only:
+        names = discover_gpu_node_names(node_name_filter=args.node_filter)
+        if args.output == "json":
+            print(json.dumps({"nodes": names, "node_count": len(names)}, indent=2))
+        else:
+            print("\n".join(names))
+            print(f"GPU nodes: {len(names)}")
+        return 0
+
+    if args.check_node:
+        status = describe_node(args.check_node, config=args.cval_config)
+        eligible = (
+            status.found
+            and status.is_gpu_node
+            and status.ready
+            and status.resource_ready
+            and status.allocatable > 0
+            and status.free == status.allocatable
+            and (status.schedulable or status.cordoned)
+        )
+        payload = asdict(status) | {"eligible": eligible}
+        if args.output == "json":
+            print(json.dumps(payload, indent=2))
+        else:
+            print(
+                f"{status.name}: {status.status_label} eligible={str(eligible).lower()} "
+                f"free={status.free}/{status.allocatable} - {status.reason}"
+            )
+        return 0
 
     nodes, totals = discover_free_nodes(node_name_filter=args.node_filter)
     if args.output == "json":

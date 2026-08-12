@@ -45,6 +45,7 @@ class NodeCooldownTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), "node-a,node-b")
         self.assertEqual(payload["cooldown_excluded"], [])
+        self.assertEqual(payload["priority_eligible_nodes"], ["node-a", "node-b"])
 
     def test_active_cooldown_is_excluded_until_exact_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

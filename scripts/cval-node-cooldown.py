@@ -176,9 +176,9 @@ def main() -> int:
         "observed_at": args.now,
         "cooldown_seconds": args.cooldown_seconds,
         "state_file": str(args.state_file),
-        "discovered_fully_free_nodes": nodes,
+        "gpu_inventory_nodes": nodes,
         "cooldown_excluded": excluded,
-        "eligible_fully_free_nodes": eligible,
+        "priority_eligible_nodes": eligible,
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(

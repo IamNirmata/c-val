@@ -19,11 +19,69 @@ from cval.baselines.storage import (
     store_dynamic_baseline,
 )
 from cval.config import load_config
+from cval.k8s.discovery import NodeStatus
 from cval.models import ClassificationResultRow, LatestStatusRow
 from cval.validation.plugins import ExportRows
 
 
 class CliTests(unittest.TestCase):
+    def test_nodes_inventory_only_lists_gpu_names_without_full_discovery(self) -> None:
+        output = io.StringIO()
+        with (
+            patch(
+                "cval.cli.discover_gpu_node_names",
+                return_value=["slc01-cl02-hgx-0001", "slc01-cl02-hgx-0002"],
+            ) as inventory,
+            patch("cval.cli.discover_free_nodes") as full_discovery,
+            redirect_stdout(output),
+        ):
+            exit_code = main(["nodes", "--inventory-only", "--output", "json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {
+                "nodes": ["slc01-cl02-hgx-0001", "slc01-cl02-hgx-0002"],
+                "node_count": 2,
+            },
+        )
+        inventory.assert_called_once()
+        full_discovery.assert_not_called()
+
+    def test_nodes_check_node_reports_targeted_eligibility(self) -> None:
+        output = io.StringIO()
+        status = NodeStatus(
+            name="slc01-cl02-hgx-0001",
+            found=True,
+            is_gpu_node=True,
+            schedulable=True,
+            resource_ready=True,
+            capacity=8,
+            allocatable=8,
+            used=0,
+            free=8,
+            fully_free=True,
+            reason="free and schedulable",
+            ready=True,
+            status_label="ready",
+        )
+        with patch("cval.cli.describe_node", return_value=status) as describe, redirect_stdout(output):
+            exit_code = main(
+                [
+                    "nodes",
+                    "--check-node",
+                    status.name,
+                    "--output",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["eligible"])
+        self.assertEqual(payload["name"], status.name)
+        describe.assert_called_once()
+
     def test_help_lists_only_preferred_commands(self) -> None:
         output = io.StringIO()
 

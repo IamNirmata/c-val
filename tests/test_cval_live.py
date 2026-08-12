@@ -140,7 +140,27 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
                 printf 'discovery failed\n' >&2
                 exit 31
             fi
-            if [[ "$FAKE_TWO_NODES" == "1" ]]; then
+            if [[ " $* " == *" --inventory-only "* ]]; then
+                if [[ "$FAKE_TWO_NODES" == "1" ]]; then
+                    printf '{"nodes":["%s","%s"],"node_count":2}\n' "$FAKE_NODE" "$FAKE_NODE_2"
+                else
+                    printf '{"nodes":["%s"],"node_count":1}\n' "$FAKE_NODE"
+                fi
+            elif [[ " $* " == *" --check-node "* ]]; then
+                args=("$@")
+                target=""
+                for ((index=0; index<${#args[@]}; index++)); do
+                    if [[ "${args[$index]}" == "--check-node" ]]; then
+                        target="${args[$((index + 1))]}"
+                        break
+                    fi
+                done
+                if [[ ",$FAKE_BUSY_NODES," == *",$target,"* ]]; then
+                    printf '{"name":"%s","found":true,"is_gpu_node":true,"schedulable":true,"resource_ready":true,"capacity":8,"allocatable":8,"used":8,"free":0,"fully_free":false,"reason":"8/8 GPUs already in use","cordoned":false,"ready":true,"status_label":"busy","eligible":false}\n' "$target"
+                else
+                    printf '{"name":"%s","found":true,"is_gpu_node":true,"schedulable":true,"resource_ready":true,"capacity":8,"allocatable":8,"used":0,"free":8,"fully_free":true,"reason":"free and schedulable","cordoned":false,"ready":true,"status_label":"ready","eligible":true}\n' "$target"
+                fi
+            elif [[ "$FAKE_TWO_NODES" == "1" ]]; then
                 printf '{"nodes":[{"name":"%s","capacity":8,"allocatable":8,"used":0,"resource_ready":true,"free":8},{"name":"%s","capacity":8,"allocatable":8,"used":0,"resource_ready":true,"free":8}],"totals":{"capacity":16,"allocatable":16,"used":0,"free":16}}\n' "$FAKE_NODE" "$FAKE_NODE_2"
             else
                 printf '{"nodes":[{"name":"%s","capacity":8,"allocatable":8,"used":0,"resource_ready":true,"free":8}],"totals":{"capacity":8,"allocatable":8,"used":0,"free":8}}\n' "$FAKE_NODE"
@@ -190,7 +210,15 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
                 exit 35
             fi
             if [[ " $* " == *" --submit "* ]]; then
-                printf '{"namespace":"test","submitted_count":1,"jobs":[{"node":"%s","job_name":"cval-%s-123","git_ref":"%s","action":"submitted","submitted":true,"stdout":"created"}]}\n' "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
+                args=("$@")
+                selected_node=""
+                for ((index=0; index<${#args[@]}; index++)); do
+                    if [[ "${args[$index]}" == "--free-nodes" ]]; then
+                        selected_node="${args[$((index + 1))]}"
+                        break
+                    fi
+                done
+                printf '{"namespace":"test","submitted_count":1,"jobs":[{"node":"%s","job_name":"cval-%s-123","git_ref":"%s","action":"submitted","submitted":true,"stdout":"created"}]}\n' "$selected_node" "$selected_node" "$FAKE_ORIGIN_SHA"
             else
                 if [[ "$FAKE_PLAN_DUE" == "1" ]]; then
                     printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123","git_ref":"%s"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
@@ -204,7 +232,16 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
                 printf 'jobs failed\n' >&2
                 exit 34
             fi
-            printf '[{"job_name":"cval-%s-123","phase":"%s"}]\n' "$FAKE_NODE" "$FAKE_JOB_PHASE"
+            args=("$@")
+            requested_jobs=""
+            for ((index=0; index<${#args[@]}; index++)); do
+                if [[ "${args[$index]}" == "--jobs" ]]; then
+                    requested_jobs="${args[$((index + 1))]}"
+                    break
+                fi
+            done
+            first_job=${requested_jobs%%,*}
+            printf '[{"job_name":"%s","phase":"%s"}]\n' "$first_job" "$FAKE_JOB_PHASE"
             ;;
         *)
             printf '{}\n'
@@ -283,6 +320,7 @@ class CvalLiveTests(unittest.TestCase):
             "FAKE_NODE": NODE,
             "FAKE_NODE_2": "slc01-cl02-hgx-0002",
             "FAKE_TWO_NODES": "0",
+            "FAKE_BUSY_NODES": "",
             "FAKE_PLAN_DUE": "1" if due else "0",
             "FAKE_FAIL_COMPONENT": fail_component,
             "FAKE_GIT_FAIL_MATCH": "",
@@ -402,7 +440,8 @@ class CvalLiveTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         joined = "\n".join(calls)
         self.assertIn("python\t-m cval.cli --config", joined)
-        self.assertIn(" nodes --output json", joined)
+        self.assertIn(" nodes --inventory-only --output json", joined)
+        self.assertIn(f" nodes --check-node {NODE} --output json", joined)
         self.assertIn(" status --output json", joined)
         self.assertIn(" plan --free-nodes", joined)
         self.assertNotIn("--submit", joined)
@@ -415,7 +454,7 @@ class CvalLiveTests(unittest.TestCase):
         self.assertEqual(summary["action"], "audit")
         self.assertEqual(summary["cluster_mutations"], 0)
         self.assertEqual(summary["selected_nodes"], [NODE])
-        self.assertIn("free_nodes_count=1", completed.stdout)
+        self.assertIn("candidate_node_count=1", completed.stdout)
         self.assertIn("queue_count=1 planned_count=1", completed.stdout)
 
     def test_submit_wrong_confirmation_fails_before_git_or_kubernetes(self) -> None:
@@ -480,6 +519,65 @@ class CvalLiveTests(unittest.TestCase):
         self.assertEqual(node, NODE)
         self.assertTrue(timestamp.isdigit())
 
+    def test_priority_first_checks_nodes_in_order_until_first_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root, mode="submit", confirm="submit")
+            env["FAKE_TWO_NODES"] = "1"
+            env["FAKE_BUSY_NODES"] = NODE
+            env["FAKE_PLAN_JSON"] = json.dumps(
+                {
+                    "batch_size": 9,
+                    "days_threshold": 7,
+                    "free_nodes_count": 2,
+                    "queue_count": 2,
+                    "planned_jobs": [
+                        {
+                            "priority": 1,
+                            "node": NODE,
+                            "reason": "never-tested",
+                            "last_tested_timestamp": 0,
+                            "age_days": None,
+                            "job_name": f"cval-{NODE}-123",
+                            "git_ref": ORIGIN_SHA,
+                        },
+                        {
+                            "priority": 2,
+                            "node": env["FAKE_NODE_2"],
+                            "reason": "expired",
+                            "last_tested_timestamp": 100,
+                            "age_days": 10.0,
+                            "job_name": f"cval-{env['FAKE_NODE_2']}-123",
+                            "git_ref": ORIGIN_SHA,
+                        },
+                    ],
+                }
+            )
+            completed = self._run(env)
+            calls = self._calls(env)
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        checks = [
+            line
+            for line in calls
+            if line.startswith("python\t") and " nodes --check-node " in line
+        ]
+        self.assertGreaterEqual(len(checks), 2)
+        self.assertIn(f"--check-node {NODE}", checks[0])
+        self.assertIn(f"--check-node {env['FAKE_NODE_2']}", checks[1])
+        submit_calls = [
+            line
+            for line in calls
+            if line.startswith("python\t") and " --submit " in f" {line} "
+        ]
+        self.assertEqual(len(submit_calls), 1)
+        self.assertIn(f"--free-nodes {env['FAKE_NODE_2']}", submit_calls[0])
+        self.assertIn(f"node={NODE} status=busy eligible=false", completed.stdout)
+        self.assertIn(
+            f"node={env['FAKE_NODE_2']} status=ready eligible=true",
+            completed.stdout,
+        )
+
     def test_active_node_cooldown_filters_before_plan_and_submits_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -504,7 +602,7 @@ class CvalLiveTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertFalse(any(" --submit " in f" {line} " for line in calls))
         self.assertIn("state=no-due-candidates", completed.stdout)
-        self.assertEqual(report["eligible_fully_free_nodes"], [])
+        self.assertEqual(report["priority_eligible_nodes"], [])
         self.assertEqual(report["cooldown_excluded"][0]["node"], NODE)
 
     def test_failed_submission_does_not_create_cooldown_state(self) -> None:
@@ -1001,7 +1099,7 @@ class CvalLiveTests(unittest.TestCase):
         self.assertIn("queue_count=0 planned_count=0", completed.stdout)
 
         for component, diagnostic in (
-            ("nodes", "component=discovery status=failed exit_code=31"),
+            ("nodes", "component=gpu-inventory status=failed exit_code=31"),
             ("plan", "audit component=plan status=failed exit_code=33"),
         ):
             with self.subTest(component=component), tempfile.TemporaryDirectory() as tmpdir:
@@ -1278,7 +1376,7 @@ class CvalLiveTests(unittest.TestCase):
                 after,
                 f"missing guard immediately after c-val invocation at source line {start + 1}",
             )
-        self.assertEqual(invocation_count, 11)
+        self.assertEqual(invocation_count, 12)
 
         git_commands = [
             line.strip()

@@ -5,15 +5,18 @@
 c-val continuously validates GPU-cluster nodes without allowing health verdicts
 to mutate the cluster. The code path is deterministic and testable:
 
-1. discover schedulable free nodes;
-2. prioritize never-tested or stale nodes from `metadata/validation.db`;
-3. render Volcano jobs from an exact published commit;
-4. run development validation directly on the cluster through the existing
+1. list all matching GPU nodes without scanning cluster-wide pods;
+2. prioritize never-tested or stale nodes from `metadata/validation.db`, after
+  applying the node submission cooldown;
+3. check prioritized nodes one at a time until the first currently available
+  node is found;
+4. render Volcano jobs from an exact published commit;
+5. run development validation directly on the cluster through the existing
   double confirmation gate;
-5. run registered storage, NCCL, and DL checks;
-6. ingest current raw pass/fail and metric databases;
-7. build median/MAD baselines and classify nodes;
-8. export `normal`, `degraded`, and `improved` verdicts.
+6. run registered storage, NCCL, and DL checks;
+7. ingest current raw pass/fail and metric databases;
+8. build median/MAD baselines and classify nodes;
+9. export `normal`, `degraded`, and `improved` verdicts.
 
 ## Canonical data model
 

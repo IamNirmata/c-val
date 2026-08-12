@@ -1,9 +1,10 @@
 # c-val
 
 c-val is a deterministic continuous-validation framework for GPU clusters. It
-discovers free nodes, prioritizes stale coverage, runs real Volcano validation
-jobs from exact commits, supervises registered checks, ingests current result databases, and
-classifies nodes with robust baselines.
+prioritizes stale coverage across the GPU-node inventory, checks availability
+one node at a time in priority order, runs real Volcano validation jobs from
+exact commits, supervises registered checks, ingests current result databases,
+and classifies nodes with robust baselines.
 
 ## Safety defaults
 

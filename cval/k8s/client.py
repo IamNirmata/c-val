@@ -118,10 +118,22 @@ class KubectlClient:
 
         return self.get_json(["get", "pods", "-A"])
 
+    def get_pods_for_node_json(self, node_name: str) -> dict:
+        """Return pods assigned to one node using a server-side field selector."""
+
+        return self.get_json(
+            ["get", "pods", "-A", "--field-selector", f"spec.nodeName={node_name}"]
+        )
+
     def get_nodes_json(self) -> dict:
         """Return all nodes as Kubernetes JSON, including taints and schedulability."""
 
         return self.get_json(["get", "nodes"])
+
+    def get_node_json(self, node_name: str) -> dict:
+        """Return one named node as Kubernetes JSON."""
+
+        return self.get_json(["get", "node", node_name])
 
     def get_nodes_capacity_table(self) -> str:
         """Return a compact node table containing GPU capacity and allocatable values."""

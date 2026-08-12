@@ -14,9 +14,9 @@ sequenceDiagram
     User->>CLI: cval status --output table
     CLI->>DB: read latest_status in mode=ro
     DB-->>CLI: latest node/test rows
-    User->>CLI: cval nodes
-    CLI->>K8s: kubectl get pods/nodes
-    K8s-->>CLI: pod usage + node resources
+    User->>CLI: cval nodes --inventory-only
+    CLI->>K8s: kubectl get nodes GPU capacity
+    K8s-->>CLI: all matching GPU node names
     User->>CLI: cval plan --live-status --git-ref SHA
     CLI->>CLI: prioritize stale/never-tested nodes
     CLI->>CLI: render job specs
@@ -34,36 +34,52 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[Read latest status] --> B[Discover nodes]
-    B --> C{Node schedulable?}
-    C -- No --> X[Exclude node]
-    C -- Yes --> D{GPU fully free?}
-    D -- No --> X
-    D -- Yes --> E{History fresh?}
-    E -- Yes --> X
-    E -- No --> F[Queue candidate]
-    F --> G[Sort never-tested and oldest first]
-    G --> H[Take batch-size]
-    H --> I[Render Volcano job YAML]
-    I --> J[Read-only queue plan]
+    A[List all matching GPU nodes] --> B[Read latest status]
+    B --> C[Remove active cooldown nodes]
+    C --> D{History fresh?}
+    D -- Yes --> X[Exclude node]
+    D -- No --> E[Queue candidate]
+    E --> F[Sort never-tested and oldest first]
+    F --> G[Check first node only]
+    G --> H{Ready, schedulable, resources and all GPUs free?}
+    H -- No --> I[Check next prioritized node]
+    I --> H
+    H -- Yes --> J[Render and submit one Volcano Job]
+    J --> K[Rebuild priority queue for next slot]
 ```
 
 ## Live Runner Per-Slot Rebuild Policy
 
-The live runner treats the ranked node list as a short-lived snapshot. It does
-not build one large queue and walk it blindly.
+The live runner prioritizes before it performs expensive availability checks.
+It does not fetch all pods across the cluster merely to decide which node should
+be checked first.
 
 For every open batch slot, it rebuilds the ranked list from scratch:
 
-1. Rebuilds the free schedulable node list from current Kubernetes state.
-2. Reads the local latest-submission cooldown table and excludes nodes whose
+1. Reads the compact Kubernetes GPU-capacity table and lists every node matching
+    the configured GPU-node filter (`hgx` by default). No pod inventory is read.
+2. Re-reads latest validation status from SQLite.
+3. Reads the local latest-submission cooldown table and excludes nodes whose
     configured cooldown has not expired.
-3. Re-reads latest validation status from SQLite.
 4. Filters out nodes with valid `all` results inside the threshold window.
 5. Ranks never-tested nodes first, then nodes with the oldest available results.
-6. Submits exactly one job for the top currently valid node.
-7. Records that node's latest submission timestamp atomically.
-8. Repeats the same rebuild for the next open slot.
+6. Checks nodes one at a time in that priority order. Each check reads only the
+    named Node and pods assigned to that Node, then verifies Ready state, taints,
+    CPU, memory, RDMA, and that every allocatable GPU is free.
+7. Stops checking immediately when the first eligible free node is found and
+    submits exactly one Job for it. Lower-priority nodes are not queried.
+8. Records that node's latest submission timestamp atomically.
+9. Rebuilds the entire priority queue before filling the next batch slot.
+
+Availability checks operate in bounded priority pages (`CVAL_PLAN_LIMIT`, 50 by
+default). If every node in a page is busy, cval excludes those checked nodes,
+rebuilds, and continues with the next priority page. It stops only when it finds
+the first free node or exhausts the due queue. Busy nodes are not removed from
+validation history; they are reconsidered on the next full per-slot rebuild.
+
+One local advisory lock under `run-logs/cval-live/` prevents two cval-live
+processes on the same operator host from racing the same slots. Kubernetes
+submission policy and exact node rechecks remain the final mutation gates.
 
 The default cooldown is four hours. Its compact local state is
 `run-logs/cval-live/node_cool_down.csv`, with exactly one row per node and the
