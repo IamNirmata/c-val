@@ -86,9 +86,12 @@ load_operational_settings() {
     EXPLICIT_GIT_REF=${CVAL_GIT_REF:-}
     BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 2)}
     DAYS_THRESHOLD=${CVAL_DAYS_THRESHOLD:-$(config_value scheduling days_threshold 7)}
+    NODE_COOLDOWN_SECONDS=${CVAL_NODE_COOLDOWN_SECONDS:-$(config_value scheduling node_cooldown_seconds 14400)}
+    NODE_COOLDOWN_STATE_FILE=${CVAL_NODE_COOLDOWN_STATE_FILE:-$LOG_DIR/node_cool_down.csv}
+    NODE_COOLDOWN_HELPER=${CVAL_NODE_COOLDOWN_HELPER:-$SCRIPT_DIR/cval-node-cooldown.py}
     WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring timeout_seconds 3600)}
     WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
-    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
+    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 300)}
     NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
     JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
 }
@@ -112,6 +115,8 @@ Environment overrides:
   CVAL_CONFIG=$CONFIG_PATH
     CVAL_BATCH_SIZE=<positive-integer>
     CVAL_DAYS_THRESHOLD=<days>
+    CVAL_NODE_COOLDOWN_SECONDS=14400              # 4 hours; 0 disables
+    CVAL_NODE_COOLDOWN_STATE_FILE=$LOG_DIR/node_cool_down.csv
     CVAL_PENDING_START_TIMEOUT_SECONDS=<seconds>
     CVAL_GIT_REF=<40-hex-commit>                   # explicit session pin only
     CVAL_KUBECTL_TIMEOUT_SECONDS=120
@@ -153,6 +158,18 @@ validate_runtime_settings() {
             return 2
         fi
     done
+    if [[ ! "$PENDING_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "CVAL_PENDING_START_TIMEOUT_SECONDS must be a positive integer (got: $PENDING_START_TIMEOUT_SECONDS)" >&2
+        return 2
+    fi
+    if [[ ! "$NODE_COOLDOWN_SECONDS" =~ ^[0-9]+$ ]]; then
+        echo "CVAL_NODE_COOLDOWN_SECONDS must be a non-negative integer (got: $NODE_COOLDOWN_SECONDS)" >&2
+        return 2
+    fi
+    if [[ ! -f "$NODE_COOLDOWN_HELPER" ]]; then
+        echo "Node cooldown helper not found: $NODE_COOLDOWN_HELPER" >&2
+        return 2
+    fi
 }
 
 require_submit_startup_gate() {
@@ -305,26 +322,46 @@ leave_runner_worktree() {
     fi
 }
 
-json_submitted_jobs_csv() {
-    python - "$1" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-jobs = [job["job_name"] for job in data.get("jobs", []) if job.get("submitted")]
-print(",".join(jobs))
-PY
-}
-
 json_submitted_jobs_csv_from_dir() {
     local cycle_dir="$1"
     python - "$cycle_dir" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
 cycle_dir = Path(sys.argv[1])
+pruned_path = cycle_dir / "pruned-jobs.csv"
+pruned = set()
+if pruned_path.exists():
+    import csv
+    with pruned_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != ["job_name", "deleted_at"]:
+            raise ValueError("pruned-jobs.csv has an invalid header")
+        for row in reader:
+            name = row.get("job_name", "")
+            deleted_at = row.get("deleted_at", "")
+            if not name or not deleted_at.isdigit() or name in pruned:
+                raise ValueError("pruned-jobs.csv has an invalid row")
+            pruned.add(name)
+legacy_deleted_path = cycle_dir / "deleted-jobs.log"
+if legacy_deleted_path.exists():
+    patterns = (
+        re.compile(
+            r'^job\.batch\.volcano\.sh/([^ ]+) deleted'
+            r'(?: from [a-z0-9.-]+ namespace)?$'
+        ),
+        re.compile(
+            r'^job\.batch\.volcano\.sh "([^"]+)" deleted'
+            r'(?: from [a-z0-9.-]+ namespace)?$'
+        ),
+    )
+    for raw_line in legacy_deleted_path.read_text(encoding="utf-8").splitlines():
+        matches = [pattern.fullmatch(raw_line) for pattern in patterns]
+        match = next((value for value in matches if value is not None), None)
+        if match is not None:
+            pruned.add(match.group(1))
 jobs = []
 for path in sorted(cycle_dir.glob("submit*.json")):
     try:
@@ -332,10 +369,78 @@ for path in sorted(cycle_dir.glob("submit*.json")):
     except json.JSONDecodeError:
         continue
     for job in data.get("jobs", []):
-        if job.get("submitted") and job.get("job_name") not in jobs:
+        if (
+            job.get("submitted")
+            and job.get("job_name") not in pruned
+            and job.get("job_name") not in jobs
+        ):
             jobs.append(job["job_name"])
 print(",".join(jobs))
 PY
+}
+
+json_submitted_job_tsv() {
+    python - "$1" "$2" "$3" <<'PY'
+import json
+import sys
+
+path, expected_node, expected_git_ref = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+if not isinstance(payload, dict) or set(payload) != {"namespace", "submitted_count", "jobs"}:
+    raise ValueError("submission JSON has an unexpected top-level shape")
+if type(payload["submitted_count"]) is not int or payload["submitted_count"] != 1:
+    raise ValueError("submission JSON must report exactly one submitted job")
+jobs = payload["jobs"]
+if not isinstance(jobs, list) or len(jobs) != 1 or not isinstance(jobs[0], dict):
+    raise ValueError("submission JSON must contain exactly one job object")
+job = jobs[0]
+if job.get("submitted") is not True or job.get("action") != "submitted":
+    raise ValueError("submission JSON does not confirm creation")
+if job.get("node") != expected_node or job.get("git_ref") != expected_git_ref:
+    raise ValueError("submission JSON identity does not match the requested job")
+job_name = job.get("job_name")
+if not isinstance(job_name, str) or not job_name:
+    raise ValueError("submission JSON has an invalid job name")
+print(f"{job_name}\t{expected_node}")
+PY
+}
+
+apply_node_cooldown() {
+    local cycle_dir="$1"
+    local stem="$2"
+    local observed_at
+    observed_at=$(date +%s)
+    local report="$cycle_dir/$stem-node-cooldown.json"
+    local filtered
+    if ! filtered=$(python "$NODE_COOLDOWN_HELPER" filter \
+        --state-file "$NODE_COOLDOWN_STATE_FILE" \
+        --nodes "$PLAN_FREE_NODES" \
+        --now "$observed_at" \
+        --cooldown-seconds "$NODE_COOLDOWN_SECONDS" \
+        --report "$report"); then
+        log "component=node-cooldown status=failed state=$NODE_COOLDOWN_STATE_FILE" >&2
+        return 1
+    fi
+    PLAN_FREE_NODES="$filtered"
+    PLAN_FREE_NODE_COUNT=$(csv_count "$PLAN_FREE_NODES")
+    local excluded_count
+    excluded_count=$(python - "$report" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(len(json.load(handle)["cooldown_excluded"]))
+PY
+)
+    log "component=node-cooldown status=ok excluded_count=$excluded_count eligible_free_nodes_count=$PLAN_FREE_NODE_COUNT period=${NODE_COOLDOWN_SECONDS}s"
+}
+
+record_node_submission() {
+    local node="$1"
+    local timestamp="$2"
+    python "$NODE_COOLDOWN_HELPER" record \
+        --state-file "$NODE_COOLDOWN_STATE_FILE" \
+        --node "$node" \
+        --timestamp "$timestamp"
 }
 
 json_plan_summary_tsv() {
@@ -590,6 +695,7 @@ collect_plan_inputs() {
     if (( failed != 0 )); then
         return 1
     fi
+    apply_node_cooldown "$cycle_dir" "$stem"
 }
 
 json_selected_nodes_csv() {
@@ -737,73 +843,68 @@ else:
 PY
 }
 
+record_pruned_job() {
+    local cycle_dir="$1"
+    local job_name="$2"
+    local deleted_at="$3"
+    python - "$cycle_dir/pruned-jobs.csv" "$job_name" "$deleted_at" <<'PY'
+import csv
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+job_name = sys.argv[2]
+deleted_at = sys.argv[3]
+rows = {}
+if path.exists():
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != ["job_name", "deleted_at"]:
+            raise ValueError("pruned-jobs.csv has an invalid header")
+        for row in reader:
+            name = row.get("job_name", "")
+            timestamp = row.get("deleted_at", "")
+            if not name or not timestamp.isdigit() or name in rows:
+                raise ValueError("pruned-jobs.csv has an invalid row")
+            rows[name] = timestamp
+if not job_name or not deleted_at.isdigit():
+    raise ValueError("invalid pruned job receipt")
+rows[job_name] = deleted_at
+path.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+temporary = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(("job_name", "deleted_at"))
+        for name in sorted(rows):
+            writer.writerow((name, rows[name]))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+finally:
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
 delete_job() {
     local job_name="$1"
+    local deleted_log="$2"
+    local cycle_dir="$3"
     if ! pruning_enabled; then
         log "refusing pending-job delete because pruning is not independently enabled"
         return 2
     fi
     log "deleting pending job after timeout: $job_name"
-    run_kubectl delete vcjob -n "$NAMESPACE" "$job_name" --ignore-not-found=true | tee -a "$2"
-}
-
-stale_pending_jobs() {
-    local vcjob_json
-    vcjob_json=$(mktemp)
-    if ! run_kubectl get vcjob -n "$NAMESPACE" -o json > "$vcjob_json"; then
-        log "bounded stale-pending vcjob read failed; skipping pruning for this pass"
-        rm -f "$vcjob_json"
-        return 0
+    if ! run_kubectl delete vcjob -n "$NAMESPACE" "$job_name" --ignore-not-found=true | tee -a "$deleted_log"; then
+        return 1
     fi
-    local rc=0
-    python - "$JOB_PREFIX" "$PENDING_START_TIMEOUT_SECONDS" "$vcjob_json" <<'PY' || rc=$?
-import datetime as dt
-import json
-import sys
-import time
-
-prefix = sys.argv[1]
-timeout_seconds = int(float(sys.argv[2]))
-payload_path = sys.argv[3]
-with open(payload_path, encoding="utf-8") as handle:
-    payload = json.load(handle)
-now = int(time.time())
-
-for item in payload.get("items", []):
-    metadata = item.get("metadata", {})
-    status = item.get("status", {})
-    name = metadata.get("name", "")
-    phase = status.get("state", {}).get("phase", "")
-    created = metadata.get("creationTimestamp", "")
-    if not name.startswith(prefix + "-") or phase != "Pending" or not created:
-        continue
-    created_epoch = int(dt.datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp())
-    if now - created_epoch >= timeout_seconds:
-        print(name)
-PY
-    rm -f "$vcjob_json"
-    return "$rc"
-}
-
-prune_stale_pending_jobs() {
-    local cycle_dir="$1"
-    if ! pruning_enabled; then
-        return 0
-    fi
-    local stale_jobs
-    if ! stale_jobs=$(stale_pending_jobs); then
-        log "stale pending job parsing failed; skipping pruning for this pass"
-        return 0
-    fi
-    if [[ -z "$stale_jobs" ]]; then
-        return 0
-    fi
-
-    while IFS= read -r job_name; do
-        [[ -n "$job_name" ]] || continue
-        log "pruning stale pending c-val job: $job_name"
-        delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
-    done <<< "$stale_jobs"
+    record_pruned_job "$cycle_dir" "$job_name" "$(date +%s)"
 }
 
 watch_existing_jobs_until_clear() {
@@ -874,7 +975,11 @@ watch_existing_jobs_until_clear() {
                         local now_epoch
                         now_epoch=$(date +%s)
                         if [[ "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
-                            delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
+                            if ! delete_job "$job_name" "$cycle_dir/deleted-jobs.log" "$cycle_dir"; then
+                                log "resume prune failed for $job_name; retaining tracked job"
+                                leave_runner_worktree "resume-watch" 2 || return "$?"
+                                return 2
+                            fi
                             active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
                         fi
                     fi
@@ -996,7 +1101,8 @@ new_cycle_dir() {
 
 log_operation_settings() {
     log "mode=$LIVE_MODE config=$CONFIG_PATH"
-    log "batch_size=$BATCH_SIZE plan_limit=$PLAN_LIMIT days_threshold=$DAYS_THRESHOLD kubectl_timeout=${KUBECTL_TIMEOUT_SECONDS}s"
+    log "batch_size=$BATCH_SIZE plan_limit=$PLAN_LIMIT days_threshold=$DAYS_THRESHOLD node_cooldown=${NODE_COOLDOWN_SECONDS}s kubectl_timeout=${KUBECTL_TIMEOUT_SECONDS}s"
+    log "node_cooldown_state=$NODE_COOLDOWN_STATE_FILE"
     if pruning_enabled; then
         log "pruning=enabled confirmation=delete-pending namespace=$NAMESPACE prefix=$JOB_PREFIX"
     else
@@ -1165,8 +1271,6 @@ run_submit_cycle() {
     local idle_rounds=0
 
     while true; do
-        prune_stale_pending_jobs "$cycle_dir"
-
         local status_file="$cycle_dir/status-$(date -u +%H%M%S).json"
         if [[ -n "$active_jobs" ]]; then
             local status_error="$status_file.stderr"
@@ -1231,7 +1335,11 @@ run_submit_cycle() {
                             local now_epoch
                             now_epoch=$(date +%s)
                             if [[ "$phase" == "Pending" && "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
-                                delete_job "$job_name" "$cycle_dir/deleted-jobs.log"
+                                if ! delete_job "$job_name" "$cycle_dir/deleted-jobs.log" "$cycle_dir"; then
+                                    log "pending job prune failed for $job_name; retaining it and ending cycle"
+                                    leave_runner_worktree "submit" 1 || return "$?"
+                                    return 1
+                                fi
                                 active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
                                 skipped_nodes=$(csv_append_unique "$skipped_nodes" "$node")
                             fi
@@ -1342,9 +1450,22 @@ run_submit_cycle() {
                 fi
                 cat "$submit_file"
 
-                local new_jobs
-                new_jobs=$(json_submitted_jobs_csv "$submit_file")
-                active_jobs=$(csv_append_unique "$active_jobs" "$new_jobs")
+                local submitted_identity
+                local submitted_parse_rc=0
+                submitted_identity=$(json_submitted_job_tsv "$submit_file" "$nodes_csv" "$git_ref") || submitted_parse_rc=$?
+                if (( submitted_parse_rc != 0 )); then
+                    log "submission response was invalid for node $nodes_csv; saved artifact retained and cycle stopped"
+                    leave_runner_worktree "submit" "$submitted_parse_rc" || return "$?"
+                    return "$submitted_parse_rc"
+                fi
+                local new_job submitted_node
+                IFS=$'\t' read -r new_job submitted_node <<<"$submitted_identity"
+                if ! record_node_submission "$submitted_node" "$run_timestamp"; then
+                    log "cooldown state update failed after submitting $new_job; ending cycle without further submissions"
+                    leave_runner_worktree "submit" 1 || return "$?"
+                    return 1
+                fi
+                active_jobs=$(csv_append_unique "$active_jobs" "$new_job")
 
                 IFS=',' read -r -a submitted_nodes_array <<< "$nodes_csv"
                 for node in "${submitted_nodes_array[@]}"; do
@@ -1457,8 +1578,8 @@ start_session() {
         printf -v explicit_git_ref_env ' CVAL_GIT_REF=%q' "$EXPLICIT_GIT_REF"
     fi
     printf -v runner_cmd \
-        'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q%s bash %q run-loop' \
-        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT" "$DAYS_THRESHOLD" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$explicit_git_ref_env" "$SCRIPT_PATH"
+        'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q%s bash %q run-loop' \
+        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$explicit_git_ref_env" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \

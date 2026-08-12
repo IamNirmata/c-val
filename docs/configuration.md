@@ -5,10 +5,10 @@ The operator config is `config/cval.toml`.
 ## Sections
 
 - `[cluster]` — namespace, current PVC reader pod name, node filter, tolerated taints;
-- `[scheduling]` — staleness threshold and batch size;
+- `[scheduling]` — staleness threshold, batch size, and node submission cooldown;
 - `[job]` — validation template, prefix, repository, and ref;
 - `[policy]` — namespace allowlist, max batch size, submit confirmation;
-- `[monitoring]` — read-only polling and timeout values;
+- `[monitoring]` — read-only polling, overall timeout, and Pending-start timeout values;
 - `[storage]` — current authoritative raw DB paths;
 - `[runtime]` — repository, evidence root, test directory, and DL artifact root;
 - `[tests.<id>]` — only `enabled` and repository-relative `config_path`;
@@ -18,6 +18,15 @@ The operator config is `config/cval.toml`.
 
 There are no normalized-history, alternate per-test ingestion, or dedicated
 health-evaluator state/write sections.
+
+`[scheduling].node_cooldown_seconds` defaults to `14400` (four hours).
+`cval-live` excludes a node until that many seconds have elapsed since its
+latest successful Job submission. The local one-row-per-node table is
+`run-logs/cval-live/node_cool_down.csv`; it is not a raw result database.
+
+`[monitoring].pending_start_timeout_seconds` defaults to `300`. A tracked Job
+that stays `Pending` for five minutes may be pruned only when submit mode and
+the independent `CVAL_PRUNE_CONFIRM=delete-pending` gate are both active.
 
 `[job].git_ref` is an all-zero fail-closed placeholder in source control.
 Every real `validate` or `run` submission must provide an exact published,

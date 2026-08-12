@@ -10,6 +10,8 @@ tolerated_no_schedule_taints = ["nvidia.com/gpu", "rdma"]
 [scheduling]
 days_threshold = 7
 batch_size = 2
+# Do not submit another cval Job to a recently submitted node until this expires.
+node_cooldown_seconds = 14400
 
 [job]
 template_path = "ymls/specific-node-job.yml"
@@ -28,7 +30,7 @@ confirmation_phrase = "submit"
 # mode enough time for every sequential test deadline plus ingestion grace.
 timeout_seconds = 6000
 poll_interval_seconds = 60
-pending_start_timeout_seconds = 480
+pending_start_timeout_seconds = 300
 
 [storage]
 validation_db_path = "/data/continuous_validation/metadata/validation.db"

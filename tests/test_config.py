@@ -32,6 +32,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.cluster.namespace, "gcr-admin")
         self.assertEqual(config.cluster.pvc_access_pod, "gcr-admin-pvc-access")
         self.assertEqual(config.scheduling.batch_size, 2)
+        self.assertEqual(config.scheduling.node_cooldown_seconds, 14400)
+        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 300)
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
         self.assertEqual(
             config.runtime.dl_results_root_path,
@@ -106,6 +108,8 @@ enabled = false
 
         self.assertEqual(config.cluster.namespace, "staging")
         self.assertEqual(config.scheduling.batch_size, 2)
+        self.assertEqual(config.scheduling.node_cooldown_seconds, 14400)
+        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 300)
         self.assertEqual(config.runtime.validation_root, "/tmp/cval")
         self.assertEqual(
             config.tests.registry.require("dltest").definition.settings["iterations"],
@@ -114,6 +118,44 @@ enabled = false
         self.assertFalse(config.tests.registry.require("dltest").enabled)
         self.assertTrue(config.tests.registry.require("storage").enabled)
         self.assertEqual(config.job.git_ref, "0" * 40)
+
+    def test_loads_scheduler_cooldown_and_pending_timeout_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "cval.toml"
+            config_path.write_text(
+                """
+[scheduling]
+node_cooldown_seconds = 7200
+
+[monitoring]
+pending_start_timeout_seconds = 180
+""",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+
+        self.assertEqual(config.scheduling.node_cooldown_seconds, 7200)
+        self.assertEqual(config.monitoring.pending_start_timeout_seconds, 180)
+
+    def test_rejects_invalid_scheduler_cooldown_and_pending_timeout(self) -> None:
+        cases = (
+            ("[scheduling]\nnode_cooldown_seconds = -1\n", "node_cooldown_seconds"),
+            ("[scheduling]\nnode_cooldown_seconds = true\n", "must be an integer"),
+            (
+                "[monitoring]\npending_start_timeout_seconds = 0\n",
+                "pending_start_timeout_seconds",
+            ),
+            (
+                "[monitoring]\npending_start_timeout_seconds = 1.5\n",
+                "must be an integer",
+            ),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "cval.toml"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, message):
+                    load_config(path)
 
     def test_load_config_runs_plugin_config_validation_for_all_declared_tests(self) -> None:
         repository = Path(__file__).resolve().parents[1]

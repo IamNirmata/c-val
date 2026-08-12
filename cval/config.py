@@ -52,6 +52,7 @@ class SchedulingConfig:
 
     days_threshold: float = 7
     batch_size: int = 2
+    node_cooldown_seconds: int = 4 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class MonitoringConfig:
 
     timeout_seconds: float = 6000
     poll_interval_seconds: float = 60
+    pending_start_timeout_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -381,6 +383,11 @@ def _build_config(
         scheduling=SchedulingConfig(
             days_threshold=_float(scheduling, "days_threshold", defaults.scheduling.days_threshold),
             batch_size=_int(scheduling, "batch_size", defaults.scheduling.batch_size),
+            node_cooldown_seconds=_int(
+                scheduling,
+                "node_cooldown_seconds",
+                defaults.scheduling.node_cooldown_seconds,
+            ),
         ),
         job=JobConfig(
             template_path=_repo_path(job, "template_path", defaults.job.template_path),
@@ -411,6 +418,11 @@ def _build_config(
                 monitoring,
                 "poll_interval_seconds",
                 defaults.monitoring.poll_interval_seconds,
+            ),
+            pending_start_timeout_seconds=_int(
+                monitoring,
+                "pending_start_timeout_seconds",
+                defaults.monitoring.pending_start_timeout_seconds,
             ),
         ),
         storage=StorageConfig(
@@ -571,6 +583,18 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     # Reject reserved/colliding operator-facing names during config loading,
     # before argparse or a background loop can observe an ambiguous catalog.
     build_operational_target_catalog(tests.registry)
+    if (
+        isinstance(config.scheduling.node_cooldown_seconds, bool)
+        or config.scheduling.node_cooldown_seconds < 0
+    ):
+        raise ValueError("scheduling.node_cooldown_seconds must be a non-negative integer")
+    if (
+        isinstance(config.monitoring.pending_start_timeout_seconds, bool)
+        or config.monitoring.pending_start_timeout_seconds <= 0
+    ):
+        raise ValueError(
+            "monitoring.pending_start_timeout_seconds must be a positive integer"
+        )
     nccl = tests.registry.get("nccl")
     if nccl is not None and nccl.definition.settings.get("evaluation_enabled") is True:
         if not is_exact_commit(config.job.git_ref):

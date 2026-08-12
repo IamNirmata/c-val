@@ -166,6 +166,18 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
                 printf '%s\n' "$FAKE_PLAN_JSON"
                 exit 0
             fi
+            free_nodes_arg=""
+            args=("$@")
+            for ((index=0; index<${#args[@]}; index++)); do
+                if [[ "${args[$index]}" == "--free-nodes" ]]; then
+                    free_nodes_arg="${args[$((index + 1))]}"
+                    break
+                fi
+            done
+            if [[ -z "$free_nodes_arg" ]]; then
+                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":0,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
+                exit 0
+            fi
             if [[ "$FAKE_PLAN_DUE" == "1" ]]; then
                 printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123","git_ref":"%s"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
             else
@@ -173,6 +185,10 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
             fi
             ;;
         run)
+            if [[ "$FAKE_FAIL_COMPONENT" == "run" ]]; then
+                printf 'submission failed\n' >&2
+                exit 35
+            fi
             if [[ " $* " == *" --submit "* ]]; then
                 printf '{"namespace":"test","submitted_count":1,"jobs":[{"node":"%s","job_name":"cval-%s-123","git_ref":"%s","action":"submitted","submitted":true,"stdout":"created"}]}\n' "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
             else
@@ -289,6 +305,10 @@ class CvalLiveTests(unittest.TestCase):
             "CVAL_BATCH_SIZE": "1",
             "CVAL_PLAN_LIMIT": "9",
             "CVAL_DAYS_THRESHOLD": "7",
+            "CVAL_NODE_COOLDOWN_SECONDS": "0",
+            "CVAL_NODE_COOLDOWN_STATE_FILE": str(root / "logs/node_cool_down.csv"),
+            "CVAL_NODE_COOLDOWN_HELPER": str(REPO_ROOT / "scripts/cval-node-cooldown.py"),
+            "CVAL_PENDING_START_TIMEOUT_SECONDS": "300",
             "CVAL_KUBECTL_TIMEOUT_SECONDS": "17",
             "CVAL_WATCH_POLL_SECONDS": "0",
             "CVAL_LOOP_SLEEP_SECONDS": "0",
@@ -409,6 +429,25 @@ class CvalLiveTests(unittest.TestCase):
             self.assertIn("CVAL_LIVE_CONFIRM=submit", completed.stderr)
             self.assertEqual(calls, [])
 
+    def test_invalid_cooldown_and_pending_timeout_fail_before_git_or_kubernetes(self) -> None:
+        cases = (
+            ("CVAL_NODE_COOLDOWN_SECONDS", "-1", "non-negative integer"),
+            ("CVAL_NODE_COOLDOWN_SECONDS", "1.5", "non-negative integer"),
+            ("CVAL_PENDING_START_TIMEOUT_SECONDS", "0", "positive integer"),
+            ("CVAL_PENDING_START_TIMEOUT_SECONDS", "nope", "positive integer"),
+        )
+        for name, value, message in cases:
+            with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as tmpdir:
+                env = self._environment(Path(tmpdir))
+                env[name] = value
+                failed = self._run(env)
+                calls = self._calls(env)
+
+            self.assertEqual(failed.returncode, 2)
+            self.assertIn(message, failed.stderr)
+            self.assertFalse(any(line.startswith("git\t") for line in calls))
+            self.assertFalse(any(line.startswith("kubectl\t") for line in calls))
+
     def test_submit_exact_gate_passes_cli_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env = self._environment(Path(tmpdir), mode="submit", confirm="submit")
@@ -425,6 +464,80 @@ class CvalLiveTests(unittest.TestCase):
         self.assertIn("--confirm submit", submit_calls[0])
         self.assertIn("pruning=disabled", completed.stdout)
         self.assertFalse(any("kubectl\t" in line and " delete " in f" {line} " for line in calls))
+
+    def test_successful_submission_records_latest_node_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root, mode="submit", confirm="submit")
+            completed = self._run(env)
+            state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
+            rows = state.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(rows[0], "node_name,latest_job_submission_timestamp")
+        self.assertEqual(len(rows), 2)
+        node, timestamp = rows[1].split(",")
+        self.assertEqual(node, NODE)
+        self.assertTrue(timestamp.isdigit())
+
+    def test_active_node_cooldown_filters_before_plan_and_submits_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root, mode="submit", confirm="submit")
+            env["CVAL_NODE_COOLDOWN_SECONDS"] = "14400"
+            state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
+            state.parent.mkdir(parents=True)
+            state.write_text(
+                "node_name,latest_job_submission_timestamp\n"
+                f"{NODE},9999999999\n",
+                encoding="utf-8",
+            )
+            completed = self._run(env)
+            calls = self._calls(env)
+            reports = sorted(
+                Path(env["CVAL_LIVE_LOG_DIR"]).glob(
+                    "*/preflight-node-cooldown.json"
+                )
+            )
+            report = json.loads(reports[-1].read_text(encoding="utf-8"))
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertFalse(any(" --submit " in f" {line} " for line in calls))
+        self.assertIn("state=no-due-candidates", completed.stdout)
+        self.assertEqual(report["eligible_fully_free_nodes"], [])
+        self.assertEqual(report["cooldown_excluded"][0]["node"], NODE)
+
+    def test_failed_submission_does_not_create_cooldown_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root, mode="submit", confirm="submit")
+            env["FAKE_PLAN_JSON"] = json.dumps(
+                {
+                    "batch_size": 9,
+                    "days_threshold": 7,
+                    "free_nodes_count": 1,
+                    "queue_count": 1,
+                    "planned_jobs": [
+                        {
+                            "priority": 1,
+                            "node": NODE,
+                            "reason": "never-tested",
+                            "last_tested_timestamp": 0,
+                            "age_days": None,
+                            "job_name": f"cval-{NODE}-123",
+                            "git_ref": ORIGIN_SHA,
+                        }
+                    ],
+                }
+            )
+            env["FAKE_FAIL_COMPONENT"] = "run"
+            completed = self._run(env)
+            cooldown_state_exists = Path(
+                env["CVAL_NODE_COOLDOWN_STATE_FILE"]
+            ).exists()
+
+        self.assertIn("submission failed", completed.stdout)
+        self.assertFalse(cooldown_state_exists)
 
     def test_prune_is_default_off_and_separately_gated_with_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -452,8 +565,12 @@ class CvalLiveTests(unittest.TestCase):
                 confirm="submit",
                 prune_confirm="delete-pending",
             )
+            env["FAKE_JOB_PHASE"] = "Pending"
             completed = self._run(env)
             calls = self._calls(env)
+            pruned = self._latest_artifact(env, "pruned-jobs.csv").read_text(
+                encoding="utf-8"
+            )
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         kubectl_calls = [line for line in calls if line.startswith("kubectl\t")]
@@ -464,6 +581,60 @@ class CvalLiveTests(unittest.TestCase):
         self.assertTrue(timeout_calls)
         self.assertTrue(all("--foreground 17s kubectl" in line for line in timeout_calls))
         self.assertIn("pruning=enabled", completed.stdout)
+        self.assertIn(f"cval-{NODE}-123", pruned)
+
+    def test_self_pruned_job_resumes_as_resolved_and_node_stays_in_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(
+                root,
+                mode="submit",
+                confirm="submit",
+                prune_confirm="delete-pending",
+            )
+            env["CVAL_NODE_COOLDOWN_SECONDS"] = "14400"
+            env["FAKE_JOB_PHASE"] = "Pending"
+            first = self._run(env)
+            env["FAKE_JOB_PHASE"] = "Unknown"
+            second = self._run(env)
+            calls = self._calls(env)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        submit_calls = [
+            line
+            for line in calls
+            if line.startswith("python\t") and " --submit " in f" {line} "
+        ]
+        self.assertEqual(len(submit_calls), 1)
+        self.assertNotIn("indeterminate", second.stdout)
+        self.assertIn("state=no-due-candidates", second.stdout)
+        self.assertIn("excluded_count=1", second.stdout)
+
+    def test_legacy_exact_delete_receipt_resolves_pre_csv_pruned_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(
+                root,
+                due=False,
+                mode="submit",
+                confirm="submit",
+            )
+            self._write_resume_submission(env)
+            old = Path(env["CVAL_LIVE_LOG_DIR"]) / "old"
+            (old / "deleted-jobs.log").write_text(
+                f'job.batch.volcano.sh "cval-{NODE}-123" deleted\n',
+                encoding="utf-8",
+            )
+            env["FAKE_JOB_PHASE"] = "Unknown"
+            completed = self._run(env)
+            calls = self._calls(env)
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertNotIn("indeterminate", completed.stdout)
+        self.assertIn("state=no-due-candidates", completed.stdout)
+        self.assertFalse(any(" jobs --jobs " in line for line in calls))
+        self.assertFalse(any(" --submit " in f" {line} " for line in calls))
 
     def test_default_ref_fetches_origin_main_and_explicit_ref_does_not(self) -> None:
         for explicit, expected_sha, expected_source, expect_fetch in (
@@ -981,6 +1152,8 @@ class CvalLiveTests(unittest.TestCase):
             self.assertIn("CVAL_LIVE_CONFIRM=submit", tmux_call)
             self.assertIn("CVAL_PRUNE_CONFIRM=delete-pending", tmux_call)
             self.assertIn("CVAL_PLAN_LIMIT=9", tmux_call)
+            self.assertIn("CVAL_NODE_COOLDOWN_SECONDS=0", tmux_call)
+            self.assertIn("CVAL_PENDING_START_TIMEOUT_SECONDS=300", tmux_call)
             self.assertIn("CVAL_KUBECTL_TIMEOUT_SECONDS=17", tmux_call)
             if git_ref is None:
                 self.assertNotIn("CVAL_GIT_REF=", tmux_call)
