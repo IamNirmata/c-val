@@ -697,7 +697,7 @@ def run_node_validation(
             and status.resource_ready
             and status.allocatable > 0
             and status.free == status.allocatable
-            and (status.schedulable or status.cordoned)
+            and status.schedulable
         )
         if not eligible:
             raise PolicyViolation(

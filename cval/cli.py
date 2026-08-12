@@ -798,7 +798,7 @@ def handle_nodes(args: argparse.Namespace) -> int:
             and status.resource_ready
             and status.allocatable > 0
             and status.free == status.allocatable
-            and (status.schedulable or status.cordoned)
+            and status.schedulable
         )
         payload = asdict(status) | {"eligible": eligible}
         if args.output == "json":

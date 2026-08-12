@@ -82,6 +82,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["name"], status.name)
         describe.assert_called_once()
 
+    def test_nodes_check_node_rejects_cordoned_node_with_blocking_taint(self) -> None:
+        output = io.StringIO()
+        status = NodeStatus(
+            name="slc01-cl02-hgx-0001",
+            found=True,
+            is_gpu_node=True,
+            schedulable=False,
+            resource_ready=True,
+            capacity=8,
+            allocatable=8,
+            used=0,
+            free=8,
+            fully_free=True,
+            reason="node carries a blocking NoSchedule taint",
+            cordoned=True,
+            ready=True,
+            status_label="unschedulable",
+        )
+        with patch("cval.cli.describe_node", return_value=status), redirect_stdout(output):
+            exit_code = main(
+                ["nodes", "--check-node", status.name, "--output", "json"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(json.loads(output.getvalue())["eligible"])
+
     def test_help_lists_only_preferred_commands(self) -> None:
         output = io.StringIO()
 
