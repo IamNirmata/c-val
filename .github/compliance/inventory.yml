@@ -2,4 +2,3 @@ inventory:
 - source: DirectOwners
   items:
   - id: erdman@microsoft.com
-  - id: cesarmart@microsoft.com
