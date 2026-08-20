@@ -274,7 +274,19 @@ class TestDescribeNode(unittest.TestCase):
         )
 
     def _nodes_json(self, name, *, unschedulable=False, allocatable=None, ready=True):
-        spec = {"unschedulable": True} if unschedulable else {}
+        spec = (
+            {
+                "unschedulable": True,
+                "taints": [
+                    {
+                        "key": "node.kubernetes.io/unschedulable",
+                        "effect": "NoSchedule",
+                    }
+                ],
+            }
+            if unschedulable
+            else {}
+        )
         return {
             "items": [
                 {

@@ -212,6 +212,30 @@ class DiscoveryTests(unittest.TestCase):
             )
         )
 
+    def test_standard_cordon_taint_is_not_an_unrelated_blocker(self) -> None:
+        node = {
+            "spec": {
+                "unschedulable": True,
+                "taints": [
+                    {
+                        "key": "node.kubernetes.io/unschedulable",
+                        "effect": "NoSchedule",
+                    },
+                    {"key": "nvidia.com/gpu", "effect": "NoSchedule"},
+                ],
+            }
+        }
+        self.assertFalse(
+            node_has_blocking_no_schedule_taint(
+                node,
+                {
+                    "nvidia.com/gpu",
+                    "rdma",
+                    "node.kubernetes.io/unschedulable",
+                },
+            )
+        )
+
     def test_excludes_nodes_without_validation_pod_resources(self) -> None:
         config = CvalConfig(
             job_template=JobTemplateConfig(

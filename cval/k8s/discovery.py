@@ -448,9 +448,12 @@ def describe_node_from_outputs(
     if cordoned:
         # Explicit targeted validation may tolerate cordon itself, but never an
         # unrelated NoSchedule taint such as maintenance/quarantine.
+        targeted_tolerations = set(
+            active_config.cluster.tolerated_no_schedule_taints
+        ) | {"node.kubernetes.io/unschedulable"}
         schedulable = not node_has_blocking_no_schedule_taint(
             node_map,
-            set(active_config.cluster.tolerated_no_schedule_taints),
+            targeted_tolerations,
         )
     ready = node_is_ready(node_map) if found else False
     fully_free = (
