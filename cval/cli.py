@@ -494,6 +494,15 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
     db_add_nccl_health.set_defaults(handler=handle_db_add_nccl_health)
 
+    db_add_dltest = subparsers.add_parser("db-add-dltest-run")
+    db_add_dltest.add_argument("node")
+    db_add_dltest.add_argument("timestamp")
+    db_add_dltest.add_argument("results_root", type=Path)
+    db_add_dltest.add_argument("--result-json", type=Path, required=True)
+    db_add_dltest.add_argument("--result-digest", required=True)
+    db_add_dltest.add_argument("--output", choices=["table", "json"], default="table")
+    db_add_dltest.set_defaults(handler=handle_db_add_dltest_run)
+
     db_rebuild_dltest = subparsers.add_parser("db-rebuild-dltest-metrics")
     db_rebuild_dltest.add_argument(
         "--results-root",
@@ -1496,6 +1505,29 @@ def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
         _authorization=authorization,
     )
     print(f"Added consolidated IB_HEALTH result: {args.node} {timestamp}")
+    return 0
+
+
+def handle_db_add_dltest_run(args: argparse.Namespace) -> int:
+    """Ingest one complete passing DL run into all four metric DBs."""
+
+    from cval.storage.dltest_ingest import ingest_dltest_run
+
+    authorization = _raw_write_authorization(args)
+    summary = ingest_dltest_run(
+        args.results_root,
+        node=args.node,
+        timestamp=args.timestamp,
+        config=args.cval_config,
+        _authorization=authorization,
+    )
+    if args.output == "json":
+        print(json.dumps(summary, indent=2))
+    else:
+        print(
+            f"Ingested current DL run from {summary['rank_files']} rank file(s): "
+            f"{summary['results_root']}"
+        )
     return 0
 
 

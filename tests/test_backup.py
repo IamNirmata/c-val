@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/cval-backup.sh"
@@ -95,6 +96,55 @@ class BackupScriptTests(unittest.TestCase):
             self.assertIn("independent external storage", completed.stdout)
             self.assertIn("--confirm-quiesced writers-stopped", completed.stdout)
             self.assertEqual([path.name for path in (root / "backups").iterdir()], ["old"])
+
+    def test_publish_falls_back_in_owner_only_directory_when_renameat2_is_unsupported(
+        self,
+    ) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            root.chmod(0o700)
+            (root / "staging").mkdir()
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(
+                    module,
+                    "rename_noreplace_at",
+                    side_effect=OSError(22, "unsupported"),
+                ):
+                    module._publish_staging(descriptor, "staging", "published")
+            finally:
+                os.close(descriptor)
+
+            self.assertFalse((root / "staging").exists())
+            self.assertTrue((root / "published").is_dir())
+
+    def test_publish_fallback_never_replaces_existing_destination(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            root.chmod(0o700)
+            (root / "staging").mkdir()
+            published = root / "published"
+            published.mkdir()
+            marker = published / "marker"
+            marker.write_text("retain", encoding="utf-8")
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(
+                    module,
+                    "rename_noreplace_at",
+                    side_effect=OSError(22, "unsupported"),
+                ):
+                    with self.assertRaises(FileExistsError):
+                        module._publish_staging(
+                            descriptor, "staging", "published"
+                        )
+            finally:
+                os.close(descriptor)
+
+            self.assertTrue((root / "staging").is_dir())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "retain")
 
     def test_inspection_insufficient_capacity_has_no_effects(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -128,6 +128,9 @@ expected = {
     "CVAL_DL_COMPUTE_DB_PATH": storage.dl_compute_db_path,
     "CVAL_DL_COLLECTIVE_DB_PATH": storage.dl_collective_db_path,
     "CVAL_DL_OVERLAP_DB_PATH": storage.dl_overlap_db_path,
+    "CVAL_DL_METRIC_LOCK_FILE": str(
+        Path(config.baseline.baseline_root_path) / ".dl-metric-refresh.lock"
+    ),
 }
 expected_digest = effective_config_digest(config)
 expected["CVAL_CONFIG_DIGEST"] = expected_digest
@@ -541,7 +544,8 @@ if is_enabled "$RUN_NCCL" && [ "$GCRRESULT2" = "pass" ]; then
     # each HCA port's maximum observed bandwidth (mlx5_0..mlx5_13).
     nccl_hca_args=()
     if is_enabled "$CVAL_IBBW_ENABLED"; then
-        nccl_hca_args=(--require-hca-samples)
+        nccl_ibbw_ingest_log=${CVAL_CANONICAL_NCCL_IBBW_LOG_FILE:-$NCCL_IBBW_LOG_FILE}
+        nccl_hca_args=(--ibbw-log "$nccl_ibbw_ingest_log" --require-hca-samples)
     fi
     PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-nccl-health \
         "$GCRNODE" \
@@ -579,8 +583,9 @@ if is_enabled "$RUN_DLTEST" && [ "$GCRRESULT3" = "pass" ]; then
     PYTHONPATH="$CVAL_REPO_DIR" python3 "$CVAL_DL_METRIC_LOCK_HELPER" \
         "$CVAL_DL_METRIC_LOCK_FILE" -- \
         python3 -m cval.cli --config "$CVAL_CONFIG_PATH" \
-        db-rebuild-dltest-metrics \
-        --results-root "$dltest_ingest_dir" \
+        db-add-dltest-run "$GCRNODE" "$GCRTIME" "$dltest_ingest_dir" \
+        --result-json "$CVAL_RESULT_JSON_FILE" \
+        --result-digest "$result_digest" \
         --output json
     echo "DL metric DB update completed."
 else

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -509,6 +510,88 @@ def _cleanup_staging(destination_fd: int, staging_fd: int | None, staging_name: 
     remove_tree_at(destination_fd, staging_name)
 
 
+def _publish_staging(destination_fd: int, staging_name: str, final_name: str) -> None:
+    """Publish staging without overwrite, including owner-only FS fallback."""
+
+    try:
+        rename_noreplace_at(
+            destination_fd,
+            staging_name,
+            destination_fd,
+            final_name,
+        )
+        return
+    except OSError as exc:
+        unsupported = {errno.EINVAL, errno.ENOSYS}
+        if hasattr(errno, "EOPNOTSUPP"):
+            unsupported.add(errno.EOPNOTSUPP)
+        if exc.errno not in unsupported:
+            raise
+    metadata = os.fstat(destination_fd)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise BackupError(
+            "backup publication fallback requires an owner-only destination directory"
+        )
+    staging_fd = os.open(staging_name, DIRECTORY_FLAGS, dir_fd=destination_fd)
+    reservation_fd: int | None = None
+    renamed = False
+    try:
+        staging_identity = descriptor_identity(staging_fd)
+        reservation_fd = mkdir_exact_at(destination_fd, final_name, 0o700)
+        reservation_identity = descriptor_identity(reservation_fd)
+        os.fsync(destination_fd)
+        if os.listdir(reservation_fd):
+            raise BackupError("backup destination reservation is not empty")
+        named_staging = os.stat(
+            staging_name, dir_fd=destination_fd, follow_symlinks=False
+        )
+        named_reservation = os.stat(
+            final_name, dir_fd=destination_fd, follow_symlinks=False
+        )
+        if (named_staging.st_dev, named_staging.st_ino) != staging_identity:
+            raise BackupError("backup staging identity changed before publication")
+        if (
+            named_reservation.st_dev,
+            named_reservation.st_ino,
+        ) != reservation_identity:
+            raise BackupError("backup destination reservation identity changed")
+        os.rename(
+            staging_name,
+            final_name,
+            src_dir_fd=destination_fd,
+            dst_dir_fd=destination_fd,
+        )
+        renamed = True
+        published = os.stat(
+            final_name, dir_fd=destination_fd, follow_symlinks=False
+        )
+        if (published.st_dev, published.st_ino) != staging_identity:
+            raise BackupError("backup publication identity mismatch")
+    except BaseException:
+        try:
+            named = os.stat(final_name, dir_fd=destination_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            named_identity = (named.st_dev, named.st_ino)
+            if renamed and named_identity == descriptor_identity(staging_fd):
+                remove_tree_at(destination_fd, final_name)
+            elif (
+                reservation_fd is not None
+                and named_identity == descriptor_identity(reservation_fd)
+            ):
+                os.rmdir(final_name, dir_fd=destination_fd)
+        raise
+    finally:
+        if reservation_fd is not None:
+            os.close(reservation_fd)
+        os.close(staging_fd)
+
+
 def _test_hook_after_copy(source: Path) -> None:
     relative = os.environ.get("_CVAL_BACKUP_TEST_MUTATE_RELATIVE")
     if not relative:
@@ -702,7 +785,7 @@ def create_backup(
             (entry for entry in inventory.values() if entry.type == "directory"),
         )
         os.fsync(staging_fd)
-        rename_noreplace_at(destination_fd, staging_name, destination_fd, final_name)
+        _publish_staging(destination_fd, staging_name, final_name)
         published = True
         os.fsync(destination_fd)
         return {

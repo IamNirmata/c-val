@@ -222,6 +222,9 @@ def add_nccl_health_from_summary(*args, **kwargs):
         canonical_ibbw = canonical.parent / "artifacts/ibbw.log"
         canonical_ibbw.parent.mkdir()
         shutil.copy2(Path(ibbw_source), canonical_ibbw)
+        payload = json.loads(canonical.read_text(encoding="utf-8"))
+        payload["GCR_IBBW_LOG_FILE"] = str(canonical_ibbw)
+        canonical.write_text(json.dumps(payload), encoding="utf-8")
         kwargs["ibbw_log_path"] = canonical_ibbw
     kwargs["_authorization"] = authorization
     return _add_nccl_health_from_summary(*mutable_args, **kwargs)
@@ -1111,6 +1114,54 @@ class NcclHealthIngestTests(unittest.TestCase):
                 ).fetchone()
 
         self.assertEqual(row, (2, 46.25, 45.75))
+
+    def test_nccl_recovery_rejects_alternate_canonical_ibbw_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nccl.db"
+            authorization, root = _authorization(
+                "node-a",
+                123,
+                operation="nccl",
+                db_path=db_path,
+            )
+            run_dir = root / "validation_tests/nccl/runs/node-a/node-a-123"
+            artifacts = run_dir / "artifacts"
+            artifacts.mkdir(parents=True)
+            referenced = artifacts / "ibbw.log"
+            alternate = artifacts / "ibbw-node-a-123.log"
+            for path, value in ((referenced, 46.0), (alternate, 12.0)):
+                path.write_text(
+                    f"00:00:01 | mlx5_4: {value:.3f} GB/s\n",
+                    encoding="utf-8",
+                )
+            summary = run_dir / "summary.json"
+            summary.write_text(
+                json.dumps(
+                    {
+                        "GCR_ITERATIONS": 20,
+                        "GCR_BUSBW": 44.5,
+                        "GCR_ALGBW": 25.4,
+                        "GCR_LATENCY": 628.2,
+                        "GCR_IB_PORT_BW_GBPS": {},
+                        "GCR_IBBW_LOG_FILE": str(referenced),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "summary reference"):
+                _add_nccl_health_from_summary(
+                    "node-a",
+                    123,
+                    summary,
+                    ibbw_log_path=alternate,
+                    require_hca_samples=True,
+                    immutable=True,
+                    db_path=db_path,
+                    _authorization=authorization,
+                )
+
+            self.assertFalse(db_path.exists())
 
     def test_nccl_rejects_incomplete_or_invalid_port_schema(self) -> None:
         for port in (

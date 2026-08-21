@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from pathlib import Path
 import re
 import shlex
 from typing import TYPE_CHECKING
@@ -77,6 +78,9 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         "CVAL_DL_COMPUTE_DB_PATH": config.storage.dl_compute_db_path,
         "CVAL_DL_COLLECTIVE_DB_PATH": config.storage.dl_collective_db_path,
         "CVAL_DL_OVERLAP_DB_PATH": config.storage.dl_overlap_db_path,
+        "CVAL_DL_METRIC_LOCK_FILE": str(
+            Path(config.baseline.baseline_root_path) / ".dl-metric-refresh.lock"
+        ),
         BUILTIN_ENABLE_ENV["storage"]: _shell_bool(bool(storage and storage.enabled)),
         "CVAL_STORAGE_INSTALL_FIO": _shell_bool(bool(storage_settings["install_fio"])),
         BUILTIN_ENABLE_ENV["nccl"]: _shell_bool(bool(nccl and nccl.enabled)),

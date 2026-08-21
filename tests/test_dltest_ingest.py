@@ -25,7 +25,14 @@ from cval.storage.dltest_ingest import (
     connect,
 )
 from cval.config import encode_config_snapshot, load_config
-from cval.storage.write_provenance import authorize_dl_rebuild
+from cval.storage.write_provenance import (
+    authorize_dl_rebuild,
+    authorize_result_write,
+    validate_current_dl_write,
+)
+from cval.validation.results import load_validation_result, validation_result_digest
+from cval.validation.runtime import effective_config_digest
+from tests.test_results_v2 import payload as result_v2_payload
 
 
 def ingest_dltest_results(results_root=None, output_dir=None, *, config=None):
@@ -124,6 +131,57 @@ def _write_rank_json(path: Path, rank: int) -> None:
 
 
 class DltestIngestTests(unittest.TestCase):
+    def test_current_dl_write_requires_exact_v2_artifacts_path(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metadata = root / "metadata"
+            results_root = root / "validation_tests/dltest/runs"
+            run_dir = results_root / "node-a/node-a-123"
+            run_dir.mkdir(parents=True)
+            base = load_config()
+            config = replace(
+                base,
+                storage=replace(
+                    base.storage,
+                    validation_db_path=str(metadata / "validation.db"),
+                    storage_db_path=str(metadata / "storage.db"),
+                    nccl_db_path=str(metadata / "nccl.db"),
+                    dl_numerical_db_path=str(metadata / "numerical.db"),
+                    dl_compute_db_path=str(metadata / "compute.db"),
+                    dl_collective_db_path=str(metadata / "collective.db"),
+                    dl_overlap_db_path=str(metadata / "overlap.db"),
+                ),
+                runtime=replace(
+                    base.runtime,
+                    validation_root=str(root),
+                    dl_results_root_path=str(results_root),
+                ),
+            )
+            result_payload = result_v2_payload()
+            result_payload["global_config_digest"] = effective_config_digest(config)
+            result_payload["tests"]["dltest"]["artifacts"] = str(
+                run_dir / "not-artifacts"
+            )
+            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+            result = load_validation_result(result_path)
+            authorization = authorize_result_write(
+                result_path,
+                result_digest=validation_result_digest(result),
+                config_snapshot_b64=encode_config_snapshot(config),
+                config=config,
+            )
+
+            with self.assertRaisesRegex(ValueError, "artifacts are not canonical"):
+                validate_current_dl_write(
+                    authorization,
+                    node="node-a",
+                    timestamp=123,
+                    results_root=run_dir,
+                    db_paths=dl_ingest_module.default_dl_metric_db_paths(config),
+                )
+
     def test_dl_rebuild_rejects_symlinked_results_root_before_db_write(self) -> None:
         with TemporaryDirectory() as tmpdir:
             outside = Path(tmpdir) / "outside-results"

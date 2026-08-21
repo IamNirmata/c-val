@@ -39,6 +39,7 @@ class ResultWriteAuthorization:
 @dataclass(frozen=True)
 class DlRebuildAuthorization:
     results_root: Path
+    evidence_root: Path
     db_paths: dict[str, Path]
     config: CvalConfig
     _nonce: object
@@ -415,10 +416,25 @@ def authorize_dl_rebuild(
     if not config_snapshot_b64 or config_snapshot_b64 != encode_config_snapshot(config):
         raise ValueError("DL rebuild config does not match an immutable snapshot")
     raw_root = Path(results_root).expanduser()
+    if not raw_root.is_absolute():
+        raw_root = Path.cwd() / raw_root
+    raw_root = Path(*raw_root.parts)
+    canonical_root = Path(config.runtime.dl_results_root_path).expanduser()
+    legacy_root = Path(config.runtime.validation_root).expanduser() / "dltest"
+    allowed_root = None
+    for candidate in (canonical_root, legacy_root):
+        try:
+            raw_root.relative_to(candidate)
+        except ValueError:
+            continue
+        allowed_root = candidate
+        break
+    if allowed_root is None:
+        raise ValueError("DL rebuild results root is outside configured evidence roots")
     root = safe_existing_evidence_path(
         raw_root,
         expected_path=raw_root,
-        allowed_root=config.runtime.dl_results_root_path,
+        allowed_root=allowed_root,
         expect_directory=True,
         description="DL rebuild results root",
         allow_missing=True,
@@ -448,7 +464,13 @@ def authorize_dl_rebuild(
     safe_targets = {
         key: safe_writable_file_path(path) for key, path in targets.items()
     }
-    return DlRebuildAuthorization(root, safe_targets, config, _AUTHORIZATION_NONCE)
+    return DlRebuildAuthorization(
+        root,
+        allowed_root,
+        safe_targets,
+        config,
+        _AUTHORIZATION_NONCE,
+    )
 
 
 def require_dl_rebuild_authorization(
@@ -466,11 +488,71 @@ def require_dl_rebuild_authorization(
         or not isinstance(authorization, DlRebuildAuthorization)
         or authorization._nonce is not _AUTHORIZATION_NONCE
         or authorization.results_root != requested_root
+        or authorization.evidence_root not in {
+            Path(authorization.config.runtime.dl_results_root_path).expanduser(),
+            Path(authorization.config.runtime.validation_root).expanduser() / "dltest",
+        }
         or authorization.db_paths
         != {key: path.expanduser().resolve() for key, path in db_paths.items()}
     ):
         raise PermissionError("DL rebuild requires validated configured provenance")
     return authorization
+
+
+def validate_current_dl_write(
+    authorization: ResultWriteAuthorization | None,
+    *,
+    node: str,
+    timestamp: object,
+    results_root: str | Path,
+    db_paths: dict[str, Path],
+) -> ResultWriteAuthorization:
+    """Bind one passing DL run and all four configured metric DB targets."""
+
+    auth = require_result_write_authorization(authorization)
+    _revalidate_authorized_result(auth)
+    result = auth.result
+    if node != result.node or _timestamp_epoch(timestamp) != _timestamp_epoch(
+        result.timestamp
+    ):
+        raise ValueError("Current DL write identity does not match result evidence")
+    test_result = result.tests.get("dltest")
+    if test_result is None or test_result.status != "pass":
+        raise ValueError("Current DL metrics require a passing result")
+    expected_run_id = (
+        result.run_id
+        if isinstance(result, ValidationResultV2)
+        else f"{result.node}-{result.timestamp}"
+    )
+    evidence_root = (
+        Path(auth.config.runtime.validation_root)
+        / "validation_tests/dltest/runs"
+    )
+    expected_run = evidence_root / result.node / expected_run_id
+    if (
+        isinstance(result, ValidationResultV2)
+        and Path(test_result.artifacts) != expected_run / "artifacts"
+    ):
+        raise ValueError("Current DL result artifacts are not canonical")
+    safe_existing_evidence_path(
+        results_root,
+        expected_path=expected_run,
+        allowed_root=evidence_root,
+        expect_directory=True,
+        description="current DL run evidence",
+    )
+    configured = {
+        "numerical_correctness": Path(auth.config.storage.dl_numerical_db_path),
+        "compute_performance": Path(auth.config.storage.dl_compute_db_path),
+        "collective_performance": Path(auth.config.storage.dl_collective_db_path),
+        "overlap_performance": Path(auth.config.storage.dl_overlap_db_path),
+    }
+    requested = {key: Path(path) for key, path in db_paths.items()}
+    if requested != configured:
+        raise ValueError("Current DL DB paths do not match the immutable snapshot")
+    for path in requested.values():
+        safe_writable_file_path(path)
+    return auth
 
 
 def validate_current_write(

@@ -485,8 +485,6 @@ def _parse_nccl_health_evidence(
     )
     if ibbw_log_path is None:
         return metrics
-    if metrics.port_max_gbps:
-        raise ValueError("NCCL IBBW recovery requires an empty summary HCA map")
 
     result = authorization.result
     expected_run_id = getattr(
@@ -496,19 +494,27 @@ def _parse_nccl_health_evidence(
         Path(authorization.config.runtime.validation_root)
         / "validation_tests/nccl/runs"
     )
-    expected_log = (
-        evidence_root
-        / result.node
-        / expected_run_id
-        / "artifacts/ibbw.log"
-    )
+    artifacts = evidence_root / result.node / expected_run_id / "artifacts"
+    expected_logs = {
+        artifacts / "ibbw.log",
+        artifacts / f"ibbw-{result.node}-{result.timestamp}.log",
+    }
+    requested_log = Path(ibbw_log_path)
+    if requested_log not in expected_logs:
+        raise ValueError(f"current NCCL IBBW evidence path is not canonical: {requested_log}")
     safe_log = safe_existing_evidence_path(
         ibbw_log_path,
-        expected_path=expected_log,
+        expected_path=requested_log,
         allowed_root=evidence_root,
         expect_directory=False,
         description="current NCCL IBBW evidence",
     )
+    summary_payload = json.loads(Path(summary_json_path).read_text(encoding="utf-8"))
+    summary_reference = summary_payload.get("GCR_IBBW_LOG_FILE")
+    if summary_reference != str(requested_log):
+        raise ValueError("NCCL IBBW evidence does not match the summary reference")
+    if metrics.port_max_gbps:
+        return metrics
     from cval.validation.nccl_summary import summarize_ibbw_file
 
     ports = summarize_ibbw_file(safe_log)

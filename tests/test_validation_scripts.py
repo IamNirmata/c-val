@@ -202,10 +202,11 @@ printf '%s\n' \
         self.assertIn('--db-path "$CVAL_VALIDATION_DB_PATH"', script)
         self.assertIn('--db-path "$CVAL_STORAGE_DB_PATH"', script)
         self.assertIn('--db-path "$CVAL_NCCL_DB_PATH"', script)
-        self.assertIn('db-rebuild-dltest-metrics', script)
+        self.assertIn('db-add-dltest-run', script)
         self.assertIn('dltest_ingest_dir=${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}', script)
-        self.assertIn('--results-root "$dltest_ingest_dir"', script)
+        self.assertIn('"$GCRTIME" "$dltest_ingest_dir"', script)
         self.assertIn('"$CVAL_DL_METRIC_LOCK_HELPER"', script)
+        self.assertIn('"CVAL_DL_METRIC_LOCK_FILE": str(', script)
         self.assertIn('db-add-run-results', script)
         self.assertIn('--storage-result "$GCRRESULT1"', script)
         self.assertIn('--overall-result "$overall_result"', script)
@@ -219,6 +220,7 @@ printf '%s\n' \
         self.assertIn('nccl-eval emit-outbox', script)
         self.assertIn('--apply --confirm emit-outbox', script)
         self.assertIn('CVAL_NCCL_EVALUATION_ENABLED', script)
+        self.assertIn('--ibbw-log "$nccl_ibbw_ingest_log"', script)
         self.assertIn('partial durable raw evidence', script)
         self.assertNotIn('DATABASE_URL', script)
         self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", script)
@@ -251,6 +253,9 @@ printf '%s\n' \
                         f'validation_root = "{root}"',
                         f'validation_tests_dir = "{REPO_ROOT / "validation-tests"}"',
                         f'dl_results_root_path = "{dl_results}"',
+                        "",
+                        "[baseline]",
+                        f'baseline_root_path = "{root / "baselines"}"',
                     )
                 )
                 + "\n",
@@ -383,6 +388,86 @@ printf '%s\n' \
         )
         self.assertEqual(dl_status, ("pass",))
         self.assertIn("DL metric DB update completed.", completed.stdout)
+
+    def test_db_update_rejects_passing_dl_run_without_rank_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metadata = root / "metadata"
+            dl_results = root / "validation_tests/dltest/runs"
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[storage]",
+                        f'validation_db_path = "{metadata / "validation.db"}"',
+                        f'storage_db_path = "{metadata / "test-storage.db"}"',
+                        f'nccl_db_path = "{metadata / "test-nccl.db"}"',
+                        f'dl_numerical_db_path = "{metadata / "dltest_numerical_correctness.db"}"',
+                        f'dl_compute_db_path = "{metadata / "dltest_compute_performance.db"}"',
+                        f'dl_collective_db_path = "{metadata / "dltest_collective_performance.db"}"',
+                        f'dl_overlap_db_path = "{metadata / "dltest_overlap_performance.db"}"',
+                        "",
+                        "[runtime]",
+                        f'repo_dir = "{REPO_ROOT}"',
+                        f'validation_root = "{root}"',
+                        f'validation_tests_dir = "{REPO_ROOT / "validation-tests"}"',
+                        f'dl_results_root_path = "{dl_results}"',
+                        "",
+                        "[baseline]",
+                        f'baseline_root_path = "{root / "baselines"}"',
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            run_dir = dl_results / "node-a/node-a-123"
+            run_dir.mkdir(parents=True)
+            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "cval.results.v1",
+                        "node": "node-a",
+                        "timestamp": "123",
+                        "overall": "pass",
+                        "tests": {
+                            "storage": {"enabled": False, "status": "incomplete"},
+                            "nccl": {"enabled": False, "status": "incomplete"},
+                            "dltest": {"enabled": True, "status": "pass"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ | build_runtime_environment(config) | {
+                "GCRNODE": "node-a",
+                "GCRTIME": "123",
+                "CVAL_RUN_ID": "node-a-123",
+                "CVAL_REPO_DIR": str(REPO_ROOT),
+                "CVAL_CONFIG_PATH": str(config_path),
+                "CVAL_VALIDATION_ROOT": str(root),
+                "CVAL_RESULT_JSON_FILE": str(result_path),
+                "CVAL_JOB_LOG_DIR": str(result_path.parent),
+                "DLTEST_RUN_DIR": "/proc/self/fd/999/run",
+                "CVAL_CANONICAL_DLTEST_RUN_DIR": str(run_dir),
+            }
+
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/db-update.sh")],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            databases = list(metadata.glob("*.db")) if metadata.exists() else []
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("no complete rank evidence", completed.stderr)
+        self.assertEqual(databases, [])
 
     def test_runtime_scripts_use_configured_environment(self) -> None:
         run_test = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(

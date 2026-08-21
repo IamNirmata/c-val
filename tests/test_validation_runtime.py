@@ -28,6 +28,10 @@ class ValidationRuntimeTests(unittest.TestCase):
         self.assertEqual(values["RUN_NCCL"], "true")
         self.assertEqual(values["RUN_DLTEST"], "true")
         self.assertEqual(values["CVAL_CONFIG_PATH"], "/workspace/c-val/config/cval.toml")
+        self.assertEqual(
+            values["CVAL_DL_METRIC_LOCK_FILE"],
+            "/data/continuous_validation/baselines/.dl-metric-refresh.lock",
+        )
         self.assertNotIn("CVAL_RUN_HISTORY_DB_PATH", values)
         self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", values)
         self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", values)
@@ -117,6 +121,9 @@ enabled = false
                 f'''
 [runtime]
 validation_root = "{tmpdir}/validation"
+
+[baseline]
+baseline_root_path = "{tmpdir}/custom-baselines"
 ''',
                 encoding="utf-8",
             )
@@ -126,6 +133,14 @@ validation_root = "{tmpdir}/validation"
             restored = load_config_snapshot(values["CVAL_CONFIG_SNAPSHOT_B64"])
 
         self.assertEqual(restored.runtime.validation_root, f"{tmpdir}/validation")
+        self.assertEqual(
+            values["CVAL_DL_METRIC_LOCK_FILE"],
+            f"{tmpdir}/custom-baselines/.dl-metric-refresh.lock",
+        )
+        self.assertEqual(
+            restored.baseline.baseline_root_path,
+            f"{tmpdir}/custom-baselines",
+        )
         self.assertEqual(effective_config_digest(restored), effective_config_digest(config))
 
     def test_decode_rejects_invalid_payload(self) -> None:

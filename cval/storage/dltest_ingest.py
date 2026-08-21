@@ -30,7 +30,9 @@ from cval.config import CvalConfig, load_config
 from cval.storage.paths import safe_existing_evidence_path, safe_writable_file_path
 from cval.storage.write_provenance import (
     DlRebuildAuthorization,
+    ResultWriteAuthorization,
     require_dl_rebuild_authorization,
+    validate_current_dl_write,
 )
 
 COMPUTE_METRICS = frozenset(("fp_cpu_time", "fp_gpu_time", "bp_cpu_time", "bp_gpu_time"))
@@ -696,6 +698,111 @@ def validate_dl_metric_generation(db_paths: dict[str, str | Path]) -> str | None
     return next(iter(present))
 
 
+def ingest_dltest_run(
+    results_root: str | Path,
+    *,
+    node: str,
+    timestamp: object,
+    config: CvalConfig,
+    _authorization: ResultWriteAuthorization | None = None,
+) -> dict[str, Any]:
+    """Ingest exactly one complete passing canonical DL run."""
+
+    root = Path(results_root).expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    root = Path(*root.parts)
+    paths = default_dl_metric_db_paths(config)
+    validate_current_dl_write(
+        _authorization,
+        node=node,
+        timestamp=timestamp,
+        results_root=root,
+        db_paths=paths,
+    )
+    validated_root = safe_existing_evidence_path(
+        root,
+        expected_path=root,
+        allowed_root=config.runtime.dl_results_root_path,
+        expect_directory=True,
+        description="current DL run evidence",
+    )
+    _validate_dl_evidence_tree(validated_root)
+    rank_files = list(load_rank_files(validated_root))
+    if not rank_files:
+        raise ValueError("Current DL run has no complete rank evidence")
+    run_keys = {rank_file.run_key for rank_file in rank_files}
+    identities = {
+        (rank_file.node, rank_file.cval_timestamp) for rank_file in rank_files
+    }
+    from cval.storage.write_provenance import _timestamp_epoch
+
+    expected_identity = (node, _timestamp_epoch(timestamp))
+    if len(run_keys) != 1 or identities != {expected_identity}:
+        raise ValueError("Current DL evidence does not contain exactly one requested run")
+
+    numerical_rows, compute_rows, collective_rows, overlap_rows = classify_rank_files(
+        rank_files
+    )
+    component_rows = {
+        "numerical_correctness": numerical_rows,
+        "compute_performance": compute_rows,
+        "collective_performance": collective_rows,
+        "overlap_performance": overlap_rows,
+    }
+    empty = [component for component, rows in component_rows.items() if not rows]
+    if empty:
+        raise ValueError(
+            "Current DL run produced no rows for required components: "
+            + ", ".join(empty)
+        )
+
+    generation_id = f"{int(time.time() * 1_000_000)}-{uuid.uuid4().hex}"
+    safe_paths = {
+        component: safe_writable_file_path(path)
+        for component, path in paths.items()
+    }
+    write_standard_db(
+        safe_paths["numerical_correctness"],
+        "numerical_correctness",
+        numerical_rows,
+        replace_run_keys=run_keys,
+        generation_id=generation_id,
+    )
+    write_standard_db(
+        safe_paths["compute_performance"],
+        "compute_performance",
+        compute_rows,
+        replace_run_keys=run_keys,
+        generation_id=generation_id,
+    )
+    write_standard_db(
+        safe_paths["collective_performance"],
+        "collective_performance",
+        collective_rows,
+        replace_run_keys=run_keys,
+        generation_id=generation_id,
+    )
+    write_overlap_db(
+        safe_paths["overlap_performance"],
+        "overlap_performance",
+        overlap_rows,
+        replace_run_keys=run_keys,
+        generation_id=generation_id,
+    )
+    return {
+        "results_root": str(root),
+        "db_paths": {name: str(path) for name, path in safe_paths.items()},
+        "generation_id": generation_id,
+        "rank_files": len(rank_files),
+        "runs": 1,
+        "numerical_correctness_rows": len(numerical_rows),
+        "compute_performance_rows": len(compute_rows),
+        "collective_performance_rows": len(collective_rows),
+        "overlap_performance_rows": len(overlap_rows),
+    }
+
+
 def ingest_dltest_results(
     results_root: str | Path | None = None,
     output_dir: str | Path | None = None,
@@ -732,7 +839,7 @@ def ingest_dltest_results(
     validated_root = safe_existing_evidence_path(
         lexical_root,
         expected_path=authorization.results_root,
-        allowed_root=authorization.config.runtime.dl_results_root_path,
+        allowed_root=authorization.evidence_root,
         expect_directory=True,
         description="DL rebuild results root",
     )
