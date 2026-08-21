@@ -35,7 +35,9 @@ from cval.validation.runtime import effective_config_digest
 from tests.test_results_v2 import payload as result_v2_payload
 
 
-def ingest_dltest_results(results_root=None, output_dir=None, *, config=None):
+def ingest_dltest_results(
+    results_root=None, output_dir=None, *, config=None, only_missing=False
+):
     root = Path(results_root) if results_root is not None else Path(
         (config or load_config()).runtime.dl_results_root_path
     )
@@ -71,6 +73,7 @@ def ingest_dltest_results(results_root=None, output_dir=None, *, config=None):
         root,
         output_dir,
         config=active,
+        only_missing=only_missing,
         _authorization=authorization,
     )
 
@@ -545,6 +548,50 @@ class DltestIngestTests(unittest.TestCase):
                 connection.commit()
             with self.assertRaisesRegex(RuntimeError, "generation"):
                 validate_dl_metric_generation(paths)
+
+    def test_only_missing_preserves_existing_run_and_adds_new_run(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            first = root / "dltest-node-a-1781649558"
+            _write_rank_json(
+                first / "workdir/test_plans/80gb-example/runs/first_RANK0.json",
+                0,
+            )
+            ingest_dltest_results(root, output)
+            with closing(
+                sqlite3.connect(output / "dltest_compute_performance.db")
+            ) as connection:
+                connection.execute(
+                    "UPDATE compute_performance SET metric_value=999 "
+                    "WHERE run_key=? AND metric_name='fp_cpu_time'",
+                    (first.name,),
+                )
+                connection.commit()
+            second = root / "dltest-node-b-1781649559"
+            _write_rank_json(
+                second / "workdir/test_plans/80gb-example/runs/second_RANK0.json",
+                0,
+            )
+
+            summary = ingest_dltest_results(root, output, only_missing=True)
+
+            with closing(
+                sqlite3.connect(output / "dltest_compute_performance.db")
+            ) as connection:
+                first_value = connection.execute(
+                    "SELECT metric_value FROM compute_performance "
+                    "WHERE run_key=? AND metric_name='fp_cpu_time'",
+                    (first.name,),
+                ).fetchone()[0]
+                runs = connection.execute(
+                    "SELECT COUNT(DISTINCT run_key) FROM compute_performance"
+                ).fetchone()[0]
+
+        self.assertEqual(summary["runs"], 1)
+        self.assertEqual(summary["skipped_existing_runs"], 1)
+        self.assertEqual(first_value, 999)
+        self.assertEqual(runs, 2)
 
     def test_default_ingest_honors_exact_configured_db_paths(self) -> None:
         with TemporaryDirectory() as tmpdir:

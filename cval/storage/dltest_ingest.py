@@ -44,6 +44,7 @@ RANK_PATTERN = re.compile(r"(?:^|_)rank(?P<rank>\d+)(?:_|$)", re.IGNORECASE)
 RUN_DIR_PATTERN = re.compile(r"^dltest-(?P<node>.+)-(?P<timestamp>\d+)$")
 CANONICAL_RUN_DIR_PATTERN = re.compile(r"^(?P<node>.+)-(?P<timestamp>\d+)$")
 HISTORICAL_DL_ITERATIONS = 20
+DL_INGEST_BATCH_RUNS = 25
 logger = logging.getLogger(__name__)
 
 
@@ -808,9 +809,10 @@ def ingest_dltest_results(
     output_dir: str | Path | None = None,
     *,
     config: CvalConfig | None = None,
+    only_missing: bool = False,
     _authorization: DlRebuildAuthorization | None = None,
 ) -> dict[str, Any]:
-    """Ingest DL rank JSONs and return a summary."""
+    """Reconcile DL rank JSONs in bounded batches and return a summary."""
 
     root = Path(results_root) if results_root is not None else default_dl_results_root()
     if output_dir is None:
@@ -844,25 +846,135 @@ def ingest_dltest_results(
         description="DL rebuild results root",
     )
     _validate_dl_evidence_tree(validated_root)
-    rank_files = list(load_rank_files(validated_root))
-    if not rank_files and not any(Path(path).is_file() for path in paths.values()):
-        raise ValueError(
-            "DL rebuild found no valid rank evidence and no existing metric DBs to reconcile"
-        )
-
-    numerical_rows, compute_rows, collective_rows, overlap_rows = classify_rank_files(rank_files)
-    run_keys = {rank_file.run_key for rank_file in rank_files}
-    generation_id = f"{int(time.time() * 1_000_000)}-{uuid.uuid4().hex}"
     paths = {
         component: safe_writable_file_path(path)
         for component, path in paths.items()
     }
+    existing_files = any(path.is_file() for path in paths.values())
+    complete_run_keys = _complete_stored_run_keys(paths) if only_missing else set()
+    generation_id = f"{int(time.time() * 1_000_000)}-{uuid.uuid4().hex}"
+    valid_run_keys: set[str] = set()
+    processed_run_keys: set[str] = set()
+    batch: list[RankFile] = []
+    batch_run_keys: set[str] = set()
+    counts: Counter[str] = Counter()
+    processed_rank_files = 0
+
+    def flush_batch() -> None:
+        nonlocal batch, batch_run_keys, processed_rank_files
+        if not batch:
+            return
+        rows = classify_rank_files(batch)
+        _write_dl_rows(paths, rows, batch_run_keys, generation_id)
+        processed_rank_files += len(batch)
+        processed_run_keys.update(batch_run_keys)
+        for component, values in zip(
+            (
+                "numerical_correctness",
+                "compute_performance",
+                "collective_performance",
+                "overlap_performance",
+            ),
+            rows,
+            strict=True,
+        ):
+            counts[component] += len(values)
+        batch = []
+        batch_run_keys = set()
+
+    for run_dir in find_dl_run_dirs(validated_root):
+        current = list(load_rank_files(run_dir))
+        if not current:
+            continue
+        current_keys = {rank_file.run_key for rank_file in current}
+        valid_run_keys.update(current_keys)
+        if only_missing and current_keys <= complete_run_keys:
+            continue
+        batch.extend(current)
+        batch_run_keys.update(current_keys)
+        if len(batch_run_keys) >= DL_INGEST_BATCH_RUNS:
+            flush_batch()
+    flush_batch()
+
+    if not valid_run_keys and not existing_files:
+        raise ValueError(
+            "DL rebuild found no valid rank evidence and no existing metric DBs to reconcile"
+        )
+    if not only_missing:
+        _finish_dl_reconciliation(
+            paths,
+            validated_root,
+            valid_run_keys,
+            generation_id,
+        )
+    elif not processed_run_keys:
+        generation_id = validate_dl_metric_generation(paths)
+
+    return {
+        "results_root": str(root),
+        "output_dir": output_label,
+        "db_paths": {name: str(path) for name, path in paths.items()},
+        "generation_id": generation_id,
+        "rank_files": processed_rank_files,
+        "runs": len(processed_run_keys),
+        "discovered_runs": len(valid_run_keys),
+        "skipped_existing_runs": len(valid_run_keys & complete_run_keys),
+        "only_missing": only_missing,
+        "numerical_correctness_rows": counts["numerical_correctness"],
+        "compute_performance_rows": counts["compute_performance"],
+        "collective_performance_rows": counts["collective_performance"],
+        "overlap_performance_rows": counts["overlap_performance"],
+    }
+
+
+def _stored_run_keys(db_path: Path, table_name: str) -> set[str]:
+    if not db_path.is_file():
+        return set()
+    from cval.storage.sqlite_uri import connect_sqlite_file
+
+    with closing(connect_sqlite_file(db_path, mode="ro", timeout=30)) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if table is None:
+            return set()
+        return {
+            str(row[0])
+            for row in connection.execute(f'SELECT DISTINCT run_key FROM "{table_name}"')
+        }
+
+
+def _complete_stored_run_keys(paths: dict[str, Path]) -> set[str]:
+    stored = [
+        _stored_run_keys(paths[component], component)
+        for component in (
+            "numerical_correctness",
+            "compute_performance",
+            "collective_performance",
+            "overlap_performance",
+        )
+    ]
+    return set.intersection(*stored) if stored else set()
+
+
+def _write_dl_rows(
+    paths: dict[str, Path],
+    rows: tuple[
+        list[StandardMetricRow],
+        list[StandardMetricRow],
+        list[StandardMetricRow],
+        list[OverlapMetricRow],
+    ],
+    run_keys: set[str],
+    generation_id: str,
+) -> None:
+    numerical_rows, compute_rows, collective_rows, overlap_rows = rows
     write_standard_db(
         paths["numerical_correctness"],
         "numerical_correctness",
         numerical_rows,
         replace_run_keys=run_keys,
-        reconcile_root=validated_root,
         generation_id=generation_id,
     )
     write_standard_db(
@@ -870,7 +982,6 @@ def ingest_dltest_results(
         "compute_performance",
         compute_rows,
         replace_run_keys=run_keys,
-        reconcile_root=validated_root,
         generation_id=generation_id,
     )
     write_standard_db(
@@ -878,7 +989,6 @@ def ingest_dltest_results(
         "collective_performance",
         collective_rows,
         replace_run_keys=run_keys,
-        reconcile_root=validated_root,
         generation_id=generation_id,
     )
     write_overlap_db(
@@ -886,23 +996,53 @@ def ingest_dltest_results(
         "overlap_performance",
         overlap_rows,
         replace_run_keys=run_keys,
-        reconcile_root=validated_root,
         generation_id=generation_id,
     )
 
-    run_counts = Counter(rank_file.run_key for rank_file in rank_files)
-    return {
-        "results_root": str(root),
-        "output_dir": output_label,
-        "db_paths": {name: str(path) for name, path in paths.items()},
-        "generation_id": generation_id,
-        "rank_files": len(rank_files),
-        "runs": len(run_counts),
-        "numerical_correctness_rows": len(numerical_rows),
-        "compute_performance_rows": len(compute_rows),
-        "collective_performance_rows": len(collective_rows),
-        "overlap_performance_rows": len(overlap_rows),
-    }
+
+def _finish_dl_reconciliation(
+    paths: dict[str, Path],
+    root: Path,
+    valid_run_keys: set[str],
+    generation_id: str,
+) -> None:
+    from cval.storage.sqlite_uri import connect_sqlite_file
+
+    stale: dict[str, set[str]] = {}
+    for component, path in paths.items():
+        if not path.is_file():
+            stale[component] = set()
+            continue
+        with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
+            stale[component] = _run_keys_in_scope(connection, component, root) - valid_run_keys
+    write_standard_db(
+        paths["numerical_correctness"],
+        "numerical_correctness",
+        [],
+        replace_run_keys=stale["numerical_correctness"],
+        generation_id=generation_id,
+    )
+    write_standard_db(
+        paths["compute_performance"],
+        "compute_performance",
+        [],
+        replace_run_keys=stale["compute_performance"],
+        generation_id=generation_id,
+    )
+    write_standard_db(
+        paths["collective_performance"],
+        "collective_performance",
+        [],
+        replace_run_keys=stale["collective_performance"],
+        generation_id=generation_id,
+    )
+    write_overlap_db(
+        paths["overlap_performance"],
+        "overlap_performance",
+        [],
+        replace_run_keys=stale["overlap_performance"],
+        generation_id=generation_id,
+    )
 
 
 def _validate_dl_evidence_tree(root: Path) -> None:

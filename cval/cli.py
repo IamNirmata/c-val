@@ -521,6 +521,11 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
             "exact configured storage.dl_*_db_path"
         ),
     )
+    db_rebuild_dltest.add_argument(
+        "--only-missing",
+        action="store_true",
+        help="Append or repair evidence absent from any DL metric DB; never purge rows",
+    )
     db_rebuild_dltest.add_argument("--output", choices=["table", "json"], default="table")
     db_rebuild_dltest.set_defaults(handler=handle_db_rebuild_dltest_metrics)
 
@@ -1563,6 +1568,7 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
             args.results_root,
             args.output_dir,
             config=args.cval_config,
+            only_missing=args.only_missing,
             _authorization=authorization,
         )
     except FileNotFoundError as exc:
