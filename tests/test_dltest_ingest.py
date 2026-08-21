@@ -768,6 +768,78 @@ class DltestIngestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Duplicate DL run key"):
                 ingest_dltest_results(root, output, only_missing=True)
 
+    def test_generation_remains_in_progress_until_all_batches_finish(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            for index in range(26):
+                run_dir = root / f"dltest-node-{index:02d}-{1781649558 + index}"
+                _write_rank_json(
+                    run_dir
+                    / "workdir/test_plans/80gb-example/runs/example_RANK0.json",
+                    0,
+                )
+            original = dl_ingest_module._write_dl_rows
+            observed = []
+
+            def tracked(*args, **kwargs):
+                original(*args, **kwargs)
+                paths = args[0]
+                with self.assertRaisesRegex(RuntimeError, "not complete"):
+                    validate_dl_metric_generation(paths)
+                observed.append(len(args[2]))
+
+            with patch.object(dl_ingest_module, "_write_dl_rows", side_effect=tracked):
+                summary = ingest_dltest_results(root, output, only_missing=True)
+
+            paths = {
+                component: output / f"dltest_{component}.db"
+                for component in (
+                    "numerical_correctness",
+                    "compute_performance",
+                    "collective_performance",
+                    "overlap_performance",
+                )
+            }
+            final_generation = validate_dl_metric_generation(paths)
+
+        self.assertEqual(observed, [25, 1])
+        self.assertEqual(final_generation, summary["generation_id"])
+
+    def test_only_missing_refuses_to_finalize_divergent_receipts(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            _write_rank_json(
+                run_dir / "workdir/test_plans/80gb-example/runs/example_RANK0.json",
+                0,
+            )
+            ingest_dltest_results(root, output)
+            with closing(
+                sqlite3.connect(output / "dltest_compute_performance.db")
+            ) as connection:
+                connection.execute(
+                    "INSERT INTO cval_ingested_runs VALUES (?, ?, ?)",
+                    ("orphan", str(root / "missing"), 1),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(RuntimeError, "receipts"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+            paths = {
+                component: output / f"dltest_{component}.db"
+                for component in (
+                    "numerical_correctness",
+                    "compute_performance",
+                    "collective_performance",
+                    "overlap_performance",
+                )
+            }
+            with self.assertRaisesRegex(RuntimeError, "not complete"):
+                validate_dl_metric_generation(paths)
+
     def test_only_missing_reports_deduplicated_stored_row_counts(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "results"

@@ -45,6 +45,8 @@ RUN_DIR_PATTERN = re.compile(r"^dltest-(?P<node>.+)-(?P<timestamp>\d+)$")
 CANONICAL_RUN_DIR_PATTERN = re.compile(r"^(?P<node>.+)-(?P<timestamp>\d+)$")
 HISTORICAL_DL_ITERATIONS = 20
 DL_INGEST_BATCH_RUNS = 25
+DL_INGEST_STATE_IN_PROGRESS = "in_progress"
+DL_INGEST_STATE_COMPLETE = "complete"
 logger = logging.getLogger(__name__)
 
 _STANDARD_REQUIRED_COLUMNS = frozenset(
@@ -511,6 +513,7 @@ def write_standard_db(
     replace_run_keys: set[str] | None = None,
     reconcile_root: Path | None = None,
     generation_id: str | None = None,
+    generation_state: str = DL_INGEST_STATE_COMPLETE,
     run_receipts: dict[str, str] | None = None,
 ) -> None:
     """Write standard metric rows to a SQLite DB."""
@@ -564,7 +567,7 @@ def write_standard_db(
             receipts.setdefault(row.run_key, row.sample_dir)
         _write_ingested_run_receipts(connection, receipts)
         if generation_id:
-            _write_ingest_generation(connection, generation_id)
+            _write_ingest_generation(connection, generation_id, generation_state)
         connection.commit()
 
 
@@ -576,6 +579,7 @@ def write_overlap_db(
     replace_run_keys: set[str] | None = None,
     reconcile_root: Path | None = None,
     generation_id: str | None = None,
+    generation_state: str = DL_INGEST_STATE_COMPLETE,
     run_receipts: dict[str, str] | None = None,
 ) -> None:
     """Write overlap metric rows to a SQLite DB."""
@@ -632,7 +636,7 @@ def write_overlap_db(
             receipts.setdefault(row.run_key, row.sample_dir)
         _write_ingested_run_receipts(connection, receipts)
         if generation_id:
-            _write_ingest_generation(connection, generation_id)
+            _write_ingest_generation(connection, generation_id, generation_state)
         connection.commit()
 
 
@@ -742,7 +746,10 @@ def _run_keys_in_scope(
 def _write_ingest_generation(
     connection: sqlite3.Connection,
     generation_id: str,
+    state: str = DL_INGEST_STATE_COMPLETE,
 ) -> None:
+    if state not in {DL_INGEST_STATE_IN_PROGRESS, DL_INGEST_STATE_COMPLETE}:
+        raise ValueError(f"Invalid DL ingest generation state: {state}")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS cval_ingest_metadata (
@@ -752,11 +759,21 @@ def _write_ingest_generation(
         )
         """
     )
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(cval_ingest_metadata)")
+    }
+    if "state" not in columns:
+        connection.execute(
+            "ALTER TABLE cval_ingest_metadata ADD COLUMN state TEXT "
+            "NOT NULL DEFAULT 'complete'"
+        )
     connection.execute(
-        "INSERT INTO cval_ingest_metadata(id, generation_id, updated_at) "
-        "VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET "
-        "generation_id=excluded.generation_id, updated_at=excluded.updated_at",
-        (generation_id, int(time.time())),
+        "INSERT INTO cval_ingest_metadata(id, generation_id, updated_at, state) "
+        "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+        "generation_id=excluded.generation_id, updated_at=excluded.updated_at, "
+        "state=excluded.state",
+        (generation_id, int(time.time()), state),
     )
 
 
@@ -765,7 +782,7 @@ def validate_dl_metric_generation(db_paths: dict[str, str | Path]) -> str | None
 
     from cval.storage.sqlite_uri import connect_sqlite_file
 
-    generations: dict[str, str | None] = {}
+    generations: dict[str, tuple[str, str] | None] = {}
     for component, raw_path in db_paths.items():
         path = Path(raw_path)
         if not path.is_file():
@@ -779,19 +796,38 @@ def validate_dl_metric_generation(db_paths: dict[str, str | Path]) -> str | None
             if table is None:
                 generations[component] = None
                 continue
-            row = connection.execute(
-                "SELECT generation_id FROM cval_ingest_metadata WHERE id=1"
-            ).fetchone()
-            generations[component] = str(row[0]) if row else None
+            columns = {
+                str(item[1])
+                for item in connection.execute(
+                    "PRAGMA table_info(cval_ingest_metadata)"
+                )
+            }
+            select = (
+                "SELECT generation_id, state FROM cval_ingest_metadata WHERE id=1"
+                if "state" in columns
+                else "SELECT generation_id, 'complete' FROM cval_ingest_metadata WHERE id=1"
+            )
+            row = connection.execute(select).fetchone()
+            generations[component] = (
+                (str(row[0]), str(row[1])) if row else None
+            )
     present = {value for value in generations.values() if value is not None}
     if not present:
         return None  # Legacy DB set without generation metadata.
-    if len(present) != 1 or any(value is None for value in generations.values()):
+    if any(
+        value is not None and value[1] != DL_INGEST_STATE_COMPLETE
+        for value in generations.values()
+    ):
+        raise RuntimeError(
+            f"DL metric DB refresh is not complete: {generations}"
+        )
+    generation_ids = {value[0] for value in present}
+    if len(generation_ids) != 1 or any(value is None for value in generations.values()):
         raise RuntimeError(
             "DL metric DB refresh generation is incomplete or inconsistent: "
             f"{generations}"
         )
-    return next(iter(present))
+    return next(iter(generation_ids))
 
 
 def ingest_dltest_run(
@@ -861,38 +897,16 @@ def ingest_dltest_run(
     run_receipts = {
         rank_file.run_key: rank_file.sample_dir for rank_file in rank_files
     }
-    write_standard_db(
-        safe_paths["numerical_correctness"],
-        "numerical_correctness",
-        numerical_rows,
-        replace_run_keys=run_keys,
-        generation_id=generation_id,
-        run_receipts=run_receipts,
+    _write_dl_rows(
+        safe_paths,
+        (numerical_rows, compute_rows, collective_rows, overlap_rows),
+        run_keys,
+        generation_id,
+        run_receipts,
+        generation_state=DL_INGEST_STATE_IN_PROGRESS,
     )
-    write_standard_db(
-        safe_paths["compute_performance"],
-        "compute_performance",
-        compute_rows,
-        replace_run_keys=run_keys,
-        generation_id=generation_id,
-        run_receipts=run_receipts,
-    )
-    write_standard_db(
-        safe_paths["collective_performance"],
-        "collective_performance",
-        collective_rows,
-        replace_run_keys=run_keys,
-        generation_id=generation_id,
-        run_receipts=run_receipts,
-    )
-    write_overlap_db(
-        safe_paths["overlap_performance"],
-        "overlap_performance",
-        overlap_rows,
-        replace_run_keys=run_keys,
-        generation_id=generation_id,
-        run_receipts=run_receipts,
-    )
+    _assert_equal_dl_receipts(safe_paths)
+    _finalize_dl_generation(safe_paths, generation_id)
     return {
         "results_root": str(root),
         "db_paths": {name: str(path) for name, path in safe_paths.items()},
@@ -980,6 +994,7 @@ def ingest_dltest_results(
             batch_run_keys,
             generation_id,
             run_receipts,
+            generation_state=DL_INGEST_STATE_IN_PROGRESS,
         )
         processed_rank_files += len(batch)
         processed_run_keys.update(batch_run_keys)
@@ -1028,12 +1043,8 @@ def ingest_dltest_results(
             valid_run_keys,
             generation_id,
         )
-    elif not processed_run_keys:
-        generation_id = validate_dl_metric_generation(paths)
-        if generation_id is None:
-            raise ValueError(
-                "DL only-missing scan requires a coherent generation when no runs are written"
-            )
+    _assert_equal_dl_receipts(paths)
+    _finalize_dl_generation(paths, generation_id)
 
     return {
         "results_root": str(root),
@@ -1127,7 +1138,11 @@ def _initialize_existing_dl_state(
         with closing(connect(path)) as connection:
             ensure_iterations_column(connection, component)
             _ensure_ingested_runs_table(connection, component)
-            _write_ingest_generation(connection, generation_id)
+            _write_ingest_generation(
+                connection,
+                generation_id,
+                DL_INGEST_STATE_IN_PROGRESS,
+            )
             connection.commit()
 
 
@@ -1180,6 +1195,7 @@ def _write_dl_rows(
     run_keys: set[str],
     generation_id: str,
     run_receipts: dict[str, str],
+    generation_state: str,
 ) -> None:
     numerical_rows, compute_rows, collective_rows, overlap_rows = rows
     write_standard_db(
@@ -1188,6 +1204,7 @@ def _write_dl_rows(
         numerical_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        generation_state=generation_state,
         run_receipts=run_receipts,
     )
     write_standard_db(
@@ -1196,6 +1213,7 @@ def _write_dl_rows(
         compute_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        generation_state=generation_state,
         run_receipts=run_receipts,
     )
     write_standard_db(
@@ -1204,6 +1222,7 @@ def _write_dl_rows(
         collective_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        generation_state=generation_state,
         run_receipts=run_receipts,
     )
     write_overlap_db(
@@ -1212,6 +1231,7 @@ def _write_dl_rows(
         overlap_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        generation_state=generation_state,
         run_receipts=run_receipts,
     )
 
@@ -1237,6 +1257,7 @@ def _finish_dl_reconciliation(
         [],
         replace_run_keys=stale["numerical_correctness"],
         generation_id=generation_id,
+        generation_state=DL_INGEST_STATE_IN_PROGRESS,
     )
     write_standard_db(
         paths["compute_performance"],
@@ -1244,6 +1265,7 @@ def _finish_dl_reconciliation(
         [],
         replace_run_keys=stale["compute_performance"],
         generation_id=generation_id,
+        generation_state=DL_INGEST_STATE_IN_PROGRESS,
     )
     write_standard_db(
         paths["collective_performance"],
@@ -1251,6 +1273,7 @@ def _finish_dl_reconciliation(
         [],
         replace_run_keys=stale["collective_performance"],
         generation_id=generation_id,
+        generation_state=DL_INGEST_STATE_IN_PROGRESS,
     )
     write_overlap_db(
         paths["overlap_performance"],
@@ -1258,7 +1281,36 @@ def _finish_dl_reconciliation(
         [],
         replace_run_keys=stale["overlap_performance"],
         generation_id=generation_id,
+        generation_state=DL_INGEST_STATE_IN_PROGRESS,
     )
+
+
+def _receipt_sets(paths: dict[str, Path]) -> dict[str, set[str]]:
+    return {
+        component: _stored_run_keys(path, component)
+        for component, path in paths.items()
+    }
+
+
+def _assert_equal_dl_receipts(paths: dict[str, Path]) -> None:
+    receipts = _receipt_sets(paths)
+    unique = {frozenset(values) for values in receipts.values()}
+    if len(unique) != 1:
+        counts = {component: len(values) for component, values in receipts.items()}
+        raise RuntimeError(
+            f"DL metric DB run receipts are incomplete or inconsistent: {counts}"
+        )
+
+
+def _finalize_dl_generation(paths: dict[str, Path], generation_id: str) -> None:
+    for path in paths.values():
+        with closing(connect(path)) as connection:
+            _write_ingest_generation(
+                connection,
+                generation_id,
+                DL_INGEST_STATE_COMPLETE,
+            )
+            connection.commit()
 
 
 def _validate_dl_evidence_tree(root: Path) -> None:
