@@ -65,6 +65,15 @@ def summarize_ibbw(payload: str) -> dict[str, dict[str, float | int]]:
     }
 
 
+def summarize_ibbw_file(path: Path) -> dict[str, dict[str, float | int]]:
+    """Securely read and summarize one retained IBBW log."""
+
+    payload = _read_private_regular_file(path, max_bytes=_MAX_IBBW_BYTES).decode(
+        "utf-8", errors="replace"
+    )
+    return summarize_ibbw(payload)
+
+
 def _mlx_sort_key(device: str) -> tuple[int, int, str]:
     suffix = device.rsplit("_", 1)[-1]
     dev_part, _, port_part = suffix.partition(".")
@@ -87,12 +96,9 @@ def finalize_summary(
     if not isinstance(metrics, dict):
         raise ValueError("NCCL staged metrics must be a JSON object")
     if require_hca_samples or ibbw_log_path.exists():
-        ibbw_payload = _read_private_regular_file(
-            ibbw_log_path, max_bytes=_MAX_IBBW_BYTES
-        ).decode("utf-8", errors="replace")
+        ports = summarize_ibbw_file(ibbw_log_path)
     else:
-        ibbw_payload = ""
-    ports = summarize_ibbw(ibbw_payload)
+        ports = {}
     if require_hca_samples and not any(
         re.fullmatch(r"mlx5_(?:[0-9]|1[0-3])", port) for port in ports
     ):

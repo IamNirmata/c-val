@@ -20,7 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from cval.config import StorageConfig
-from cval.storage.paths import safe_writable_file_path
+from cval.storage.paths import safe_existing_evidence_path, safe_writable_file_path
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
     validate_current_write,
@@ -283,6 +283,7 @@ def add_nccl_health_result(
     run_id: str = "",
     immutable: bool = False,
     summary_json_path: str | Path | None = None,
+    ibbw_log_path: str | Path | None = None,
     require_hca_samples: bool = False,
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
     _authorization: ResultWriteAuthorization | None = None,
@@ -303,9 +304,11 @@ def add_nccl_health_result(
     )
     if summary_json_path is None:
         raise PermissionError("NCCL metrics require validated summary evidence")
-    summary_metrics = parse_nccl_health_summary(
+    summary_metrics = _parse_nccl_health_evidence(
         summary_json_path,
         iterations=iterations,
+        ibbw_log_path=ibbw_log_path,
+        authorization=authorization,
         require_hca_samples=require_hca_samples,
     )
     expected_ports = {
@@ -420,6 +423,7 @@ def add_nccl_health_from_summary(
     pytorch_version: str = "",
     run_id: str = "",
     immutable: bool = False,
+    ibbw_log_path: str | Path | None = None,
     require_hca_samples: bool = False,
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
     _authorization: ResultWriteAuthorization | None = None,
@@ -438,9 +442,11 @@ def add_nccl_health_from_summary(
         cuda_version=cuda_version,
         run_id=run_id,
     )
-    metrics = parse_nccl_health_summary(
+    metrics = _parse_nccl_health_evidence(
         summary_json_path,
         iterations=iterations,
+        ibbw_log_path=ibbw_log_path,
+        authorization=authorization,
         require_hca_samples=require_hca_samples,
     )
     return add_nccl_health_result(
@@ -457,9 +463,75 @@ def add_nccl_health_from_summary(
         run_id=run_id,
         immutable=immutable,
         summary_json_path=summary_json_path,
+        ibbw_log_path=ibbw_log_path,
         require_hca_samples=require_hca_samples,
         db_path=db_path,
         _authorization=authorization,
+    )
+
+
+def _parse_nccl_health_evidence(
+    summary_json_path: str | Path,
+    *,
+    iterations: int | str | None,
+    ibbw_log_path: str | Path | None,
+    authorization: ResultWriteAuthorization,
+    require_hca_samples: bool,
+) -> NcclHealthMetrics:
+    metrics = parse_nccl_health_summary(
+        summary_json_path,
+        iterations=iterations,
+        require_hca_samples=require_hca_samples and ibbw_log_path is None,
+    )
+    if ibbw_log_path is None:
+        return metrics
+    if metrics.port_max_gbps:
+        raise ValueError("NCCL IBBW recovery requires an empty summary HCA map")
+
+    result = authorization.result
+    expected_run_id = getattr(
+        result, "run_id", f"{result.node}-{result.timestamp}"
+    )
+    evidence_root = (
+        Path(authorization.config.runtime.validation_root)
+        / "validation_tests/nccl/runs"
+    )
+    expected_log = (
+        evidence_root
+        / result.node
+        / expected_run_id
+        / "artifacts/ibbw.log"
+    )
+    safe_log = safe_existing_evidence_path(
+        ibbw_log_path,
+        expected_path=expected_log,
+        allowed_root=evidence_root,
+        expect_directory=False,
+        description="current NCCL IBBW evidence",
+    )
+    from cval.validation.nccl_summary import summarize_ibbw_file
+
+    ports = summarize_ibbw_file(safe_log)
+    canonical_ports = {
+        label: float(values["max_gbps"])
+        for label, values in ports.items()
+        if label in NCCL_IB_PORT_COLUMNS
+    }
+    sample_counts = [
+        int(values["samples"])
+        for label, values in ports.items()
+        if label in NCCL_IB_PORT_COLUMNS
+    ]
+    if not canonical_ports:
+        raise ValueError("NCCL IBBW log has no sampled mlx5_0..mlx5_13 HCA port")
+    return NcclHealthMetrics(
+        iterations=metrics.iterations,
+        data_size_gb=metrics.data_size_gb,
+        samples=max(sample_counts) if sample_counts else None,
+        bus_bw=metrics.bus_bw,
+        alg_bw=metrics.alg_bw,
+        latency=metrics.latency,
+        port_max_gbps=canonical_ports,
     )
 
 

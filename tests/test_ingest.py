@@ -217,6 +217,12 @@ def add_nccl_health_from_summary(*args, **kwargs):
     else:
         shutil.copy2(source, canonical)
     mutable_args[2] = canonical
+    ibbw_source = kwargs.get("ibbw_log_path")
+    if ibbw_source is not None:
+        canonical_ibbw = canonical.parent / "artifacts/ibbw.log"
+        canonical_ibbw.parent.mkdir()
+        shutil.copy2(Path(ibbw_source), canonical_ibbw)
+        kwargs["ibbw_log_path"] = canonical_ibbw
     kwargs["_authorization"] = authorization
     return _add_nccl_health_from_summary(*mutable_args, **kwargs)
 
@@ -1063,6 +1069,48 @@ class NcclHealthIngestTests(unittest.TestCase):
                     require_hca_samples=True,
                     db_path=Path(tmpdir) / "nccl.db",
                 )
+
+    def test_nccl_recovers_missing_hca_metrics_from_canonical_ibbw_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            summary = root / "summary.json"
+            summary.write_text(
+                json.dumps(
+                    {
+                        "GCR_ITERATIONS": 20,
+                        "GCR_DATA_SIZE_GB": 8,
+                        "GCR_BUSBW": 44.5,
+                        "GCR_ALGBW": 25.4,
+                        "GCR_LATENCY": 628.2,
+                        "GCR_IB_PORT_BW_GBPS": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ibbw = root / "ibbw.log"
+            ibbw.write_text(
+                "00:00:01 | mlx5_4: 46.125 GB/s mlx5_7: 45.500 GB/s\n"
+                "00:00:02 | mlx5_4: 46.250 GB/s mlx5_7: 45.750 GB/s\n",
+                encoding="utf-8",
+            )
+            db_path = root / "nccl.db"
+
+            add_nccl_health_from_summary(
+                "node-a",
+                123,
+                summary,
+                ibbw_log_path=ibbw,
+                require_hca_samples=True,
+                immutable=True,
+                db_path=db_path,
+            )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                row = connection.execute(
+                    "SELECT samples, mlx5_4, mlx5_7 FROM IB_HEALTH"
+                ).fetchone()
+
+        self.assertEqual(row, (2, 46.25, 45.75))
 
     def test_nccl_rejects_incomplete_or_invalid_port_schema(self) -> None:
         for port in (

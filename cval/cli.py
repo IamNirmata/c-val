@@ -487,6 +487,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl_health.add_argument("--pytorch-version", default="")
     db_add_nccl_health.add_argument("--run-id", default="")
     db_add_nccl_health.add_argument("--immutable", action="store_true")
+    db_add_nccl_health.add_argument("--ibbw-log", type=Path)
     db_add_nccl_health.add_argument("--require-hca-samples", action="store_true")
     db_add_nccl_health.add_argument("--result-json", type=Path, required=True)
     db_add_nccl_health.add_argument("--result-digest", default="")
@@ -1489,6 +1490,7 @@ def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
         pytorch_version=args.pytorch_version,
         run_id=args.run_id,
         immutable=args.immutable,
+        ibbw_log_path=args.ibbw_log,
         require_hca_samples=args.require_hca_samples,
         db_path=args.db_path,
         _authorization=authorization,
