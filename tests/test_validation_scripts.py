@@ -202,6 +202,10 @@ printf '%s\n' \
         self.assertIn('--db-path "$CVAL_VALIDATION_DB_PATH"', script)
         self.assertIn('--db-path "$CVAL_STORAGE_DB_PATH"', script)
         self.assertIn('--db-path "$CVAL_NCCL_DB_PATH"', script)
+        self.assertIn('db-rebuild-dltest-metrics', script)
+        self.assertIn('dltest_ingest_dir=${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}', script)
+        self.assertIn('--results-root "$dltest_ingest_dir"', script)
+        self.assertIn('"$CVAL_DL_METRIC_LOCK_HELPER"', script)
         self.assertIn('db-add-run-results', script)
         self.assertIn('--storage-result "$GCRRESULT1"', script)
         self.assertIn('--overall-result "$overall_result"', script)
@@ -223,6 +227,162 @@ printf '%s\n' \
         self.assertNotIn("db-upsert-run-history", script)
         self.assertIn('--result-json "$CVAL_RESULT_JSON_FILE"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
+
+    def test_db_update_ingests_passing_dl_metrics_without_evaluator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metadata = root / "metadata"
+            dl_results = root / "validation_tests/dltest/runs"
+            config_path = root / "cval.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[storage]",
+                        f'validation_db_path = "{metadata / "validation.db"}"',
+                        f'storage_db_path = "{metadata / "test-storage.db"}"',
+                        f'nccl_db_path = "{metadata / "test-nccl.db"}"',
+                        f'dl_numerical_db_path = "{metadata / "dltest_numerical_correctness.db"}"',
+                        f'dl_compute_db_path = "{metadata / "dltest_compute_performance.db"}"',
+                        f'dl_collective_db_path = "{metadata / "dltest_collective_performance.db"}"',
+                        f'dl_overlap_db_path = "{metadata / "dltest_overlap_performance.db"}"',
+                        "",
+                        "[runtime]",
+                        f'repo_dir = "{REPO_ROOT}"',
+                        f'validation_root = "{root}"',
+                        f'validation_tests_dir = "{REPO_ROOT / "validation-tests"}"',
+                        f'dl_results_root_path = "{dl_results}"',
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            run_dir = dl_results / "node-a/node-a-123"
+            ranks_dir = run_dir / "artifacts/workdir/test_plans/80gb-example/runs"
+            ranks_dir.mkdir(parents=True)
+            (ranks_dir / "example_RANK0.json").write_text(
+                json.dumps(
+                    {
+                        "runID": "example_RANK0",
+                        "test_plan": "80gb-example",
+                        "nn_tasks": [
+                            {
+                                "task_name": "linear",
+                                "status": "completed",
+                                "norm_output": 1.0,
+                                "fp_cpu_time": 2.0,
+                                "fp_gpu_time": 3.0,
+                                "bp_cpu_time": 4.0,
+                                "bp_gpu_time": 5.0,
+                            }
+                        ],
+                        "f_tasks": [],
+                        "coll_tasks": [
+                            {
+                                "task_name": "allreduce",
+                                "status": "completed",
+                                "norm_output": 6.0,
+                                "cpu_time": 7.0,
+                                "gpu_time": 8.0,
+                            }
+                        ],
+                        "overlap_tasks": [
+                            {
+                                "task_name": "overlap",
+                                "status": "completed",
+                                "coll_name": "allreduce",
+                                "layer_name": "linear",
+                                "coll_mean": 9.0,
+                                "coll_stdev": 0.9,
+                                "layer_mean": 10.0,
+                                "layer_stdev": 1.0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "status": "pass",
+                        "gpu_count": 1,
+                        "rank_result_count": 1,
+                        "iterations": 100,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "cval.results.v1",
+                        "node": "node-a",
+                        "timestamp": "123",
+                        "overall": "pass",
+                        "tests": {
+                            "storage": {"enabled": False, "status": "incomplete"},
+                            "nccl": {"enabled": False, "status": "incomplete"},
+                            "dltest": {"enabled": True, "status": "pass"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ | build_runtime_environment(config) | {
+                "GCRNODE": "node-a",
+                "GCRTIME": "123",
+                "CVAL_RUN_ID": "node-a-123",
+                "CVAL_REPO_DIR": str(REPO_ROOT),
+                "CVAL_CONFIG_PATH": str(config_path),
+                "CVAL_VALIDATION_ROOT": str(root),
+                "CVAL_RESULT_JSON_FILE": str(result_path),
+                "CVAL_JOB_LOG_DIR": str(result_path.parent),
+                "DLTEST_RUN_DIR": "/proc/self/fd/999/run",
+                "CVAL_CANONICAL_DLTEST_RUN_DIR": str(run_dir),
+            }
+            completed = subprocess.run(
+                ["bash", str(REPO_ROOT / "validation-tests/db-update.sh")],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+
+            counts = {}
+            for component in (
+                "numerical_correctness",
+                "compute_performance",
+                "collective_performance",
+                "overlap_performance",
+            ):
+                db_path = metadata / f"dltest_{component}.db"
+                with closing(sqlite3.connect(db_path)) as connection:
+                    counts[component] = connection.execute(
+                        f'SELECT COUNT(*) FROM "{component}" '
+                        "WHERE node = ? AND cval_timestamp = ?",
+                        ("node-a", 123),
+                    ).fetchone()[0]
+            with closing(sqlite3.connect(metadata / "validation.db")) as connection:
+                dl_status = connection.execute(
+                    "SELECT result FROM runs WHERE node = ? AND test = ? AND timestamp = ?",
+                    ("node-a", "dltest", 123),
+                ).fetchone()
+
+        self.assertEqual(
+            counts,
+            {
+                "numerical_correctness": 2,
+                "compute_performance": 4,
+                "collective_performance": 2,
+                "overlap_performance": 4,
+            },
+        )
+        self.assertEqual(dl_status, ("pass",))
+        self.assertIn("DL metric DB update completed.", completed.stdout)
 
     def test_runtime_scripts_use_configured_environment(self) -> None:
         run_test = (REPO_ROOT / "validation-tests" / "run-test.sh").read_text(

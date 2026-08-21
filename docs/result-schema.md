@@ -23,11 +23,12 @@ never rewritten or deleted.
 - `metadata/validation.db` — `runs` plus `latest_status`, authoritative pass/fail;
 - `metadata/test-storage.db` — storage metrics;
 - `metadata/test-nccl.db` — consolidated `IB_HEALTH` metrics and current views;
-- four `metadata/dltest_*.db` files — component metrics rebuilt from canonical
-  rank JSON.
+- four `metadata/dltest_*.db` files — component metrics ingested from each
+  passing validation run and reconcilable from retained rank JSON.
 
 `validation-tests/db-update.sh` validates result/config provenance and writes
-only these current surfaces.
+only these current surfaces. DL writes use the same cross-process refresh lock
+as historical reconciliation so validation Jobs do not race maintenance.
 
 ## Baseline and classification databases
 

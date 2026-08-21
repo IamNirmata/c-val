@@ -21,9 +21,11 @@ cval validate --node <eligible-node> --git-ref <40-hex-commit> \
 
 Publish the candidate commit first because the job fetches only that immutable
 commit. The command performs the real storage/NCCL/DL workload and canonical
-raw ingestion. It does not rebuild DL metric DBs or persist classifications;
-those remain independently operated by the resident evaluator. A degraded
-verdict never triggers cluster mutation.
+raw ingestion. A passing DL phase writes that run's rank metrics into all four
+DL metric DBs under the shared DL refresh lock before its pass status is
+committed. It does not persist baselines or classifications; those remain
+independently operated by the resident evaluator. A degraded verdict never
+triggers cluster mutation.
 
 Use `cval plan --live-status --git-ref <40-hex-commit>` only to inspect the
 rolling scheduler queue. It is
@@ -44,6 +46,9 @@ runs all recurring NCCL PostgreSQL work. Do not start separate tmux loops while
 the Deployment is active. Before scaling it to one, discover and stop old tmux
 loops and suspend any evaluator CronJobs left by an earlier deployment;
 removing their source manifests does not prune live objects.
+
+Evaluator DL rebuilds reconcile retained historical rank evidence and refresh
+derived baselines. They are not required for current validation-run ingestion.
 
 ## Whole-root backup preparation
 

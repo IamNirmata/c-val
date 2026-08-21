@@ -56,7 +56,11 @@ file descriptors and invokes the generic runner. New runs write the canonical
 artifacts remain readable and are never rewritten.
 
 `validation-tests/db-update.sh` writes only the current raw databases. It has no
-normalized run-history or alternate per-test dual-write branches.
+normalized run-history or alternate per-test dual-write branches. A passing DL
+phase ingests only its canonical run directory into all four DL metric DBs under
+the shared refresh lock before the pass/fail status transaction. Evaluator
+rebuilds remain an idempotent historical reconciliation mechanism, not a
+prerequisite for current-run ingestion.
 
 The optional NCCL PostgreSQL path is an asynchronous outbox, not a validation
 job dual-write. The GPU pod records strict runtime evidence and, only when the

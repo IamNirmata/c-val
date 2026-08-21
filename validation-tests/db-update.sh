@@ -19,10 +19,13 @@ CVAL_DL_NUMERICAL_DB_PATH=${CVAL_DL_NUMERICAL_DB_PATH:-$CVAL_VALIDATION_ROOT/met
 CVAL_DL_COMPUTE_DB_PATH=${CVAL_DL_COMPUTE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_compute_performance.db}
 CVAL_DL_COLLECTIVE_DB_PATH=${CVAL_DL_COLLECTIVE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_collective_performance.db}
 CVAL_DL_OVERLAP_DB_PATH=${CVAL_DL_OVERLAP_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_overlap_performance.db}
+CVAL_DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$CVAL_VALIDATION_ROOT/baselines/.dl-metric-refresh.lock}
+CVAL_DL_METRIC_LOCK_HELPER=${CVAL_DL_METRIC_LOCK_HELPER:-$CVAL_REPO_DIR/scripts/dl-metric-lock.py}
 GCRNODE=${GCRNODE:-unknown}
 GCRTIME=${GCRTIME:-unknown}
 CVAL_RUN_ID=${CVAL_RUN_ID:-${GCRNODE:-unknown}-${GCRTIME:-unknown}}
 CVAL_JOB_LOG_DIR=${CVAL_JOB_LOG_DIR:-$CVAL_VALIDATION_ROOT/logs/job_logs/${GCRNODE:-unknown}/$CVAL_RUN_ID}
+DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
 export CVAL_RUN_ID CVAL_JOB_LOG_DIR
 
 emit_cval_event() {
@@ -435,6 +438,11 @@ if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
                 echo "STORAGE_OUTPUT_DIR does not match the validated v2 result" >&2
                 exit 1
         fi
+        expected_dltest_run_dir="$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID"
+        if [[ "${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}" != "$expected_dltest_run_dir" ]]; then
+                echo "DLTEST_RUN_DIR does not match the canonical v2 run" >&2
+                exit 1
+        fi
         if [[ -n "$result_nccl_summary" && \
             "${CVAL_CANONICAL_NCCL_SUMMARY_FILE:-${NCCL_SUMMARY_FILE:-}}" != "$result_nccl_summary" ]]; then
                 echo "NCCL_SUMMARY_FILE does not match the validated v2 result" >&2
@@ -552,6 +560,31 @@ if is_enabled "$RUN_NCCL" && [ "$GCRRESULT2" = "pass" ]; then
     echo "NCCL IB_HEALTH DB update completed."
 else
     echo "Skipping NCCL metrics DB update because result is $GCRRESULT2."
+fi
+
+# DL metric ingestion is owned by the validation Job. The evaluator may rebuild
+# these DBs for reconciliation, but it is not required for current-run ingestion.
+if is_enabled "$RUN_DLTEST" && [ "$GCRRESULT3" = "pass" ]; then
+    dltest_ingest_dir=${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}
+    if [[ ! -d "$dltest_ingest_dir" ]]; then
+        echo "Passing DL result is missing required run directory: $dltest_ingest_dir" >&2
+        exit 1
+    fi
+    if [[ ! -f "$CVAL_DL_METRIC_LOCK_HELPER" ]]; then
+        echo "DL metric lock helper is missing: $CVAL_DL_METRIC_LOCK_HELPER" >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "$CVAL_DL_METRIC_LOCK_FILE")"
+    echo "Updating DL metric DBs from current run evidence"
+    PYTHONPATH="$CVAL_REPO_DIR" python3 "$CVAL_DL_METRIC_LOCK_HELPER" \
+        "$CVAL_DL_METRIC_LOCK_FILE" -- \
+        python3 -m cval.cli --config "$CVAL_CONFIG_PATH" \
+        db-rebuild-dltest-metrics \
+        --results-root "$dltest_ingest_dir" \
+        --output json
+    echo "DL metric DB update completed."
+else
+    echo "Skipping DL metrics DB update because result is $GCRRESULT3."
 fi
 
 # Commit fixed built-in status rows only after all required metric
