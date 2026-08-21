@@ -47,6 +47,25 @@ HISTORICAL_DL_ITERATIONS = 20
 DL_INGEST_BATCH_RUNS = 25
 logger = logging.getLogger(__name__)
 
+_STANDARD_REQUIRED_COLUMNS = frozenset(
+    {
+        "run_key",
+        "node",
+        "cval_timestamp",
+        "sample_dir",
+        "test_plan",
+        "dltest_run_id",
+        "rank",
+        "task_group",
+        "task_name",
+        "status",
+        "metric_name",
+        "metric_value",
+        "source_file",
+    }
+)
+_OVERLAP_REQUIRED_COLUMNS = _STANDARD_REQUIRED_COLUMNS | {"coll_name", "layer_name"}
+
 
 @dataclass(frozen=True)
 class RankFile:
@@ -492,6 +511,7 @@ def write_standard_db(
     replace_run_keys: set[str] | None = None,
     reconcile_root: Path | None = None,
     generation_id: str | None = None,
+    run_receipts: dict[str, str] | None = None,
 ) -> None:
     """Write standard metric rows to a SQLite DB."""
 
@@ -524,10 +544,12 @@ def write_standard_db(
         connection.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table_name}_metric ON {table_name}(task_name, metric_name)"
         )
+        _ensure_ingested_runs_table(connection, table_name)
         run_keys = set(replace_run_keys or set())
         if reconcile_root is not None:
             run_keys.update(_run_keys_in_scope(connection, table_name, reconcile_root))
         _delete_run_keys(connection, table_name, run_keys)
+        _delete_ingested_run_keys(connection, run_keys)
         connection.executemany(
             f"""
             INSERT OR REPLACE INTO {table_name} (
@@ -537,6 +559,10 @@ def write_standard_db(
             """,
             [tuple(row.__dict__.values()) for row in rows],
         )
+        receipts = dict(run_receipts or {})
+        for row in rows:
+            receipts.setdefault(row.run_key, row.sample_dir)
+        _write_ingested_run_receipts(connection, receipts)
         if generation_id:
             _write_ingest_generation(connection, generation_id)
         connection.commit()
@@ -550,6 +576,7 @@ def write_overlap_db(
     replace_run_keys: set[str] | None = None,
     reconcile_root: Path | None = None,
     generation_id: str | None = None,
+    run_receipts: dict[str, str] | None = None,
 ) -> None:
     """Write overlap metric rows to a SQLite DB."""
 
@@ -584,10 +611,12 @@ def write_overlap_db(
         connection.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pair ON {table_name}(coll_name, layer_name)"
         )
+        _ensure_ingested_runs_table(connection, table_name)
         run_keys = set(replace_run_keys or set())
         if reconcile_root is not None:
             run_keys.update(_run_keys_in_scope(connection, table_name, reconcile_root))
         _delete_run_keys(connection, table_name, run_keys)
+        _delete_ingested_run_keys(connection, run_keys)
         connection.executemany(
             f"""
             INSERT OR REPLACE INTO {table_name} (
@@ -598,6 +627,10 @@ def write_overlap_db(
             """,
             [tuple(row.__dict__.values()) for row in rows],
         )
+        receipts = dict(run_receipts or {})
+        for row in rows:
+            receipts.setdefault(row.run_key, row.sample_dir)
+        _write_ingested_run_receipts(connection, receipts)
         if generation_id:
             _write_ingest_generation(connection, generation_id)
         connection.commit()
@@ -620,6 +653,58 @@ def _delete_run_keys(
         )
 
 
+def _ensure_ingested_runs_table(
+    connection: sqlite3.Connection,
+    table_name: str,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cval_ingested_runs (
+            run_key TEXT PRIMARY KEY,
+            sample_dir TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO cval_ingested_runs(run_key, sample_dir, updated_at) "
+        f"SELECT run_key, MIN(sample_dir), ? FROM {table_name} GROUP BY run_key",
+        (int(time.time()),),
+    )
+
+
+def _delete_ingested_run_keys(
+    connection: sqlite3.Connection,
+    run_keys: set[str],
+) -> None:
+    keys = sorted(run_keys)
+    for start in range(0, len(keys), 500):
+        chunk = keys[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        connection.execute(
+            f"DELETE FROM cval_ingested_runs WHERE run_key IN ({placeholders})",
+            chunk,
+        )
+
+
+def _write_ingested_run_receipts(
+    connection: sqlite3.Connection,
+    receipts: dict[str, str],
+) -> None:
+    now = int(time.time())
+    values: list[tuple[str, str, int]] = []
+    for run_key, sample_dir in sorted(receipts.items()):
+        if not run_key or not sample_dir:
+            raise ValueError("DL ingestion receipt fields must be non-empty")
+        values.append((run_key, sample_dir, now))
+    connection.executemany(
+        "INSERT INTO cval_ingested_runs(run_key, sample_dir, updated_at) "
+        "VALUES (?, ?, ?) ON CONFLICT(run_key) DO UPDATE SET "
+        "sample_dir=excluded.sample_dir, updated_at=excluded.updated_at",
+        values,
+    )
+
+
 def _run_keys_in_scope(
     connection: sqlite3.Connection,
     table_name: str,
@@ -634,6 +719,16 @@ def _run_keys_in_scope(
     rows = connection.execute(
         f"SELECT DISTINCT run_key, sample_dir FROM {table_name}"
     ).fetchall()
+    receipts_table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='cval_ingested_runs'"
+    ).fetchone()
+    if receipts_table is not None:
+        rows.extend(
+            connection.execute(
+                "SELECT run_key, sample_dir FROM cval_ingested_runs"
+            ).fetchall()
+        )
     scoped: set[str] = set()
     for run_key, sample_dir in rows:
         try:
@@ -763,12 +858,16 @@ def ingest_dltest_run(
         component: safe_writable_file_path(path)
         for component, path in paths.items()
     }
+    run_receipts = {
+        rank_file.run_key: rank_file.sample_dir for rank_file in rank_files
+    }
     write_standard_db(
         safe_paths["numerical_correctness"],
         "numerical_correctness",
         numerical_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     write_standard_db(
         safe_paths["compute_performance"],
@@ -776,6 +875,7 @@ def ingest_dltest_run(
         compute_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     write_standard_db(
         safe_paths["collective_performance"],
@@ -783,6 +883,7 @@ def ingest_dltest_run(
         collective_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     write_overlap_db(
         safe_paths["overlap_performance"],
@@ -790,6 +891,7 @@ def ingest_dltest_run(
         overlap_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     return {
         "results_root": str(root),
@@ -850,9 +952,13 @@ def ingest_dltest_results(
         component: safe_writable_file_path(path)
         for component, path in paths.items()
     }
-    existing_files = any(path.is_file() for path in paths.values())
-    complete_run_keys = _complete_stored_run_keys(paths) if only_missing else set()
+    existing_files = {component: path.is_file() for component, path in paths.items()}
     generation_id = f"{int(time.time() * 1_000_000)}-{uuid.uuid4().hex}"
+    if only_missing and any(existing_files.values()):
+        if not all(existing_files.values()):
+            raise ValueError("DL only-missing requires all four metric DBs or none")
+        _initialize_existing_dl_state(paths, generation_id)
+    complete_run_keys = _complete_stored_run_keys(paths) if only_missing else set()
     valid_run_keys: set[str] = set()
     processed_run_keys: set[str] = set()
     batch: list[RankFile] = []
@@ -864,8 +970,17 @@ def ingest_dltest_results(
         nonlocal batch, batch_run_keys, processed_rank_files
         if not batch:
             return
-        rows = classify_rank_files(batch)
-        _write_dl_rows(paths, rows, batch_run_keys, generation_id)
+        rows = _deduplicate_component_rows(classify_rank_files(batch))
+        run_receipts = {
+            rank_file.run_key: rank_file.sample_dir for rank_file in batch
+        }
+        _write_dl_rows(
+            paths,
+            rows,
+            batch_run_keys,
+            generation_id,
+            run_receipts,
+        )
         processed_rank_files += len(batch)
         processed_run_keys.update(batch_run_keys)
         for component, values in zip(
@@ -887,6 +1002,12 @@ def ingest_dltest_results(
         if not current:
             continue
         current_keys = {rank_file.run_key for rank_file in current}
+        duplicate_keys = current_keys & valid_run_keys
+        if duplicate_keys:
+            raise ValueError(
+                "Duplicate DL run key appears in multiple evidence directories: "
+                + ", ".join(sorted(duplicate_keys))
+            )
         valid_run_keys.update(current_keys)
         if only_missing and current_keys <= complete_run_keys:
             continue
@@ -896,9 +1017,9 @@ def ingest_dltest_results(
             flush_batch()
     flush_batch()
 
-    if not valid_run_keys and not existing_files:
+    if not valid_run_keys and not all(existing_files.values()):
         raise ValueError(
-            "DL rebuild found no valid rank evidence and no existing metric DBs to reconcile"
+            "DL rebuild found no valid rank evidence and not all four metric DBs exist"
         )
     if not only_missing:
         _finish_dl_reconciliation(
@@ -909,6 +1030,10 @@ def ingest_dltest_results(
         )
     elif not processed_run_keys:
         generation_id = validate_dl_metric_generation(paths)
+        if generation_id is None:
+            raise ValueError(
+                "DL only-missing scan requires a coherent generation when no runs are written"
+            )
 
     return {
         "results_root": str(root),
@@ -939,10 +1064,16 @@ def _stored_run_keys(db_path: Path, table_name: str) -> set[str]:
         ).fetchone()
         if table is None:
             return set()
-        return {
-            str(row[0])
-            for row in connection.execute(f'SELECT DISTINCT run_key FROM "{table_name}"')
-        }
+        receipts = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='cval_ingested_runs'"
+        ).fetchone()
+        source = (
+            "SELECT run_key FROM cval_ingested_runs"
+            if receipts is not None
+            else f'SELECT DISTINCT run_key FROM "{table_name}"'
+        )
+        return {str(row[0]) for row in connection.execute(source)}
 
 
 def _complete_stored_run_keys(paths: dict[str, Path]) -> set[str]:
@@ -958,6 +1089,86 @@ def _complete_stored_run_keys(paths: dict[str, Path]) -> set[str]:
     return set.intersection(*stored) if stored else set()
 
 
+def _initialize_existing_dl_state(
+    paths: dict[str, Path],
+    generation_id: str,
+) -> None:
+    """Validate/migrate all existing DL DBs and establish one generation."""
+
+    from cval.storage.sqlite_uri import connect_sqlite_file
+
+    for component, path in paths.items():
+        with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (component,),
+            ).fetchone()
+            if table is None:
+                raise ValueError(
+                    f"DL metric DB is missing required table {component}: {path}"
+                )
+            columns = {
+                str(row[1])
+                for row in connection.execute(f'PRAGMA table_info("{component}")')
+            }
+            required = (
+                _OVERLAP_REQUIRED_COLUMNS
+                if component == "overlap_performance"
+                else _STANDARD_REQUIRED_COLUMNS
+            )
+            missing = sorted(required - columns)
+            if missing:
+                raise ValueError(
+                    f"DL metric DB table {component} is missing required columns: "
+                    + ", ".join(missing)
+                )
+
+    for component, path in paths.items():
+        with closing(connect(path)) as connection:
+            ensure_iterations_column(connection, component)
+            _ensure_ingested_runs_table(connection, component)
+            _write_ingest_generation(connection, generation_id)
+            connection.commit()
+
+
+def _deduplicate_component_rows(
+    rows: tuple[
+        list[StandardMetricRow],
+        list[StandardMetricRow],
+        list[StandardMetricRow],
+        list[OverlapMetricRow],
+    ],
+) -> tuple[
+    list[StandardMetricRow],
+    list[StandardMetricRow],
+    list[StandardMetricRow],
+    list[OverlapMetricRow],
+]:
+    deduplicated: list[list[Any]] = []
+    for component_rows in rows:
+        unique: dict[tuple[object, ...], Any] = {}
+        for row in component_rows:
+            key = (
+                row.run_key,
+                row.rank,
+                row.task_group,
+                row.task_name,
+                row.metric_name,
+            )
+            prior = unique.get(key)
+            if prior is not None:
+                prior_values = prior.__dict__ | {"source_file": ""}
+                row_values = row.__dict__ | {"source_file": ""}
+                if prior_values != row_values:
+                    raise ValueError(
+                        f"Conflicting duplicate DL metric evidence: {key}"
+                    )
+                continue
+            unique[key] = row
+        deduplicated.append(list(unique.values()))
+    return tuple(deduplicated)  # type: ignore[return-value]
+
+
 def _write_dl_rows(
     paths: dict[str, Path],
     rows: tuple[
@@ -968,6 +1179,7 @@ def _write_dl_rows(
     ],
     run_keys: set[str],
     generation_id: str,
+    run_receipts: dict[str, str],
 ) -> None:
     numerical_rows, compute_rows, collective_rows, overlap_rows = rows
     write_standard_db(
@@ -976,6 +1188,7 @@ def _write_dl_rows(
         numerical_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     write_standard_db(
         paths["compute_performance"],
@@ -983,6 +1196,7 @@ def _write_dl_rows(
         compute_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     write_standard_db(
         paths["collective_performance"],
@@ -990,6 +1204,7 @@ def _write_dl_rows(
         collective_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
     write_overlap_db(
         paths["overlap_performance"],
@@ -997,6 +1212,7 @@ def _write_dl_rows(
         overlap_rows,
         replace_run_keys=run_keys,
         generation_id=generation_id,
+        run_receipts=run_receipts,
     )
 
 

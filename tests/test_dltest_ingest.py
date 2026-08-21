@@ -593,6 +593,203 @@ class DltestIngestTests(unittest.TestCase):
         self.assertEqual(first_value, 999)
         self.assertEqual(runs, 2)
 
+    def test_only_missing_receipts_mark_valid_zero_row_components_complete(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            rank_path = (
+                run_dir
+                / "workdir/test_plans/80gb-example/runs/example_RANK0.json"
+            )
+            _write_rank_json(rank_path, 0)
+            payload = json.loads(rank_path.read_text(encoding="utf-8"))
+            payload["coll_tasks"] = []
+            payload["overlap_tasks"] = []
+            rank_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            first = ingest_dltest_results(root, output, only_missing=True)
+            second = ingest_dltest_results(root, output, only_missing=True)
+
+            with closing(
+                sqlite3.connect(output / "dltest_collective_performance.db")
+            ) as connection:
+                rows = connection.execute(
+                    "SELECT COUNT(*) FROM collective_performance"
+                ).fetchone()[0]
+                receipts = connection.execute(
+                    "SELECT COUNT(*) FROM cval_ingested_runs WHERE run_key=?",
+                    (run_dir.name,),
+                ).fetchone()[0]
+
+        self.assertEqual(first["runs"], 1)
+        self.assertEqual(second["runs"], 0)
+        self.assertEqual(second["skipped_existing_runs"], 1)
+        self.assertEqual(rows, 0)
+        self.assertEqual(receipts, 1)
+
+    def test_only_missing_empty_root_rejects_partial_legacy_db_set(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            root.mkdir()
+            output.mkdir()
+            with closing(
+                sqlite3.connect(output / "dltest_compute_performance.db")
+            ) as connection:
+                connection.execute("CREATE TABLE placeholder(value INTEGER)")
+                connection.commit()
+
+            with self.assertRaisesRegex(ValueError, "all four metric DBs"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_only_missing_repairs_existing_empty_receipt_tables(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            _write_rank_json(
+                run_dir / "workdir/test_plans/80gb-example/runs/example_RANK0.json",
+                0,
+            )
+            ingest_dltest_results(root, output)
+            for db_path in output.glob("dltest_*.db"):
+                with closing(sqlite3.connect(db_path)) as connection:
+                    connection.execute("DELETE FROM cval_ingested_runs")
+                    connection.commit()
+
+            summary = ingest_dltest_results(root, output, only_missing=True)
+
+            receipts = []
+            for db_path in output.glob("dltest_*.db"):
+                with closing(sqlite3.connect(db_path)) as connection:
+                    receipts.append(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM cval_ingested_runs"
+                        ).fetchone()[0]
+                    )
+
+        self.assertEqual(summary["runs"], 0)
+        self.assertEqual(summary["skipped_existing_runs"], 1)
+        self.assertEqual(receipts, [1, 1, 1, 1])
+
+    def test_only_missing_empty_root_rejects_missing_metric_tables(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            root.mkdir()
+            output.mkdir()
+            for component in (
+                "numerical_correctness",
+                "compute_performance",
+                "collective_performance",
+                "overlap_performance",
+            ):
+                with closing(sqlite3.connect(output / f"dltest_{component}.db")) as connection:
+                    connection.execute(
+                        "CREATE TABLE cval_ingest_metadata ("
+                        "id INTEGER PRIMARY KEY, generation_id TEXT, updated_at INTEGER)"
+                    )
+                    connection.execute(
+                        "INSERT INTO cval_ingest_metadata VALUES (1, 'same', 1)"
+                    )
+                    connection.commit()
+
+            with self.assertRaisesRegex(ValueError, "missing required table"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_only_missing_preflights_all_schemas_before_generation_write(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            _write_rank_json(
+                run_dir / "workdir/test_plans/80gb-example/runs/example_RANK0.json",
+                0,
+            )
+            ingest_dltest_results(root, output)
+            paths = sorted(output.glob("dltest_*.db"))
+            generations = {}
+            for path in paths:
+                with closing(sqlite3.connect(path)) as connection:
+                    generations[path.name] = connection.execute(
+                        "SELECT generation_id FROM cval_ingest_metadata WHERE id=1"
+                    ).fetchone()[0]
+            overlap = output / "dltest_overlap_performance.db"
+            with closing(sqlite3.connect(overlap)) as connection:
+                connection.execute("ALTER TABLE overlap_performance RENAME TO broken")
+                connection.commit()
+
+            with self.assertRaisesRegex(ValueError, "missing required table"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+            after = {}
+            for path in paths[:-1]:
+                with closing(sqlite3.connect(path)) as connection:
+                    after[path.name] = connection.execute(
+                        "SELECT generation_id FROM cval_ingest_metadata WHERE id=1"
+                    ).fetchone()[0]
+
+        self.assertEqual(after, {name: generations[name] for name in after})
+
+    def test_only_missing_rejects_incomplete_metric_table_columns(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            root.mkdir()
+            output.mkdir()
+            for component in (
+                "numerical_correctness",
+                "compute_performance",
+                "collective_performance",
+                "overlap_performance",
+            ):
+                with closing(sqlite3.connect(output / f"dltest_{component}.db")) as connection:
+                    connection.execute(
+                        f'CREATE TABLE "{component}" (run_key TEXT, sample_dir TEXT)'
+                    )
+                    connection.commit()
+
+            with self.assertRaisesRegex(ValueError, "missing required columns"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_only_missing_rejects_duplicate_run_keys_across_directories(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            first = root / "dltest-node-a-1781649558"
+            second = root / "nested/dltest-node-a-1781649558"
+            for run_dir in (first, second):
+                _write_rank_json(
+                    run_dir / "workdir/test_plans/80gb-example/runs/example_RANK0.json",
+                    0,
+                )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate DL run key"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_only_missing_reports_deduplicated_stored_row_counts(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            runs_dir = run_dir / "workdir/test_plans/80gb-example/runs"
+            first = runs_dir / "first_RANK0.json"
+            second = runs_dir / "second_RANK0.json"
+            _write_rank_json(first, 0)
+            second.write_bytes(first.read_bytes())
+
+            summary = ingest_dltest_results(root, output, only_missing=True)
+
+            with closing(
+                sqlite3.connect(output / "dltest_compute_performance.db")
+            ) as connection:
+                stored = connection.execute(
+                    "SELECT COUNT(*) FROM compute_performance"
+                ).fetchone()[0]
+
+        self.assertEqual(summary["compute_performance_rows"], stored)
+
     def test_default_ingest_honors_exact_configured_db_paths(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "results"

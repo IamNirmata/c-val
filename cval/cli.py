@@ -1579,10 +1579,17 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
         print(json.dumps(summary, indent=2))
         return 0
 
-    print(
-        f"Rebuilt DL metric DBs from {summary['rank_files']} rank file(s) "
-        f"across {summary['runs']} run(s)"
-    )
+    if summary["only_missing"]:
+        print(
+            f"Scanned {summary['discovered_runs']} DL run(s): "
+            f"ingested {summary['runs']}, "
+            f"skipped {summary['skipped_existing_runs']} already complete"
+        )
+    else:
+        print(
+            f"Rebuilt DL metric DBs from {summary['rank_files']} rank file(s) "
+            f"across {summary['runs']} run(s)"
+        )
     print(f"Results root: {summary['results_root']}")
     print(f"Output dir: {summary['output_dir']}")
     print(f"numerical_correctness: {summary['numerical_correctness_rows']} rows")
