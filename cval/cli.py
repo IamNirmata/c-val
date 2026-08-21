@@ -488,6 +488,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_nccl_health.add_argument("--run-id", default="")
     db_add_nccl_health.add_argument("--immutable", action="store_true")
     db_add_nccl_health.add_argument("--ibbw-log", type=Path)
+    db_add_nccl_health.add_argument("--recover-descriptor-ibbw-log", action="store_true")
+    db_add_nccl_health.add_argument("--confirm-recovery")
     db_add_nccl_health.add_argument("--require-hca-samples", action="store_true")
     db_add_nccl_health.add_argument("--result-json", type=Path, required=True)
     db_add_nccl_health.add_argument("--result-digest", default="")
@@ -1480,6 +1482,16 @@ def handle_db_add_storage_result(args: argparse.Namespace) -> int:
 def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
     """Ingest one consolidated NCCL/IB health row from a summary JSON."""
 
+    if args.recover_descriptor_ibbw_log:
+        if args.confirm_recovery != "recover-descriptor-ibbw":
+            raise ValueError(
+                "descriptor IBBW recovery requires exact --confirm-recovery "
+                "recover-descriptor-ibbw"
+            )
+    elif args.confirm_recovery is not None:
+        raise ValueError(
+            "--confirm-recovery is valid only with --recover-descriptor-ibbw-log"
+        )
     authorization = _raw_write_authorization(args)
     if not args.summary_json.exists():
         print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
@@ -1500,6 +1512,7 @@ def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         immutable=args.immutable,
         ibbw_log_path=args.ibbw_log,
+        recover_descriptor_ibbw_log=args.recover_descriptor_ibbw_log,
         require_hca_samples=args.require_hca_samples,
         db_path=args.db_path,
         _authorization=authorization,

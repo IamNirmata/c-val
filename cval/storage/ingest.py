@@ -284,6 +284,7 @@ def add_nccl_health_result(
     immutable: bool = False,
     summary_json_path: str | Path | None = None,
     ibbw_log_path: str | Path | None = None,
+    recover_descriptor_ibbw_log: bool = False,
     require_hca_samples: bool = False,
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
     _authorization: ResultWriteAuthorization | None = None,
@@ -309,6 +310,7 @@ def add_nccl_health_result(
         iterations=iterations,
         ibbw_log_path=ibbw_log_path,
         authorization=authorization,
+        recover_descriptor_ibbw_log=recover_descriptor_ibbw_log,
         require_hca_samples=require_hca_samples,
     )
     expected_ports = {
@@ -424,6 +426,7 @@ def add_nccl_health_from_summary(
     run_id: str = "",
     immutable: bool = False,
     ibbw_log_path: str | Path | None = None,
+    recover_descriptor_ibbw_log: bool = False,
     require_hca_samples: bool = False,
     db_path: str | Path = DEFAULT_NCCL_DB_PATH,
     _authorization: ResultWriteAuthorization | None = None,
@@ -447,6 +450,7 @@ def add_nccl_health_from_summary(
         iterations=iterations,
         ibbw_log_path=ibbw_log_path,
         authorization=authorization,
+        recover_descriptor_ibbw_log=recover_descriptor_ibbw_log,
         require_hca_samples=require_hca_samples,
     )
     return add_nccl_health_result(
@@ -464,6 +468,7 @@ def add_nccl_health_from_summary(
         immutable=immutable,
         summary_json_path=summary_json_path,
         ibbw_log_path=ibbw_log_path,
+        recover_descriptor_ibbw_log=recover_descriptor_ibbw_log,
         require_hca_samples=require_hca_samples,
         db_path=db_path,
         _authorization=authorization,
@@ -476,6 +481,7 @@ def _parse_nccl_health_evidence(
     iterations: int | str | None,
     ibbw_log_path: str | Path | None,
     authorization: ResultWriteAuthorization,
+    recover_descriptor_ibbw_log: bool,
     require_hca_samples: bool,
 ) -> NcclHealthMetrics:
     metrics = parse_nccl_health_summary(
@@ -511,7 +517,13 @@ def _parse_nccl_health_evidence(
     )
     summary_payload = json.loads(Path(summary_json_path).read_text(encoding="utf-8"))
     summary_reference = summary_payload.get("GCR_IBBW_LOG_FILE")
-    if summary_reference != str(requested_log):
+    historical_descriptor_reference = (
+        recover_descriptor_ibbw_log
+        and isinstance(summary_reference, str)
+        and re.fullmatch(r"/proc/self/fd/[0-9]+/ibbw\.log", summary_reference)
+        and requested_log == artifacts / "ibbw.log"
+    )
+    if summary_reference != str(requested_log) and not historical_descriptor_reference:
         raise ValueError("NCCL IBBW evidence does not match the summary reference")
     if metrics.port_max_gbps:
         return metrics

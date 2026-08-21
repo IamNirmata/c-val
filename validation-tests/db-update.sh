@@ -582,7 +582,7 @@ if is_enabled "$RUN_DLTEST" && [ "$GCRRESULT3" = "pass" ]; then
     echo "Updating DL metric DBs from current run evidence"
     PYTHONPATH="$CVAL_REPO_DIR" python3 "$CVAL_DL_METRIC_LOCK_HELPER" \
         "$CVAL_DL_METRIC_LOCK_FILE" -- \
-        python3 -m cval.cli --config "$CVAL_CONFIG_PATH" \
+        python3 -m cval.cli \
         db-add-dltest-run "$GCRNODE" "$GCRTIME" "$dltest_ingest_dir" \
         --result-json "$CVAL_RESULT_JSON_FILE" \
         --result-digest "$result_digest" \

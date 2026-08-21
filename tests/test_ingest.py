@@ -1163,6 +1163,69 @@ class NcclHealthIngestTests(unittest.TestCase):
 
             self.assertFalse(db_path.exists())
 
+    def test_nccl_historical_descriptor_recovery_requires_explicit_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nccl.db"
+            authorization, root = _authorization(
+                "node-a",
+                123,
+                operation="nccl",
+                db_path=db_path,
+            )
+            run_dir = root / "validation_tests/nccl/runs/node-a/node-a-123"
+            artifacts = run_dir / "artifacts"
+            artifacts.mkdir(parents=True)
+            ibbw = artifacts / "ibbw.log"
+            ibbw.write_text(
+                "00:00:01 | mlx5_4: 46.250 GB/s\n",
+                encoding="utf-8",
+            )
+            summary = run_dir / "summary.json"
+            summary.write_text(
+                json.dumps(
+                    {
+                        "GCR_ITERATIONS": 20,
+                        "GCR_BUSBW": 44.5,
+                        "GCR_ALGBW": 25.4,
+                        "GCR_LATENCY": 628.2,
+                        "GCR_IB_PORT_BW_GBPS": {},
+                        "GCR_IBBW_LOG_FILE": "/proc/self/fd/26/ibbw.log",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "summary reference"):
+                _add_nccl_health_from_summary(
+                    "node-a",
+                    123,
+                    summary,
+                    ibbw_log_path=ibbw,
+                    require_hca_samples=True,
+                    immutable=True,
+                    db_path=db_path,
+                    _authorization=authorization,
+                )
+
+            _add_nccl_health_from_summary(
+                "node-a",
+                123,
+                summary,
+                ibbw_log_path=ibbw,
+                recover_descriptor_ibbw_log=True,
+                require_hca_samples=True,
+                immutable=True,
+                db_path=db_path,
+                _authorization=authorization,
+            )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                row = connection.execute(
+                    "SELECT samples, mlx5_4 FROM IB_HEALTH"
+                ).fetchone()
+
+        self.assertEqual(row, (1, 46.25))
+
     def test_nccl_rejects_incomplete_or_invalid_port_schema(self) -> None:
         for port in (
             {"max_gbps": 10.0, "samples": 2},
