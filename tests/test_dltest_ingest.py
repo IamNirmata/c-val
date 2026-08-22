@@ -15,6 +15,7 @@ import cval.storage.dltest_ingest as dl_ingest_module
 
 from cval.storage.dltest_ingest import (
     HISTORICAL_DL_ITERATIONS,
+    StandardMetricRow,
     dl_run_iterations,
     ensure_iterations_column,
     find_dl_run_dirs,
@@ -866,6 +867,7 @@ class DltestIngestTests(unittest.TestCase):
             summary = ingest_dltest_results(root, output, only_missing=True)
 
             receipts = []
+            migrations = []
             for db_path in output.glob("dltest_*.db"):
                 with closing(sqlite3.connect(db_path)) as connection:
                     receipts.append(
@@ -873,10 +875,65 @@ class DltestIngestTests(unittest.TestCase):
                             "SELECT COUNT(*) FROM cval_ingested_runs"
                         ).fetchone()[0]
                     )
+                    migrations.append(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM cval_ingest_migrations "
+                            "WHERE name LIKE 'receipts-v1:%'"
+                        ).fetchone()[0]
+                    )
 
-        self.assertEqual(summary["runs"], 0)
-        self.assertEqual(summary["skipped_existing_runs"], 1)
+        self.assertEqual(summary["runs"], 1)
+        self.assertEqual(summary["skipped_existing_runs"], 0)
         self.assertEqual(receipts, [1, 1, 1, 1])
+        self.assertEqual(migrations, [1, 1, 1, 1])
+
+    def test_receipt_migration_marker_prevents_repeated_table_backfill(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "compute.db"
+            row = StandardMetricRow(
+                run_key="run-a",
+                node="node-a",
+                cval_timestamp=1,
+                iterations=20,
+                sample_dir="/evidence/run-a",
+                test_plan="plan",
+                dltest_run_id="rank0",
+                rank=0,
+                task_group="nn_tasks",
+                task_name="task",
+                status="completed",
+                metric_name="fp_cpu_time",
+                metric_value=1.0,
+                source_file="/evidence/run-a/rank0.json",
+            )
+            dl_ingest_module.write_standard_db(
+                db_path,
+                "compute_performance",
+                [row],
+                replace_run_keys={"run-a"},
+                generation_id="generation-a",
+            )
+            with closing(sqlite3.connect(db_path)) as connection:
+                connection.execute("DELETE FROM cval_ingested_runs")
+                connection.commit()
+
+            dl_ingest_module.write_standard_db(
+                db_path,
+                "compute_performance",
+                [],
+                generation_id="generation-b",
+            )
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                receipts = connection.execute(
+                    "SELECT COUNT(*) FROM cval_ingested_runs"
+                ).fetchone()[0]
+                migrations = connection.execute(
+                    "SELECT COUNT(*) FROM cval_ingest_migrations"
+                ).fetchone()[0]
+
+        self.assertEqual(receipts, 0)
+        self.assertEqual(migrations, 1)
 
     def test_only_missing_empty_root_rejects_missing_metric_tables(self) -> None:
         with TemporaryDirectory() as tmpdir:

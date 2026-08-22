@@ -868,9 +868,28 @@ def _ensure_ingested_runs_table(
         """
     )
     connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cval_ingest_migrations (
+            name TEXT PRIMARY KEY,
+            completed_at INTEGER NOT NULL
+        )
+        """
+    )
+    migration_name = f"receipts-v1:{table_name}"
+    migrated = connection.execute(
+        "SELECT 1 FROM cval_ingest_migrations WHERE name=?",
+        (migration_name,),
+    ).fetchone()
+    if migrated is not None:
+        return
+    connection.execute(
         "INSERT OR IGNORE INTO cval_ingested_runs(run_key, sample_dir, updated_at) "
         f"SELECT run_key, MIN(sample_dir), ? FROM {table_name} GROUP BY run_key",
         (int(time.time()),),
+    )
+    connection.execute(
+        "INSERT INTO cval_ingest_migrations(name, completed_at) VALUES (?, ?)",
+        (migration_name, int(time.time())),
     )
 
 
