@@ -196,36 +196,31 @@ def _write_flat_rank_json(path: Path, rank: int) -> None:
             "coll_cpu": 13.0 + rank + index,
             "coll_gpu": 14.0 + rank + index,
         }
-    extended_collectives = [
-        *overlap_collectives,
-        "alltoall_8_float16",
-        "reducescatter_8_float16",
-    ]
-    payload["alltoall_8_float16"] = {
-        "norm_output": 101.0 + rank,
-        "coll_cpu": 102.0 + rank,
-        "coll_gpu": 103.0 + rank,
-    }
-    payload["reducescatter_8_float16"] = {
-        "norm_output": 104.0 + rank,
-        "coll_cpu": 105.0 + rank,
-        "coll_gpu": 106.0 + rank,
-    }
-    del payload["allreduce_extra_16"]
-    del payload["allreduce_extra_17"]
+    overlap_layers = layer_names[:8]
     payload["overlap_tasks"] = {
         layer_name: {
             metric_name: value
-            for collective_index, collective in enumerate(
-                overlap_collectives if layer_index < 8 else extended_collectives
-            )
+            for collective_index, collective in enumerate(overlap_collectives)
             for metric_name, value in (
                 (f"mean_{collective}", 15.0 + rank + collective_index),
                 (f"stdev_{collective}", 1.5 + rank + collective_index),
             )
         }
-        for layer_index, layer_name in enumerate(layer_names[:14])
+        for layer_name in overlap_layers
     }
+    payload["overlap_tasks"].update(
+        {
+            collective: {
+                metric_name: value
+                for layer_index, layer_name in enumerate(overlap_layers)
+                for metric_name, value in (
+                    (f"mean_{layer_name}", 25.0 + rank + layer_index),
+                    (f"stdev_{layer_name}", 2.5 + rank + layer_index),
+                )
+            }
+            for collective in overlap_collectives
+        }
+    )
     path.write_text(
         json.dumps(payload),
         encoding="utf-8",
@@ -280,8 +275,10 @@ class DltestIngestTests(unittest.TestCase):
         self.assertEqual(
             overlap,
             [
-                ("allgather_4_float16", "linear_float16", "layer_mean", 15.0),
-                ("allgather_4_float16", "linear_float16", "layer_stdev", 1.5),
+                ("allgather_4_float16", "linear_float16", "coll_mean", 15.0),
+                ("allgather_4_float16", "linear_float16", "coll_stdev", 1.5),
+                ("allgather_4_float16", "linear_float16", "layer_mean", 25.0),
+                ("allgather_4_float16", "linear_float16", "layer_stdev", 2.5),
             ],
         )
 
@@ -336,6 +333,36 @@ class DltestIngestTests(unittest.TestCase):
                 if rank == 0:
                     payload = json.loads(path.read_text(encoding="utf-8"))
                     payload["linear_float16"]["unexpected"] = 1.0
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "no valid rank evidence"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_pre_registry_flat_rejects_compensating_overlap_counts(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            for rank in range(8):
+                path = (
+                    run_dir
+                    / "workdir/test_plans/80gb-b200/runs"
+                    / f"legacy_rank{rank}_world8.json"
+                )
+                _write_flat_rank_json(path, rank)
+                if rank in {0, 1}:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    layers = list(payload["overlap_tasks"])[:8]
+                    collectives = list(payload["overlap_tasks"])[8:]
+                    if rank == 0:
+                        layer = payload["overlap_tasks"][layers[0]]
+                        extra_collective = "allreduce_extra_0"
+                        layer[f"mean_{extra_collective}"] = 1.0
+                        layer[f"stdev_{extra_collective}"] = 0.1
+                    else:
+                        collective = payload["overlap_tasks"][collectives[0]]
+                        del collective["mean_nn_task_6"]
+                        del collective["stdev_nn_task_6"]
                     path.write_text(json.dumps(payload), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "no valid rank evidence"):

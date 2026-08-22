@@ -107,7 +107,6 @@ FLAT_F_METRICS = frozenset(
     }
 )
 FLAT_COLLECTIVE_METRICS = frozenset({"coll_cpu", "coll_gpu", "norm_output"})
-FLAT_OVERLAP_COLLECTIVE_COUNTS = frozenset({6, 8})
 FLAT_EXPECTED_ROW_COUNTS = (2168, 3040, 384, 1536)
 FLAT_SCHEMA_MARKER = "_cval_flat_schema"
 RUN_DIR_PATTERN = re.compile(r"^dltest-(?P<node>.+)-(?P<timestamp>\d+)$")
@@ -465,35 +464,62 @@ def _normalize_flat_rank_payload(
         return None
     nn_names = {task["task_name"] for task in groups["nn_tasks"]}
     collective_names = {task["task_name"] for task in groups["coll_tasks"]}
-    for layer_name, raw_metrics in overlap.items():
-        if not isinstance(layer_name, str) or not isinstance(raw_metrics, dict):
+    overlap_pairs: dict[tuple[str, str], dict[str, float]] = {}
+    outer_layer_counts: Counter[int] = Counter()
+    outer_collective_counts: Counter[int] = Counter()
+    for outer_name, raw_metrics in overlap.items():
+        if not isinstance(outer_name, str) or not isinstance(raw_metrics, dict):
             return None
-        if layer_name not in nn_names:
+        if outer_name in nn_names:
+            outer_kind = "layer"
+        elif outer_name in collective_names:
+            outer_kind = "collective"
+        else:
             return None
-        pairs: dict[str, dict[str, float]] = {}
+        inner_names: set[str] = set()
         for metric_name, raw_value in raw_metrics.items():
             match = FLAT_OVERLAP_METRIC_PATTERN.fullmatch(str(metric_name))
             if match is None or not is_metric_value(raw_value):
                 return None
-            field = "layer_mean" if match.group("stat") == "mean" else "layer_stdev"
-            pairs.setdefault(match.group("collective"), {})[field] = float(raw_value)
-        if (
-            len(pairs) not in FLAT_OVERLAP_COLLECTIVE_COUNTS
-            or not set(pairs).issubset(collective_names)
-        ):
-            return None
-        for collective, metrics in sorted(pairs.items()):
-            if set(metrics) != {"layer_mean", "layer_stdev"}:
+            inner_name = match.group("collective")
+            inner_names.add(inner_name)
+            if outer_kind == "layer":
+                if inner_name not in collective_names:
+                    return None
+                pair = (inner_name, outer_name)
+                prefix = "coll"
+            else:
+                if inner_name not in nn_names:
+                    return None
+                pair = (outer_name, inner_name)
+                prefix = "layer"
+            suffix = "mean" if match.group("stat") == "mean" else "stdev"
+            field = f"{prefix}_{suffix}"
+            if field in overlap_pairs.setdefault(pair, {}):
                 return None
-            groups["overlap_tasks"].append(
-                {
-                    "task_name": f"{collective}+{layer_name}",
-                    "status": "completed",
-                    "coll_name": collective,
-                    "layer_name": layer_name,
-                    **metrics,
-                }
-            )
+            overlap_pairs[pair][field] = float(raw_value)
+        if outer_kind == "layer":
+            outer_layer_counts[len(inner_names)] += 1
+        else:
+            outer_collective_counts[len(inner_names)] += 1
+    if (
+        outer_layer_counts != Counter({6: 8})
+        or outer_collective_counts != Counter({8: 6})
+        or len(overlap_pairs) != 48
+    ):
+        return None
+    for (collective_name, layer_name), metrics in sorted(overlap_pairs.items()):
+        if set(metrics) != OVERLAP_METRICS:
+            return None
+        groups["overlap_tasks"].append(
+            {
+                "task_name": f"{collective_name}+{layer_name}",
+                "status": "completed",
+                "coll_name": collective_name,
+                "layer_name": layer_name,
+                **metrics,
+            }
+        )
     if not all(groups[group] for group in TASK_GROUPS):
         return None
     return {
