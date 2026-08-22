@@ -41,6 +41,75 @@ OVERLAP_METRICS = frozenset(("coll_mean", "coll_stdev", "layer_mean", "layer_std
 METADATA_FIELDS = frozenset(("task_name", "status", "error_msg", "coll_name", "layer_name"))
 TASK_GROUPS = ("nn_tasks", "f_tasks", "coll_tasks", "overlap_tasks")
 RANK_PATTERN = re.compile(r"(?:^|_)rank(?P<rank>\d+)(?:_|$)", re.IGNORECASE)
+FLAT_OVERLAP_METRIC_PATTERN = re.compile(r"^(?P<stat>mean|stdev)_(?P<collective>.+)$")
+FLAT_TEST_PLAN = "80gb-b200"
+FLAT_TASK_COUNTS = {
+    "nn_tasks": 57,
+    "f_tasks": 38,
+    "coll_tasks": 24,
+    "overlap_layers": 14,
+}
+FLAT_NN_METRIC_SETS = frozenset(
+    {
+        frozenset(
+            {
+                "bias",
+                "bp_cpu_time",
+                "bp_gpu_time",
+                "fp_cpu_time",
+                "fp_gpu_time",
+                "norm_output",
+                "weight",
+            }
+        ),
+        frozenset(
+            {
+                "bp_cpu_time",
+                "bp_gpu_time",
+                "fp_cpu_time",
+                "fp_gpu_time",
+                "norm_output",
+                "weight",
+            }
+        ),
+        frozenset(
+            {
+                "bias_hh_l0",
+                "bias_ih_l0",
+                "bp_cpu_time",
+                "bp_gpu_time",
+                "fp_cpu_time",
+                "fp_gpu_time",
+                "norm_output",
+                "weight_hh_l0",
+                "weight_ih_l0",
+            }
+        ),
+        frozenset(
+            {
+                "bp_cpu_time",
+                "bp_gpu_time",
+                "fp_cpu_time",
+                "fp_gpu_time",
+                "norm_output",
+            }
+        ),
+    }
+)
+FLAT_F_METRICS = frozenset(
+    {
+        "bp_cpu_time",
+        "bp_gpu_time",
+        "fp_cpu_time",
+        "fp_gpu_time",
+        "norm_output",
+        "weight",
+    }
+)
+FLAT_COLLECTIVE_METRICS = frozenset({"coll_cpu", "coll_gpu", "norm_output"})
+FLAT_OVERLAP_COLLECTIVE_COUNTS = frozenset({6, 8})
+FLAT_EXPECTED_ROW_COUNTS = (2168, 3040, 384, 1536)
+FLAT_SCHEMA_MARKER = "_cval_flat_schema"
 RUN_DIR_PATTERN = re.compile(r"^dltest-(?P<node>.+)-(?P<timestamp>\d+)$")
 CANONICAL_RUN_DIR_PATTERN = re.compile(r"^(?P<node>.+)-(?P<timestamp>\d+)$")
 HISTORICAL_DL_ITERATIONS = 20
@@ -261,7 +330,13 @@ def load_rank_files(results_root: Path) -> Iterable[RankFile]:
                     logger.warning("Skipping malformed DL run %s due to %s", run_dir, rank_path)
                     malformed = True
                     break
-                if not isinstance(payload, dict) or not _payload_tasks_completed(payload):
+                if not isinstance(payload, dict):
+                    logger.info("Skipping incomplete DL task payload: %s", rank_path)
+                    malformed = True
+                    break
+                if not _payload_tasks_completed(payload):
+                    payload = _normalize_flat_rank_payload(payload, rank_path.stem)
+                if payload is None or not _payload_tasks_completed(payload):
                     logger.info("Skipping incomplete DL task payload: %s", rank_path)
                     malformed = True
                     break
@@ -289,6 +364,27 @@ def load_rank_files(results_root: Path) -> Iterable[RankFile]:
                 break
         if malformed or not current_run:
             continue
+        flat_flags = [
+            rank_file.payload.get(FLAT_SCHEMA_MARKER) is True
+            for rank_file in current_run
+        ]
+        if any(flat_flags) and (
+            not all(flat_flags)
+            or len(current_run) != 8
+            or {rank_file.rank for rank_file in current_run} != set(range(8))
+        ):
+            logger.warning(
+                "Skipping flat DL run with incomplete rank coverage: %s", run_dir
+            )
+            continue
+        if any(flat_flags) and tuple(
+            len(rows) for rows in classify_rank_files(current_run)
+        ) != FLAT_EXPECTED_ROW_COUNTS:
+            logger.warning(
+                "Skipping flat DL run with unexpected metric cardinality: %s",
+                run_dir,
+            )
+            continue
         if canonical_run:
             assert summary is not None
             try:
@@ -305,6 +401,107 @@ def load_rank_files(results_root: Path) -> Iterable[RankFile]:
                 logger.warning("Skipping DL run with incomplete rank coverage: %s", run_dir)
                 continue
         yield from current_run
+
+
+def _normalize_flat_rank_payload(
+    payload: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any] | None:
+    """Normalize the pre-registry flat 80gb-b200 rank JSON shape."""
+
+    test_plan = payload.get("test_plan")
+    overlap = payload.get("overlap_tasks")
+    if test_plan != FLAT_TEST_PLAN or not isinstance(overlap, dict):
+        return None
+    groups: dict[str, list[dict[str, Any]]] = {
+        "nn_tasks": [],
+        "f_tasks": [],
+        "coll_tasks": [],
+        "overlap_tasks": [],
+    }
+    reserved = {"PartitionKey", "test_plan", "overlap_tasks"}
+    for task_name, raw_metrics in payload.items():
+        if task_name in reserved:
+            continue
+        if not isinstance(task_name, str) or not isinstance(raw_metrics, dict):
+            return None
+        metrics = dict(raw_metrics)
+        if task_name.startswith("f."):
+            group = "f_tasks"
+            if frozenset(metrics) != FLAT_F_METRICS:
+                return None
+        elif task_name.startswith(
+            ("allgather_", "allreduce_", "alltoall_", "reducescatter_")
+        ):
+            group = "coll_tasks"
+            if frozenset(metrics) != FLAT_COLLECTIVE_METRICS:
+                return None
+            if ("coll_cpu" in metrics and "cpu_time" in metrics) or (
+                "coll_gpu" in metrics and "gpu_time" in metrics
+            ):
+                return None
+            if "coll_cpu" in metrics:
+                metrics["cpu_time"] = metrics.pop("coll_cpu")
+            if "coll_gpu" in metrics:
+                metrics["gpu_time"] = metrics.pop("coll_gpu")
+        else:
+            group = "nn_tasks"
+            if frozenset(metrics) not in FLAT_NN_METRIC_SETS:
+                return None
+        if not metrics or not all(is_metric_value(value) for value in metrics.values()):
+            return None
+        groups[group].append(
+            {
+                "task_name": task_name,
+                "status": "completed",
+                **metrics,
+            }
+        )
+
+    if any(
+        len(groups[group]) != FLAT_TASK_COUNTS[group]
+        for group in ("nn_tasks", "f_tasks", "coll_tasks")
+    ) or len(overlap) != FLAT_TASK_COUNTS["overlap_layers"]:
+        return None
+    nn_names = {task["task_name"] for task in groups["nn_tasks"]}
+    collective_names = {task["task_name"] for task in groups["coll_tasks"]}
+    for layer_name, raw_metrics in overlap.items():
+        if not isinstance(layer_name, str) or not isinstance(raw_metrics, dict):
+            return None
+        if layer_name not in nn_names:
+            return None
+        pairs: dict[str, dict[str, float]] = {}
+        for metric_name, raw_value in raw_metrics.items():
+            match = FLAT_OVERLAP_METRIC_PATTERN.fullmatch(str(metric_name))
+            if match is None or not is_metric_value(raw_value):
+                return None
+            field = "layer_mean" if match.group("stat") == "mean" else "layer_stdev"
+            pairs.setdefault(match.group("collective"), {})[field] = float(raw_value)
+        if (
+            len(pairs) not in FLAT_OVERLAP_COLLECTIVE_COUNTS
+            or not set(pairs).issubset(collective_names)
+        ):
+            return None
+        for collective, metrics in sorted(pairs.items()):
+            if set(metrics) != {"layer_mean", "layer_stdev"}:
+                return None
+            groups["overlap_tasks"].append(
+                {
+                    "task_name": f"{collective}+{layer_name}",
+                    "status": "completed",
+                    "coll_name": collective,
+                    "layer_name": layer_name,
+                    **metrics,
+                }
+            )
+    if not all(groups[group] for group in TASK_GROUPS):
+        return None
+    return {
+        "runID": run_id,
+        "test_plan": test_plan,
+        FLAT_SCHEMA_MARKER: True,
+        **groups,
+    }
 
 
 def _payload_tasks_completed(payload: dict[str, Any]) -> bool:

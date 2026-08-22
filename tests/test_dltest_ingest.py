@@ -133,7 +133,212 @@ def _write_rank_json(path: Path, rank: int) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_flat_rank_json(path: Path, rank: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    layer_names = ["linear_float16", *(f"nn_task_{index}" for index in range(56))]
+    function_names = ["f.relu_float16", *(f"f.task_{index}" for index in range(37))]
+    overlap_collectives = [
+        "allgather_4_float16",
+        "allgather_8_float16",
+        "allreduce_4_float16",
+        "allreduce_8_float16",
+        "alltoall_4_float16",
+        "reducescatter_4_float16",
+    ]
+    collective_names = [
+        *overlap_collectives,
+        *(f"allreduce_extra_{index}" for index in range(18)),
+    ]
+    payload = {
+        "PartitionKey": "legacy",
+        "test_plan": "80gb-b200",
+    }
+    for index, name in enumerate(layer_names):
+        metrics = {
+            "norm_output": 1.0 + rank + index,
+            "fp_cpu_time": 3.0 + rank + index,
+            "fp_gpu_time": 4.0 + rank + index,
+            "bp_cpu_time": 5.0 + rank + index,
+            "bp_gpu_time": 6.0 + rank + index,
+        }
+        if index < 42:
+            metrics.update(
+                {
+                    "weight": 2.0 + rank + index,
+                    "bias": 2.5 + rank + index,
+                }
+            )
+        elif index < 48:
+            metrics["weight"] = 2.0 + rank + index
+        elif index < 54:
+            metrics.update(
+                {
+                    "weight_hh_l0": 2.0 + rank + index,
+                    "weight_ih_l0": 2.1 + rank + index,
+                    "bias_hh_l0": 2.2 + rank + index,
+                    "bias_ih_l0": 2.3 + rank + index,
+                }
+            )
+        payload[name] = metrics
+    for index, name in enumerate(function_names):
+        payload[name] = {
+            "norm_output": 7.0 + rank + index,
+            "weight": 7.5 + rank + index,
+            "fp_cpu_time": 8.0 + rank + index,
+            "fp_gpu_time": 9.0 + rank + index,
+            "bp_cpu_time": 10.0 + rank + index,
+            "bp_gpu_time": 11.0 + rank + index,
+        }
+    for index, name in enumerate(collective_names):
+        payload[name] = {
+            "norm_output": 12.0 + rank + index,
+            "coll_cpu": 13.0 + rank + index,
+            "coll_gpu": 14.0 + rank + index,
+        }
+    extended_collectives = [
+        *overlap_collectives,
+        "alltoall_8_float16",
+        "reducescatter_8_float16",
+    ]
+    payload["alltoall_8_float16"] = {
+        "norm_output": 101.0 + rank,
+        "coll_cpu": 102.0 + rank,
+        "coll_gpu": 103.0 + rank,
+    }
+    payload["reducescatter_8_float16"] = {
+        "norm_output": 104.0 + rank,
+        "coll_cpu": 105.0 + rank,
+        "coll_gpu": 106.0 + rank,
+    }
+    del payload["allreduce_extra_16"]
+    del payload["allreduce_extra_17"]
+    payload["overlap_tasks"] = {
+        layer_name: {
+            metric_name: value
+            for collective_index, collective in enumerate(
+                overlap_collectives if layer_index < 8 else extended_collectives
+            )
+            for metric_name, value in (
+                (f"mean_{collective}", 15.0 + rank + collective_index),
+                (f"stdev_{collective}", 1.5 + rank + collective_index),
+            )
+        }
+        for layer_index, layer_name in enumerate(layer_names[:14])
+    }
+    path.write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
 class DltestIngestTests(unittest.TestCase):
+    def test_pre_registry_flat_rank_json_is_normalized_without_invented_metrics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            for rank in range(8):
+                _write_flat_rank_json(
+                    run_dir
+                    / "workdir/test_plans/80gb-b200/runs"
+                    / f"legacy_rank{rank}_world2.json",
+                    rank,
+                )
+
+            summary = ingest_dltest_results(root, output, only_missing=True)
+
+            with closing(
+                sqlite3.connect(output / "dltest_collective_performance.db")
+            ) as connection:
+                collective = connection.execute(
+                    "SELECT metric_name, metric_value, test_plan FROM collective_performance "
+                    "WHERE rank=0 AND task_name='allreduce_4_float16' "
+                    "ORDER BY rank, metric_name"
+                ).fetchall()
+            with closing(
+                sqlite3.connect(output / "dltest_overlap_performance.db")
+            ) as connection:
+                overlap = connection.execute(
+                    "SELECT coll_name, layer_name, metric_name, metric_value "
+                    "FROM overlap_performance WHERE rank=0 "
+                    "AND coll_name='allgather_4_float16' "
+                    "AND layer_name='linear_float16' ORDER BY metric_name"
+                ).fetchall()
+
+        self.assertEqual(summary["rank_files"], 8)
+        self.assertEqual(summary["numerical_correctness_rows"], 2168)
+        self.assertEqual(summary["compute_performance_rows"], 3040)
+        self.assertEqual(summary["collective_performance_rows"], 384)
+        self.assertEqual(summary["overlap_performance_rows"], 1536)
+        self.assertEqual(
+            collective,
+            [("cpu_time", 15.0, "80gb-b200"), ("gpu_time", 16.0, "80gb-b200")],
+        )
+        self.assertEqual(
+            overlap,
+            [
+                ("allgather_4_float16", "linear_float16", "layer_mean", 15.0),
+                ("allgather_4_float16", "linear_float16", "layer_stdev", 1.5),
+            ],
+        )
+
+    def test_pre_registry_flat_run_requires_all_eight_ranks(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            for rank in range(7):
+                _write_flat_rank_json(
+                    run_dir
+                    / "workdir/test_plans/80gb-b200/runs"
+                    / f"legacy_rank{rank}_world8.json",
+                    rank,
+                )
+
+            with self.assertRaisesRegex(ValueError, "no valid rank evidence"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_pre_registry_flat_collective_alias_collision_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            for rank in range(8):
+                path = (
+                    run_dir
+                    / "workdir/test_plans/80gb-b200/runs"
+                    / f"legacy_rank{rank}_world8.json"
+                )
+                _write_flat_rank_json(path, rank)
+                if rank == 0:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["allreduce_4_float16"]["cpu_time"] = 999.0
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "no valid rank evidence"):
+                ingest_dltest_results(root, output, only_missing=True)
+
+    def test_pre_registry_flat_extra_metric_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "results"
+            output = Path(tmpdir) / "metadata"
+            run_dir = root / "dltest-node-a-1781649558"
+            for rank in range(8):
+                path = (
+                    run_dir
+                    / "workdir/test_plans/80gb-b200/runs"
+                    / f"legacy_rank{rank}_world8.json"
+                )
+                _write_flat_rank_json(path, rank)
+                if rank == 0:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["linear_float16"]["unexpected"] = 1.0
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "no valid rank evidence"):
+                ingest_dltest_results(root, output, only_missing=True)
     def test_current_dl_write_requires_exact_v2_artifacts_path(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
