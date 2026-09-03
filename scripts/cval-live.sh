@@ -81,10 +81,11 @@ load_operational_settings() {
     validate_operational_config
     RUNNER_WORKTREE=${CVAL_RUNNER_WORKTREE:-/tmp/cval-live-worktree}
     LOOP_SLEEP_SECONDS=${CVAL_LOOP_SLEEP_SECONDS:-300}
-    PLAN_LIMIT=${CVAL_PLAN_LIMIT:-50}
+    PLAN_LIMIT_SETTING=${CVAL_PLAN_LIMIT:-all}
+    PLAN_LIMIT=1
     KUBECTL_TIMEOUT_SECONDS=${CVAL_KUBECTL_TIMEOUT_SECONDS:-120}
     EXPLICIT_GIT_REF=${CVAL_GIT_REF:-}
-    BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 2)}
+    BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 3)}
     DAYS_THRESHOLD=${CVAL_DAYS_THRESHOLD:-$(config_value scheduling days_threshold 7)}
     NODE_COOLDOWN_SECONDS=${CVAL_NODE_COOLDOWN_SECONDS:-$(config_value scheduling node_cooldown_seconds 14400)}
     NODE_COOLDOWN_STATE_FILE=${CVAL_NODE_COOLDOWN_STATE_FILE:-$LOG_DIR/node_cool_down.csv}
@@ -120,7 +121,7 @@ Environment overrides:
     CVAL_PENDING_START_TIMEOUT_SECONDS=<seconds>
     CVAL_GIT_REF=<40-hex-commit>                   # explicit session pin only
     CVAL_KUBECTL_TIMEOUT_SECONDS=120
-    CVAL_PLAN_LIMIT=50
+    CVAL_PLAN_LIMIT=all                            # default: all discovered nodes
   CVAL_TMUX_SESSION=$SESSION_NAME
     CVAL_LIVE_LOG_DIR=$LOG_DIR
     CVAL_LOOP_SLEEP_SECONDS=300
@@ -157,10 +158,9 @@ validate_runtime_settings() {
             ;;
     esac
     local name value
-    for name in CVAL_BATCH_SIZE CVAL_PLAN_LIMIT CVAL_KUBECTL_TIMEOUT_SECONDS; do
+    for name in CVAL_BATCH_SIZE CVAL_KUBECTL_TIMEOUT_SECONDS; do
         case "$name" in
             CVAL_BATCH_SIZE) value="$BATCH_SIZE" ;;
-            CVAL_PLAN_LIMIT) value="$PLAN_LIMIT" ;;
             CVAL_KUBECTL_TIMEOUT_SECONDS) value="$KUBECTL_TIMEOUT_SECONDS" ;;
         esac
         if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
@@ -168,6 +168,10 @@ validate_runtime_settings() {
             return 2
         fi
     done
+    if [[ "$PLAN_LIMIT_SETTING" != "all" && ! "$PLAN_LIMIT_SETTING" =~ ^[1-9][0-9]*$ ]]; then
+        echo "CVAL_PLAN_LIMIT must be 'all' or a positive integer (got: $PLAN_LIMIT_SETTING)" >&2
+        return 2
+    fi
     if [[ ! "$PENDING_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
         echo "CVAL_PENDING_START_TIMEOUT_SECONDS must be a positive integer (got: $PENDING_START_TIMEOUT_SECONDS)" >&2
         return 2
@@ -712,7 +716,12 @@ collect_plan_inputs() {
         if (( inventory_parse_rc == 0 )); then
             IFS=$'\t' read -r PLAN_DISCOVERED_NODE_COUNT PLAN_FREE_NODES <<<"$inventory_summary"
             PLAN_FREE_NODE_COUNT="$PLAN_DISCOVERED_NODE_COUNT"
-            log "component=gpu-inventory status=ok candidate_node_count=$PLAN_DISCOVERED_NODE_COUNT"
+            if [[ "$PLAN_LIMIT_SETTING" == "all" ]]; then
+                PLAN_LIMIT=$((PLAN_DISCOVERED_NODE_COUNT > 0 ? PLAN_DISCOVERED_NODE_COUNT : 1))
+            else
+                PLAN_LIMIT="$PLAN_LIMIT_SETTING"
+            fi
+            log "component=gpu-inventory status=ok candidate_node_count=$PLAN_DISCOVERED_NODE_COUNT plan_limit=$PLAN_LIMIT"
         else
             log "component=gpu-inventory status=invalid-json exit_code=$inventory_parse_rc artifact=$nodes_file"
             failed=1
@@ -1241,7 +1250,7 @@ new_cycle_dir() {
 
 log_operation_settings() {
     log "mode=$LIVE_MODE config=$CONFIG_PATH"
-    log "batch_size=$BATCH_SIZE plan_limit=$PLAN_LIMIT days_threshold=$DAYS_THRESHOLD node_cooldown=${NODE_COOLDOWN_SECONDS}s kubectl_timeout=${KUBECTL_TIMEOUT_SECONDS}s"
+    log "batch_size=$BATCH_SIZE plan_limit=$PLAN_LIMIT_SETTING days_threshold=$DAYS_THRESHOLD node_cooldown=${NODE_COOLDOWN_SECONDS}s kubectl_timeout=${KUBECTL_TIMEOUT_SECONDS}s"
     log "node_cooldown_state=$NODE_COOLDOWN_STATE_FILE"
     if pruning_enabled; then
         log "pruning=enabled confirmation=delete-pending namespace=$NAMESPACE prefix=$JOB_PREFIX"
@@ -1757,7 +1766,7 @@ start_session() {
     fi
     printf -v runner_cmd \
         'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q%s bash %q run-loop' \
-        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$explicit_git_ref_env" "$SCRIPT_PATH"
+        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$explicit_git_ref_env" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \

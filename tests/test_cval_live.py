@@ -457,6 +457,50 @@ class CvalLiveTests(unittest.TestCase):
         self.assertIn("candidate_node_count=1", completed.stdout)
         self.assertIn("queue_count=1 planned_count=1", completed.stdout)
 
+    def test_default_plan_limit_covers_all_discovered_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root)
+            env.pop("CVAL_PLAN_LIMIT")
+            env["FAKE_TWO_NODES"] = "1"
+            env["FAKE_PLAN_JSON"] = json.dumps(
+                {
+                    "batch_size": 2,
+                    "days_threshold": 7,
+                    "free_nodes_count": 2,
+                    "queue_count": 2,
+                    "planned_jobs": [
+                        {
+                            "priority": 1,
+                            "node": NODE,
+                            "reason": "never-tested",
+                            "last_tested_timestamp": 0,
+                            "age_days": None,
+                            "job_name": f"cval-{NODE}-123",
+                            "git_ref": ORIGIN_SHA,
+                        },
+                        {
+                            "priority": 2,
+                            "node": env["FAKE_NODE_2"],
+                            "reason": "expired",
+                            "last_tested_timestamp": 100,
+                            "age_days": 10.0,
+                            "job_name": f"cval-{env['FAKE_NODE_2']}-123",
+                            "git_ref": ORIGIN_SHA,
+                        },
+                    ],
+                }
+            )
+
+            completed = self._run(env)
+            calls = self._calls(env)
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        plan_calls = [line for line in calls if " plan " in f" {line} "]
+        self.assertTrue(any(" --batch-size 2 " in f" {line} " for line in plan_calls))
+        self.assertIn("candidate_node_count=2 plan_limit=2", completed.stdout)
+        self.assertIn("batch_size=1 plan_limit=all", completed.stdout)
+
     def test_submit_wrong_confirmation_fails_before_git_or_kubernetes(self) -> None:
         for confirm in (None, "wrong"):
             with self.subTest(confirm=confirm), tempfile.TemporaryDirectory() as tmpdir:
@@ -468,8 +512,10 @@ class CvalLiveTests(unittest.TestCase):
             self.assertIn("CVAL_LIVE_CONFIRM=submit", completed.stderr)
             self.assertEqual(calls, [])
 
-    def test_invalid_cooldown_and_pending_timeout_fail_before_git_or_kubernetes(self) -> None:
+    def test_invalid_runtime_settings_fail_before_git_or_kubernetes(self) -> None:
         cases = (
+            ("CVAL_PLAN_LIMIT", "0", "'all' or a positive integer"),
+            ("CVAL_PLAN_LIMIT", "nope", "'all' or a positive integer"),
             ("CVAL_NODE_COOLDOWN_SECONDS", "-1", "non-negative integer"),
             ("CVAL_NODE_COOLDOWN_SECONDS", "1.5", "non-negative integer"),
             ("CVAL_PENDING_START_TIMEOUT_SECONDS", "0", "positive integer"),

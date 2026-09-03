@@ -9,7 +9,7 @@ tolerated_no_schedule_taints = ["nvidia.com/gpu", "rdma"]
 
 [scheduling]
 days_threshold = 7
-batch_size = 2
+batch_size = 3
 # Do not submit another cval Job to a recently submitted node until this expires.
 node_cooldown_seconds = 14400
 

@@ -51,7 +51,7 @@ class SchedulingConfig:
     """Default prioritization and batching controls."""
 
     days_threshold: float = 7
-    batch_size: int = 2
+    batch_size: int = 3
     node_cooldown_seconds: int = 4 * 60 * 60
 
 
