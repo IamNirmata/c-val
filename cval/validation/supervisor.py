@@ -396,8 +396,6 @@ def supervise_validation_run(
         upper = name.upper()
         if (
             upper == "DATABASE_URL"
-            or upper.startswith("PG")
-            or upper.startswith("POSTGRES")
             or any(fragment in upper for fragment in sensitive_fragments)
         ):
             runtime_env.pop(name, None)

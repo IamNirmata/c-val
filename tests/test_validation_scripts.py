@@ -231,7 +231,7 @@ printf '%s\n' \
         self.assertIn('--result-json "$CVAL_RESULT_JSON_FILE"', script)
         self.assertNotIn('"all" \\\n    "pass"', script)
 
-    def test_db_update_ingests_passing_dl_metrics_without_evaluator(self) -> None:
+    def test_db_update_ingests_passing_dl_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             metadata = root / "metadata"
@@ -254,9 +254,6 @@ printf '%s\n' \
                         f'validation_root = "{root}"',
                         f'validation_tests_dir = "{REPO_ROOT / "validation-tests"}"',
                         f'dl_results_root_path = "{dl_results}"',
-                        "",
-                        "[baseline]",
-                        f'baseline_root_path = "{root / "baselines"}"',
                     )
                 )
                 + "\n",
@@ -413,9 +410,6 @@ printf '%s\n' \
                         f'validation_root = "{root}"',
                         f'validation_tests_dir = "{REPO_ROOT / "validation-tests"}"',
                         f'dl_results_root_path = "{dl_results}"',
-                        "",
-                        "[baseline]",
-                        f'baseline_root_path = "{root / "baselines"}"',
                     )
                 )
                 + "\n",
@@ -497,23 +491,6 @@ printf '%s\n' \
         self.assertIn("DLTEST_WORK_DIR", dltest)
         self.assertIn("summarize_results.py", dltest)
 
-    def test_baseline_scripts_use_composed_test_config(self) -> None:
-        build_script = (REPO_ROOT / "scripts" / "cval-baseline-build.sh").read_text(
-            encoding="utf-8"
-        )
-        classify_script = (
-            REPO_ROOT / "scripts" / "cval-baseline-classify.sh"
-        ).read_text(encoding="utf-8")
-        common_script = (
-            REPO_ROOT / "scripts" / "cval-baseline-common.sh"
-        ).read_text(encoding="utf-8")
-
-        for script in (build_script, classify_script):
-            self.assertIn('source "$SCRIPT_DIR/cval-baseline-common.sh"', script)
-        self.assertIn("from cval.config import config_to_dict, load_config", common_script)
-        self.assertIn("config_to_dict(load_config(Path(path)))", common_script)
-        self.assertNotIn("tomllib.loads", common_script)
-        self.assertIn("config_value tests.dltest.settings test_plan", build_script)
 
     def test_ibbw_monitor_reports_gbps(self) -> None:
         script = (REPO_ROOT / "validation-tests" / "nccl" / "ibbw.sh").read_text(
@@ -678,31 +655,11 @@ echo "fake torchrun"
                 encoding="utf-8",
             )
             fake_torchrun.chmod(0o755)
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
-    output=${{@: -1}}
-    cat > "$output" <<'JSON'
-{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}
-JSON
-    chmod 600 "$output"
-    exit 0
-fi
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then
-    exit 0
-fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
             output_dir = root / "nccl"
             env = os.environ | {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
                 "CVAL_IBBW_ENABLED": "false",
-                "CVAL_NCCL_EVALUATION_ENABLED": "true",
                 "GCRNODE": "node-a",
                 "GCRTIME": "123",
                 "NCCL_OUTPUT_DIR": str(output_dir),
@@ -781,7 +738,6 @@ printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_
                     "CVAL_REPO_DIR": str(REPO_ROOT),
                     "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
                     "CVAL_IBBW_ENABLED": "true",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "false",
                     "IB_SYS_ROOT": str(root / "infiniband"),
                     "GCRNODE": "node-a",
                     "GCRTIME": "123",
@@ -823,21 +779,6 @@ printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_
             fake_torchrun = bin_dir / "torchrun"
             fake_torchrun.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
             fake_torchrun.chmod(0o755)
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
-    output=${{@: -1}}
-    printf '%s\n' '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}' > "$output"
-    chmod 600 "$output"
-    exit 0
-fi
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
             output_dir = root / "nccl"
             env = os.environ | {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",

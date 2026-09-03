@@ -27,7 +27,6 @@ from cval.validation.operational_targets import build_operational_target_catalog
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "cval.toml"
 _EXACT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_DIGESTED_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
 
 
 def is_exact_commit(value: str) -> bool:
@@ -148,33 +147,6 @@ class JobTemplateConfig:
 
 
 @dataclass(frozen=True)
-class BaselineClassificationConfig:
-    """Baseline and peer-comparison tolerance rules."""
-
-    baseline_root_path: str = "/data/continuous_validation/baselines"
-    storage_peer_tolerance_pct: float = 10.0
-    dl_compute_tolerance_pct: float = 3.0
-    dl_numerical_tolerance_pct: float = 0.1
-    dl_overlap_tolerance_pct: float = 20.0
-    # Robust z-score cutoff (Iglewicz & Hoaglin recommend 3.5) used when
-    # building dynamic baselines and flagging outliers.
-    robust_z_threshold: float = 3.5
-    # Minimum clean samples before a metric baseline is trustworthy.
-    min_samples: int = 8
-    # Rolling window (days) of recent runs used to build a baseline.
-    window_days: int = 30
-    # DL aggregation: a DL component/node is degraded only when enough severe
-    # metric deviations accumulate, avoiding any-one-metric fleet noise.
-    dl_degraded_metric_fraction: float = 0.02
-    dl_min_degraded_metrics: int = 10
-    dl_degraded_severity_pct: float = 10.0
-    # How often the background baseline builder should build candidates.
-    build_interval_seconds: int = 86400
-    # How often the background classifier should evaluate nodes.
-    classify_interval_seconds: int = 300
-
-
-@dataclass(frozen=True)
 class CvalConfig:
     """Complete c-val configuration tree."""
 
@@ -187,7 +159,6 @@ class CvalConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     tests: TestsConfig = field(default_factory=TestsConfig)
     job_template: JobTemplateConfig = field(default_factory=JobTemplateConfig)
-    baseline: BaselineClassificationConfig = field(default_factory=BaselineClassificationConfig)
 
 
 def default_config() -> CvalConfig:
@@ -228,7 +199,6 @@ def config_to_dict(config: CvalConfig) -> dict[str, Any]:
         "runtime": asdict(config.runtime),
         "tests": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
-        "baseline": asdict(config.baseline),
     }
 
 
@@ -257,7 +227,6 @@ def encode_config_snapshot(config: CvalConfig) -> str:
         },
         "test_definitions": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
-        "baseline": asdict(config.baseline),
     }
     payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(payload).decode("ascii")
@@ -288,7 +257,6 @@ def load_config_snapshot(
         "tests",
         "test_definitions",
         "job_template",
-        "baseline",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -364,11 +332,7 @@ def _build_config(
         repo_root=repo_root or REPO_ROOT,
         include_defaults=include_test_defaults,
     )
-    dltest_registration = test_registry.get("dltest")
-    dltest = dltest_registration.definition.settings if dltest_registration else {}
-    dl_health_aggregation = _section(dict(dltest), "health_aggregation")
     job_template = _section(data, "job_template")
-    baseline = _section(data, "baseline")
     config = CvalConfig(
         cluster=ClusterConfig(
             namespace=_str(cluster, "namespace", defaults.cluster.namespace),
@@ -502,73 +466,6 @@ def _build_config(
                 defaults.job_template.gpu_toleration_key,
             ),
         ),
-        baseline=BaselineClassificationConfig(
-            baseline_root_path=_str(
-                baseline, "baseline_root_path", defaults.baseline.baseline_root_path
-            ),
-            storage_peer_tolerance_pct=_float(
-                baseline,
-                "storage_peer_tolerance_pct",
-                defaults.baseline.storage_peer_tolerance_pct,
-            ),
-            dl_compute_tolerance_pct=_float(
-                baseline,
-                "dl_compute_tolerance_pct",
-                defaults.baseline.dl_compute_tolerance_pct,
-            ),
-            dl_numerical_tolerance_pct=_float(
-                baseline,
-                "dl_numerical_tolerance_pct",
-                defaults.baseline.dl_numerical_tolerance_pct,
-            ),
-            dl_overlap_tolerance_pct=_float(
-                baseline,
-                "dl_overlap_tolerance_pct",
-                defaults.baseline.dl_overlap_tolerance_pct,
-            ),
-            robust_z_threshold=_float(
-                baseline, "robust_z_threshold", defaults.baseline.robust_z_threshold
-            ),
-            min_samples=_int(baseline, "min_samples", defaults.baseline.min_samples),
-            window_days=_int(baseline, "window_days", defaults.baseline.window_days),
-            dl_degraded_metric_fraction=_float(
-                baseline,
-                "dl_degraded_metric_fraction",
-                _float(
-                    dl_health_aggregation,
-                    "degraded_metric_fraction",
-                    defaults.baseline.dl_degraded_metric_fraction,
-                ),
-            ),
-            dl_min_degraded_metrics=_int(
-                baseline,
-                "dl_min_degraded_metrics",
-                _int(
-                    dl_health_aggregation,
-                    "min_degraded_metrics",
-                    defaults.baseline.dl_min_degraded_metrics,
-                ),
-            ),
-            dl_degraded_severity_pct=_float(
-                baseline,
-                "dl_degraded_severity_pct",
-                _float(
-                    dl_health_aggregation,
-                    "degraded_severity_pct",
-                    defaults.baseline.dl_degraded_severity_pct,
-                ),
-            ),
-            build_interval_seconds=_int(
-                baseline,
-                "build_interval_seconds",
-                defaults.baseline.build_interval_seconds,
-            ),
-            classify_interval_seconds=_int(
-                baseline,
-                "classify_interval_seconds",
-                defaults.baseline.classify_interval_seconds,
-            ),
-        ),
     )
     _validate_config(config, validate_plugins=validate_plugins)
     return config
@@ -595,43 +492,6 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
         raise ValueError(
             "monitoring.pending_start_timeout_seconds must be a positive integer"
         )
-    nccl = tests.registry.get("nccl")
-    if nccl is not None and nccl.definition.settings.get("evaluation_enabled") is True:
-        if not is_exact_commit(config.job.git_ref):
-            raise ValueError(
-                "NCCL evaluation requires job.git_ref to be an exact lowercase 40-hex commit"
-            )
-        if not _DIGESTED_IMAGE.fullmatch(config.job_template.container_image):
-            raise ValueError(
-                "NCCL evaluation requires job_template.container_image pinned with @sha256"
-            )
-    baseline = config.baseline
-    non_negative_values = {
-        "storage_peer_tolerance_pct": baseline.storage_peer_tolerance_pct,
-        "dl_compute_tolerance_pct": baseline.dl_compute_tolerance_pct,
-        "dl_numerical_tolerance_pct": baseline.dl_numerical_tolerance_pct,
-        "dl_overlap_tolerance_pct": baseline.dl_overlap_tolerance_pct,
-        "dl_degraded_severity_pct": baseline.dl_degraded_severity_pct,
-    }
-    for name, value in non_negative_values.items():
-        if not math.isfinite(value) or value < 0:
-            raise ValueError(f"baseline.{name} must be finite and non-negative")
-    if not math.isfinite(baseline.robust_z_threshold) or baseline.robust_z_threshold <= 0:
-        raise ValueError("baseline.robust_z_threshold must be finite and positive")
-    if (
-        not math.isfinite(baseline.dl_degraded_metric_fraction)
-        or not 0 <= baseline.dl_degraded_metric_fraction <= 1
-    ):
-        raise ValueError("baseline.dl_degraded_metric_fraction must be in [0,1]")
-    for name, value in {
-        "min_samples": baseline.min_samples,
-        "window_days": baseline.window_days,
-        "dl_min_degraded_metrics": baseline.dl_min_degraded_metrics,
-        "build_interval_seconds": baseline.build_interval_seconds,
-        "classify_interval_seconds": baseline.classify_interval_seconds,
-    }.items():
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"baseline.{name} must be a positive integer")
     try:
         reserved_gpus = int(config.job_template.gpu_count)
         reserved_rdma = int(config.job_template.rdma_count)

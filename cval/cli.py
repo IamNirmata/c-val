@@ -5,8 +5,7 @@ discovery commands, nonmutating queue inspection, approval-gated cluster
 validation, read-only monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
-Public commands: config, tests, nodes, validate, status, plan, run, jobs, results,
-baseline, and nccl-eval.
+Public commands: config, tests, nodes, validate, status, plan, run, jobs, and results.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -54,13 +53,6 @@ from cval.validation.results import (
     validation_result_to_env,
 )
 from cval.validation.operational_targets import (
-    BASELINE_ACTIVATE,
-    BASELINE_BUILD,
-    BASELINE_CLASSIFY,
-    BASELINE_LIST,
-    BASELINE_SHOW,
-    CLASSIFICATIONS_EXPORT,
-    OPERATION_ORDER,
     RESULTS_EXPORT,
     build_operational_target_catalog,
 )
@@ -70,11 +62,6 @@ def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments, dispatch to a handler, and return a process code."""
 
     raw_argv = sys.argv[1:] if argv is None else argv
-    try:
-        _preflight_nccl_mutation_gate(raw_argv)
-    except PolicyViolation as exc:
-        print(f"Policy violation: {exc}", file=sys.stderr)
-        return 2
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
     config_args, _ = bootstrap.parse_known_args(raw_argv)
@@ -127,53 +114,11 @@ def _tests_descriptor_only_command(argv: list[str]) -> bool:
     return index + 1 < len(argv) and argv[index + 1] in {"list", "describe"}
 
 
-def _preflight_nccl_mutation_gate(argv: list[str]) -> None:
-    """Reject malformed NCCL apply confirmation before config/plugin loading."""
-
-    try:
-        index = argv.index("nccl-eval")
-    except ValueError:
-        return
-    if index + 1 >= len(argv) or "--apply" not in argv[index + 1 :]:
-        return
-    command = argv[index + 1]
-    expected = {
-        "schema": "schema",
-        "grant-runtime": "grant-runtime",
-        "ingest": "ingest",
-        "emit-outbox": "emit-outbox",
-        "commit-outbox": "commit-outbox",
-        "ingest-outbox": "ingest-outbox",
-        "calibration": "calibration",
-        "build-baselines": "build-baselines",
-        "evaluate": "evaluate",
-        "worker": "worker",
-        "recover": "recover",
-    }
-    if command not in expected:
-        return
-    confirmation = None
-    for position, value in enumerate(argv[index + 2 :], start=index + 2):
-        if value == "--confirm" and position + 1 < len(argv):
-            confirmation = argv[position + 1]
-            break
-        if value.startswith("--confirm="):
-            confirmation = value.split("=", 1)[1]
-            break
-    if confirmation != expected[command]:
-        raise PolicyViolation(
-            f"NCCL mutation requires --apply --confirm {expected[command]}"
-        )
-
-
 def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     """Build the top-level parser and subcommands."""
 
     active_config = config or load_config()
     target_catalog = build_operational_target_catalog(active_config.tests.registry)
-    from cval.baselines.storage import validate_default_baseline_db_paths
-
-    validate_default_baseline_db_paths(active_config)
     parser = argparse.ArgumentParser(prog="cval", description="c-val orchestration CLI")
     parser.add_argument(
         "--config",
@@ -184,8 +129,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         dest="command",
         required=True,
         metavar=(
-            "{config,tests,nodes,validate,status,plan,run,jobs,results,"
-            "baseline,nccl-eval}"
+            "{config,tests,nodes,validate,status,plan,run,jobs,results}"
         ),
     )
 
@@ -217,13 +161,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     tests_validate.add_argument("--output", choices=["table", "json"], default="table")
     tests_validate.set_defaults(handler=handle_tests_validate)
-
-    # Machine-only catalog used by background loops. It is intentionally
-    # omitted from public help and emits data, never shell assignments.
-    operational_targets = subparsers.add_parser("operational-targets")
-    operational_targets.add_argument("--operation", choices=OPERATION_ORDER, required=True)
-    operational_targets.add_argument("--output", choices=["tsv", "json"], default="tsv")
-    operational_targets.set_defaults(handler=handle_operational_targets)
 
     nodes = subparsers.add_parser("nodes", help="List schedulable GPU nodes and free capacity")
     nodes.add_argument(
@@ -359,12 +296,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         choices=[
             "overall",
             "all",
-            *dict.fromkeys(
-                (
-                    *target_catalog.names_for(RESULTS_EXPORT),
-                    *target_catalog.names_for(CLASSIFICATIONS_EXPORT),
-                )
-            ),
+            *target_catalog.names_for(RESULTS_EXPORT),
         ],
         required=True,
     )
@@ -373,21 +305,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     results.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
     results.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     results.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    results.add_argument(
-        "--classification-db-path",
-        help="Override one classification DB; defaults to per-target DBs",
-    )
-    classification_mode = results.add_mutually_exclusive_group()
-    classification_mode.add_argument(
-        "--no-classification",
-        action="store_true",
-        help="Do not join latest baseline classification columns into the CSV",
-    )
-    classification_mode.add_argument(
-        "--classifications-only",
-        action="store_true",
-        help="Export only latest baseline classification rows",
-    )
     results.add_argument(
         "--nccl-db-path",
         default=active_config.storage.nccl_db_path,
@@ -484,251 +401,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     db_rebuild_dltest.add_argument("--output", choices=["table", "json"], default="table")
     db_rebuild_dltest.set_defaults(handler=handle_db_rebuild_dltest_metrics)
-
-    # Baseline commands (read-only and ingestion)
-    baseline = subparsers.add_parser("baseline", help="Manage baselines and peer comparison")
-    baseline_sub = baseline.add_subparsers(dest="baseline_command", required=True)
-
-    baseline_list = baseline_sub.add_parser("list", help="List stored baselines")
-    baseline_list.add_argument(
-        "--test-type", choices=target_catalog.names_for(BASELINE_LIST)
-    )
-    baseline_list.add_argument(
-        "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
-    )
-    baseline_list.add_argument("--output", choices=["table", "json"], default="table")
-    baseline_list.set_defaults(handler=handle_baseline_list)
-
-    baseline_build = baseline_sub.add_parser(
-        "build", help="Build a dynamic baseline from result DBs (robust stats)"
-    )
-    baseline_build.add_argument(
-        "--test-type", choices=target_catalog.names_for(BASELINE_BUILD), required=True
-    )
-    baseline_build.add_argument(
-        "--window-days", type=int, default=active_config.baseline.window_days
-    )
-    baseline_build.add_argument(
-        "--min-samples", type=int, default=active_config.baseline.min_samples
-    )
-    baseline_build.add_argument("--image-name", help="Stratify storage by image")
-    baseline_build.add_argument("--node", help="Restrict storage to one node")
-    baseline_build.add_argument("--test-plan", help="Stratify DL by test plan")
-    baseline_build.add_argument("--source-db", help="Override source result DB")
-    baseline_build.add_argument("--baseline-id", help="Explicit baseline id")
-    baseline_build.add_argument(
-        "--db-path",
-        help="Override DB to store the baseline in; defaults to baseline_root_path DBs",
-    )
-    baseline_build.add_argument(
-        "--store", action="store_true", help="Persist as a candidate baseline"
-    )
-    baseline_build.add_argument(
-        "--activate", action="store_true", help="Persist and promote to active"
-    )
-    baseline_build.add_argument("--output", choices=["table", "json"], default="table")
-    baseline_build.set_defaults(handler=handle_baseline_build)
-
-    baseline_activate = baseline_sub.add_parser(
-        "activate", help="Promote a stored baseline to active"
-    )
-    baseline_activate.add_argument("baseline_id")
-    baseline_activate.add_argument(
-        "test_type", choices=target_catalog.names_for(BASELINE_ACTIVATE)
-    )
-    baseline_activate.add_argument(
-        "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
-    )
-    baseline_activate.set_defaults(handler=handle_baseline_activate)
-
-    baseline_show = baseline_sub.add_parser("show", help="Show a stored baseline record")
-    baseline_show.add_argument("baseline_id")
-    baseline_show.add_argument(
-        "test_type", choices=target_catalog.names_for(BASELINE_SHOW)
-    )
-    baseline_show.add_argument(
-        "--db-path", help="Override baseline DB; defaults to baseline_root_path DBs"
-    )
-    baseline_show.add_argument("--output", choices=["table", "json"], default="table")
-    baseline_show.set_defaults(handler=handle_baseline_show)
-
-    baseline_classify = baseline_sub.add_parser(
-        "classify", help="Classify nodes against the active baseline"
-    )
-    baseline_classify.add_argument(
-        "--test-type", choices=target_catalog.names_for(BASELINE_CLASSIFY), required=True
-    )
-    baseline_classify.add_argument(
-        "--node", help="Classify one node; omit to classify all nodes in the window"
-    )
-    baseline_classify.add_argument(
-        "--baseline-id",
-        help="Baseline id to compare against; default is the active baseline",
-    )
-    baseline_classify.add_argument(
-        "--window-days", type=int, default=active_config.baseline.window_days
-    )
-    baseline_classify.add_argument(
-        "--source-db", help="Override source result DB"
-    )
-    baseline_classify.add_argument(
-        "--db-path",
-        help="Override baseline DB; defaults to baseline_root_path DBs",
-    )
-    baseline_classify.add_argument(
-        "--store-results",
-        action="store_true",
-        help="Persist decisions to the target classification DB",
-    )
-    baseline_classify.add_argument(
-        "--classification-db-path",
-        help="Override the target classification DB path",
-    )
-    baseline_classify.add_argument("--output", choices=["table", "json"], default="table")
-    baseline_classify.set_defaults(handler=handle_baseline_classify)
-
-    nccl_eval = subparsers.add_parser(
-        "nccl-eval",
-        help="Operate the focused PostgreSQL NCCL evaluation subsystem",
-    )
-    nccl_sub = nccl_eval.add_subparsers(dest="nccl_eval_command", required=True)
-
-    nccl_schema = nccl_sub.add_parser(
-        "schema", help="Plan or apply packaged PostgreSQL schema migrations"
-    )
-    _add_nccl_mutation_gate(nccl_schema)
-    nccl_schema.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_schema.set_defaults(handler=handle_nccl_eval_schema)
-
-    nccl_grant_runtime = nccl_sub.add_parser(
-        "grant-runtime", help="Provision the least-privilege PostgreSQL runtime role"
-    )
-    _add_nccl_mutation_gate(nccl_grant_runtime)
-    nccl_grant_runtime.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_grant_runtime.set_defaults(handler=handle_nccl_eval_grant_runtime)
-
-    nccl_ingest = nccl_sub.add_parser(
-        "ingest", help="Validate or atomically ingest one normalized JSON batch"
-    )
-    nccl_ingest.add_argument("--input", type=Path, required=True)
-    _add_nccl_mutation_gate(nccl_ingest)
-    nccl_ingest.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_ingest.set_defaults(handler=handle_nccl_eval_ingest)
-
-    nccl_emit_outbox = nccl_sub.add_parser(
-        "emit-outbox",
-        help="Validate or atomically emit one native NCCL PVC outbox file",
-    )
-    nccl_emit_outbox.add_argument("--result-json", type=Path, required=True)
-    nccl_emit_outbox.add_argument("--summary", type=Path, required=True)
-    nccl_emit_outbox.add_argument("--runtime-evidence", type=Path, required=True)
-    nccl_emit_outbox.add_argument("--result-digest", required=True)
-    nccl_emit_outbox.add_argument("--outbox-root", type=Path, required=True)
-    _add_nccl_mutation_gate(nccl_emit_outbox)
-    nccl_emit_outbox.add_argument(
-        "--output", choices=["table", "json"], default="table"
-    )
-    nccl_emit_outbox.set_defaults(handler=handle_nccl_eval_emit_outbox)
-
-    nccl_commit_outbox = nccl_sub.add_parser(
-        "commit-outbox", help="Create the final retryable marker after SQLite commits"
-    )
-    nccl_commit_outbox.add_argument("--outbox-root", type=Path, required=True)
-    nccl_commit_outbox.add_argument("--pending", type=Path, required=True)
-    nccl_commit_outbox.add_argument("--result-digest", required=True)
-    _add_nccl_mutation_gate(nccl_commit_outbox)
-    nccl_commit_outbox.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_commit_outbox.set_defaults(handler=handle_nccl_eval_commit_outbox)
-
-    nccl_ingest_outbox = nccl_sub.add_parser(
-        "ingest-outbox",
-        help="Scan or durably ingest immutable NCCL PVC outbox files",
-    )
-    nccl_ingest_outbox.add_argument("--outbox-root", type=Path, required=True)
-    nccl_ingest_outbox.add_argument("--limit", type=int, default=100)
-    nccl_ingest_outbox.add_argument(
-        "--continue-on-error",
-        action="store_true",
-        help="Continue after a per-file database error; fail closed by default",
-    )
-    _add_nccl_mutation_gate(nccl_ingest_outbox)
-    nccl_ingest_outbox.add_argument(
-        "--output", choices=["table", "json"], default="table"
-    )
-    nccl_ingest_outbox.set_defaults(handler=handle_nccl_eval_ingest_outbox)
-
-    nccl_calibration = nccl_sub.add_parser(
-        "calibration", help="Plan, append, or inspect immutable calibration decisions"
-    )
-    calibration_sub = nccl_calibration.add_subparsers(
-        dest="nccl_calibration_command", required=True
-    )
-    calibration_plan = calibration_sub.add_parser("plan")
-    calibration_plan.add_argument("--input", type=Path, required=True)
-    calibration_plan.add_argument("--output", choices=["table", "json"], default="table")
-    calibration_plan.set_defaults(handler=handle_nccl_eval_calibration)
-    calibration_apply = calibration_sub.add_parser("apply")
-    calibration_apply.add_argument("--input", type=Path, required=True)
-    _add_nccl_mutation_gate(calibration_apply)
-    calibration_apply.add_argument("--output", choices=["table", "json"], default="table")
-    calibration_apply.set_defaults(handler=handle_nccl_eval_calibration)
-    for calibration_command in ("list", "status"):
-        calibration_read = calibration_sub.add_parser(calibration_command)
-        calibration_read.add_argument("--limit", type=int, default=100)
-        calibration_read.add_argument("--output", choices=["table", "json"], default="table")
-        calibration_read.set_defaults(handler=handle_nccl_eval_calibration)
-
-    nccl_build = nccl_sub.add_parser(
-        "build-baselines", help="Report eligibility or build due immutable baselines"
-    )
-    _add_nccl_mutation_gate(nccl_build)
-    nccl_build.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_build.set_defaults(handler=handle_nccl_eval_build_baselines)
-
-    nccl_evaluate = nccl_sub.add_parser(
-        "evaluate", help="Report the queue or evaluate one claimed batch"
-    )
-    from cval.nccl_eval.repository import default_worker_id
-
-    nccl_evaluate.add_argument("--worker-id", default=default_worker_id())
-    nccl_evaluate.add_argument("--batch-size", type=int)
-    _add_nccl_mutation_gate(nccl_evaluate)
-    nccl_evaluate.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_evaluate.set_defaults(handler=handle_nccl_eval_evaluate)
-
-    nccl_worker = nccl_sub.add_parser(
-        "worker", help="Run the graceful continuous NCCL evaluator worker"
-    )
-    nccl_worker.add_argument("--worker-id", default=default_worker_id())
-    nccl_worker.add_argument("--recover-every-cycles", type=int, default=12)
-    _add_nccl_mutation_gate(nccl_worker)
-    nccl_worker.add_argument("--output", choices=["table", "json"], default="json")
-    nccl_worker.set_defaults(handler=handle_nccl_eval_worker)
-
-    nccl_resident = nccl_sub.add_parser(
-        "resident", help="Run ingestion, baseline, recovery, and evaluation continuously"
-    )
-    nccl_resident.add_argument("--worker-id", default=default_worker_id())
-    nccl_resident.add_argument("--outbox-root", type=Path, required=True)
-    nccl_resident.add_argument("--ingest-limit", type=int, default=5000)
-    nccl_resident.add_argument("--recover-every-cycles", type=int, default=12)
-    _add_nccl_mutation_gate(nccl_resident)
-    nccl_resident.add_argument("--output", choices=["json"], default="json")
-    nccl_resident.set_defaults(handler=handle_nccl_eval_resident)
-
-    nccl_recover = nccl_sub.add_parser(
-        "recover", help="Report or recover expired evaluator claims"
-    )
-    _add_nccl_mutation_gate(nccl_recover)
-    nccl_recover.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_recover.set_defaults(handler=handle_nccl_eval_recover)
-
-    nccl_status = nccl_sub.add_parser(
-        "status", help="Read NCCL queue, profile, and latest evaluation summaries"
-    )
-    nccl_status.add_argument("--latest-limit", type=int, default=20)
-    nccl_status.add_argument("--output", choices=["table", "json"], default="table")
-    nccl_status.set_defaults(handler=handle_nccl_eval_status)
 
     return parser
 
@@ -899,31 +571,6 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_operational_targets(args: argparse.Namespace) -> int:
-    """Emit enabled capability-derived targets for trusted local loops."""
-
-    catalog = build_operational_target_catalog(args.cval_config.tests.registry)
-    targets = catalog.for_operation(args.operation)
-    if args.output == "json":
-        print(json.dumps([target.to_dict() for target in targets], indent=2))
-        return 0
-    for target in targets:
-        print(
-            "\t".join(
-                (
-                    "cval.operational-target.v1",
-                    target.name,
-                    target.owner_test_id,
-                    target.baseline_test_type,
-                    target.status_test,
-                    str(target.alias).lower(),
-                    target.refresh_group or "-",
-                )
-            )
-        )
-    return 0
-
-
 def handle_status(args: argparse.Namespace) -> int:
     """Read latest validation status without mutating SQLite metadata."""
 
@@ -1068,9 +715,8 @@ def handle_results(args: argparse.Namespace) -> int:
         write_latest_results_csv,
         write_export_rows_csv,
     )
-    from cval.storage.classification_status import get_latest_classification_rows
     from cval.validation.operations import (
-        export_evaluator_rows,
+        export_result_rows,
         resolve_operational_target,
     )
     from cval.validation.plugins import ExportContext
@@ -1079,52 +725,12 @@ def handle_results(args: argparse.Namespace) -> int:
         raise ValueError("Only --type csv is currently supported")
 
     test = args.test.lower()
-    if args.classifications_only:
-        from cval.storage.classification_status import (
-            filter_classification_rows,
-            write_classifications_csv,
-        )
-
-        catalog = build_operational_target_catalog(args.cval_config.tests.registry)
-        if test != "all":
-            resolve_operational_target(args.cval_config, test, CLASSIFICATIONS_EXPORT)
-        classifications = get_latest_classification_rows(
-            pod=args.pod,
-            namespace=args.namespace,
-            db_path=args.classification_db_path,
-            test_type=(None if test == "all" else test),
-            config=args.cval_config,
-        )
-        if test == "all":
-            enabled_targets = set(catalog.names_for(CLASSIFICATIONS_EXPORT))
-            classifications = [
-                row for row in classifications if row.test_type in enabled_targets
-            ]
-        selected = filter_classification_rows(classifications, test)
-        output_path = write_classifications_csv(
-            classifications, test, output_dir=args.output_dir
-        )
-        print(f"Wrote {len(selected)} {test} classification row(s) to {output_path}")
-        return 0
-
     rows = get_latest_status_rows(
         pod=args.pod,
         namespace=args.namespace,
         db_path=args.db_path,
         config=args.cval_config,
     )
-    classifications = []
-    if not args.no_classification and test != "nccl":
-        selected_test = test
-        classifications = get_latest_classification_rows(
-            pod=args.pod,
-            namespace=args.namespace,
-            db_path=args.classification_db_path,
-            test_type=(
-                None if selected_test in {"all", "overall"} else selected_test
-            ),
-            config=args.cval_config,
-        )
 
     if test in {"overall", "all"}:
         from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
@@ -1149,7 +755,6 @@ def handle_results(args: argparse.Namespace) -> int:
             rows,
             args.test,
             output_dir=args.output_dir,
-            classifications=classifications,
             nccl_metrics=nccl_metrics,
             storage_metrics=storage_metrics,
         )
@@ -1162,7 +767,6 @@ def handle_results(args: argparse.Namespace) -> int:
             definition=registered.definition,
             config=args.cval_config,
             status_rows=tuple(rows),
-            classification_rows=tuple(classifications),
             pod=args.pod,
             namespace=args.namespace,
             source_db_paths=(
@@ -1171,7 +775,7 @@ def handle_results(args: argparse.Namespace) -> int:
             ),
             include_metrics=not args.no_metrics,
         )
-        export = export_evaluator_rows(args.cval_config, test, context)
+        export = export_result_rows(args.cval_config, test, context)
         output_path = write_export_rows_csv(
             export,
             target.name,
@@ -1433,648 +1037,6 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
     print(f"collective_performance: {summary['collective_performance_rows']} rows")
     print(f"overlap_performance: {summary['overlap_performance_rows']} rows")
     return 0
-
-
-def handle_baseline_list(args: argparse.Namespace) -> int:
-    """List stored baselines in the validation DB."""
-    from cval.baselines.storage import list_dynamic_baselines
-    from cval.validation.operations import resolve_operational_target
-
-    if args.test_type:
-        resolve_operational_target(args.cval_config, args.test_type, BASELINE_LIST)
-
-    baselines = list_dynamic_baselines(
-        test_type=args.test_type,
-        db_path=args.db_path,
-        config=args.cval_config,
-    )
-    if args.output == "json":
-        print(
-            json.dumps(
-                [
-                    {
-                        "baseline_id": b[0],
-                        "test_type": b[1],
-                        "status": b[2],
-                        "stratum_key": b[3],
-                        "n_samples": b[4],
-                        "created_at": b[5],
-                    }
-                    for b in baselines
-                ],
-                indent=2,
-            )
-        )
-        return 0
-
-    print(f"Stored baselines: {len(baselines)}")
-    print(f"{'BASELINE_ID':<40} {'TEST_TYPE':<10} {'STATUS':<10} {'N':>5} STRATUM")
-    for baseline_id, test_type, status, stratum_key, n_samples, _created_at in baselines:
-        print(f"{baseline_id:<40} {test_type:<10} {status:<10} {n_samples:>5} {stratum_key}")
-    return 0
-
-
-def handle_baseline_build(args: argparse.Namespace) -> int:
-    """Build a dynamic baseline from result DBs and optionally store/activate it."""
-    from cval.baselines.storage import (
-        activate_baseline,
-        default_dynamic_baseline_db_paths,
-        store_dynamic_baseline,
-    )
-    from cval.validation.operations import build_evaluator_baseline
-
-    config: CvalConfig = args.cval_config
-    try:
-        record = build_evaluator_baseline(
-            config,
-            args.test_type,
-            window_days=args.window_days,
-            min_samples=args.min_samples,
-            source_db=args.source_db,
-            image_name=args.image_name,
-            node=args.node,
-            test_plan=args.test_plan,
-            baseline_id=args.baseline_id,
-        )
-    except (FileNotFoundError, TypeError, ValueError) as exc:
-        print(f"Baseline build failed: {exc}", file=sys.stderr)
-        return 1
-
-    stored = False
-    if args.store or args.activate:
-        store_dynamic_baseline(record, db_path=args.db_path, status="candidate", config=config)
-        stored = True
-        if args.activate:
-            activate_baseline(record["baseline_id"], args.test_type, db_path=args.db_path, config=config)
-
-    metrics = record["metrics"]
-    if args.output == "json":
-        payload = dict(record)
-        payload["stored"] = stored
-        payload["activated"] = bool(args.activate)
-        print(json.dumps(payload, indent=2))
-        return 0
-
-    print(f"Built {args.test_type} baseline: {record['baseline_id']}")
-    print(
-        f"Stratum: {record['stratum_key'] or '(all)'} | window: {record['window_days']}d | "
-        f"runs: {record['n_samples']} | metrics: {len(metrics)}"
-    )
-    if stored:
-        state = "active" if args.activate else "candidate"
-        if args.db_path:
-            print(f"Stored in {args.db_path} as {state}")
-        else:
-            paths = ", ".join(str(path) for path in default_dynamic_baseline_db_paths(args.test_type, config=config))
-            print(f"Stored in default baseline DB(s) as {state}: {paths}")
-    if not metrics:
-        print("No metrics met --min-samples; lower it or widen --window-days.")
-        return 0
-    print(f"{'METRIC':<48} {'MEDIAN':>14} {'MAD_SIGMA':>12} {'N':>4} DIR")
-    for key, stat in metrics.items():
-        print(
-            f"{key:<48} {stat['median']:>14.4g} {stat['mad_sigma']:>12.4g} "
-            f"{stat['n']:>4} {stat['direction']}"
-        )
-    return 0
-
-
-def handle_baseline_activate(args: argparse.Namespace) -> int:
-    """Promote a stored baseline to active and supersede the previous one."""
-    from cval.baselines.storage import activate_baseline
-    from cval.validation.operations import resolve_operational_target
-
-    resolve_operational_target(
-        args.cval_config, args.test_type, BASELINE_ACTIVATE
-    )
-
-    try:
-        activated = activate_baseline(
-            args.baseline_id,
-            args.test_type,
-            db_path=args.db_path,
-            config=args.cval_config,
-        )
-    except (TypeError, ValueError) as exc:
-        print(f"Baseline activation failed: {exc}", file=sys.stderr)
-        return 1
-    if not activated:
-        print(
-            f"Baseline not found: {args.baseline_id} ({args.test_type})",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"Activated baseline: {args.baseline_id} ({args.test_type})")
-    return 0
-
-
-def handle_baseline_show(args: argparse.Namespace) -> int:
-    """Print a stored baseline record and its per-metric acceptance bands."""
-    from cval.baselines.storage import load_dynamic_baseline
-    from cval.validation.operations import resolve_operational_target
-
-    resolve_operational_target(args.cval_config, args.test_type, BASELINE_SHOW)
-
-    record = load_dynamic_baseline(
-        args.baseline_id,
-        args.test_type,
-        db_path=args.db_path,
-        config=args.cval_config,
-    )
-    if record is None:
-        print(
-            f"Baseline not found: {args.baseline_id} ({args.test_type})",
-            file=sys.stderr,
-        )
-        return 1
-
-    if args.output == "json":
-        print(json.dumps(record, indent=2))
-        return 0
-
-    metrics = record.get("metrics", {})
-    print(f"Baseline: {record.get('baseline_id')} ({record.get('test_type')})")
-    print(
-        f"Stratum: {record.get('stratum_key') or '(all)'} | "
-        f"window: {record.get('window_days')}d | runs: {record.get('n_samples')} | "
-        f"metrics: {len(metrics)}"
-    )
-    print(f"{'METRIC':<48} {'MEDIAN':>14} {'LOWER':>14} {'UPPER':>14} DIR")
-    for key, stat in metrics.items():
-        lower = stat.get("lower_bound")
-        upper = stat.get("upper_bound")
-        lower_s = "-inf" if lower is None else f"{lower:.4g}"
-        upper_s = "+inf" if upper is None else f"{upper:.4g}"
-        print(
-            f"{key:<48} {stat['median']:>14.4g} {lower_s:>14} {upper_s:>14} "
-            f"{stat['direction']}"
-        )
-    return 0
-
-
-def handle_baseline_classify(args: argparse.Namespace) -> int:
-    """Classify one or all nodes against the active (or named) baseline."""
-    from cval.baselines.storage import (
-        default_classification_db_path,
-        get_active_baseline,
-        load_dynamic_baseline,
-        store_classification_results,
-    )
-    from cval.validation.operations import (
-        classify_evaluator_target,
-        resolve_operational_target,
-    )
-
-    config: CvalConfig = args.cval_config
-    resolve_operational_target(config, args.test_type, BASELINE_CLASSIFY)
-    if args.baseline_id:
-        baseline = load_dynamic_baseline(
-            args.baseline_id,
-            args.test_type,
-            db_path=args.db_path,
-            config=config,
-        )
-    else:
-        baseline = get_active_baseline(args.test_type, db_path=args.db_path, config=config)
-    if not baseline:
-        target = args.baseline_id or "active"
-        print(
-            f"No {target} baseline for {args.test_type}; build and activate one first.",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        verdicts = classify_evaluator_target(
-            config,
-            args.test_type,
-            baseline,
-            node=args.node,
-            source_db=args.source_db,
-            window_days=args.window_days,
-        )
-    except (TypeError, ValueError) as exc:
-        print(f"Classification failed: {exc}", file=sys.stderr)
-        return 1
-
-    stored_count = 0
-    if args.store_results:
-        try:
-            stored_count = store_classification_results(
-                verdicts,
-                db_path=args.classification_db_path,
-                config=config,
-            )
-        except (TypeError, ValueError) as exc:
-            print(f"Classification storage failed: {exc}", file=sys.stderr)
-            return 1
-
-    if args.output == "json":
-        payload = {
-            "verdicts": verdicts,
-            "stored_count": stored_count,
-            "classification_db_path": str(
-                args.classification_db_path
-                or default_classification_db_path(args.test_type, config)
-            ) if args.store_results else "",
-        }
-        print(json.dumps(payload if args.store_results else verdicts, indent=2))
-        return 0
-
-    print(f"Classification vs baseline {baseline.get('baseline_id')} ({args.test_type})")
-    if args.store_results:
-        target_db = args.classification_db_path or default_classification_db_path(
-            args.test_type, config
-        )
-        print(f"Stored {stored_count} classification row(s) in {target_db}")
-    if not verdicts:
-        print("No nodes found in the window.")
-        return 0
-    print(
-        f"{'NODE':<32} {'STATUS':<9} {'BAD':>8} {'BAND_BAD':>8} "
-        f"{'BAD%':>8} {'WORST%':>8} {'COMPARED':>8}"
-    )
-    for verdict in verdicts:
-        print(
-            f"{verdict['node']:<32} {verdict['status']:<9} {verdict['n_degraded']:>8} "
-            f"{verdict.get('n_band_degraded', verdict['n_degraded']):>8} "
-            f"{verdict.get('degraded_metric_percent', 0.0):>7.2f}% "
-            f"{verdict.get('worst_pct_diff', 0.0):>7.2f}% {verdict['n_compared']:>8}"
-        )
-    degraded = [v["node"] for v in verdicts if v["status"] == "degraded"]
-    if degraded:
-        print(f"Degraded nodes: {', '.join(degraded)}")
-    return 0
-
-
-def handle_nccl_eval_schema(args: argparse.Namespace) -> int:
-    """Plan packaged migrations or apply them after the exact schema gate."""
-
-    if args.apply:
-        _require_nccl_apply(args, "schema")
-    else:
-        from cval.nccl_eval.schema import migration_plan
-
-        _print_nccl_payload(migration_plan(), args.output)
-        return 0
-    return _run_nccl_db_action(args, "apply_schema")
-
-
-def handle_nccl_eval_grant_runtime(args: argparse.Namespace) -> int:
-    """Provision the runtime login from Secret-backed environment only."""
-
-    if args.apply:
-        _require_nccl_apply(args, "grant-runtime")
-    else:
-        _print_nccl_payload(
-            {
-                "mode": "dry-run",
-                "required_environment": [
-                    "DATABASE_URL",
-                    "CVAL_POSTGRES_RUNTIME_USERNAME",
-                    "CVAL_POSTGRES_RUNTIME_PASSWORD",
-                ],
-                "ownership_granted": False,
-            },
-            args.output,
-        )
-        return 0
-    try:
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import grant_runtime
-
-        username = os.environ.get("CVAL_POSTGRES_RUNTIME_USERNAME", "")
-        password = os.environ.get("CVAL_POSTGRES_RUNTIME_PASSWORD", "")
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        _print_nccl_payload(
-            grant_runtime(config, username=username, password=password), args.output
-        )
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_ingest(args: argparse.Namespace) -> int:
-    """Validate normalized input without a DB, or ingest it atomically."""
-
-    if args.apply:
-        _require_nccl_apply(args, "ingest")
-    try:
-        from cval.nccl_eval.models import IngestionBatch
-        from cval.nccl_eval.profile import build_profile_identity
-
-        raw = json.loads(args.input.read_text(encoding="utf-8"))
-        batch = IngestionBatch.from_dict(raw)
-        if not args.apply:
-            profile = build_profile_identity(batch.test_run)
-            _print_nccl_payload(
-                {
-                    "mode": "dry-run",
-                    "valid": True,
-                    "run_id": str(batch.test_run.run_id),
-                    "profile_id": str(profile.profile_id),
-                    "profile_key": profile.profile_key,
-                    "node_count": len(batch.node_results),
-                    "nic_count": sum(len(node.nics) for node in batch.node_results),
-                },
-                args.output,
-            )
-            return 0
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import ingest
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        _print_nccl_payload(ingest(config, batch), args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_emit_outbox(args: argparse.Namespace) -> int:
-    """Build a descriptor-bound native batch and optionally emit it once."""
-
-    if args.apply:
-        _require_nccl_apply(args, "emit-outbox")
-    try:
-        from cval.nccl_eval.outbox import (
-            build_ingestion_batch,
-            emission_plan,
-            emit_outbox,
-        )
-
-        batch = build_ingestion_batch(
-            result_json=args.result_json,
-            summary=args.summary,
-            runtime_evidence=args.runtime_evidence,
-            result_digest=args.result_digest,
-            config=args.cval_config,
-        )
-        payload = (
-            emit_outbox(args.outbox_root, batch.test_run.cval_run_id, batch)
-            if args.apply
-            else emission_plan(args.outbox_root, batch.test_run.cval_run_id, batch)
-        )
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - immutable-file CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_commit_outbox(args: argparse.Namespace) -> int:
-    """Validate or write the final committed marker for one pending payload."""
-
-    if args.apply:
-        _require_nccl_apply(args, "commit-outbox")
-    try:
-        from cval.nccl_eval.outbox import commit_outbox, commit_outbox_plan
-
-        payload = (
-            commit_outbox(
-                args.outbox_root,
-                pending=args.pending,
-                result_digest=args.result_digest,
-            )
-            if args.apply
-            else commit_outbox_plan(
-                args.outbox_root,
-                pending=args.pending,
-                result_digest=args.result_digest,
-            )
-        )
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - immutable-file CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_ingest_outbox(args: argparse.Namespace) -> int:
-    """Scan before any database setup, then ingest each exact valid file."""
-
-    if args.apply:
-        _require_nccl_apply(args, "ingest-outbox")
-    try:
-        from cval.nccl_eval.outbox import ingest_outbox_progression, scan_outbox
-
-        scan = scan_outbox(args.outbox_root, limit=args.limit)
-        if not args.apply:
-            _print_nccl_payload(scan.public_dict(), args.output)
-            return 0
-        from cval.nccl_eval.config import NcclEvaluationConfig
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        payload = ingest_outbox_progression(
-            config,
-            args.outbox_root,
-            limit=args.limit,
-            continue_on_error=args.continue_on_error,
-        )
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_calibration(args: argparse.Namespace) -> int:
-    """Plan/apply exact decision IDs or inspect the append-only ledger."""
-
-    try:
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.repository import parse_calibration_input
-        from cval.nccl_eval.service import (
-            apply_calibration,
-            calibration_plan,
-            calibration_report,
-        )
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        command = args.nccl_calibration_command
-        if command in {"list", "status"}:
-            payload = calibration_report(config, limit=args.limit)
-        else:
-            raw = json.loads(args.input.read_text(encoding="utf-8"))
-            decisions = parse_calibration_input(raw)
-            if command == "apply":
-                _require_nccl_apply(args, "calibration")
-                payload = apply_calibration(config, decisions)
-            else:
-                payload = calibration_plan(config, decisions)
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_build_baselines(args: argparse.Namespace) -> int:
-    """Report baseline eligibility or run the approval-gated builder once."""
-
-    if args.apply:
-        _require_nccl_apply(args, "build-baselines")
-    return _run_nccl_db_action(
-        args, "build_baselines" if args.apply else "baseline_report"
-    )
-
-
-def handle_nccl_eval_evaluate(args: argparse.Namespace) -> int:
-    """Report ready jobs or claim and evaluate a short batch."""
-
-    if args.apply:
-        _require_nccl_apply(args, "evaluate")
-    try:
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import evaluate_once, queue_report
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        payload = (
-            evaluate_once(
-                config, worker_id=args.worker_id, batch_size=args.batch_size
-            )
-            if args.apply
-            else queue_report(config)
-        )
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_worker(args: argparse.Namespace) -> int:
-    """Run the signal-aware evaluator service until graceful shutdown."""
-
-    if args.apply:
-        _require_nccl_apply(args, "worker")
-    try:
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import queue_report, worker
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        payload = (
-            worker(
-                config,
-                worker_id=args.worker_id,
-                recover_every_cycles=args.recover_every_cycles,
-            )
-            if args.apply
-            else queue_report(config)
-        )
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_resident(args: argparse.Namespace) -> int:
-    """Run all recurring NCCL evaluator tasks in one resident process."""
-
-    if args.apply:
-        _require_nccl_apply(args, "resident")
-    try:
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import queue_report, resident
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        if not args.apply:
-            _print_nccl_payload(queue_report(config), args.output)
-            return 0
-
-        def emit(payload: dict[str, object]) -> None:
-            print(json.dumps(payload, sort_keys=True), flush=True)
-
-        payload = resident(
-            config,
-            worker_id=args.worker_id,
-            outbox_root=args.outbox_root,
-            ingest_limit=args.ingest_limit,
-            recover_every_cycles=args.recover_every_cycles,
-            event_sink=emit,
-        )
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def handle_nccl_eval_recover(args: argparse.Namespace) -> int:
-    """Report or approval-gate stale processing claim recovery."""
-
-    if args.apply:
-        _require_nccl_apply(args, "recover")
-    return _run_nccl_db_action(args, "recover" if args.apply else "stale_report")
-
-
-def handle_nccl_eval_status(args: argparse.Namespace) -> int:
-    """Read subsystem status without mutations."""
-
-    try:
-        from cval.nccl_eval.config import NcclEvaluationConfig
-        from cval.nccl_eval.service import status
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        _print_nccl_payload(
-            status(config, latest_limit=args.latest_limit), args.output
-        )
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def _add_nccl_mutation_gate(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--confirm")
-
-
-def _require_nccl_apply(args: argparse.Namespace, phrase: str) -> None:
-    if not args.apply or args.confirm != phrase:
-        raise PolicyViolation(
-            f"NCCL mutation requires --apply --confirm {phrase}"
-        )
-
-
-def _run_nccl_db_action(args: argparse.Namespace, action: str) -> int:
-    try:
-        from cval.nccl_eval import service
-        from cval.nccl_eval.config import NcclEvaluationConfig
-
-        config = NcclEvaluationConfig.from_env(require_database=True)
-        payload = getattr(service, action)(config)
-        _print_nccl_payload(payload, args.output)
-        return 0
-    except Exception as exc:  # noqa: BLE001 - secret-redacting CLI boundary
-        return _report_nccl_error(exc)
-
-
-def _print_nccl_payload(payload: dict[str, object], output: str) -> None:
-    if output == "json":
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    print("NCCL PostgreSQL evaluation")
-    for key, value in payload.items():
-        if isinstance(value, list | dict):
-            print(f"{key}: {json.dumps(value, sort_keys=True)}")
-        else:
-            print(f"{key}: {value}")
-
-
-def _report_nccl_error(exc: BaseException) -> int:
-    import re
-
-    message = str(exc).replace("\n", " ").replace("\r", " ")
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url:
-        message = message.replace(database_url, "[DATABASE_URL REDACTED]")
-    message = re.sub(
-        r"(postgres(?:ql)?://)[^\s/@:]+(?::[^\s/@]*)?@",
-        r"\1[REDACTED]@",
-        message,
-        flags=re.IGNORECASE,
-    )
-    message = re.sub(
-        r"\b(user|password|passfile|sslkey)=('(?:[^']|'')*'|\S+)",
-        r"\1=[REDACTED]",
-        message,
-        flags=re.IGNORECASE,
-    )
-    print(f"NCCL evaluation error: {message[:1000]}", file=sys.stderr)
-    return 2
 
 
 def _build_plan_from_args(args: argparse.Namespace):

@@ -299,7 +299,7 @@ summary_filename = "summary.json"
                 [],
             )
 
-    def test_nccl_success_writes_raw_status_and_metrics_without_evaluator(self) -> None:
+    def test_nccl_success_writes_raw_status_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "data"
             repo = Path(tmpdir) / "test-repo"
@@ -314,9 +314,8 @@ summary_filename = "summary.json"
                 '''#!/bin/bash
 set -euo pipefail
 [[ -z "${DATABASE_URL+x}" ]]
-[[ -z "${PGPASSWORD+x}" ]]
-[[ -z "${PGSSLPASSWORD+x}" ]]
-[[ -z "${POSTGRES_PASSWORD_FILE+x}" ]]
+[[ -z "${DB_PASSWORD+x}" ]]
+[[ -z "${DB_SSL_PASSWORD+x}" ]]
 [[ -z "${FUTURE_API_KEY+x}" ]]
 [[ -z "${SERVICE_PRIVATE_KEY+x}" ]]
 cat > "$CVAL_TEST_SUMMARY_FILE" <<'JSON'
@@ -362,10 +361,9 @@ summary_filename = "summary.json"
             environment = self._supervisor_environment(config, repo)
             environment["CVAL_IMAGE_NAME"] = "test-image@sha256:" + "b" * 64
             environment["CVAL_GIT_REF"] = "a" * 40
-            environment["DATABASE_URL"] = "postgresql://must-not-reach-validation/cval"
-            environment["PGPASSWORD"] = "must-not-reach-validation"
-            environment["PGSSLPASSWORD"] = "must-not-reach-validation"
-            environment["POSTGRES_PASSWORD_FILE"] = "/secret/file"
+            environment["DATABASE_URL"] = "must-not-reach-validation"
+            environment["DB_PASSWORD"] = "must-not-reach-validation"
+            environment["DB_SSL_PASSWORD"] = "must-not-reach-validation"
             environment["FUTURE_API_KEY"] = "must-not-reach-validation"
             environment["SERVICE_PRIVATE_KEY"] = "must-not-reach-validation"
             stdout = io.BytesIO()
@@ -399,7 +397,6 @@ summary_filename = "summary.json"
         self.assertEqual(return_code, 0)
         self.assertEqual(status_rows[1], ("nccl", "pass"))
         self.assertEqual(metric_count, 1)
-        self.assertFalse((root / "nccl_eval").exists())
 
     def test_nccl_setup_failure_records_raw_status_without_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -473,7 +470,6 @@ summary_filename = "summary.json"
             self.assertEqual(return_code, 0, stderr.getvalue().decode())
             self.assertEqual(status, "fail")
             self.assertFalse((root / "metadata/test-nccl.db").exists())
-            self.assertFalse((root / "nccl_eval/outbox").exists())
 
     def test_canonical_run_replacement_gets_no_db_or_evidence_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

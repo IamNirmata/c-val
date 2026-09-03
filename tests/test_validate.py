@@ -16,7 +16,6 @@ from cval.k8s.client import CommandResult
 from cval.k8s.discovery import describe_node_from_outputs
 from cval.orchestrator.validate import (
     build_validation_report,
-    degraded_metrics_from_verdict,
     finalize_download_zip,
     log_signals_db_updated,
     parse_test_progress,
@@ -154,55 +153,9 @@ class TestRawResults(unittest.TestCase):
         self.assertFalse(log_signals_db_updated(text))
 
 
-class TestDegradedMetrics(unittest.TestCase):
-    def test_sorted_and_limited(self):
-        verdict = {
-            "metrics": [
-                {"metric": "a", "status": "normal", "pct_diff": 1.0},
-                {"metric": "b", "status": "degraded", "pct_diff": 5.0, "component": "compute_performance"},
-                {"metric": "c", "status": "degraded", "pct_diff": -20.0, "component": "compute_performance"},
-            ]
-        }
-        degraded = degraded_metrics_from_verdict(verdict, limit=1)
-        self.assertEqual(len(degraded), 1)
-        self.assertEqual(degraded[0]["metric"], "c")  # |−20| is worst
-
-    def test_none_verdict(self):
-        self.assertEqual(degraded_metrics_from_verdict(None), [])
-
 
 class TestBuildAndRenderReport(unittest.TestCase):
-    def _verdicts(self):
-        return {
-            "storage": {"status": "normal", "n_compared": 12, "n_degraded": 0, "metrics": []},
-            "nccl": {"status": "normal", "n_compared": 2, "n_degraded": 0, "metrics": []},
-            "dltest": {
-                "status": "degraded",
-                "n_compared": 2788,
-                "n_degraded": 12,
-                "degraded_metric_percent": 0.43,
-                "worst_pct_diff": 18.5,
-                "components": {
-                    "compute_performance": {
-                        "status": "degraded",
-                        "n_degraded": 12,
-                        "degraded_metric_percent": 0.9,
-                        "worst_pct_diff": 18.5,
-                    }
-                },
-                "metrics": [
-                    {
-                        "metric": "nn_tasks/instance_norm/elapsed_ms",
-                        "component": "compute_performance",
-                        "status": "degraded",
-                        "pct_diff": 18.5,
-                        "direction": "high_bad",
-                    }
-                ],
-            },
-        }
-
-    def test_report_health_degraded(self):
+    def test_report_contains_only_raw_results(self):
         report = build_validation_report(
             node="node-x",
             timestamp=123,
@@ -210,13 +163,11 @@ class TestBuildAndRenderReport(unittest.TestCase):
             job_phase="Completed",
             schedulability={"fully_free": True, "schedulable": True, "resource_ready": True, "reason": "free"},
             raw_results={"storage": "pass", "nccl": "pass", "dltest": "pass", "all": "pass"},
-            verdicts=self._verdicts(),
         )
         self.assertTrue(report["ok"])
-        self.assertEqual(report["health"], "degraded")
         self.assertEqual(report["raw_overall"], "pass")
-        self.assertEqual(report["classification"]["dltest"]["n_degraded"], 12)
-        self.assertEqual(len(report["classification"]["dltest"]["degraded_metrics"]), 1)
+        self.assertNotIn("health", report)
+        self.assertNotIn("classification", report)
 
     def test_render_contains_sections(self):
         report = build_validation_report(
@@ -226,11 +177,12 @@ class TestBuildAndRenderReport(unittest.TestCase):
             job_phase="Completed",
             schedulability={"fully_free": True, "schedulable": True, "resource_ready": True, "reason": "free"},
             raw_results={"storage": "pass", "nccl": "pass", "dltest": "pass", "all": "pass"},
-            verdicts=self._verdicts(),
         )
         text = render_validation_report(report)
-        for token in ("validation report", "node-x", "storage", "nccl", "dltest", "DL components", "instance_norm"):
+        for token in ("validation report", "node-x", "storage", "nccl", "dltest"):
             self.assertIn(token, text)
+        self.assertNotIn("VERDICT", text)
+        self.assertNotIn("HEALTH", text)
 
     def test_completed_job_with_failed_raw_result_is_not_ok(self):
         report = build_validation_report(
@@ -240,7 +192,6 @@ class TestBuildAndRenderReport(unittest.TestCase):
             job_phase="Completed",
             schedulability={},
             raw_results={"storage": "pass", "nccl": "fail", "all": "fail"},
-            verdicts={"storage": None, "nccl": None, "dltest": None},
         )
 
         self.assertFalse(report["ok"])
@@ -253,7 +204,6 @@ class TestBuildAndRenderReport(unittest.TestCase):
             job_phase="Completed",
             schedulability={},
             raw_results={"storage": "pass", "nccl": "pass", "all": "pass"},
-            verdicts={"storage": None, "nccl": None, "dltest": None},
             ingestion_complete=False,
         )
 
@@ -441,25 +391,7 @@ class FakeValidateClient:
                     }
                 )
             )
-        if "exec" in joined and "baseline classify" in joined:
-            test = args[args.index("--test-type") + 1]
-            verdict = {"node": "node-x", "test_type": test, "status": "normal", "n_compared": 5, "n_degraded": 0, "metrics": []}
-            if test == "dltest":
-                verdict = {
-                    "node": "node-x",
-                    "test_type": "dltest",
-                    "status": "degraded",
-                    "n_compared": 2788,
-                    "n_degraded": 12,
-                    "degraded_metric_percent": 0.43,
-                    "worst_pct_diff": 18.5,
-                    "components": {"compute_performance": {"status": "degraded", "n_degraded": 12, "worst_pct_diff": 18.5, "degraded_metric_percent": 0.9}},
-                    "metrics": [
-                        {"metric": "nn_tasks/x/elapsed_ms", "component": "compute_performance", "status": "degraded", "pct_diff": 18.5, "direction": "high_bad"}
-                    ],
-                }
-            payload = {"verdicts": [verdict], "stored_count": 1, "classification_db_path": "/data/.../classification-results.db"}
-            return self._result(json.dumps(payload))
+
         if "exec" in joined and "latest_status" in (input_text or ""):
             rows = [{"node": "node-x", "test": t, "latest_timestamp": 123, "result": "pass"} for t in ("storage", "nccl", "dltest", "all")]
             return self._result(json.dumps(rows))
@@ -617,16 +549,13 @@ class TestRunNodeValidation(unittest.TestCase):
         self.assertEqual(report["git_ref"], self.COMMIT)
         self.assertTrue(report["ok"])
         self.assertEqual(report["raw_overall"], "pass")
-        self.assertEqual(report["classification"]["storage"]["status"], "unknown")
-        self.assertEqual(report["classification"]["dltest"]["status"], "unknown")
-        self.assertEqual(report["health"], "unknown")
-        # One real job was created; derived writes were not coupled to validation.
+        self.assertNotIn("classification", report)
+        self.assertNotIn("health", report)
+        # One real job was created; raw recovery was not coupled to validation.
         self.assertTrue(any(" ".join(call).startswith("create -n") for call in client.calls))
         self.assertTrue(
             any("--tail=2000" in call for call in client.calls if call and call[0] == "logs")
         )
-        classify_calls = [c for c in client.calls if "baseline" in c and "classify" in c]
-        self.assertEqual(classify_calls, [])
         self.assertFalse(
             any("db-rebuild-dltest-metrics" in call for call in client.calls)
         )
@@ -654,7 +583,7 @@ class TestRunNodeValidation(unittest.TestCase):
             any(" ".join(call).startswith("create -n") for call in client.calls)
         )
 
-    def test_stale_status_rows_do_not_produce_success_or_classification(self):
+    def test_stale_status_rows_do_not_produce_success(self):
         client = FakeValidateClient()
         ticks = iter(range(0, 100))
 
@@ -673,10 +602,6 @@ class TestRunNodeValidation(unittest.TestCase):
 
         self.assertFalse(report["ok"])
         self.assertFalse(report["fresh_status_complete"])
-        classify_calls = [
-            call for call in client.calls if "baseline" in call and "classify" in call
-        ]
-        self.assertEqual(classify_calls, [])
         self.assertTrue(any("ignored stale" in note for note in report["notes"]))
 
     def test_dynamic_test_does_not_require_legacy_status_row(self):
@@ -754,7 +679,6 @@ class TestFinalizeDownloadZip(unittest.TestCase):
             job_phase="Completed",
             schedulability={"status_label": "cordoned", "reason": "cordoned"},
             raw_results={"storage": "pass", "nccl": "pass", "dltest": "pass"},
-            verdicts={"storage": None, "nccl": None, "dltest": None},
         )
 
         with TemporaryDirectory() as tmp:
@@ -783,7 +707,6 @@ class TestFinalizeDownloadZip(unittest.TestCase):
             job_phase="Completed",
             schedulability={},
             raw_results={"storage": "pass", "nccl": "pass", "dltest": "pass"},
-            verdicts={"storage": None, "nccl": None, "dltest": None},
         )
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "cval-node-y-9.zip"

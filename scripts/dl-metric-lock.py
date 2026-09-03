@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely serialize DL metric work on the stable baseline directory inode."""
+"""Safely serialize DL metric ingestion on its stable metadata directory inode."""
 
 from __future__ import annotations
 

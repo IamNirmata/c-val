@@ -2,25 +2,15 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from cval.cli import main
-from cval.baselines import stats
-from cval.baselines.storage import (
-    activate_baseline,
-    get_active_baseline,
-    store_dynamic_baseline,
-)
-from cval.config import load_config
 from cval.k8s.discovery import NodeStatus
-from cval.models import ClassificationResultRow, LatestStatusRow
+from cval.models import LatestStatusRow
 from cval.validation.plugins import ExportRows
 
 
@@ -118,8 +108,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
         self.assertIn(
-            "{config,tests,nodes,validate,status,plan,run,jobs,results,"
-            "baseline,nccl-eval}",
+            "{config,tests,nodes,validate,status,plan,run,jobs,results}",
             help_text,
         )
         self.assertNotIn("prioritize", help_text)
@@ -139,10 +128,7 @@ class CliTests(unittest.TestCase):
                     LatestStatusRow("node-a", "all", 100, "fail"),
                     LatestStatusRow("node-a", "storage", 100, "pass"),
                 ],
-            ), patch(
-                "cval.storage.classification_status.get_latest_classification_rows",
-                return_value=[],
-            ) as classification_reader:
+            ):
                 with redirect_stdout(output):
                     exit_code = main(
                         [
@@ -153,15 +139,17 @@ class CliTests(unittest.TestCase):
                             "csv",
                             "--output-dir",
                             tmpdir,
+                            "--no-metrics",
                         ]
                     )
 
             files = list(Path(tmpdir).glob("cval_overall_*.csv"))
+            text = files[0].read_text(encoding="utf-8")
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(files), 1)
         self.assertIn("Wrote 2 overall latest result row(s)", output.getvalue())
-        classification_reader.assert_called_once()
+        self.assertNotIn("classification", text)
 
     def test_plugin_results_command_reports_export_row_count(self) -> None:
         output = io.StringIO()
@@ -172,7 +160,7 @@ class CliTests(unittest.TestCase):
                 "cval.cli.get_latest_status_rows",
                 return_value=[LatestStatusRow("node-a", "storage", 100, "pass")],
             ), patch(
-                "cval.validation.operations.export_evaluator_rows",
+                "cval.validation.operations.export_result_rows",
                 return_value=exported,
             ):
                 with redirect_stdout(output):
@@ -181,7 +169,6 @@ class CliTests(unittest.TestCase):
                             "results",
                             "--test",
                             "storage",
-                            "--no-classification",
                             "--no-metrics",
                             "--output-dir",
                             tmpdir,
@@ -191,7 +178,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Wrote 2 storage latest result row(s)", output.getvalue())
 
-    def test_nccl_raw_export_does_not_read_sqlite_classifications(self) -> None:
+    def test_nccl_raw_export_uses_plugin_rows(self) -> None:
         output = io.StringIO()
         exported = ExportRows(("node", "BUS_BW"), (("node-a", "44.0000"),))
 
@@ -199,9 +186,7 @@ class CliTests(unittest.TestCase):
             "cval.cli.get_latest_status_rows",
             return_value=[LatestStatusRow("node-a", "nccl", 100, "pass")],
         ), patch(
-            "cval.storage.classification_status.get_latest_classification_rows"
-        ) as classifications, patch(
-            "cval.validation.operations.export_evaluator_rows",
+            "cval.validation.operations.export_result_rows",
             return_value=exported,
         ), redirect_stdout(output):
             exit_code = main(
@@ -215,50 +200,18 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        classifications.assert_not_called()
 
-    def test_results_classifications_only_writes_csv(self) -> None:
-        output = io.StringIO()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch(
-                "cval.storage.classification_status.get_latest_classification_rows",
-                return_value=[
-                    ClassificationResultRow(
-                        200,
-                        "node-a",
-                        "storage",
-                        "storage-1",
-                        "degraded",
-                        False,
-                        12,
-                        2,
-                        0,
-                        2,
-                        0.1667,
-                        22.0,
-                    )
-                ],
-            ):
-                with redirect_stdout(output):
-                    exit_code = main(
-                        [
-                            "results",
-                            "--classifications-only",
-                            "--test",
-                            "storage",
-                            "--type",
-                            "csv",
-                            "--output-dir",
-                            tmpdir,
-                        ]
-                    )
-
-            files = list(Path(tmpdir).glob("cval_classifications_storage_*.csv"))
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(len(files), 1)
-        self.assertIn("Wrote 1 storage classification row(s)", output.getvalue())
+    def test_removed_results_classification_flags_are_rejected(self) -> None:
+        for flag in (
+            "--classifications-only",
+            "--classification-db-path=/tmp/removed.db",
+            "--no-classification",
+        ):
+            with self.subTest(flag=flag), redirect_stderr(io.StringIO()), self.assertRaises(
+                SystemExit
+            ) as exc:
+                main(["results", "--test", "storage", flag])
+            self.assertEqual(exc.exception.code, 2)
 
     def test_config_command_prints_effective_config(self) -> None:
         output = io.StringIO()
@@ -310,96 +263,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["registered_count"], 3)
         self.assertEqual(result["enabled_count"], 3)
 
-    def test_empty_baseline_build_fails_nonzero_and_preserves_active(self) -> None:
-        from cval.storage.ingest import STORAGE_METRIC_COLUMNS
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "storage.db"
-            columns = STORAGE_METRIC_COLUMNS
-            with closing(sqlite3.connect(source)) as connection:
-                connection.execute(
-                    "CREATE TABLE storage_performance (node TEXT, timestamp INTEGER, "
-                    "image_name TEXT, "
-                    + ", ".join(f"{name} REAL" for name in columns)
-                    + ")"
-                )
-                connection.execute(
-                    "INSERT INTO storage_performance VALUES (?,?,?,"
-                    + ",".join("?" for _ in columns)
-                    + ")",
-                    ("node-a", 2_000_000_000, "img", *([100.0] * len(columns))),
-                )
-                connection.commit()
-            baseline_root = root / "baselines"
-            config_path = root / "cval.toml"
-            config_path.write_text(
-                f'[baseline]\nbaseline_root_path = "{baseline_root}"\nmin_samples = 5\n',
-                encoding="utf-8",
-            )
-            config = load_config(config_path)
-            metric = stats.summarize_metric(
-                columns[0],
-                [100.0] * 8,
-                direction="low_bad",
-                tolerance_pct=10.0,
-                bootstrap=False,
-            ).to_dict()
-            metric["source_table"] = "storage_performance"
-            active = {
-                "schema_version": "cval.baseline.v2", "baseline_id": "active-1",
-                "test_type": "storage", "stratum_key": "", "window_days": 30,
-                "created_at": 1, "timestamp": 1, "n_samples": 8,
-                "method": "robust_mad", "metrics": {columns[0]: metric},
-            }
-            store_dynamic_baseline(active, config=config)
-            activate_baseline("active-1", "storage", config=config)
-            stderr = io.StringIO()
-
-            with redirect_stderr(stderr):
-                exit_code = main(
-                    [
-                        "--config", str(config_path), "baseline", "build",
-                        "--test-type", "storage", "--source-db", str(source),
-                        "--window-days", "365", "--min-samples", "5",
-                        "--activate", "--output", "json",
-                    ]
-                )
-
-            self.assertEqual(exit_code, 1)
-            self.assertIn("metrics must be non-empty", stderr.getvalue())
-            self.assertEqual(
-                get_active_baseline("storage", config=config)["baseline_id"],
-                "active-1",
-            )
-
-    def test_classify_cli_rejects_retained_global_store_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config_path = root / "cval.toml"
-            config_path.write_text(
-                f'[baseline]\nbaseline_root_path = "{root / "baselines"}"\n',
-                encoding="utf-8",
-            )
-            stderr = io.StringIO()
-            with patch(
-                "cval.validation.operations.classify_evaluator_target",
-                return_value=[],
-            ), patch(
-                "cval.baselines.storage.get_active_baseline",
-                return_value={"baseline_id": "active", "metrics": {"x": {}}},
-            ), redirect_stderr(stderr):
-                exit_code = main(
-                    [
-                        "--config", str(config_path), "baseline", "classify",
-                        "--test-type", "storage", "--store-results",
-                        "--classification-db-path",
-                        str(root / "baselines/classification-results.db"),
-                    ]
-                )
-
-            self.assertEqual(exit_code, 1)
-            self.assertIn("global classification DB is read-only", stderr.getvalue())
 
     def test_invalid_config_is_reported_without_traceback(self) -> None:
         stderr = io.StringIO()
@@ -533,8 +396,9 @@ job_prefix = "custom"
             "db-ingest-test-results",
             "db-preflight-test-results",
             "health",
-            "evaluator-preflight",
             "compatibility",
+            "baseline",
+            "nccl-eval",
         ):
             with self.subTest(command=command), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as exc:

@@ -167,15 +167,6 @@ BUILTIN_RUNTIME_SETTING_DEFAULTS = MappingProxyType(
     }
 )
 
-# owner, alias, component, refresh group
-BUILTIN_ALIAS_ROWS = (
-    ("dltest", "dltest-numerical", "numerical_correctness", "dltest"),
-    ("dltest", "dltest-compute", "compute_performance", "dltest"),
-    ("dltest", "dltest-collective", "collective_performance", "dltest"),
-    ("dltest", "dltest-overlap", "overlap_performance", "dltest"),
-)
-
-
 def project_builtin_statuses(projected_environment: Mapping[str, str]) -> dict[str, str]:
     """Project current built-in status rows from a validated result."""
 
@@ -189,7 +180,6 @@ def project_builtin_statuses(projected_environment: Mapping[str, str]) -> dict[s
 
 __all__ = [
     "BUILTIN_AGGREGATE_TEST_ID",
-    "BUILTIN_ALIAS_ROWS",
     "BUILTIN_DB_UPDATE_DONE_MARKER",
     "BUILTIN_DONE_MARKERS",
     "BUILTIN_ENABLE_ENV",

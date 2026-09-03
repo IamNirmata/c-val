@@ -3,11 +3,10 @@
 ``cval validate --node <node> --git-ref <commit> --submit --confirm submit`` is
 the cluster-first development path. It submits one validation job for a
 specific eligible node, streams progress while the in-pod tests run, and
-reports the canonical raw evidence written by that job. Derived baseline and
-classification writes remain separate operational actions.
+reports the canonical raw evidence written by that job.
 
-The pure helpers (`parse_test_progress`, `degraded_metrics_from_verdict`,
-`build_validation_report`, `render_validation_report`) are import-only and
+The pure helpers (`parse_test_progress`, `build_validation_report`,
+`render_validation_report`) are import-only and
 unit-tested; the orchestration in `run_node_validation` wires them to the live
 cluster through a `KubectlClient`.
 """
@@ -192,31 +191,6 @@ def render_test_progress_line(
     return f"[{elapsed:5.0f}s] phase={phase:<9} {cells}".rstrip()
 
 
-def degraded_metrics_from_verdict(
-    verdict: dict[str, Any] | None, limit: int | None = None
-) -> list[dict[str, Any]]:
-    """Return degraded metrics from a classify verdict, worst deviation first."""
-
-    if not verdict:
-        return []
-    metrics = verdict.get("metrics", []) or []
-    degraded = [m for m in metrics if m.get("status") == "degraded"]
-    degraded.sort(key=lambda m: abs(float(m.get("pct_diff") or 0.0)), reverse=True)
-    if limit is not None:
-        degraded = degraded[:limit]
-    return [
-        {
-            "metric": m.get("metric"),
-            "component": m.get("component", ""),
-            "value": m.get("value"),
-            "median": m.get("median"),
-            "pct_diff": m.get("pct_diff"),
-            "direction": m.get("direction"),
-        }
-        for m in degraded
-    ]
-
-
 def build_validation_report(
     *,
     node: str,
@@ -226,8 +200,6 @@ def build_validation_report(
     git_ref: str = "",
     schedulability: dict[str, Any],
     raw_results: dict[str, str],
-    verdicts: dict[str, dict[str, Any] | None],
-    metric_limit: int | None = 25,
     interrupted: bool = False,
     ingestion_complete: bool = True,
     fresh_status_complete: bool = True,
@@ -239,33 +211,8 @@ def build_validation_report(
     report_tests = tuple(
         test_ids
         if test_ids is not None
-        else dict.fromkeys(
-            [test for test in raw_results if test != "all"] + list(verdicts)
-        )
+        else [test for test in raw_results if test != "all"]
     )
-    classification: dict[str, Any] = {}
-    for test in report_tests:
-        verdict = verdicts.get(test)
-        if verdict is None:
-            classification[test] = {
-                "status": "unknown",
-                "n_compared": 0,
-                "n_degraded": 0,
-                "degraded_metric_percent": 0.0,
-                "worst_pct_diff": 0.0,
-                "components": {},
-                "degraded_metrics": [],
-            }
-            continue
-        classification[test] = {
-            "status": verdict.get("status", "unknown"),
-            "n_compared": int(verdict.get("n_compared", 0) or 0),
-            "n_degraded": int(verdict.get("n_degraded", 0) or 0),
-            "degraded_metric_percent": float(verdict.get("degraded_metric_percent", 0.0) or 0.0),
-            "worst_pct_diff": float(verdict.get("worst_pct_diff", 0.0) or 0.0),
-            "components": verdict.get("components", {}) or {},
-            "degraded_metrics": degraded_metrics_from_verdict(verdict, limit=metric_limit),
-        }
 
     raw_overall = raw_results.get("all")
     if not raw_overall:
@@ -276,16 +223,6 @@ def build_validation_report(
             raw_overall = "fail"
         else:
             raw_overall = "unknown"
-
-    statuses = [classification[t]["status"] for t in report_tests]
-    if "degraded" in statuses:
-        health = "degraded"
-    elif "improved" in statuses:
-        health = "improved"
-    elif all(s in {"normal", "unknown"} for s in statuses) and "normal" in statuses:
-        health = "normal"
-    else:
-        health = "unknown"
 
     job_ok = job_phase in SUCCESS_PHASES
     return {
@@ -308,17 +245,8 @@ def build_validation_report(
         "raw_results": raw_results,
         "test_order": list(report_tests),
         "raw_overall": raw_overall,
-        "health": health,
-        "classification": classification,
         "notes": notes or [],
     }
-
-
-def _fmt_pct(value: Any) -> str:
-    try:
-        return f"{float(value):+.2f}%"
-    except (TypeError, ValueError):
-        return "n/a"
 
 
 def render_validation_report(report: dict[str, Any]) -> str:
@@ -349,61 +277,16 @@ def render_validation_report(report: dict[str, Any]) -> str:
         )
 
     lines.append("-" * 72)
-    lines.append(f"{'TEST':<10} {'RAW':<8} {'VERDICT':<10} {'BAD':>5} {'BAD%':>7} {'WORST':>9}")
+    lines.append(f"{'TEST':<20} {'RAW RESULT':<12}")
     raw = report.get("raw_results", {})
-    classification = report.get("classification", {})
     report_tests = report.get("test_order") or [
         test for test in raw if test != "all"
     ]
     for test in report_tests:
-        verdict = classification.get(test, {})
-        lines.append(
-            f"{test:<10} {raw.get(test, '-'):<8} {verdict.get('status', 'unknown'):<10} "
-            f"{verdict.get('n_degraded', 0):>5} "
-            f"{verdict.get('degraded_metric_percent', 0.0):>6.2f}% "
-            f"{_fmt_pct(verdict.get('worst_pct_diff', 0.0)):>9}"
-        )
+        lines.append(f"{test:<20} {raw.get(test, '-'):<12}")
 
     lines.append("-" * 72)
-    lines.append(
-        f"RAW overall: {report.get('raw_overall', 'unknown').upper()}   "
-        f"HEALTH: {report.get('health', 'unknown').upper()}"
-    )
-
-    # DL component breakdown when present.
-    dl_components = (classification.get("dltest", {}) or {}).get("components", {})
-    if dl_components:
-        lines.append("-" * 72)
-        lines.append("DL components:")
-        for component, summary in sorted(dl_components.items()):
-            lines.append(
-                f"  {component:<24} {summary.get('status', 'unknown'):<9} "
-                f"degraded={summary.get('n_degraded', 0)} "
-                f"({summary.get('degraded_metric_percent', 0.0):.2f}%) "
-                f"worst={_fmt_pct(summary.get('worst_pct_diff', 0.0))}"
-            )
-
-    # Degraded metric detail per test.
-    any_degraded = False
-    for test in report_tests:
-        degraded = (classification.get(test, {}) or {}).get("degraded_metrics", [])
-        if not degraded:
-            continue
-        any_degraded = True
-        lines.append("-" * 72)
-        lines.append(f"Degraded {test} metrics (deviation from baseline):")
-        for metric in degraded:
-            name = metric.get("metric", "")
-            component = metric.get("component", "")
-            label = f"{component}/{name}" if component and component not in str(name) else name
-            lines.append(
-                f"  {label:<48} {_fmt_pct(metric.get('pct_diff')):>9} "
-                f"[{metric.get('direction', '')}]"
-            )
-
-    if not any_degraded:
-        lines.append("-" * 72)
-        lines.append("No degraded metrics: all compared metrics are within baseline bands.")
+    lines.append(f"RAW overall: {report.get('raw_overall', 'unknown').upper()}")
 
     if report.get("notes"):
         lines.append("-" * 72)
@@ -484,10 +367,10 @@ def finalize_download_zip(
     report: dict[str, Any],
     output_path: Path,
 ) -> dict[str, Any]:
-    """Decode the pod archive, add the baseline-comparison report, and save it.
+    """Decode the pod archive, add the raw validation report, and save it.
 
     The pod streams a base64 zip of the run's logs/summaries/result files; this
-    writes it locally and appends ``report.json`` (structured verdicts) and
+    writes it locally and appends ``report.json`` (structured raw evidence) and
     ``report.txt`` (the rendered operator report) so the bundle is self-contained.
     """
 
@@ -827,7 +710,7 @@ def run_node_validation(
     except Exception as exc:  # noqa: BLE001
         notes.append(f"could not read validation.db status: {_first_line(str(exc))}")
 
-    # 6. Verify fresh raw rows. Derived writes run independently in the evaluator.
+    # 6. Verify fresh raw rows.
     compatibility_status_tests = enabled_tests & set(BUILTIN_TEST_IDS)
     required_fresh_tests = compatibility_status_tests | {"all"}
     fresh_rows_complete = required_fresh_tests.issubset(fresh_status_tests)
@@ -835,14 +718,6 @@ def run_node_validation(
         fresh_status_results.get(test) == raw_results.get(test)
         for test in required_fresh_tests
     )
-    verdicts: dict[str, dict[str, Any] | None] = {
-        test: None for test in enabled_test_order
-    }
-    notes.append(
-        "derived classification is not written by validate; read the resident "
-        "evaluator output separately"
-    )
-
     # 7. Build and render the report.
     report = build_validation_report(
         node=node,
@@ -852,7 +727,6 @@ def run_node_validation(
         git_ref=resolved_git_ref,
         schedulability=schedulability,
         raw_results=raw_results,
-        verdicts=verdicts,
         test_ids=enabled_test_order,
         interrupted=interrupted,
         ingestion_complete=ingestion_complete,

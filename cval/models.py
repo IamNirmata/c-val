@@ -9,24 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cval.validation.operational_targets import (
-    DL_COMPONENT_TEST_TYPES,
-    operational_component,
-    normalize_operational_target,
-)
-
-
-def normalize_baseline_test_type(test_type: str) -> str:
-    """Map component aliases to the logical baseline test type."""
-
-    return normalize_operational_target(test_type)
-
-
-def dl_component_for_test_type(test_type: str) -> str | None:
-    """Return the DL metric component selected by a test alias, if any."""
-
-    return operational_component(test_type)
-
 
 @dataclass(frozen=True)
 class NodeResource:
@@ -70,24 +52,6 @@ class LatestStatusRow:
     test: str
     latest_timestamp: int | None
     result: str
-
-
-@dataclass(frozen=True)
-class ClassificationResultRow:
-    """One latest node classification row from classification-results.db."""
-
-    classified_at: int
-    node: str
-    test_type: str
-    baseline_id: str
-    status: str
-    passed: bool
-    n_compared: int
-    n_degraded: int
-    n_improved: int
-    n_band_degraded: int
-    degraded_metric_fraction: float
-    worst_pct_diff: float
 
 
 @dataclass(frozen=True)

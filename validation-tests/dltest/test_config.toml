@@ -23,15 +23,10 @@ gpu_count = 8
 test_plan = "80gb-example"
 iterations = 100
 
-[settings.health_aggregation]
-degraded_metric_fraction = 0.02
-min_degraded_metrics = 10
-degraded_severity_pct = 10.0
-
 [artifacts]
 summary_filename = "summary.json"
 
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "baseline", "export"]
+capabilities = ["config", "export"]

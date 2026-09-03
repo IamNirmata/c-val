@@ -1,4 +1,4 @@
-"""Byte-for-byte built-in CSV compatibility through U10 export hooks."""
+"""Byte-for-byte built-in raw CSV compatibility through export hooks."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from cval.config import load_config
 from cval.models import (
-    ClassificationResultRow,
     LatestStatusRow,
     NcclHealthMetric,
     StorageMetrics,
@@ -21,7 +20,7 @@ from cval.storage.results_export import (
 )
 from cval.validation.operational_targets import RESULTS_EXPORT
 from cval.validation.operations import (
-    export_evaluator_rows,
+    export_result_rows,
     resolve_operational_target,
 )
 from cval.validation.plugins import ExportContext
@@ -36,50 +35,6 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
             LatestStatusRow("node-a", "nccl", 1781748000, "pass"),
             LatestStatusRow("node-a", "dltest", 1781748000, "pass"),
         )
-        self.classifications = (
-            ClassificationResultRow(
-                1781749000,
-                "node-a",
-                "storage",
-                "storage-1",
-                "normal",
-                True,
-                12,
-                0,
-                0,
-                0,
-                0.0,
-                0.0,
-            ),
-            ClassificationResultRow(
-                1781749000,
-                "node-a",
-                "nccl",
-                "nccl-1",
-                "normal",
-                True,
-                2,
-                0,
-                0,
-                0,
-                0.0,
-                0.0,
-            ),
-            ClassificationResultRow(
-                1781749000,
-                "node-a",
-                "dltest-compute",
-                "dl-1",
-                "degraded",
-                False,
-                100,
-                12,
-                0,
-                12,
-                0.12,
-                20.0,
-            ),
-        )
 
     def _context(self, target_name: str) -> ExportContext:
         target = resolve_operational_target(self.config, target_name, RESULTS_EXPORT)
@@ -89,7 +44,6 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
             definition=registered.definition,
             config=self.config,
             status_rows=self.rows,
-            classification_rows=self.classifications,
             pod="read-only-pod",
             namespace="read-only-namespace",
             source_db_paths=(("storage", "/read/storage.db"), ("nccl", "/read/nccl.db")),
@@ -116,7 +70,7 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
         with patch(
             "cval.storage.metrics.get_latest_storage_metrics", return_value=metrics
         ):
-            export = export_evaluator_rows(
+            export = export_result_rows(
                 self.config, "storage", self._context("storage")
             )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,7 +80,6 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
                 "storage",
                 output_dir=root / "old",
                 now=self.now,
-                classifications=list(self.classifications),
                 storage_metrics=metrics,
             )
             new = write_export_rows_csv(
@@ -153,7 +106,7 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
         with patch(
             "cval.storage.metrics.get_latest_nccl_health_metrics", return_value=metrics
         ):
-            export = export_evaluator_rows(
+            export = export_result_rows(
                 self.config, "nccl", self._context("nccl")
             )
 
@@ -162,21 +115,20 @@ class OperationalExportCompatibilityTests(unittest.TestCase):
         self.assertNotIn("classification_status", export.columns)
         self.assertEqual(export.rows[0][export.columns.index("BUS_BW")], "44.5000")
 
-    def test_dl_alias_csv_is_byte_for_byte_compatible(self) -> None:
-        export = export_evaluator_rows(
-            self.config, "dltest-compute", self._context("dltest-compute")
+    def test_dltest_csv_is_byte_for_byte_compatible(self) -> None:
+        export = export_result_rows(
+            self.config, "dltest", self._context("dltest")
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             old = write_latest_results_csv(
                 list(self.rows),
-                "dltest-compute",
+                "dltest",
                 output_dir=root / "old",
                 now=self.now,
-                classifications=list(self.classifications),
             )
             new = write_export_rows_csv(
-                export, "dltest-compute", output_dir=root / "new", now=self.now
+                export, "dltest", output_dir=root / "new", now=self.now
             )
             self.assertEqual(old.read_bytes(), new.read_bytes())
 

@@ -29,9 +29,7 @@ RESOURCE_QUANTITY_PATTERN = re.compile(
     r"^(?P<number>(?:\d+(?:\.\d*)?|\.\d+))"
     r"(?P<suffix>m|u|n|[EPTGMK]i?|[eE][+-]?\d+)?$"
 )
-ALLOWED_PLUGIN_CAPABILITIES = frozenset(
-    {"config", "baseline", "export"}
-)
+ALLOWED_PLUGIN_CAPABILITIES = frozenset({"config", "export"})
 
 class FrozenMapping(Mapping[str, Any]):
     """Pickle-safe immutable mapping used for descriptor-owned settings."""

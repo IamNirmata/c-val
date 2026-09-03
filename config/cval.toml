@@ -82,21 +82,3 @@ rdma_resource_name = "rdma/rdma_shared_device_a"
 rdma_count = "1"
 rdma_toleration_key = "rdma"
 gpu_toleration_key = "nvidia.com/gpu"
-
-[baseline]
-# Canonical evaluator lifecycle, tolerance, and cadence settings.
-baseline_root_path = "/data/continuous_validation/baselines"
-storage_peer_tolerance_pct = 10.0
-dl_compute_tolerance_pct = 3.0
-dl_numerical_tolerance_pct = 0.1
-dl_overlap_tolerance_pct = 20.0
-# Robust z-score cutoff for dynamic baselines (Iglewicz & Hoaglin: 3.5)
-robust_z_threshold = 3.5
-# Minimum clean samples before a metric baseline is trusted
-min_samples = 8
-# Rolling window (days) of recent runs used to build a baseline
-window_days = 30
-# Background builder loop cadence (daily)
-build_interval_seconds = 86400
-# Background classifier loop cadence
-classify_interval_seconds = 300

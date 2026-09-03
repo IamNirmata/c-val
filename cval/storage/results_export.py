@@ -13,13 +13,9 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.models import ClassificationResultRow, LatestStatusRow, NcclHealthMetric, NcclMetrics, StorageMetrics
-from cval.storage.classification_status import classification_rows_by_node_test
+from cval.models import LatestStatusRow, NcclHealthMetric, NcclMetrics, StorageMetrics
 from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
-from cval.validation.operational_targets import (
-    normalize_operational_target,
-    validate_operational_target_name,
-)
+from cval.validation.operational_targets import validate_operational_target_name
 from cval.validation.plugins import ExportRows
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
@@ -33,17 +29,6 @@ CSV_BASE_COLUMNS = (
     "latest_time_utc",
     "latest_time_los_angeles",
     "result",
-    "classification_status",
-    "classification_passed",
-    "classification_baseline_id",
-    "classified_timestamp",
-    "classified_time_los_angeles",
-    "n_compared",
-    "n_degraded",
-    "n_band_degraded",
-    "degraded_metric_fraction",
-    "degraded_metric_percent",
-    "worst_pct_diff",
 )
 
 # Keep the old name as an alias so existing call-sites and tests still compile.
@@ -84,7 +69,7 @@ def normalize_result_test(test_name: str) -> str:
     normalized = test_name.strip().lower()
     if normalized in {"overall", "all"}:
         return "all"
-    return normalize_operational_target(validate_operational_target_name(normalized))
+    return validate_operational_target_name(normalized)
 
 
 def display_result_test(test_name: str) -> str:
@@ -92,13 +77,6 @@ def display_result_test(test_name: str) -> str:
 
     normalized = test_name.strip().lower()
     return "overall" if normalized in {"overall", "all"} else normalized
-
-
-def classification_result_test(test_name: str) -> str:
-    """Return the classification test_type used for a requested result export."""
-
-    display_test = display_result_test(test_name)
-    return "" if display_test == "overall" else display_test
 
 
 def latest_result_rows(rows: list[LatestStatusRow], test_name: str) -> list[LatestStatusRow]:
@@ -146,7 +124,6 @@ def default_results_filename(test_name: str, now: dt.datetime | None = None) -> 
 def rows_to_csv_records(
     rows: list[LatestStatusRow],
     requested_test: str,
-    classifications: list[ClassificationResultRow] | None = None,
     nccl_metrics: dict[str, NcclMetrics] | None = None,
     storage_metrics: dict[str, StorageMetrics] | None = None,
 ) -> list[dict[str, str]]:
@@ -158,18 +135,10 @@ def rows_to_csv_records(
     """
 
     display_test = display_result_test(requested_test)
-    classification_test = classification_result_test(requested_test)
-    by_node_test = classification_rows_by_node_test(classifications or [])
     nccl_by_node = nccl_metrics or {}
     storage_by_node = storage_metrics or {}
     records: list[dict[str, str]] = []
     for row in rows:
-        classification = by_node_test.get((row.node, classification_test))
-        classification_status = classification.status if classification else ""
-        classification_passed = "" if classification is None else str(classification.passed).lower()
-        classified_at = classification.classified_at if classification else None
-        degraded_fraction = classification.degraded_metric_fraction if classification else 0.0
-
         record: dict[str, str] = {
             "node": row.node,
             "test": display_test,
@@ -178,17 +147,6 @@ def rows_to_csv_records(
             "latest_time_utc": timestamp_to_utc(row.latest_timestamp),
             "latest_time_los_angeles": timestamp_to_los_angeles(row.latest_timestamp),
             "result": row.result,
-            "classification_status": classification_status,
-            "classification_passed": classification_passed,
-            "classification_baseline_id": classification.baseline_id if classification else "",
-            "classified_timestamp": "" if classified_at is None else str(classified_at),
-            "classified_time_los_angeles": timestamp_to_los_angeles(classified_at),
-            "n_compared": "" if classification is None else str(classification.n_compared),
-            "n_degraded": "" if classification is None else str(classification.n_degraded),
-            "n_band_degraded": "" if classification is None else str(classification.n_band_degraded),
-            "degraded_metric_fraction": "" if classification is None else f"{degraded_fraction:.6f}",
-            "degraded_metric_percent": "" if classification is None else f"{degraded_fraction * 100.0:.3f}",
-            "worst_pct_diff": "" if classification is None else f"{classification.worst_pct_diff:.3f}",
         }
 
         # NCCL metric columns (busbw GB/s, latency µs)
@@ -211,7 +169,6 @@ def write_latest_results_csv(
     test_name: str,
     output_dir: str | Path = ".",
     now: dt.datetime | None = None,
-    classifications: list[ClassificationResultRow] | None = None,
     nccl_metrics: dict[str, NcclMetrics] | None = None,
     storage_metrics: dict[str, StorageMetrics] | None = None,
 ) -> Path:
@@ -227,7 +184,7 @@ def write_latest_results_csv(
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(
-            rows_to_csv_records(selected, test_name, classifications, nccl_metrics, storage_metrics)
+            rows_to_csv_records(selected, test_name, nccl_metrics, storage_metrics)
         )
 
     return output_path

@@ -1,4 +1,4 @@
-"""NCCL hooks for the canonical c-val evaluator."""
+"""NCCL validation config and raw IB health export hooks."""
 
 from __future__ import annotations
 

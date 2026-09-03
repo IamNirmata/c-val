@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
-from cval.models import ClassificationResultRow, LatestStatusRow
+from cval.models import LatestStatusRow
 from cval.validation.operational_targets import OperationalTarget
 
 from cval.validation.registry import (
@@ -47,62 +47,6 @@ class ConfigIssue:
 
 
 @dataclass(frozen=True)
-class BaselineBuildContext:
-    """Immutable inputs for one canonical baseline build hook."""
-
-    target: OperationalTarget
-    definition: ValidationTestDefinition
-    config: "CvalConfig"
-    window_days: int
-    min_samples: int
-    source_db: str | None = None
-    image_name: str | None = None
-    node: str | None = None
-    test_plan: str | None = None
-    baseline_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.target.owner_test_id != self.definition.metadata.id:
-            raise ValueError("Baseline target owner does not match its definition")
-        for name, value in (
-            ("window_days", self.window_days),
-            ("min_samples", self.min_samples),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        if self.source_db is not None and (
-            not isinstance(self.source_db, str) or not self.source_db.strip()
-        ):
-            raise ValueError("source_db must be a non-empty string when supplied")
-
-
-@dataclass(frozen=True)
-class BaselineClassificationContext:
-    """Immutable inputs for one canonical classification hook."""
-
-    target: OperationalTarget
-    definition: ValidationTestDefinition
-    config: "CvalConfig"
-    window_days: int
-    source_db: str | None = None
-    node: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.target.owner_test_id != self.definition.metadata.id:
-            raise ValueError("Classification target owner does not match its definition")
-        if (
-            isinstance(self.window_days, bool)
-            or not isinstance(self.window_days, int)
-            or self.window_days <= 0
-        ):
-            raise ValueError("window_days must be a positive integer")
-        if self.source_db is not None and (
-            not isinstance(self.source_db, str) or not self.source_db.strip()
-        ):
-            raise ValueError("source_db must be a non-empty string when supplied")
-
-
-@dataclass(frozen=True)
 class ExportContext:
     """Strict read-only inputs supplied to one result-export hook.
 
@@ -115,7 +59,6 @@ class ExportContext:
     definition: ValidationTestDefinition
     config: "CvalConfig"
     status_rows: tuple[LatestStatusRow, ...]
-    classification_rows: tuple[ClassificationResultRow, ...]
     pod: str
     namespace: str
     source_db_paths: tuple[tuple[str, str], ...]
@@ -130,13 +73,6 @@ class ExportContext:
             isinstance(row, LatestStatusRow) for row in self.status_rows
         ):
             raise TypeError("ExportContext.status_rows must be tuple[LatestStatusRow, ...]")
-        if not isinstance(self.classification_rows, tuple) or not all(
-            isinstance(row, ClassificationResultRow) for row in self.classification_rows
-        ):
-            raise TypeError(
-                "ExportContext.classification_rows must be "
-                "tuple[ClassificationResultRow, ...]"
-            )
         if not isinstance(self.pod, str) or not self.pod.strip():
             raise ValueError("ExportContext.pod must be a non-empty string")
         if not isinstance(self.namespace, str) or not self.namespace.strip():
@@ -326,7 +262,6 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
 
     required_methods: dict[str, tuple[str, ...]] = {
         "config": ("validate_config",),
-        "baseline": ("build_baseline", "classify"),
         "export": ("export_rows",),
     }
     for capability in sorted(declared):

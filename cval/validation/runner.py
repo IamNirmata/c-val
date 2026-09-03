@@ -673,11 +673,6 @@ def _test_environment(
         ibbw_alias = aliases.get("ibbw_log")
         if ibbw_alias:
             environment[ibbw_alias] = str(test_paths.artifacts / "ibbw.log")
-        runtime_evidence_alias = aliases.get("runtime_evidence")
-        if runtime_evidence_alias:
-            environment[runtime_evidence_alias] = str(
-                test_paths.artifacts / "runtime-evidence.json"
-            )
     return environment
 
 

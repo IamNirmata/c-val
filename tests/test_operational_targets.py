@@ -1,21 +1,15 @@
-"""Registry-derived current evaluator target catalog tests."""
+"""Registry-derived raw export target catalog tests."""
 
 from __future__ import annotations
 
-import argparse
 import io
-import json
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr
 from dataclasses import FrozenInstanceError, replace
 
-from cval.cli import build_parser, main
-from cval.config import CvalConfig, TestsConfig, load_config
+from cval.cli import build_parser
+from cval.config import load_config
 from cval.validation.operational_targets import (
-    BASELINE_BUILD,
-    BASELINE_CLASSIFY,
-    BASELINE_LIST,
-    CLASSIFICATIONS_EXPORT,
     RESULTS_EXPORT,
     OperationalTargetCatalog,
     build_operational_target_catalog,
@@ -35,7 +29,7 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         test_id: str,
         order: int,
         enabled: bool = True,
-        capabilities: tuple[str, ...] = ("baseline", "export"),
+        capabilities: tuple[str, ...] = ("export",),
     ):
         source = self.registry.require(source_id)
         metadata = replace(source.definition.metadata, id=test_id, order=order)
@@ -48,61 +42,37 @@ class OperationalTargetCatalogTests(unittest.TestCase):
             definition=definition,
         )
 
-    def test_default_catalog_preserves_registry_then_overlay_order(self) -> None:
+    def test_default_catalog_preserves_registry_order(self) -> None:
         catalog = build_operational_target_catalog(self.registry)
 
         self.assertEqual(
-            catalog.names_for(BASELINE_CLASSIFY),
-            (
-                "storage",
-                "dltest",
-                "dltest-numerical",
-                "dltest-compute",
-                "dltest-collective",
-                "dltest-overlap",
-            ),
-        )
-        self.assertEqual(
-            catalog.names_for(BASELINE_BUILD), ("storage", "dltest")
-        )
-        self.assertEqual(catalog.names_for(BASELINE_LIST), ("storage", "dltest"))
-        self.assertEqual(
             catalog.names_for(RESULTS_EXPORT),
-            (
-                "storage",
-                "nccl",
-                "dltest",
-                "dltest-numerical",
-                "dltest-compute",
-                "dltest-collective",
-                "dltest-overlap",
-            ),
+            ("storage", "nccl", "dltest"),
         )
-        alias = catalog.require("dltest-compute", BASELINE_CLASSIFY)
-        self.assertTrue(alias.alias)
-        self.assertEqual(alias.owner_test_id, "dltest")
-        self.assertEqual(alias.component, "compute_performance")
-        self.assertEqual(alias.refresh_group, "dltest")
+        target = catalog.require("dltest", RESULTS_EXPORT)
+        self.assertEqual(target.owner_test_id, "dltest")
+        self.assertEqual(target.status_test, "dltest")
+        self.assertEqual(target.to_dict()["format_version"], "cval.operational-target.v2")
 
-    def test_capabilities_select_operations_and_keep_registry_order(self) -> None:
+    def test_export_capability_selects_targets_and_keeps_registry_order(self) -> None:
         export_only = self._test(
             "storage",
             test_id="exporter",
             order=15,
             capabilities=("export",),
         )
-        baseline_only = self._test(
+        config_only = self._test(
             "storage",
-            test_id="metric",
+            test_id="validator",
             order=25,
-            capabilities=("baseline",),
+            capabilities=("config",),
         )
         registry = ValidationTestRegistry(
             (
                 self.registry.require("storage"),
                 export_only,
                 self.registry.require("nccl"),
-                baseline_only,
+                config_only,
                 self.registry.require("dltest"),
             )
         )
@@ -112,12 +82,9 @@ class OperationalTargetCatalogTests(unittest.TestCase):
             catalog.names_for(RESULTS_EXPORT)[:4],
             ("storage", "exporter", "nccl", "dltest"),
         )
-        self.assertNotIn("exporter", catalog.names_for(BASELINE_BUILD))
-        self.assertIn("metric", catalog.names_for(BASELINE_BUILD))
-        self.assertNotIn("metric", catalog.names_for(RESULTS_EXPORT))
-        self.assertIn("metric", catalog.names_for(CLASSIFICATIONS_EXPORT))
+        self.assertNotIn("validator", catalog.names_for(RESULTS_EXPORT))
 
-    def test_disabled_owner_and_its_aliases_are_absent(self) -> None:
+    def test_disabled_target_is_absent(self) -> None:
         disabled_dl = replace(self.registry.require("dltest"), enabled=False)
         registry = ValidationTestRegistry(
             (
@@ -128,19 +95,12 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         )
         catalog = build_operational_target_catalog(registry)
 
-        self.assertNotIn("dltest", catalog.names_for(BASELINE_BUILD))
-        self.assertFalse(
-            any(name.startswith("dltest") for name in catalog.names_for(RESULTS_EXPORT))
-        )
+        self.assertNotIn("dltest", catalog.names_for(RESULTS_EXPORT))
         with self.assertRaisesRegex(ValueError, "not enabled"):
-            catalog.require("dltest-compute", BASELINE_CLASSIFY)
+            catalog.require("dltest", RESULTS_EXPORT)
 
-    def test_reserved_and_dl_alias_collisions_are_rejected_even_when_disabled(self) -> None:
-        for test_id, message in (
-            ("overall", "reserved"),
-            ("all", "reserved"),
-            ("dltest-compute", "built-in target aliases"),
-        ):
+    def test_reserved_names_are_rejected_even_when_disabled(self) -> None:
+        for test_id in ("overall", "all"):
             with self.subTest(test_id=test_id):
                 colliding = self._test(
                     "storage",
@@ -149,7 +109,7 @@ class OperationalTargetCatalogTests(unittest.TestCase):
                     enabled=False,
                 )
                 registry = ValidationTestRegistry((*self.registry.tests, colliding))
-                with self.assertRaisesRegex(ValueError, message):
+                with self.assertRaisesRegex(ValueError, "reserved"):
                     build_operational_target_catalog(registry)
 
     def test_catalog_and_targets_are_immutable(self) -> None:
@@ -160,36 +120,25 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             catalog.targets[0].name = "changed"  # type: ignore[misc]
 
-    def test_results_modes_expose_nccl_only_for_raw_results(self) -> None:
+    def test_parser_exposes_only_raw_result_targets_and_flags(self) -> None:
         parser = build_parser(self.config)
-        catalog = build_operational_target_catalog(self.registry)
-        baseline_targets = (
-                "storage",
-                "dltest",
-                "dltest-numerical",
-                "dltest-compute",
-                "dltest-collective",
-                "dltest-overlap",
-        )
-        for target in baseline_targets:
-            with self.subTest(command="baseline", target=target):
-                parsed = parser.parse_args(
-                    ["baseline", "classify", "--test-type", target, "--output", "json"]
-                )
-                self.assertIsInstance(parsed, argparse.Namespace)
-            with self.subTest(command="results-classifications", target=target):
-                parsed = parser.parse_args(
-                    ["results", "--classifications-only", "--test", target]
-                )
-                self.assertIsInstance(parsed, argparse.Namespace)
-        for target in ("storage", "nccl", *baseline_targets[1:]):
+        for target in ("overall", "all", "storage", "nccl", "dltest"):
             with self.subTest(command="results", target=target):
-                parsed = parser.parse_args(["results", "--test", target])
-                self.assertIsInstance(parsed, argparse.Namespace)
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["baseline", "build", "--test-type", "nccl"])
-        with self.assertRaisesRegex(ValueError, "does not support"):
-            catalog.require("nccl", CLASSIFICATIONS_EXPORT)
+                self.assertEqual(
+                    parser.parse_args(["results", "--test", target]).test,
+                    target,
+                )
+        for args in (
+            ["baseline", "build", "--test-type", "storage"],
+            ["nccl-eval", "status"],
+            ["results", "--test", "storage", "--classifications-only"],
+            ["results", "--test", "storage", "--no-classification"],
+            ["results", "--test", "dltest-compute"],
+        ):
+            with self.subTest(args=args), redirect_stderr(io.StringIO()), self.assertRaises(
+                SystemExit
+            ):
+                parser.parse_args(args)
 
     def test_parser_discovers_synthetic_target_without_cli_constant_edit(self) -> None:
         synthetic = self._test("storage", test_id="synthetic", order=15)
@@ -205,69 +154,14 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         parser = build_parser(config)
 
         self.assertEqual(
-            parser.parse_args(
-                ["baseline", "build", "--test-type", "synthetic"]
-            ).test_type,
-            "synthetic",
-        )
-        self.assertEqual(
-            parser.parse_args(
-                ["baseline", "classify", "--test-type", "synthetic"]
-            ).test_type,
-            "synthetic",
-        )
-        self.assertEqual(
             parser.parse_args(["results", "--test", "synthetic"]).test,
             "synthetic",
         )
-        self.assertEqual(
-            parser.parse_args(
-                ["results", "--classifications-only", "--test", "synthetic"]
-            ).test,
-            "synthetic",
-        )
 
-    def test_hidden_enumeration_is_plain_tsv_or_json_not_shell_code(self) -> None:
-        tsv = io.StringIO()
-        with redirect_stdout(tsv):
-            self.assertEqual(
-                main(
-                    [
-                        "operational-targets",
-                        "--operation",
-                        "baseline-build",
-                        "--output",
-                        "tsv",
-                    ]
-                ),
-                0,
-            )
-        lines = tsv.getvalue().splitlines()
-        fields = [line.split("\t") for line in lines]
-        self.assertTrue(all(len(row) == 7 for row in fields))
-        self.assertTrue(
-            all(row[0] == "cval.operational-target.v1" for row in fields)
-        )
-        self.assertEqual([row[1] for row in fields], ["storage", "dltest"])
-        self.assertFalse(any("=" in line or "eval" in line for line in lines))
-
-        output = io.StringIO()
-        with redirect_stdout(output):
-            self.assertEqual(
-                main(
-                    [
-                        "operational-targets",
-                        "--operation",
-                        "results-export",
-                        "--output",
-                        "json",
-                    ]
-                ),
-                0,
-            )
-        payload = json.loads(output.getvalue())
-        self.assertEqual(payload[0]["name"], "storage")
-        self.assertIn("results-export", payload[0]["operations"])
+    def test_removed_hidden_enumeration_is_unparseable(self) -> None:
+        parser = build_parser(self.config)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["operational-targets", "--operation", "results-export"])
 
 
 if __name__ == "__main__":

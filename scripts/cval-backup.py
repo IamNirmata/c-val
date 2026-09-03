@@ -360,7 +360,7 @@ def print_inspection(
         )
     print("RECOMMENDATION: use --destination-root on independent external storage.")
     print(
-        "APPLY REQUIRES: stop evaluator/baseline loops and validation ingestion, then "
+        "APPLY REQUIRES: stop validation ingestion and all other source writers, then "
         "pass --apply --confirm backup --quiesced "
         "--confirm-quiesced writers-stopped."
     )
@@ -748,7 +748,7 @@ def create_backup(
             "quiescence": {
                 "declared": True,
                 "confirmation": QUIESCENCE_CONFIRMATION,
-                "contract": "evaluator/baseline loops and validation ingestion stopped",
+                "contract": "validation ingestion and all other source writers stopped",
             },
             "consistency": {
                 "method": "operator-quiescence + pre/post identity inventory + no-follow copies + SQLite online backup",

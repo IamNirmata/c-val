@@ -11,16 +11,10 @@ from unittest.mock import patch
 
 from cval.config import config_to_dict, load_config
 from cval.validation.operational_targets import (
-    BASELINE_BUILD,
-    BASELINE_CLASSIFY,
     RESULTS_EXPORT,
     OperationalTarget,
 )
-from cval.validation.plugins import (
-    BaselineBuildContext,
-    BaselineClassificationContext,
-    ExportContext,
-)
+from cval.validation.plugins import ExportContext
 from cval.validation.registry import load_test_registry, parse_resource_quantity
 
 
@@ -48,10 +42,6 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(nccl_settings.get("ibbw_start_device"))
         self.assertIsNone(nccl_settings.get("ibbw_end_device"))
         self.assertEqual(dltest_settings["iterations"], 100)
-        self.assertEqual(config.baseline.storage_peer_tolerance_pct, 10.0)
-        self.assertEqual(config.baseline.dl_compute_tolerance_pct, 3.0)
-        self.assertEqual(config.baseline.dl_numerical_tolerance_pct, 0.1)
-        self.assertEqual(config.baseline.dl_overlap_tolerance_pct, 20.0)
         self.assertEqual(
             [test.id for test in config.tests.registry.tests],
             ["storage", "nccl", "dltest"],
@@ -295,38 +285,28 @@ summary_filename = "summary.json"
             target = OperationalTarget(
                 name="smoke",
                 owner_test_id="smoke",
-                baseline_test_type="smoke",
                 status_test="smoke",
-                operations=frozenset(
-                    {BASELINE_BUILD, BASELINE_CLASSIFY, RESULTS_EXPORT}
-                ),
+                operations=frozenset({RESULTS_EXPORT}),
             )
-            contexts = (
-                BaselineBuildContext(target, definition, config, 30, 3),
-                BaselineClassificationContext(target, definition, config, 30),
-                ExportContext(
-                    target,
-                    definition,
-                    config,
-                    (),
-                    (),
-                    "read-only-pod",
-                    "read-only-namespace",
-                    (),
-                ),
+            context = ExportContext(
+                target,
+                definition,
+                config,
+                (),
+                "read-only-pod",
+                "read-only-namespace",
+                (),
             )
 
-            for context in contexts:
-                with self.subTest(context=type(context).__name__):
-                    settings = context.definition.settings
-                    with self.assertRaises(TypeError):
-                        settings["nested"] = {}  # type: ignore[index]
-                    with self.assertRaises(TypeError):
-                        settings["nested"]["mode"] = "changed"  # type: ignore[index]
-                    with self.assertRaises(TypeError):
-                        settings["nested"]["items"][0]["name"] = "changed"  # type: ignore[index]
-                    with self.assertRaises(AttributeError):
-                        settings["labels"].append("third")
+            settings = context.definition.settings
+            with self.assertRaises(TypeError):
+                settings["nested"] = {}  # type: ignore[index]
+            with self.assertRaises(TypeError):
+                settings["nested"]["mode"] = "changed"  # type: ignore[index]
+            with self.assertRaises(TypeError):
+                settings["nested"]["items"][0]["name"] = "changed"  # type: ignore[index]
+            with self.assertRaises(AttributeError):
+                settings["labels"].append("third")
 
             serialized_registry = registry.to_dict()
             serialized_config = config_to_dict(config)
@@ -489,23 +469,6 @@ timeout_seconds = 3000
             )
             with self.assertRaisesRegex(ValueError, "sequential test timeouts"):
                 load_config(config_path)
-
-    def test_rejects_nonfinite_or_invalid_baseline_controls(self) -> None:
-        variants = (
-            "robust_z_threshold = nan",
-            "dl_degraded_metric_fraction = nan",
-            "dl_degraded_metric_fraction = 1.1",
-            "dl_degraded_severity_pct = inf",
-            "min_samples = 0",
-            "window_days = 0",
-            "build_interval_seconds = 0",
-        )
-        for value in variants:
-            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmpdir:
-                config_path = Path(tmpdir) / "cval.toml"
-                config_path.write_text(f"[baseline]\n{value}\n", encoding="utf-8")
-                with self.assertRaises(ValueError):
-                    load_config(config_path)
 
     @staticmethod
     def _write_test_descriptor(

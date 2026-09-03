@@ -27,4 +27,4 @@ summary_filename = "summary.txt"
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "baseline", "export"]
+capabilities = ["config", "export"]
