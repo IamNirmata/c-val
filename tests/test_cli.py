@@ -118,7 +118,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         help_text = output.getvalue()
         self.assertIn(
-            "{config,tests,nodes,validate,status,plan,run,jobs,result,results,"
+            "{config,tests,nodes,validate,status,plan,run,jobs,results,"
             "classifications,baseline,nccl-eval}",
             help_text,
         )
@@ -722,49 +722,6 @@ job_prefix = "custom"
         self.assertEqual(exit_code, 2)
         run_validation.assert_not_called()
         self.assertIn("explicit --submit", stderr.getvalue())
-
-    def test_result_command_prints_status_assignments(self) -> None:
-        payload = {
-            "schema_version": "cval.results.v1",
-            "node": "slc01-cl02-hgx-0001",
-            "timestamp": "12345",
-            "image_name": "pytorch:26.05-py3",
-            "overall": "fail",
-            "tests": {
-                "storage": {"status": "pass"},
-                "nccl": {"status": "fail"},
-                "dltest": {"status": "pass"},
-            },
-        }
-        output = io.StringIO()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result_path = Path(tmpdir) / "result.json"
-            result_path.write_text(json.dumps(payload), encoding="utf-8")
-            with redirect_stdout(output):
-                exit_code = main(["result", "--result-json", str(result_path)])
-
-        self.assertEqual(exit_code, 0)
-        self.assertIn("GCRRESULT1=pass", output.getvalue())
-        self.assertIn("GCRRESULT2=fail", output.getvalue())
-        self.assertIn("overall_result=fail", output.getvalue())
-        self.assertIn("image_name=pytorch:26.05-py3", output.getvalue())
-
-    def test_result_command_reads_v2_for_legacy_db_update(self) -> None:
-        from tests.test_results_v2 import payload
-
-        output = io.StringIO()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result_path = Path(tmpdir) / "result.json"
-            result_path.write_text(json.dumps(payload()), encoding="utf-8")
-            with redirect_stdout(output):
-                exit_code = main(["result", "--result-json", str(result_path)])
-
-        self.assertEqual(exit_code, 0)
-        self.assertIn("GCRRESULT1=pass", output.getvalue())
-        self.assertIn("GCRRESULT2=pass", output.getvalue())
-        self.assertIn("GCRRESULT3=pass", output.getvalue())
-        self.assertIn("overall_result=pass", output.getvalue())
 
     def test_db_add_result_command_writes_sqlite_row(self) -> None:
         from cval.config import encode_config_snapshot, load_config

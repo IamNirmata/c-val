@@ -5,8 +5,8 @@ discovery commands, nonmutating queue inspection, approval-gated cluster
 validation, read-only monitoring, and structured result inspection. Handlers are intentionally thin:
 they parse arguments, call package modules, and format output.
 
-Public commands: config, tests, nodes, validate, status, plan, run, jobs, result,
-results, classifications, baseline, and nccl-eval.
+Public commands: config, tests, nodes, validate, status, plan, run, jobs, results,
+classifications, baseline, and nccl-eval.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -52,9 +52,7 @@ from cval.storage.ingest import (
 )
 from cval.validation.results import (
     ValidationResultV2,
-    load_validation_result,
     validation_result_to_env,
-    validation_result_to_env_lines,
 )
 from cval.validation.operational_targets import (
     BASELINE_ACTIVATE,
@@ -187,7 +185,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         dest="command",
         required=True,
         metavar=(
-            "{config,tests,nodes,validate,status,plan,run,jobs,result,results,"
+            "{config,tests,nodes,validate,status,plan,run,jobs,results,"
             "classifications,baseline,nccl-eval}"
         ),
     )
@@ -352,11 +350,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     jobs.add_argument("--output", choices=["table", "json"], default="table")
     jobs.set_defaults(handler=handle_jobs)
-
-    result = subparsers.add_parser("result", help="Inspect a structured validation result")
-    result.add_argument("--result-json", type=Path, required=True)
-    result.add_argument("--output", choices=["env", "json"], default="env")
-    result.set_defaults(handler=handle_result)
 
     results = subparsers.add_parser(
         "results",
@@ -1089,19 +1082,6 @@ def handle_jobs(args: argparse.Namespace) -> int:
     print(f"{'JOB':<64} PHASE")
     for phase in phases:
         print(f"{phase.job_name:<64} {phase.phase}")
-    return 0
-
-
-def handle_result(args: argparse.Namespace) -> int:
-    """Inspect a structured validation result JSON file."""
-
-    result = load_validation_result(args.result_json)
-    if args.output == "json":
-        print(json.dumps(asdict(result), indent=2))
-        return 0
-
-    for line in validation_result_to_env_lines(result):
-        print(line)
     return 0
 
 

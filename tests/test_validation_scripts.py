@@ -194,7 +194,8 @@ printf '%s\n' \
         script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(encoding="utf-8")
 
         self.assertIn('Loading structured test result state from $CVAL_RESULT_JSON_FILE', script)
-        self.assertIn('python3 -m cval.cli result', script)
+        self.assertIn('from cval.validation.results import load_validation_result', script)
+        self.assertIn('validation_result_to_env_lines', script)
         self.assertIn('PYTHONPATH="$CVAL_REPO_DIR"', script)
         self.assertNotIn('source "$CVAL_RESULT_ENV_FILE"', script)
         self.assertIn('result_projection=$(', script)

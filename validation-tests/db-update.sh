@@ -317,8 +317,16 @@ result_nccl_summary=""
 if [ -n "${CVAL_RESULT_JSON_FILE:-}" ] && [ -f "$CVAL_RESULT_JSON_FILE" ]; then
     echo "Loading structured test result state from $CVAL_RESULT_JSON_FILE"
     if ! result_projection=$(
-        PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli result \
-            --result-json "$CVAL_RESULT_JSON_FILE"
+        CVAL_RESULT_JSON_FILE="$CVAL_RESULT_JSON_FILE" \
+            PYTHONPATH="$CVAL_REPO_DIR" python3 - <<'PY'
+import os
+from pathlib import Path
+
+from cval.validation.results import load_validation_result, validation_result_to_env_lines
+
+result = load_validation_result(Path(os.environ["CVAL_RESULT_JSON_FILE"]))
+print("\n".join(validation_result_to_env_lines(result)))
+PY
     ); then
         echo "Structured result validation failed; refusing all DB writes." >&2
         exit 1
