@@ -279,11 +279,8 @@ class RendererTests(unittest.TestCase):
         self.assertIn("export CVAL_IBBW_END_DEVICE=''", runtime)
         self.assertIn("export CVAL_DL_ITERATIONS=100", runtime)
         self.assertIn("export CVAL_NCCL_NET=IB", runtime)
-        self.assertIn("export CVAL_NCCL_EVALUATION_ENABLED=false", runtime)
-        self.assertIn(
-            "export CVAL_NCCL_OUTBOX_ROOT=/data/continuous_validation/nccl_eval/outbox",
-            runtime,
-        )
+        self.assertNotIn("EVALUATION", runtime)
+        self.assertNotIn("OUTBOX", runtime)
         self.assertIn("export CVAL_ENABLED_TESTS=storage,nccl,dltest", runtime)
         self.assertIn("export CVAL_CONFIG_PATH=/workspace/c-val/config/cval.toml", runtime)
         self.assertIn(
@@ -352,7 +349,6 @@ enabled = true
             "RUN_NCCL",
             "RUN_DLTEST",
             "CVAL_NCCL_ITERATIONS",
-            "CVAL_NCCL_OUTBOX_ROOT",
             "CVAL_DL_ITERATIONS",
         ):
             self.assertNotIn(f"name: {environment_name}", template)

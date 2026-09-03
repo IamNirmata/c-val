@@ -189,52 +189,6 @@ config_path = "validation-tests/dltest/test_config.toml"
                 ):
                     load_config(config_path)
 
-    def test_nccl_evaluation_requires_exact_commit_and_image_digest(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            shutil.copytree(repository / "validation-tests", root / "validation-tests")
-            descriptor = root / "validation-tests/nccl/test_config.toml"
-            descriptor.write_text(
-                descriptor.read_text(encoding="utf-8").replace(
-                    "evaluation_enabled = false", "evaluation_enabled = true"
-                ),
-                encoding="utf-8",
-            )
-
-            def write_config(git_ref: str, image: str) -> Path:
-                path = root / "cval.toml"
-                path.write_text(
-                    f'''[job]
-git_ref = "{git_ref}"
-[job_template]
-container_image = "{image}"
-[tests.nccl]
-enabled = true
-config_path = "validation-tests/nccl/test_config.toml"
-''',
-                    encoding="utf-8",
-                )
-                return path
-
-            with patch("cval.config.REPO_ROOT", root), self.assertRaisesRegex(
-                ValueError, "exact lowercase 40-hex commit"
-            ):
-                load_config(write_config("main", "image@sha256:" + "b" * 64))
-            with patch("cval.config.REPO_ROOT", root), self.assertRaisesRegex(
-                ValueError, "pinned with @sha256"
-            ):
-                load_config(write_config("a" * 40, "image:latest"))
-            with patch("cval.config.REPO_ROOT", root):
-                loaded = load_config(
-                    write_config("a" * 40, "image@sha256:" + "b" * 64)
-                )
-            self.assertTrue(
-                loaded.tests.registry.require("nccl").definition.settings[
-                    "evaluation_enabled"
-                ]
-            )
-
     def test_rejects_all_tests_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "cval.toml"

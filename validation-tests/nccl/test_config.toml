@@ -27,22 +27,6 @@ net = "IB"
 p2p_disable = true
 shm_disable = true
 debug = "INFO"
-evaluation_enabled = false
-evaluation_test_name = "nccl-loopback-allreduce"
-evaluation_test_definition_version = "nccl-loopback-ar-v1"
-evaluation_collective = "all_reduce"
-evaluation_datatype = "bfloat16"
-evaluation_reduction = "sum"
-evaluation_message_size_bytes = 17179869184
-evaluation_warmup_iterations = 1
-evaluation_samples_per_result = 1
-evaluation_iteration_semantics = "timed_collective_repetitions"
-evaluation_sample_semantics = "one_aggregate_mean_per_node"
-evaluation_latency_unit = "us"
-evaluation_latency_source_unit = "ms"
-evaluation_latency_conversion = "ms_to_us_x1000"
-evaluation_driver_group_source = "runtime_evidence"
-evaluation_topology_class_source = "runtime_evidence"
 
 [artifacts]
 summary_filename = "summary.json"

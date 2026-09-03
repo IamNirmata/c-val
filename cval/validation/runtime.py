@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from pathlib import Path
 import re
 import shlex
 from typing import TYPE_CHECKING
@@ -78,8 +77,8 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         "CVAL_DL_COMPUTE_DB_PATH": config.storage.dl_compute_db_path,
         "CVAL_DL_COLLECTIVE_DB_PATH": config.storage.dl_collective_db_path,
         "CVAL_DL_OVERLAP_DB_PATH": config.storage.dl_overlap_db_path,
-        "CVAL_DL_METRIC_LOCK_FILE": str(
-            Path(config.baseline.baseline_root_path) / ".dl-metric-refresh.lock"
+        "CVAL_DL_METRIC_LOCK_FILE": (
+            f"{config.runtime.validation_root.rstrip('/')}/metadata/.dl-metric-ingest.lock"
         ),
         BUILTIN_ENABLE_ENV["storage"]: _shell_bool(bool(storage and storage.enabled)),
         "CVAL_STORAGE_INSTALL_FIO": _shell_bool(bool(storage_settings["install_fio"])),
@@ -100,57 +99,6 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         "CVAL_NCCL_P2P_DISABLE": _shell_bool(bool(nccl_settings["p2p_disable"])),
         "CVAL_NCCL_SHM_DISABLE": _shell_bool(bool(nccl_settings["shm_disable"])),
         "CVAL_NCCL_DEBUG": str(nccl_settings["debug"]),
-        "CVAL_NCCL_EVALUATION_ENABLED": _shell_bool(
-            bool(nccl_settings["evaluation_enabled"])
-        ),
-        "CVAL_NCCL_OUTBOX_ROOT": (
-            f"{config.runtime.validation_root.rstrip('/')}/nccl_eval/outbox"
-        ),
-        "CVAL_NCCL_EVALUATION_TEST_NAME": str(
-            nccl_settings["evaluation_test_name"]
-        ),
-        "CVAL_NCCL_EVALUATION_TEST_DEFINITION_VERSION": str(
-            nccl_settings["evaluation_test_definition_version"]
-        ),
-        "CVAL_NCCL_EVALUATION_COLLECTIVE": str(
-            nccl_settings["evaluation_collective"]
-        ),
-        "CVAL_NCCL_EVALUATION_DATATYPE": str(
-            nccl_settings["evaluation_datatype"]
-        ),
-        "CVAL_NCCL_EVALUATION_REDUCTION": str(
-            nccl_settings["evaluation_reduction"]
-        ),
-        "CVAL_NCCL_EVALUATION_MESSAGE_SIZE_BYTES": str(
-            nccl_settings["evaluation_message_size_bytes"]
-        ),
-        "CVAL_NCCL_EVALUATION_WARMUP_ITERATIONS": str(
-            nccl_settings["evaluation_warmup_iterations"]
-        ),
-        "CVAL_NCCL_EVALUATION_SAMPLES_PER_RESULT": str(
-            nccl_settings["evaluation_samples_per_result"]
-        ),
-        "CVAL_NCCL_EVALUATION_ITERATION_SEMANTICS": str(
-            nccl_settings["evaluation_iteration_semantics"]
-        ),
-        "CVAL_NCCL_EVALUATION_SAMPLE_SEMANTICS": str(
-            nccl_settings["evaluation_sample_semantics"]
-        ),
-        "CVAL_NCCL_EVALUATION_LATENCY_UNIT": str(
-            nccl_settings["evaluation_latency_unit"]
-        ),
-        "CVAL_NCCL_EVALUATION_LATENCY_SOURCE_UNIT": str(
-            nccl_settings["evaluation_latency_source_unit"]
-        ),
-        "CVAL_NCCL_EVALUATION_LATENCY_CONVERSION": str(
-            nccl_settings["evaluation_latency_conversion"]
-        ),
-        "CVAL_NCCL_EVALUATION_DRIVER_GROUP_SOURCE": str(
-            nccl_settings["evaluation_driver_group_source"]
-        ),
-        "CVAL_NCCL_EVALUATION_TOPOLOGY_CLASS_SOURCE": str(
-            nccl_settings["evaluation_topology_class_source"]
-        ),
         BUILTIN_ENABLE_ENV["dltest"]: _shell_bool(bool(dltest and dltest.enabled)),
         "CVAL_DL_GPU_COUNT": str(dltest_settings["gpu_count"]),
         "CVAL_DL_TEST_PLAN": str(dltest_settings["test_plan"]),

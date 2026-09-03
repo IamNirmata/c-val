@@ -299,7 +299,7 @@ summary_filename = "summary.json"
                 [],
             )
 
-    def test_enabled_nccl_emits_outbox_after_local_compatibility_db_commits(self) -> None:
+    def test_nccl_success_writes_raw_status_and_metrics_without_evaluator(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "data"
             repo = Path(tmpdir) / "test-repo"
@@ -322,10 +322,6 @@ set -euo pipefail
 cat > "$CVAL_TEST_SUMMARY_FILE" <<'JSON'
 {"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.25,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{"mlx5_0":{"avg_gbps":9.0,"max_gbps":11.0,"last_gbps":10.0,"samples":3}}}
 JSON
-cat > "$NCCL_RUNTIME_EVIDENCE_FILE" <<'JSON'
-{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"NVIDIA B200","compiled_nccl_version":"2.27.7","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27.7","driver_version":"600.12","driver_version_group":"600.12","topology_class":"nvidia-topo-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-JSON
-chmod 600 "$NCCL_RUNTIME_EVIDENCE_FILE"
 ''',
                 encoding="utf-8",
             )
@@ -349,22 +345,6 @@ net = "IB"
 p2p_disable = true
 shm_disable = true
 debug = "INFO"
-evaluation_enabled = true
-evaluation_test_name = "nccl-loopback-allreduce"
-evaluation_test_definition_version = "nccl-loopback-ar-v1"
-evaluation_collective = "all_reduce"
-evaluation_datatype = "bfloat16"
-evaluation_reduction = "sum"
-evaluation_message_size_bytes = 17179869184
-evaluation_warmup_iterations = 1
-evaluation_samples_per_result = 1
-evaluation_iteration_semantics = "timed_collective_repetitions"
-evaluation_sample_semantics = "one_aggregate_mean_per_node"
-evaluation_latency_unit = "us"
-evaluation_latency_source_unit = "ms"
-evaluation_latency_conversion = "ms_to_us_x1000"
-evaluation_driver_group_source = "runtime_evidence"
-evaluation_topology_class_source = "runtime_evidence"
 [artifacts]
 summary_filename = "summary.json"
 ''',
@@ -404,15 +384,11 @@ summary_filename = "summary.json"
                 stderr=stderr,
             )
 
-            outbox = root / "nccl_eval/outbox/pending/node-a-123.json"
-            marker = root / "nccl_eval/outbox/committed/node-a-123.json"
             self.assertEqual(
                 return_code,
                 0,
                 msg=f"stdout={stdout.getvalue()!r} stderr={stderr.getvalue()!r}",
             )
-            payload = json.loads(outbox.read_text(encoding="utf-8"))
-            self.assertTrue(marker.is_file())
             with closing(sqlite3.connect(root / "metadata/validation.db")) as connection:
                 status_rows = connection.execute(
                     "SELECT test, result FROM runs ORDER BY rowid"
@@ -423,10 +399,9 @@ summary_filename = "summary.json"
         self.assertEqual(return_code, 0)
         self.assertEqual(status_rows[1], ("nccl", "pass"))
         self.assertEqual(metric_count, 1)
-        self.assertEqual(payload["node_results"][0]["latency_us"], 1250.0)
-        self.assertNotIn("baseline_approved", payload["node_results"][0])
+        self.assertFalse((root / "nccl_eval").exists())
 
-    def test_nccl_setup_failure_without_runtime_evidence_still_records_status(self) -> None:
+    def test_nccl_setup_failure_records_raw_status_without_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "data"
             repo = Path(tmpdir) / "test-repo"
@@ -461,22 +436,6 @@ net = "IB"
 p2p_disable = true
 shm_disable = true
 debug = "INFO"
-evaluation_enabled = true
-evaluation_test_name = "nccl-loopback-allreduce"
-evaluation_test_definition_version = "nccl-loopback-ar-v1"
-evaluation_collective = "all_reduce"
-evaluation_datatype = "bfloat16"
-evaluation_reduction = "sum"
-evaluation_message_size_bytes = 17179869184
-evaluation_warmup_iterations = 1
-evaluation_samples_per_result = 1
-evaluation_iteration_semantics = "timed_collective_repetitions"
-evaluation_sample_semantics = "one_aggregate_mean_per_node"
-evaluation_latency_unit = "us"
-evaluation_latency_source_unit = "ms"
-evaluation_latency_conversion = "ms_to_us_x1000"
-evaluation_driver_group_source = "runtime_evidence"
-evaluation_topology_class_source = "runtime_evidence"
 [artifacts]
 summary_filename = "summary.json"
 ''',
@@ -515,10 +474,6 @@ summary_filename = "summary.json"
             self.assertEqual(status, "fail")
             self.assertFalse((root / "metadata/test-nccl.db").exists())
             self.assertFalse((root / "nccl_eval/outbox").exists())
-            self.assertIn(
-                b"failed test produced no runtime evidence",
-                stdout.getvalue(),
-            )
 
     def test_canonical_run_replacement_gets_no_db_or_evidence_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

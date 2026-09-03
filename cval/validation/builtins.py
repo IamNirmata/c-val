@@ -102,7 +102,6 @@ BUILTIN_TEST_EVIDENCE_ENV = MappingProxyType(
                 "log": "NCCL_LOG_FILE",
                 "summary": "NCCL_SUMMARY_FILE",
                 "ibbw_log": "NCCL_IBBW_LOG_FILE",
-                "runtime_evidence": "NCCL_RUNTIME_EVIDENCE_FILE",
             }
         ),
         "dltest": MappingProxyType(
@@ -160,22 +159,6 @@ BUILTIN_RUNTIME_SETTING_DEFAULTS = MappingProxyType(
                 "p2p_disable": True,
                 "shm_disable": True,
                 "debug": "INFO",
-                "evaluation_enabled": False,
-                "evaluation_test_name": "nccl-loopback-allreduce",
-                "evaluation_test_definition_version": "nccl-loopback-ar-v1",
-                "evaluation_collective": "all_reduce",
-                "evaluation_datatype": "bfloat16",
-                "evaluation_reduction": "sum",
-                "evaluation_message_size_bytes": 17179869184,
-                "evaluation_warmup_iterations": 1,
-                "evaluation_samples_per_result": 1,
-                "evaluation_iteration_semantics": "timed_collective_repetitions",
-                "evaluation_sample_semantics": "one_aggregate_mean_per_node",
-                "evaluation_latency_unit": "us",
-                "evaluation_latency_source_unit": "ms",
-                "evaluation_latency_conversion": "ms_to_us_x1000",
-                "evaluation_driver_group_source": "runtime_evidence",
-                "evaluation_topology_class_source": "runtime_evidence",
             }
         ),
         "dltest": MappingProxyType(

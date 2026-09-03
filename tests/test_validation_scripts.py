@@ -208,7 +208,7 @@ printf '%s\n' \
         self.assertIn('dltest_ingest_dir=${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}', script)
         self.assertIn('"$GCRTIME" "$dltest_ingest_dir"', script)
         self.assertIn('"$CVAL_DL_METRIC_LOCK_HELPER"', script)
-        self.assertIn('"CVAL_DL_METRIC_LOCK_FILE": str(', script)
+        self.assertIn('metadata/.dl-metric-ingest.lock', script)
         self.assertIn('db-add-run-results', script)
         self.assertIn('--storage-result "$GCRRESULT1"', script)
         self.assertIn('--overall-result "$overall_result"', script)
@@ -219,11 +219,10 @@ printf '%s\n' \
         self.assertIn('--image-name "$CVAL_IMAGE_NAME"', script)
         self.assertIn('emit_cval_event "ingestion_started"', script)
         self.assertIn('emit_cval_event "ingestion_finished" "pass"', script)
-        self.assertIn('nccl-eval emit-outbox', script)
-        self.assertIn('--apply --confirm emit-outbox', script)
-        self.assertIn('CVAL_NCCL_EVALUATION_ENABLED', script)
+        self.assertNotIn('nccl-eval', script)
+        self.assertNotIn('CVAL_NCCL_EVALUATION', script)
+        self.assertNotIn('CVAL_NCCL_OUTBOX', script)
         self.assertIn('--ibbw-log "$nccl_ibbw_ingest_log"', script)
-        self.assertIn('partial durable raw evidence', script)
         self.assertNotIn('DATABASE_URL', script)
         self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", script)
         self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", script)
@@ -489,12 +488,8 @@ printf '%s\n' \
         self.assertIn("CVAL_IBBW_START_DEVICE", nccl)
         self.assertIn("CVAL_IBBW_END_DEVICE", nccl)
         self.assertIn('torchrun --nproc_per_node="$CVAL_NCCL_GPU_COUNT"', nccl)
-        self.assertIn('cval.nccl_eval.runtime_evidence --output', nccl)
-        self.assertIn('cval.nccl_eval.runtime_evidence --validate', nccl)
-        self.assertLess(
-            nccl.index('cval.nccl_eval.runtime_evidence --output'),
-            nccl.index('torchrun --nproc_per_node'),
-        )
+        self.assertNotIn("nccl_eval", nccl)
+        self.assertNotIn("runtime-evidence", nccl)
         self.assertIn("CVAL_DL_TEST_PLAN", dltest)
         self.assertIn("CVAL_DL_ITERATIONS", dltest)
         self.assertIn("CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-100}", dltest)
@@ -869,295 +864,6 @@ exec {os.sys.executable} "$@"
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("summary finalization FAILED", completed.stderr)
-
-    def test_nccl_collector_failure_never_starts_workload(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            marker = root / "torchrun-started"
-            (bin_dir / "python3").write_text("#!/bin/bash\nexit 9\n", encoding="utf-8")
-            (bin_dir / "torchrun").write_text(
-                f"#!/bin/bash\ntouch {marker}\nexit 0\n", encoding="utf-8"
-            )
-            for path in (bin_dir / "python3", bin_dir / "torchrun"):
-                path.chmod(0o755)
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
-                env=os.environ
-                | {
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                    "CVAL_IBBW_ENABLED": "false",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
-                    "NCCL_OUTPUT_DIR": str(root / "output"),
-                },
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            workload_started = marker.exists()
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertFalse(workload_started)
-        self.assertIn("pre-workload runtime evidence collection FAILED", completed.stderr)
-
-    def test_nccl_post_workload_evidence_mismatch_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            counter = root / "evidence-count"
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
-    output=${{@: -1}}
-    count=0
-    [[ -f "{counter}" ]] && count=$(cat "{counter}")
-    count=$((count + 1))
-    echo "$count" > "{counter}"
-    printf '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200-%s","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}\n' "$count" > "$output"
-    chmod 600 "$output"
-    exit 0
-fi
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            fake_torchrun = bin_dir / "torchrun"
-            fake_torchrun.write_text(
-                '''#!/bin/bash
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--result-file" ]]; then result_file="$2"; shift 2; else shift; fi
-done
-printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
-''',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            fake_torchrun.chmod(0o755)
-            output = root / "output"
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
-                env=os.environ
-                | {
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                    "CVAL_IBBW_ENABLED": "false",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
-                    "NCCL_OUTPUT_DIR": str(output),
-                    "NCCL_SUMMARY_FILE": str(output / "summary.json"),
-                },
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("runtime evidence changed", completed.stderr)
-
-    def test_nccl_post_workload_evidence_collection_failure_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            counter = root / "evidence-count"
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
-    output=${{@: -1}}
-    count=0
-    [[ -f "{counter}" ]] && count=$(cat "{counter}")
-    count=$((count + 1))
-    echo "$count" > "{counter}"
-    [[ "$count" -eq 2 ]] && exit 9
-    printf '%s\n' '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}' > "$output"
-    chmod 600 "$output"
-    exit 0
-fi
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            fake_torchrun = bin_dir / "torchrun"
-            fake_torchrun.write_text(
-                '''#!/bin/bash
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--result-file" ]]; then result_file="$2"; shift 2; else shift; fi
-done
-printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
-''',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            fake_torchrun.chmod(0o755)
-            output = root / "output"
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
-                env=os.environ
-                | {
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                    "CVAL_IBBW_ENABLED": "false",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
-                    "NCCL_OUTPUT_DIR": str(output),
-                    "NCCL_SUMMARY_FILE": str(output / "summary.json"),
-                },
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("post-workload runtime evidence collection FAILED", completed.stderr)
-
-    def test_nccl_evaluation_disabled_never_invokes_collector_or_creates_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            collector_marker = root / "collector-invoked"
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence"* ]]; then
-    touch "{collector_marker}"
-    exit 99
-fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            fake_torchrun = bin_dir / "torchrun"
-            fake_torchrun.write_text(
-                '''#!/bin/bash
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--result-file" ]]; then result_file="$2"; shift 2; else shift; fi
-done
-printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_ALGBW":10.0,"GCR_BUSBW":20.0,"GCR_IB_PORT_BW_GBPS":{}}' > "$result_file"
-''',
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            fake_torchrun.chmod(0o755)
-            output = root / "output"
-            evidence = output / "runtime-evidence.json"
-            post_evidence = output / "runtime-evidence.post.json"
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
-                env=os.environ
-                | {
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                    "CVAL_IBBW_ENABLED": "false",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "false",
-                    "NCCL_OUTPUT_DIR": str(output),
-                    "NCCL_SUMMARY_FILE": str(output / "summary.json"),
-                    "NCCL_RUNTIME_EVIDENCE_FILE": str(evidence),
-                    "NCCL_RUNTIME_EVIDENCE_POST_FILE": str(post_evidence),
-                },
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-        self.assertIn("evaluation evidence disabled", completed.stdout)
-        self.assertFalse(collector_marker.exists())
-        self.assertFalse(evidence.exists())
-        self.assertFalse(post_evidence.exists())
-
-    def test_nccl_evidence_validation_failure_never_starts_workload(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            workload_marker = root / "workload-started"
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
-    output=${{@: -1}}
-    printf '%s\n' '{{}}' > "$output"
-    chmod 600 "$output"
-    exit 0
-fi
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 8; fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            (bin_dir / "torchrun").write_text(
-                f"#!/bin/bash\ntouch '{workload_marker}'\nexit 0\n", encoding="utf-8"
-            )
-            fake_python.chmod(0o755)
-            (bin_dir / "torchrun").chmod(0o755)
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
-                env=os.environ
-                | {
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                    "CVAL_IBBW_ENABLED": "false",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
-                    "NCCL_OUTPUT_DIR": str(root / "output"),
-                },
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertFalse(workload_marker.exists())
-        self.assertIn("pre-workload runtime evidence validation FAILED", completed.stderr)
-
-    def test_nccl_workload_failure_preserves_exit_and_skips_post_collection(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            collection_count = root / "collection-count"
-            fake_python = bin_dir / "python3"
-            fake_python.write_text(
-                f'''#!/bin/bash
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --output"* ]]; then
-    output=${{@: -1}}
-    count=0
-    [[ -f "{collection_count}" ]] && count=$(cat "{collection_count}")
-    echo $((count + 1)) > "{collection_count}"
-    printf '%s\n' '{{"schema_version":"cval.nccl-runtime-evidence.v1","gpu_model":"B200","compiled_nccl_version":"2.27","runtime_nccl_package_version":"nvidia-nccl-cu13==2.27","driver_version":"600.1","driver_version_group":"600.1","topology_class":"nvidia-topo-sha256:{'a' * 64}"}}' > "$output"
-    chmod 600 "$output"
-    exit 0
-fi
-if [[ "$*" == *"cval.nccl_eval.runtime_evidence --validate"* ]]; then exit 0; fi
-exec {os.sys.executable} "$@"
-''',
-                encoding="utf-8",
-            )
-            (bin_dir / "torchrun").write_text("#!/bin/bash\nexit 7\n", encoding="utf-8")
-            fake_python.chmod(0o755)
-            (bin_dir / "torchrun").chmod(0o755)
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/nccl/run-test.sh")],
-                env=os.environ
-                | {
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
-                    "CVAL_IBBW_ENABLED": "false",
-                    "CVAL_NCCL_EVALUATION_ENABLED": "true",
-                    "NCCL_OUTPUT_DIR": str(root / "output"),
-                },
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            count = collection_count.read_text(encoding="utf-8").strip()
-        self.assertEqual(completed.returncode, 7)
-        self.assertEqual(count, "1")
 
     def test_storage_runner_preserves_six_json_artifacts_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

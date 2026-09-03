@@ -13,13 +13,11 @@ CVAL_CONFIG_PATH=${CVAL_CONFIG_PATH:-$CVAL_REPO_DIR/config/cval.toml}
 CVAL_VALIDATION_DB_PATH=${CVAL_VALIDATION_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/validation.db}
 CVAL_STORAGE_DB_PATH=${CVAL_STORAGE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-storage.db}
 CVAL_NCCL_DB_PATH=${CVAL_NCCL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-nccl.db}
-CVAL_NCCL_OUTBOX_ROOT=${CVAL_NCCL_OUTBOX_ROOT:-$CVAL_VALIDATION_ROOT/nccl_eval/outbox}
-CVAL_NCCL_EVALUATION_ENABLED=${CVAL_NCCL_EVALUATION_ENABLED:-false}
 CVAL_DL_NUMERICAL_DB_PATH=${CVAL_DL_NUMERICAL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_numerical_correctness.db}
 CVAL_DL_COMPUTE_DB_PATH=${CVAL_DL_COMPUTE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_compute_performance.db}
 CVAL_DL_COLLECTIVE_DB_PATH=${CVAL_DL_COLLECTIVE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_collective_performance.db}
 CVAL_DL_OVERLAP_DB_PATH=${CVAL_DL_OVERLAP_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_overlap_performance.db}
-CVAL_DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$CVAL_VALIDATION_ROOT/baselines/.dl-metric-refresh.lock}
+CVAL_DL_METRIC_LOCK_FILE=${CVAL_DL_METRIC_LOCK_FILE:-$CVAL_VALIDATION_ROOT/metadata/.dl-metric-ingest.lock}
 CVAL_DL_METRIC_LOCK_HELPER=${CVAL_DL_METRIC_LOCK_HELPER:-$CVAL_REPO_DIR/scripts/dl-metric-lock.py}
 GCRNODE=${GCRNODE:-unknown}
 GCRTIME=${GCRTIME:-unknown}
@@ -129,8 +127,8 @@ expected = {
     "CVAL_DL_COMPUTE_DB_PATH": storage.dl_compute_db_path,
     "CVAL_DL_COLLECTIVE_DB_PATH": storage.dl_collective_db_path,
     "CVAL_DL_OVERLAP_DB_PATH": storage.dl_overlap_db_path,
-    "CVAL_DL_METRIC_LOCK_FILE": str(
-        Path(config.baseline.baseline_root_path) / ".dl-metric-refresh.lock"
+    "CVAL_DL_METRIC_LOCK_FILE": (
+        f"{runtime.validation_root.rstrip('/')}/metadata/.dl-metric-ingest.lock"
     ),
 }
 expected_digest = effective_config_digest(config)
@@ -142,49 +140,6 @@ if nccl is not None:
     expected["CVAL_IBBW_ENABLED"] = str(
         settings["ibbw_enabled"]
     ).lower()
-    expected.update(
-        {
-            "CVAL_NCCL_OUTBOX_ROOT": f"{runtime.validation_root.rstrip('/')}/nccl_eval/outbox",
-            "CVAL_NCCL_EVALUATION_ENABLED": str(settings["evaluation_enabled"]).lower(),
-            "CVAL_NCCL_EVALUATION_TEST_NAME": str(settings["evaluation_test_name"]),
-            "CVAL_NCCL_EVALUATION_TEST_DEFINITION_VERSION": str(
-                settings["evaluation_test_definition_version"]
-            ),
-            "CVAL_NCCL_EVALUATION_COLLECTIVE": str(settings["evaluation_collective"]),
-            "CVAL_NCCL_EVALUATION_DATATYPE": str(settings["evaluation_datatype"]),
-            "CVAL_NCCL_EVALUATION_REDUCTION": str(settings["evaluation_reduction"]),
-            "CVAL_NCCL_EVALUATION_MESSAGE_SIZE_BYTES": str(
-                settings["evaluation_message_size_bytes"]
-            ),
-            "CVAL_NCCL_EVALUATION_WARMUP_ITERATIONS": str(
-                settings["evaluation_warmup_iterations"]
-            ),
-            "CVAL_NCCL_EVALUATION_SAMPLES_PER_RESULT": str(
-                settings["evaluation_samples_per_result"]
-            ),
-            "CVAL_NCCL_EVALUATION_ITERATION_SEMANTICS": str(
-                settings["evaluation_iteration_semantics"]
-            ),
-            "CVAL_NCCL_EVALUATION_SAMPLE_SEMANTICS": str(
-                settings["evaluation_sample_semantics"]
-            ),
-            "CVAL_NCCL_EVALUATION_LATENCY_UNIT": str(
-                settings["evaluation_latency_unit"]
-            ),
-            "CVAL_NCCL_EVALUATION_LATENCY_SOURCE_UNIT": str(
-                settings["evaluation_latency_source_unit"]
-            ),
-            "CVAL_NCCL_EVALUATION_LATENCY_CONVERSION": str(
-                settings["evaluation_latency_conversion"]
-            ),
-            "CVAL_NCCL_EVALUATION_DRIVER_GROUP_SOURCE": str(
-                settings["evaluation_driver_group_source"]
-            ),
-            "CVAL_NCCL_EVALUATION_TOPOLOGY_CLASS_SOURCE": str(
-                settings["evaluation_topology_class_source"]
-            ),
-        }
-    )
 for name, value in expected.items():
     if os.environ.get(name) != str(value):
         raise SystemExit(
@@ -299,7 +254,6 @@ NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/nccl/r
 echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
 NCCL_RUN_DIR=${NCCL_RUN_DIR:-$(dirname "$NCCL_OUTPUT_DIR")}
 NCCL_SUMMARY_FILE=${NCCL_SUMMARY_FILE:-$NCCL_RUN_DIR/summary.json}
-NCCL_RUNTIME_EVIDENCE_FILE=${NCCL_RUNTIME_EVIDENCE_FILE:-$NCCL_OUTPUT_DIR/runtime-evidence.json}
 
 GCRRESULT1=${GCRRESULT1:-fail}
 GCRRESULT2=${GCRRESULT2:-fail}
@@ -466,15 +420,7 @@ if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
                 echo "NCCL_SUMMARY_FILE does not match the validated v2 result" >&2
                 exit 1
         fi
-        if [[ -n "${CVAL_CONFIG_SNAPSHOT_B64:-}" && -n "$result_nccl_summary" ]]; then
-            expected_runtime_evidence="$(dirname "$result_nccl_summary")/artifacts/runtime-evidence.json"
-            if [[ "${CVAL_CANONICAL_NCCL_RUNTIME_EVIDENCE_FILE:-${NCCL_RUNTIME_EVIDENCE_FILE:-}}" != "$expected_runtime_evidence" ]]; then
-                echo "NCCL_RUNTIME_EVIDENCE_FILE does not match the validated v2 result" >&2
-                exit 1
-            fi
-            NCCL_SUMMARY_FILE="$result_nccl_summary"
-            NCCL_RUNTIME_EVIDENCE_FILE="$expected_runtime_evidence"
-        fi
+        [[ -z "$result_nccl_summary" ]] || NCCL_SUMMARY_FILE="$result_nccl_summary"
     assert_snapshot_runtime
 fi
 
@@ -485,36 +431,6 @@ fi
 
 trap on_ingestion_exit EXIT
 emit_cval_event "ingestion_started" "incomplete"
-
-# Two-phase NCCL outbox: write the complete immutable pending batch before any
-# authoritative raw SQLite mutation. No PostgreSQL credentials enter this process.
-NCCL_OUTBOX_PENDING_FILE="$CVAL_NCCL_OUTBOX_ROOT/pending/$CVAL_RUN_ID.json"
-NCCL_OUTBOX_PENDING_EMITTED=false
-if is_enabled "$CVAL_NCCL_EVALUATION_ENABLED" && is_enabled "$RUN_NCCL"; then
-    if [[ -f "$NCCL_RUNTIME_EVIDENCE_FILE" ]]; then
-        echo "Emitting immutable NCCL pending outbox before raw SQLite writes."
-        if ! PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli nccl-eval emit-outbox \
-            --result-json "${CVAL_CANONICAL_RESULT_JSON_FILE:-$CVAL_RESULT_JSON_FILE}" \
-            --result-digest "$result_digest" \
-            --summary "$NCCL_SUMMARY_FILE" \
-            --runtime-evidence "$NCCL_RUNTIME_EVIDENCE_FILE" \
-            --outbox-root "$CVAL_NCCL_OUTBOX_ROOT" \
-            --apply --confirm emit-outbox --output json; then
-            echo "NCCL pending outbox emission failed; refusing raw SQLite writes." >&2
-            emit_cval_event "nccl_outbox_pending" "fail" "no raw SQLite writes attempted" || true
-            exit 1
-        fi
-        NCCL_OUTBOX_PENDING_EMITTED=true
-        emit_cval_event "nccl_outbox_pending" "pass"
-    elif [[ "$GCRRESULT2" == "pass" ]]; then
-        echo "Passing NCCL result is missing required runtime evidence; refusing raw SQLite writes." >&2
-        emit_cval_event "nccl_outbox_pending" "fail" "no raw SQLite writes attempted" || true
-        exit 1
-    else
-        echo "Skipping NCCL PostgreSQL outbox because the failed test produced no runtime evidence."
-        emit_cval_event "nccl_outbox_skipped" "incomplete" "failure occurred before runtime evidence collection"
-    fi
-fi
 
 # Storage metrics are valid only when the storage phase itself passed.
 if is_enabled "$RUN_STORAGE" && [ "$GCRRESULT1" = "pass" ]; then
@@ -573,8 +489,7 @@ else
     echo "Skipping NCCL metrics DB update because result is $GCRRESULT2."
 fi
 
-# DL metric ingestion is owned by the validation Job. The evaluator may rebuild
-# these DBs for reconciliation, but it is not required for current-run ingestion.
+# DL metric ingestion is owned by the validation Job.
 if is_enabled "$RUN_DLTEST" && [ "$GCRRESULT3" = "pass" ]; then
     dltest_ingest_dir=${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}
     if [[ ! -d "$dltest_ingest_dir" ]]; then
@@ -616,27 +531,6 @@ PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli db-add-run-results \
     --result-digest "$result_digest" \
     --db-path "$CVAL_VALIDATION_DB_PATH"
 echo "Main DB update completed."
-
-# After all authoritative raw writes are durable, expose the pending batch by
-# creating its immutable commit marker. Marker creation is byte-idempotent and
-# may be retried with nccl-eval commit-outbox after a partial durable failure.
-if [[ "$NCCL_OUTBOX_PENDING_EMITTED" == true ]]; then
-    echo "Committing NCCL evaluation outbox after durable raw SQLite writes."
-    if ! PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli nccl-eval commit-outbox \
-        --outbox-root "$CVAL_NCCL_OUTBOX_ROOT" \
-        --pending "$NCCL_OUTBOX_PENDING_FILE" \
-        --result-digest "$result_digest" \
-        --apply --confirm commit-outbox --output json; then
-        echo "NCCL commit marker failed after raw SQLite writes; retry commit-outbox with the same pending file and result digest." >&2
-        emit_cval_event "nccl_outbox_committed" "fail" "partial durable raw evidence; pending retained for retry" || true
-        exit 1
-    fi
-    emit_cval_event "nccl_outbox_committed" "pass"
-elif ! is_enabled "$CVAL_NCCL_EVALUATION_ENABLED" || ! is_enabled "$RUN_NCCL"; then
-    echo "NCCL evaluation outbox disabled; no outbox directories or files created."
-else
-    echo "NCCL evaluation outbox skipped for a pre-evidence failure."
-fi
 
 emit_cval_event "ingestion_finished" "pass"
 INGESTION_FINISHED=true

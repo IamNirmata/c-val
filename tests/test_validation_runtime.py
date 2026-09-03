@@ -30,7 +30,7 @@ class ValidationRuntimeTests(unittest.TestCase):
         self.assertEqual(values["CVAL_CONFIG_PATH"], "/workspace/c-val/config/cval.toml")
         self.assertEqual(
             values["CVAL_DL_METRIC_LOCK_FILE"],
-            "/data/continuous_validation/baselines/.dl-metric-refresh.lock",
+            "/data/continuous_validation/metadata/.dl-metric-ingest.lock",
         )
         self.assertNotIn("CVAL_RUN_HISTORY_DB_PATH", values)
         self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", values)
@@ -38,14 +38,7 @@ class ValidationRuntimeTests(unittest.TestCase):
         snapshot = load_config_snapshot(values["CVAL_CONFIG_SNAPSHOT_B64"])
         self.assertEqual(effective_config_digest(snapshot), effective_config_digest(config))
         self.assertEqual(values["CVAL_NCCL_ITERATIONS"], "20")
-        self.assertEqual(values["CVAL_NCCL_EVALUATION_ENABLED"], "false")
-        self.assertEqual(
-            values["CVAL_NCCL_EVALUATION_TEST_NAME"], "nccl-loopback-allreduce"
-        )
-        self.assertEqual(
-            values["CVAL_NCCL_OUTBOX_ROOT"],
-            "/data/continuous_validation/nccl_eval/outbox",
-        )
+        self.assertFalse(any("EVALUATION" in name or "OUTBOX" in name for name in values))
         self.assertEqual(values["CVAL_DL_ITERATIONS"], "100")
         registry = json.loads(values["CVAL_TEST_REGISTRY_JSON"])
         self.assertEqual(registry["nccl"]["order"], 20)
@@ -121,9 +114,6 @@ enabled = false
                 f'''
 [runtime]
 validation_root = "{tmpdir}/validation"
-
-[baseline]
-baseline_root_path = "{tmpdir}/custom-baselines"
 ''',
                 encoding="utf-8",
             )
@@ -135,11 +125,7 @@ baseline_root_path = "{tmpdir}/custom-baselines"
         self.assertEqual(restored.runtime.validation_root, f"{tmpdir}/validation")
         self.assertEqual(
             values["CVAL_DL_METRIC_LOCK_FILE"],
-            f"{tmpdir}/custom-baselines/.dl-metric-refresh.lock",
-        )
-        self.assertEqual(
-            restored.baseline.baseline_root_path,
-            f"{tmpdir}/custom-baselines",
+            f"{tmpdir}/validation/metadata/.dl-metric-ingest.lock",
         )
         self.assertEqual(effective_config_digest(restored), effective_config_digest(config))
 
