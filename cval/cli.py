@@ -6,7 +6,7 @@ validation, read-only monitoring, and structured result inspection. Handlers are
 they parse arguments, call package modules, and format output.
 
 Public commands: config, tests, nodes, validate, status, plan, run, jobs, result,
-results, classifications, baseline, nccl-eval, and overview.
+results, classifications, baseline, and nccl-eval.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -188,7 +188,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         required=True,
         metavar=(
             "{config,tests,nodes,validate,status,plan,run,jobs,result,results,"
-            "classifications,baseline,nccl-eval,overview}"
+            "classifications,baseline,nccl-eval}"
         ),
     )
 
@@ -760,23 +760,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     nccl_status.add_argument("--latest-limit", type=int, default=20)
     nccl_status.add_argument("--output", choices=["table", "json"], default="table")
     nccl_status.set_defaults(handler=handle_nccl_eval_status)
-
-    overview = subparsers.add_parser(
-        "overview", help="One-screen status: free nodes, freshness, queue, and jobs"
-    )
-    overview.add_argument("--node-filter", default=active_config.cluster.node_filter)
-    overview.add_argument(
-        "--threshold-days", type=float, default=active_config.scheduling.days_threshold
-    )
-    overview.add_argument("--queue-limit", type=int, default=10)
-    overview.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    overview.add_argument("--no-jobs", action="store_true", help="Skip listing Volcano jobs")
-    overview.add_argument("--watch", action="store_true", help="Refresh until interrupted")
-    overview.add_argument(
-        "--interval", type=float, default=15.0, help="Watch refresh seconds"
-    )
-    overview.add_argument("--output", choices=["table", "json"], default="table")
-    overview.set_defaults(handler=handle_overview)
 
     return parser
 
@@ -2196,42 +2179,6 @@ def _report_nccl_error(exc: BaseException) -> int:
     )
     print(f"NCCL evaluation error: {message[:1000]}", file=sys.stderr)
     return 2
-
-
-def handle_overview(args: argparse.Namespace) -> int:
-    """Print a one-screen operational overview, optionally auto-refreshing."""
-    import time
-
-    from cval.orchestrator.overview import build_overview, render_overview
-
-    def render_once() -> None:
-        overview = build_overview(
-            config=args.cval_config,
-            node_filter=args.node_filter,
-            days_threshold=args.threshold_days,
-            queue_limit=args.queue_limit,
-            namespace=args.namespace,
-            include_jobs=not args.no_jobs,
-        )
-        if args.output == "json":
-            print(json.dumps(overview, indent=2))
-        else:
-            print(render_overview(overview))
-
-    if not args.watch:
-        render_once()
-        return 0
-
-    try:
-        while True:
-            # Clear screen + home cursor, then redraw.
-            print("\033[2J\033[H", end="")
-            render_once()
-            print(f"\n(refreshing every {args.interval:.0f}s - Ctrl-C to stop)")
-            time.sleep(max(1.0, args.interval))
-    except KeyboardInterrupt:
-        print()
-        return 0
 
 
 def _build_plan_from_args(args: argparse.Namespace):

@@ -119,7 +119,7 @@ class CliTests(unittest.TestCase):
         help_text = output.getvalue()
         self.assertIn(
             "{config,tests,nodes,validate,status,plan,run,jobs,result,results,"
-            "classifications,baseline,nccl-eval,overview}",
+            "classifications,baseline,nccl-eval}",
             help_text,
         )
         self.assertNotIn("prioritize", help_text)

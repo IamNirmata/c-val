@@ -4,7 +4,6 @@
 
 ```text
 cval status --output json
-cval overview --output json
 cval classifications --test all --type csv
 ```
 
