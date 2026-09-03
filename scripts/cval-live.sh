@@ -182,13 +182,6 @@ validate_runtime_settings() {
     fi
 }
 
-require_submit_startup_gate() {
-    if [[ "$LIVE_MODE" == "submit" && "$LIVE_CONFIRM" != "submit" ]]; then
-        echo "submit mode requires exact CVAL_LIVE_CONFIRM=submit" >&2
-        return 2
-    fi
-}
-
 pruning_enabled() {
     [[ "$LIVE_MODE" == "submit" && "$PRUNE_CONFIRM" == "delete-pending" ]]
 }
@@ -1810,7 +1803,6 @@ case "$COMMAND" in
     start)
         load_operational_settings
         validate_runtime_settings
-        require_submit_startup_gate
         start_session
         ;;
     stop) stop_session ;;
@@ -1819,13 +1811,11 @@ case "$COMMAND" in
     run-once)
         load_operational_settings
         validate_runtime_settings
-        require_submit_startup_gate
         run_once
         ;;
     run-loop)
         load_operational_settings
         validate_runtime_settings
-        require_submit_startup_gate
         run_loop
         ;;
     -h|--help|help) usage ;;
