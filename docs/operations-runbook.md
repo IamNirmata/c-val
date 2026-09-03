@@ -19,7 +19,9 @@ Audit mode reads inventory and latest status, plans all discovered candidates
 by default, and checks them in priority order. It submits and prunes nothing.
 
 Use the script's `start`, `status`, and `stop` commands for the persistent tmux
-session. Stopping the session does not delete Kubernetes jobs.
+session. `start` fetches the current branch from `origin`, rejects a stale
+explicit ref, and pins the session to that exact latest published commit.
+Stopping the session does not delete Kubernetes jobs.
 
 ## Exact-commit validation
 

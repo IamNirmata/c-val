@@ -24,6 +24,10 @@ printf 'git\t%s\n' "$*" >>"$FAKE_CALLS"
 if [[ -n "$FAKE_GIT_FAIL_MATCH" && "$*" == *"$FAKE_GIT_FAIL_MATCH"* ]]; then
     exit "$FAKE_GIT_FAIL_RC"
 fi
+if [[ "$*" == *" branch --show-current"* ]]; then
+    printf 'main\n'
+    exit 0
+fi
 if [[ "$*" == *" fetch "* || "$*" == *" worktree prune"* ]]; then
     exit 0
 fi
@@ -356,6 +360,7 @@ class CvalLiveTests(unittest.TestCase):
             "CVAL_LIVE_MODE",
             "CVAL_LIVE_CONFIRM",
             "CVAL_PRUNE_CONFIRM",
+            "CVAL_GIT_BRANCH",
             "CVAL_GIT_REF",
         ):
             env.pop(key, None)
@@ -1301,8 +1306,8 @@ class CvalLiveTests(unittest.TestCase):
             self.assertFalse(any(" plan --free-nodes" in line for line in calls))
             self.assertNotIn("no longer active", failed.stdout)
 
-    def test_tmux_start_propagates_mode_gates_limits_and_only_current_explicit_ref(self) -> None:
-        for git_ref in (None, "release-ref"):
+    def test_tmux_start_pins_latest_published_branch_commit(self) -> None:
+        for git_ref in (None, ORIGIN_SHA):
             with self.subTest(git_ref=git_ref), tempfile.TemporaryDirectory() as tmpdir:
                 env = self._environment(
                     Path(tmpdir),
@@ -1311,6 +1316,8 @@ class CvalLiveTests(unittest.TestCase):
                     prune_confirm="delete-pending",
                     git_ref=git_ref,
                 )
+                if git_ref is not None:
+                    env["FAKE_EXPLICIT_SHA"] = ORIGIN_SHA
                 completed = self._run(env, "start")
                 tmux_call = "\n".join(
                     line for line in self._calls(env) if line.startswith("tmux\tnew-session")
@@ -1324,10 +1331,23 @@ class CvalLiveTests(unittest.TestCase):
             self.assertIn("CVAL_NODE_COOLDOWN_SECONDS=0", tmux_call)
             self.assertIn("CVAL_PENDING_START_TIMEOUT_SECONDS=480", tmux_call)
             self.assertIn("CVAL_KUBECTL_TIMEOUT_SECONDS=17", tmux_call)
-            if git_ref is None:
-                self.assertNotIn("CVAL_GIT_REF=", tmux_call)
-            else:
-                self.assertIn("CVAL_GIT_REF=release-ref", tmux_call)
+            self.assertIn("CVAL_GIT_BRANCH=main", tmux_call)
+            self.assertIn(f"CVAL_GIT_REF={ORIGIN_SHA}", tmux_call)
+            self.assertIn("verified latest published start ref", completed.stdout)
+
+    def test_tmux_start_rejects_stale_explicit_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = self._environment(
+                Path(tmpdir),
+                mode="audit",
+                git_ref=EXPLICIT_SHA,
+            )
+            completed = self._run(env, "start")
+            calls = self._calls(env)
+
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn("refusing stale cval-live start", completed.stderr)
+        self.assertFalse(any(line.startswith("tmux\tnew-session") for line in calls))
 
     def test_status_and_stop_remain_nonmutating_without_submit_confirmation(self) -> None:
         for command in ("status", "stop"):

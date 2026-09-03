@@ -84,6 +84,7 @@ load_operational_settings() {
     PLAN_LIMIT_SETTING=${CVAL_PLAN_LIMIT:-all}
     PLAN_LIMIT=1
     KUBECTL_TIMEOUT_SECONDS=${CVAL_KUBECTL_TIMEOUT_SECONDS:-120}
+    GIT_BRANCH_SETTING=${CVAL_GIT_BRANCH:-}
     EXPLICIT_GIT_REF=${CVAL_GIT_REF:-}
     BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 3)}
     DAYS_THRESHOLD=${CVAL_DAYS_THRESHOLD:-$(config_value scheduling days_threshold 7)}
@@ -119,7 +120,8 @@ Environment overrides:
     CVAL_NODE_COOLDOWN_SECONDS=14400              # 4 hours; 0 disables
     CVAL_NODE_COOLDOWN_STATE_FILE=$LOG_DIR/node_cool_down.csv
     CVAL_PENDING_START_TIMEOUT_SECONDS=<seconds>
-    CVAL_GIT_REF=<40-hex-commit>                   # explicit session pin only
+    CVAL_GIT_BRANCH=<remote-branch>                # default: current local branch
+    CVAL_GIT_REF=<40-hex-commit>                   # optional; must equal branch tip
     CVAL_KUBECTL_TIMEOUT_SECONDS=120
     CVAL_PLAN_LIMIT=all                            # default: all discovered nodes
   CVAL_TMUX_SESSION=$SESSION_NAME
@@ -218,6 +220,50 @@ resolve_git_ref() {
     RESOLVED_GIT_REF="$resolved"
     RESOLVED_GIT_REF_SOURCE="$source"
     log "resolved git ref source=$source sha=$resolved"
+}
+
+resolve_latest_start_ref() {
+    local branch="$GIT_BRANCH_SETTING"
+    local latest_ref latest_sha explicit_sha rc=0
+    if [[ -z "$branch" ]]; then
+        branch=$(git -C "$SOURCE_REPO" branch --show-current) || rc=$?
+        if (( rc != 0 )) || [[ -z "$branch" ]]; then
+            log "latest start ref failed: source repository is not on a branch; set CVAL_GIT_BRANCH" >&2
+            return 2
+        fi
+    fi
+    if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+        log "latest start ref failed: invalid branch=$branch" >&2
+        return 2
+    fi
+    rc=0
+    git -C "$SOURCE_REPO" fetch --quiet origin "$branch" || rc=$?
+    if (( rc != 0 )); then
+        log "latest start ref fetch failed branch=$branch exit_code=$rc" >&2
+        return "$rc"
+    fi
+    latest_ref="origin/$branch"
+    rc=0
+    latest_sha=$(git -C "$SOURCE_REPO" rev-parse --verify "${latest_ref}^{commit}") || rc=$?
+    if (( rc != 0 )) || [[ ! "$latest_sha" =~ ^[0-9a-f]{40}$ ]]; then
+        log "latest start ref resolution failed branch=$branch exit_code=$rc" >&2
+        return 2
+    fi
+    if [[ -n "$EXPLICIT_GIT_REF" ]]; then
+        rc=0
+        explicit_sha=$(git -C "$SOURCE_REPO" rev-parse --verify "${EXPLICIT_GIT_REF}^{commit}") || rc=$?
+        if (( rc != 0 )) || [[ ! "$explicit_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            log "explicit start ref resolution failed branch=$branch exit_code=$rc" >&2
+            return 2
+        fi
+        if [[ "$explicit_sha" != "$latest_sha" ]]; then
+            log "refusing stale cval-live start branch=$branch explicit=$explicit_sha latest=$latest_sha" >&2
+            return 2
+        fi
+    fi
+    GIT_BRANCH_SETTING="$branch"
+    EXPLICIT_GIT_REF="$latest_sha"
+    log "verified latest published start ref branch=$branch sha=$latest_sha"
 }
 
 ensure_runner_worktree() {
@@ -1754,19 +1800,15 @@ start_session() {
     require_command tmux
     mkdir -p "$LOG_DIR"
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-        echo "tmux session already running: $SESSION_NAME"
-        echo "Attach with: $0 attach"
-        return 0
+        echo "tmux session already running: $SESSION_NAME; stop it before starting the latest commit" >&2
+        return 2
     fi
 
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
-    local runner_cmd explicit_git_ref_env=""
-    if [[ -n "$EXPLICIT_GIT_REF" ]]; then
-        printf -v explicit_git_ref_env ' CVAL_GIT_REF=%q' "$EXPLICIT_GIT_REF"
-    fi
+    local runner_cmd
     printf -v runner_cmd \
-        'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q%s bash %q run-loop' \
-        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$explicit_git_ref_env" "$SCRIPT_PATH"
+        'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q CVAL_GIT_BRANCH=%q CVAL_GIT_REF=%q bash %q run-loop' \
+        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$GIT_BRANCH_SETTING" "$EXPLICIT_GIT_REF" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \
@@ -1812,6 +1854,8 @@ case "$COMMAND" in
     start)
         load_operational_settings
         validate_runtime_settings
+        require_command git
+        resolve_latest_start_ref
         start_session
         ;;
     stop) stop_session ;;
