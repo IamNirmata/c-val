@@ -1,1357 +1,467 @@
-# NCCL Loopback AllReduce Evaluation System
+# NCCL evaluation process: SQLite proposal
 
-## 1. Purpose
+> **Status: proposal for review.** This document describes the desired lean
+> design. The repository still contains PostgreSQL NCCL code and deployment
+> resources; approving this document does not change or deploy them.
 
-Build a PostgreSQL-backed NCCL loopback AllReduce evaluation system for C-VAL.
+## 1. Decision
 
-The system must:
+Use SQLite for NCCL evaluation, consistent with the rest of c-val.
 
-- Store raw NCCL test results for all nodes.
-- Build independent baselines for each compatible test environment.
-- Require at least 40 eligible results before activating a baseline.
-- Create a new immutable baseline version after every additional 10 eligible results.
-- Classify `BUS_BW` and `LATENCY` into five health classes.
-- Store the exact baseline version used for every evaluation.
-- Support multiple concurrent writers, readers, baseline builders, and evaluator workers.
-- Preserve raw results and historical evaluations without overwriting them.
-
-## 2. Technology and deployment
-
-Use one PostgreSQL database named `cval` with three schemas:
+Keep raw measurements and derived evaluator data separate:
 
 ```text
-cval
-├── nccl_raw
-├── nccl_baseline
-└── nccl_validation
+/data/continuous_validation/
+├── metadata/
+│   ├── validation.db                authoritative run/pass/fail status
+│   └── test-nccl.db                 authoritative NCCL measurements
+└── baselines/
+    ├── test-nccl-baselines.db       versioned baseline records
+    └── nccl-classifications.db      derived node verdicts
 ```
 
-Do not use separate SQLite files.
+Use one resident evaluator process as the only writer to the two derived NCCL
+files. Validation jobs remain the only writers to `test-nccl.db`.
 
-Recommended Kubernetes components:
+There is no PostgreSQL server, database Secret, RWO PostgreSQL PVC, result
+outbox, ingestion queue, worker claim, retry queue, schema owner, or runtime
+role.
+
+## 2. Goals
+
+- Retain `metadata/test-nccl.db` as authoritative raw evidence.
+- Compare only results produced by materially compatible NCCL environments.
+- Build robust BUS_BW and LATENCY baselines from reviewed, successful results.
+- Keep baseline history immutable and require deliberate activation.
+- Classify nodes as `improved`, `normal`, `underperforming`, `degraded`, or
+    `dnr`.
+- Preserve the exact baseline identity and metric details used by each verdict.
+- Make every write idempotent and recoverable from the raw DB.
+- Keep ordinary reads and exports nonmutating.
+
+## 3. Non-goals
+
+This design does not provide:
+
+- multiple evaluator writers;
+- a distributed work queue;
+- automatic node remediation;
+- automatic baseline activation;
+- deletion or rewriting of raw results;
+- a second normalized copy of NCCL raw measurements;
+- a separate health-class lookup table.
+
+If c-val later needs multiple active evaluator replicas writing concurrently,
+SQLite should be reconsidered. That is not a current requirement.
+
+## 4. Raw evidence
+
+### 4.1 Run status in `validation.db`
+
+`metadata/validation.db` answers whether NCCL ran successfully. The evaluator
+reads the existing `runs` row for `(node, timestamp, test = 'nccl')`.
+
+Made-up `runs` rows:
+
+| node | timestamp | test | result | image_name |
+|---|---:|---|---|---|
+| `node-a` | 1790000100 | `nccl` | `pass` | `pytorch:26.05-py3` |
+| `node-b` | 1790000200 | `nccl` | `fail` | `pytorch:26.05-py3` |
+| `node-c` | 1790000300 | `nccl` | `pass` | `pytorch:26.05-py3` |
+| `node-d` | 1790000400 | `nccl` | `pass` | `pytorch:26.05-py3` |
+| `node-e` | 1790000500 | `nccl` | `pass` | `pytorch:26.05-py3` |
+
+`node-b` becomes `dnr` because the run failed and no usable NCCL measurement
+was produced. The evaluator does not invent BUS_BW or LATENCY values.
+
+### 4.2 Measurements in `test-nccl.db`
+
+`metadata/test-nccl.db` remains authoritative. Its `IB_HEALTH` table already
+contains one consolidated row per node and timestamp, including:
+
+- `Node`;
+- `timestamp` and `la_timestamp`;
+- `image_name`, CUDA, and PyTorch versions;
+- iterations, samples, and data size when available;
+- `BUS_BW`;
+- `LATENCY`;
+- `mlx5_*` diagnostic values.
+
+The evaluator opens this DB read-only. It never adds a `classified` flag and
+never updates raw rows.
+
+Made-up `IB_HEALTH` rows:
+
+| Node | timestamp | iterations | BUS_BW GB/s | LATENCY ms | image_name | gpu_model | nccl_version |
+|---|---:|---:|---:|---:|---|---|---|
+| `node-a` | 1790000100 | 20 | 47.4 | 590.0 | `pytorch:26.05-py3` | `NVIDIA B200` | `2.29.2` |
+| `node-c` | 1790000300 | 20 | 44.4 | 635.0 | `pytorch:26.05-py3` | `NVIDIA B200` | `2.29.2` |
+| `node-d` | 1790000400 | 20 | 40.8 | 680.0 | `pytorch:26.05-py3` | `NVIDIA B200` | `2.29.2` |
+| `node-e` | 1790000500 | 20 | 35.2 | 760.0 | `pytorch:26.05-py3` | `NVIDIA B200` | `2.29.2` |
+
+There is intentionally no `node-b` row because its NCCL workload crashed.
+
+### 4.3 Additive provenance for new rows
+
+New native rows should add these nullable columns through the existing additive
+migration pattern:
+
+- `run_id`;
+- `source_commit`;
+- `test_definition_version`;
+- `gpu_model`;
+- `nccl_version`;
+- `driver_group`;
+- `topology_class`.
+
+New ingestion should populate every field. Historical rows remain readable but
+are excluded from automatic calibration when required profile facts are blank.
+An operator may explicitly select historical rows for a one-time candidate.
+
+Latency remains stored in the raw DB's existing unit. The baseline record must
+state that unit. A unit conversion, if needed, happens in Python before
+comparison and is recorded in baseline provenance.
+
+## 5. Compatibility profile
+
+A baseline profile prevents unlike workloads from sharing a reference.
+
+Build `profile_key` as SHA-256 over canonical JSON containing:
+
+- test definition version;
+- image identity;
+- GPU model and GPU count;
+- CUDA, PyTorch, and NCCL versions;
+- driver compatibility group;
+- topology class;
+- iterations, samples, data size, datatype, and collective settings;
+- latency unit.
+
+No fuzzy matching is allowed. A missing required field means the result cannot
+join an automatic calibration cohort.
+
+Store the canonical profile JSON and `profile_key` in every baseline record.
+Classifications refer to that same key.
+
+## 6. Baseline database
+
+Reuse the established c-val baseline lifecycle and SQLite storage pattern.
+
+`baselines/test-nccl-baselines.db` contains the existing `baselines` table shape:
 
 ```text
-NCCL test Job (no PostgreSQL Secret)
-    ↓ immutable native JSON on shared PVC
-Resident evaluator Deployment (PostgreSQL runtime Secret)
-    ├── durable outbox ingestion
-    ├── baseline building
-    ├── stale-claim recovery
-    └── queue evaluation
-             ↓
-         PostgreSQL
+baseline_id
+test_type = nccl
+status = candidate | active | superseded
+stratum_key = profile_key
+n_samples
+window_days
+method
+schema_version
+created_at
+supersedes
+metrics_json
 ```
 
-The evaluator runs continuously as one Deployment replica. Polling every few
-seconds is sufficient. PostgreSQL `LISTEN/NOTIFY` may be added as a wake-up
-optimization, but the database queue remains the durable source of truth.
+`metrics_json` contains:
 
-## 3. Health classes
+- canonical profile JSON and `profile_key`;
+- exact raw sample identities `(node, timestamp)`;
+- included and excluded sample identities with reasons;
+- BUS_BW and LATENCY count, median, MAD, p05, p50, and p95;
+- directional acceptance bands;
+- derivation method version;
+- raw unit and conversion evidence;
+- source DB identity and build timestamp.
 
-Create a fixed lookup table:
+Baseline content and identity are immutable. Lifecycle changes update only
+`status` and `supersedes` under one `BEGIN IMMEDIATE` transaction.
 
-| ID | Code | Label |
-|---:|---|---|
-| 1 | `EXCEEDING` | Exceeding baseline |
-| 2 | `WITHIN` | Within baseline |
-| 3 | `UNDERPERFORMING` | Underperforming |
-| 4 | `DEGRADED` | Degraded |
-| 5 | `CRITICAL` | Critical / suspected hardware failure |
+Exactly one active baseline is allowed per profile.
 
-Higher class number means worse health.
+### 6.1 What `candidate → active → superseded` means
 
-For numeric metrics:
+- **candidate**: a newly calculated baseline waiting for operator review. It is
+    not used to classify production results.
+- **active**: the reviewed baseline currently used for classification. There is
+    exactly one active baseline per compatibility profile.
+- **superseded**: an older baseline replaced by a newer active one. It remains
+    immutable so historical verdicts still show which baseline they used.
+
+Example lifecycle:
+
+1. `nccl-b200-v1` is activated from 40 reviewed results.
+2. Ten more reviewed results arrive. `nccl-b200-v2` is built as a candidate.
+3. Operators compare v2 with v1 and approve v2.
+4. One transaction marks v2 active and v1 superseded.
+5. Existing classifications keep pointing to v1; new classifications use v2.
+
+Made-up `baselines` rows:
+
+| baseline_id | test_type | status | stratum_key | n_samples | created_at | supersedes | metrics_json summary |
+|---|---|---|---|---:|---:|---|---|
+| `nccl-b200-v1` | `nccl` | `superseded` | `sha256:b200-profile` | 40 | 1790001000 |  | BW median `44.5`, latency median `629` |
+| `nccl-b200-v2` | `nccl` | `active` | `sha256:b200-profile` | 50 | 1790501000 | `nccl-b200-v1` | BW median `44.6`, latency median `628` |
+| `nccl-b200-v3` | `nccl` | `candidate` | `sha256:b200-profile` | 60 | 1791001000 | `nccl-b200-v2` | awaiting operator review |
+
+In this example, v2 is used now. V3 does nothing until explicitly activated.
+
+## 7. Baseline policy
+
+### 7.1 Eligibility
+
+A raw result is eligible only when:
+
+- the corresponding NCCL test passed;
+- BUS_BW and LATENCY are finite and greater than zero;
+- required profile fields are present and match exactly;
+- the result is not duplicated;
+- the node/result belongs to the reviewed calibration cohort;
+- configured sanity checks pass.
+
+Do not silently train on every fleet result. Known degraded or maintenance nodes
+must not pull the reference downward.
+
+### 7.2 Build and activation
+
+Recommended defaults:
+
+- minimum candidate size: 40 reviewed results;
+- create a new candidate after 10 additional eligible results;
+- never auto-activate a candidate;
+- activation supersedes the previous active baseline for that profile.
+
+Candidate creation is idempotent. Rebuilding the same sample set and profile
+must produce the same baseline ID and byte-equivalent record.
+
+### 7.3 Statistics
+
+Use the existing c-val robust baseline method:
+
+- center: median;
+- robust scale: $1.4826 \times \mathrm{MAD}$;
+- engineering tolerance floor;
+- BUS_BW direction: lower is bad;
+- LATENCY direction: higher is bad.
+
+The derivation version is part of the baseline identity. Changing formulas
+creates a new candidate; it never edits an active record.
+
+### 7.4 Five verdict bands
+
+The active baseline stores exact boundaries for both metrics:
+
+| Stored code | Display label | Meaning |
+|---|---|---|
+| `improved` | Improved | Better than the active baseline's good-side limit |
+| `normal` | Normal | Within the active baseline limits |
+| `underperforming` | Underperforming | Outside normal limits but not yet severe |
+| `degraded` | Degraded | Beyond the severe performance limit |
+| `dnr` | DNR | Did not run, crashed, timed out, or produced no usable result |
+
+| Verdict | BUS_BW, where higher is better | LATENCY, where lower is better |
+|---|---|---|
+| `improved` | at or beyond the reviewed good-side threshold | at or beyond the reviewed good-side threshold |
+| `normal` | within the baseline's normal limits | within the baseline's normal limits |
+| `underperforming` | outside normal, but not beyond the severe limit | outside normal, but not beyond the severe limit |
+| `degraded` | beyond the severe low limit | beyond the severe high limit |
+| `dnr` | no usable measurement because the test did not run, crashed, timed out, or produced invalid/missing metrics | same |
+
+For a made-up profile with BUS_BW median `44.5 GB/s` and LATENCY median
+`629 ms`, the stored boundaries could be:
+
+| Metric | Improved | Normal | Underperforming | Degraded |
+|---|---|---|---|---|
+| BUS_BW | `>= 46.7` | `42.3 <= x < 46.7` | `37.8 <= x < 42.3` | `< 37.8` |
+| LATENCY | `<= 597.6` | `597.6 < x <= 660.5` | `660.5 < x <= 723.4` | `> 723.4` |
+
+These example numbers use approximately 5% normal/good-side limits and a 15%
+severe boundary. Production boundaries come from the versioned median/MAD
+derivation plus configured engineering floors. They are stored in
+`metrics_json`, not recomputed differently by each reader.
+
+## 8. Classification database
+
+`baselines/nccl-classifications.db` uses the established
+`classification_results` schema with one additive column:
 
 ```text
-lower_bound <= measured_value < upper_bound
+raw_timestamp INTEGER NOT NULL
+n_underperforming INTEGER NOT NULL DEFAULT 0
 ```
 
-`upper_bound = NULL` means no upper limit.
+Each row records:
 
-Overall health:
+- classification timestamp;
+- node;
+- `test_type = nccl`;
+- baseline ID;
+- overall status;
+- compared/improved/underperforming/degraded counts;
+- worst percentage difference;
+- `metrics_json` with BUS_BW and LATENCY details.
+
+Protect the natural immutable identity with a unique index:
 
 ```text
-overall_health_class = GREATEST(bus_bw_class, latency_class)
+(node, raw_timestamp, baseline_id)
 ```
 
-Do not average health classes.
+An exact retry is a no-op; conflicting content fails closed. `metrics_json`
+also records `raw_timestamp` so exports remain self-describing.
 
-### Versioned median-centered derivation
+Made-up `classification_results` rows showing all five verdicts:
 
-`nccl-median-bands-v2` replaces quintile health labels. Eligible baseline
-samples must be finite and strictly positive. Let `m = p50`.
+| classified_at | node | raw_timestamp | baseline_id | status | n_compared | n_improved | n_underperforming | n_degraded | metrics_json summary |
+|---:|---|---:|---|---|---:|---:|---:|---:|---|
+| 1791002000 | `node-a` | 1790000100 | `nccl-b200-v2` | `improved` | 2 | 2 | 0 | 0 | BW `47.4`, latency `590.0` |
+| 1791002000 | `node-c` | 1790000300 | `nccl-b200-v2` | `normal` | 2 | 0 | 0 | 0 | BW `44.4`, latency `635.0` |
+| 1791002000 | `node-d` | 1790000400 | `nccl-b200-v2` | `underperforming` | 2 | 0 | 2 | 0 | BW `40.8`, latency `680.0` |
+| 1791002000 | `node-e` | 1790000500 | `nccl-b200-v2` | `degraded` | 2 | 0 | 0 | 2 | BW `35.2`, latency `760.0` |
+| 1791002000 | `node-b` | 1790000200 | `nccl-b200-v2` | `dnr` | 0 | 0 | 0 | 0 | test crashed; no measurement |
 
-BUS_BW (higher is better) uses ascending class order `5,4,3,2,1`:
+### Verdict rules
 
-- class 5 below `70% * m`;
-- class 4 through `85% * m`;
-- class 3 through `min(p05, 95% * m)`, raised only as needed to keep a strict
-    non-empty range;
-- class 2 through `max(p95, 105% * m)`;
-- class 1 above that boundary.
+For one raw NCCL result:
 
-LATENCY (lower is better) uses ascending class order `1,2,3,4,5`:
+1. if the NCCL run did not complete with two usable metrics, set overall `dnr`;
+2. otherwise classify BUS_BW and LATENCY against the active baseline;
+3. set overall `degraded` if either metric is degraded;
+4. otherwise set overall `underperforming` if either metric is underperforming;
+5. otherwise set overall `normal` if both metrics are normal, or one is improved
+    and the other is normal;
+6. set overall `improved` only when both metrics are improved.
 
-- class 1 below `min(p05, 95% * m)`;
-- class 2 through `max(p95, 105% * m)`;
-- classes 3 and 4 end at progressively worse `115% * m` and `130% * m`
-    boundaries, raised only as needed to remain strictly contiguous;
-- class 5 covers the remaining high-latency tail.
-
-Both class-2 ranges contain `p50`, including tied/equal distributions. A value
-equal to `p50` has severity exactly `50`; overall class and severity are the
-worse (maximum) metric values. For an all-44 baseline, BUS_BW 44 and LATENCY
-44 are both class 2 with severity 50.
-
-## 4. Baseline compatibility profile
-
-A baseline must not be selected using only CUDA + PyTorch + GPU model.
-
-A baseline profile should include all fields that materially affect NCCL performance:
-
-- Test name.
-- Test definition/configuration version.
-- GPU model.
-- GPUs per node.
-- CUDA version.
-- PyTorch version.
-- NCCL version.
-- Relevant driver compatibility group.
-- Relevant topology class.
-- Message size or message-size group.
-- Collective, datatype, reduction operation, and other important test settings.
-- Iterations, nullable samples, and warmup iterations.
-- Canonical `latency_unit = "us"` and any source-unit conversion evidence.
-
-Human-readable example:
+Overall precedence from worst to best is:
 
 ```text
-nccl-loopback-ar:b200:8gpu:cuda13.2:pt2.12:nccl2.27:test-v1:8g
+dnr → degraded → underperforming → normal → improved
 ```
 
-Use:
+`dnr` is operationally worst because there is no trustworthy performance
+measurement, but it is not a numeric performance class. Keep the run's failure
+reason in `metrics_json`.
 
-- `profile_id`: internal UUID primary key.
-- `profile_key`: unique readable identifier.
+Never average metrics to hide one degraded dimension. `mlx5_*` values remain
+diagnostic evidence and do not affect the initial overall verdict.
 
-## 5. PostgreSQL schema
+Raw pass/fail and derived performance health remain separate. A test can pass
+functionally while its performance classification is underperforming or
+degraded. A failed or incomplete NCCL run produces `dnr`.
 
-### 5.1 `nccl_raw.test_run`
+## 9. Resident evaluator cycle
 
-One row per NCCL test execution.
+One resident evaluator process runs the following loop:
 
-```sql
-CREATE SCHEMA IF NOT EXISTS nccl_raw;
-CREATE SCHEMA IF NOT EXISTS nccl_baseline;
-CREATE SCHEMA IF NOT EXISTS nccl_validation;
+1. open `test-nccl.db` read-only;
+2. enumerate exact compatibility profiles;
+3. build due candidates from reviewed samples;
+4. read the active baseline for each profile;
+5. scan recent raw rows for that profile;
+6. calculate missing classifications;
+7. write one classification transaction with `BEGIN IMMEDIATE`;
+8. emit a structured cycle receipt;
+9. sleep for the configured interval.
 
-CREATE TABLE nccl_raw.test_run (
-    run_id                   UUID PRIMARY KEY,
-    test_name                TEXT NOT NULL,
-    test_definition_version  TEXT NOT NULL,
+There is no durable queue. Recovery is deterministic: after a crash, the next
+cycle scans raw rows again and idempotently fills missing classifications.
 
-    started_at               TIMESTAMPTZ NOT NULL,
-    completed_at             TIMESTAMPTZ,
+The evaluator is the only writer to NCCL baseline/classification DBs. Readers
+use SQLite read-only URIs. Use a bounded busy timeout and the default rollback
+journal; do not enable WAL on the shared NFS PVC.
 
-    image_name               TEXT,
-    image_digest             TEXT,
+## 10. Commands
 
-    cuda_version             TEXT NOT NULL,
-    pytorch_version          TEXT NOT NULL,
-    compiled_nccl_version    TEXT NOT NULL,
-    runtime_nccl_package_version TEXT NOT NULL,
-    driver_version           TEXT,
-
-    gpu_model                TEXT NOT NULL,
-    gpus_per_node            SMALLINT NOT NULL CHECK (gpus_per_node > 0),
-
-    iterations               INTEGER NOT NULL CHECK (iterations > 0),
-    samples                  INTEGER,
-
-    test_config              JSONB NOT NULL DEFAULT '{}'::jsonb,
-    test_config_fingerprint  TEXT NOT NULL,
-    cval_run_id              TEXT NOT NULL,
-    cval_result_digest       TEXT NOT NULL,
-    summary_sha256           TEXT,
-    runtime_evidence_sha256  TEXT NOT NULL,
-    source_commit            TEXT NOT NULL,
-    implementation_identity  TEXT NOT NULL,
-    legacy_source            BOOLEAN NOT NULL,
-    ingested_at              TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-`test_config` should include values such as:
-
-```json
-{
-  "collective": "all_reduce",
-  "datatype": "float32",
-  "reduction": "sum",
-  "message_size": "8G",
-    "warmup_iterations": 5,
-    "latency_unit": "us"
-}
-```
-
-### 5.2 `nccl_raw.node_result`
-
-One row per node result.
-
-```sql
-CREATE TABLE nccl_raw.node_result (
-    result_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    run_id             UUID NOT NULL
-                       REFERENCES nccl_raw.test_run(run_id)
-                       ON DELETE CASCADE,
-
-    node_name          TEXT NOT NULL,
-    test_timestamp     TIMESTAMPTZ NOT NULL,
-    la_timestamp       TIMESTAMPTZ,
-
-    bus_bw_gbps        DOUBLE PRECISION,
-    latency_us         DOUBLE PRECISION,
-
-    result_status      TEXT NOT NULL DEFAULT 'SUCCESS'
-                       CHECK (
-                           result_status IN (
-                               'SUCCESS',
-                               'TIMEOUT',
-                               'TEST_ERROR',
-                               'NO_RESULT'
-                           )
-                       ),
-
-    error_code         TEXT,
-    error_message      TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    UNIQUE (run_id, node_name)
-);
-```
-
-Raw results are append-only after ingestion.
-
-`legacy_source` remains in the initial schema for historical provenance, but a
-later additive constraint rejects new `true` rows. Current ingestion is native
-only and requires exact commit/image/evidence digests.
-
-`SUCCESS` requires both BUS_BW and LATENCY. Non-success native rows may retain
-partial diagnostic metrics but create no evaluation row.
-
-Do not store a Boolean `classified` column here.
-
-### 5.3 `nccl_raw.nic_result`
-
-Store mlx5 device values as rows, not columns.
-
-```sql
-CREATE TABLE nccl_raw.nic_result (
-    result_id          BIGINT NOT NULL
-                       REFERENCES nccl_raw.node_result(result_id)
-                       ON DELETE CASCADE,
-
-    device_name        TEXT NOT NULL,
-    max_bus_bw_gbps    DOUBLE PRECISION,
-
-    PRIMARY KEY (result_id, device_name)
-);
-```
-
-Example:
+Proposed operator surface, reusing existing baseline commands:
 
 ```text
-result_id | device_name | max_bus_bw_gbps
-1001      | mlx5_0      | 44.5172
-1001      | mlx5_4      | 44.5172
-1001      | mlx5_6      | 44.5120
-1001      | mlx5_7      | 44.5100
+# inspect/build candidate
+cval baseline build --test-type nccl --store
+
+# deliberate promotion
+cval baseline activate <baseline-id> nccl
+
+# classify one node or all recent nodes
+cval baseline classify --test-type nccl --node <node> --store-results
+cval baseline classify --test-type nccl --store-results
+
+# read/export
+cval baseline list --test-type nccl
+cval classifications --test nccl --type csv
+cval results --test nccl --type csv
 ```
 
-NIC values are diagnostic only and are not copied into the validation table.
+These commands are proposed, not currently available. Implementation should
+restore NCCL through the registry adapter and normal `cval.baselines` APIs,
+without introducing a second evaluator framework.
 
-### 5.4 `nccl_baseline.baseline_profile`
+Candidate build, activation, and classification writes must keep their existing
+explicit mutation gates. List/show/results/classification export remain
+read-only.
 
-One row per compatible baseline environment.
+## 11. Backup and concurrency safety
 
-```sql
-CREATE TABLE nccl_baseline.baseline_profile (
-    profile_id                  UUID PRIMARY KEY,
-    profile_key                 TEXT NOT NULL UNIQUE,
+- Whole-root backup still requires writer quiescence and exact confirmation.
+- Stop the resident evaluator before backup.
+- Ensure no validation job is writing `test-nccl.db`.
+- Reject backup while `-wal`, `-shm`, or `-journal` sidecars exist.
+- Verify the backup manifest before any cutover.
+- Never place derived tables inside `test-nccl.db`.
+- Never run two resident evaluator writers.
 
-    test_name                   TEXT NOT NULL,
-    test_definition_version     TEXT NOT NULL,
+## 12. Transition from the PostgreSQL implementation
 
-    gpu_model                   TEXT NOT NULL,
-    gpus_per_node               SMALLINT NOT NULL,
+Approval of this document should lead to a separate implementation change:
 
-    cuda_version                TEXT NOT NULL,
-    pytorch_version             TEXT NOT NULL,
-    compiled_nccl_version       TEXT NOT NULL,
-    runtime_nccl_package_version TEXT NOT NULL,
-    driver_version_group        TEXT,
-    topology_class              TEXT,
-    source_commit               TEXT NOT NULL,
-    image_digest                TEXT NOT NULL,
-    implementation_identity     TEXT NOT NULL,
+1. keep `test-nccl.db` and all historical artifacts unchanged;
+2. add native provenance columns to raw ingestion additively;
+3. restore an NCCL adapter in `cval.baselines`;
+4. add the two derived SQLite paths and schemas;
+5. implement candidate build, activation, classification, and exports;
+6. run one copied-DB rehearsal;
+7. run one exact-commit on-cluster NCCL validation;
+8. compare raw metrics and derived verdicts;
+9. only then remove PostgreSQL code, dependencies, Secrets, manifests, and docs;
+10. preserve any PostgreSQL data created before cutover as read-only evidence.
 
-    test_config_fingerprint     TEXT NOT NULL,
+Do not run a live migration or delete PostgreSQL/PVC data as part of document
+approval.
 
-    status                      TEXT NOT NULL
-                                CHECK (
-                                    status IN (
-                                        'COLLECTING',
-                                        'ACTIVE',
-                                        'DISABLED'
-                                    )
-                                ),
+## 13. Acceptance criteria
 
-    eligible_result_count       INTEGER NOT NULL DEFAULT 0,
-    last_built_sample_count     INTEGER NOT NULL DEFAULT 0,
+The SQLite implementation is ready when:
 
-    active_baseline_version_id  UUID,
+1. new NCCL runs still write authoritative `test-nccl.db` rows;
+2. the evaluator never writes the raw DB;
+3. incompatible profiles cannot share a baseline;
+4. no candidate is created below 40 reviewed samples;
+5. candidates never auto-activate;
+6. active baseline history is preserved through supersession;
+7. BUS_BW and LATENCY classifications are deterministic at all three numeric
+    boundaries; DNR is handled independently from numeric bands;
+8. overall status implements all five verdicts and uses the worse metric;
+9. exact reruns create no duplicate baseline or classification rows;
+10. restart recovery requires no queue repair;
+11. read/export commands are nonmutating;
+12. backup rejects active writers and SQLite sidecars;
+13. one real exact-commit cluster run produces raw and derived evidence;
+14. PostgreSQL is no longer required by the active evaluator path.
 
-    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
+## 14. Review decisions
 
-Add the foreign key to `active_baseline_version_id` after creating the baseline version table.
+Please approve or change these defaults before implementation:
 
-### 5.5 `nccl_baseline.baseline_version`
-
-Baseline versions are immutable.
-
-Never update thresholds of an existing active or superseded baseline version.
-
-```sql
-CREATE TABLE nccl_baseline.baseline_version (
-    baseline_version_id         UUID PRIMARY KEY,
-    profile_id                  UUID NOT NULL
-                                REFERENCES nccl_baseline.baseline_profile(profile_id),
-
-    version_number              INTEGER NOT NULL CHECK (version_number > 0),
-    status                      TEXT NOT NULL
-                                CHECK (
-                                    status IN (
-                                        'BUILDING',
-                                        'ACTIVE',
-                                        'SUPERSEDED',
-                                        'FAILED'
-                                    )
-                                ),
-
-    sample_count                INTEGER NOT NULL CHECK (sample_count >= 40),
-
-    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    activated_at                TIMESTAMPTZ,
-    failure_reason              TEXT,
-
-    supersedes_version_id       UUID
-                                REFERENCES nccl_baseline.baseline_version(
-                                    baseline_version_id
-                                ),
-
-    derivation_method_version   TEXT NOT NULL,
-
-    bus_bw_mean                 DOUBLE PRECISION,
-    bus_bw_p05                  DOUBLE PRECISION,
-    bus_bw_p50                  DOUBLE PRECISION,
-    bus_bw_p95                  DOUBLE PRECISION,
-
-    latency_mean                DOUBLE PRECISION,
-    latency_p05                 DOUBLE PRECISION,
-    latency_p50                 DOUBLE PRECISION,
-    latency_p95                 DOUBLE PRECISION,
-
-    UNIQUE (profile_id, version_number)
-);
-```
-
-Add:
-
-```sql
-ALTER TABLE nccl_baseline.baseline_profile
-ADD CONSTRAINT baseline_profile_active_version_fk
-FOREIGN KEY (active_baseline_version_id)
-REFERENCES nccl_baseline.baseline_version(baseline_version_id);
-```
-
-### 5.6 `nccl_baseline.baseline_version_sample`
-
-Store exact sample lineage.
-
-```sql
-CREATE TABLE nccl_baseline.baseline_version_sample (
-    baseline_version_id   UUID NOT NULL
-                          REFERENCES nccl_baseline.baseline_version(
-                              baseline_version_id
-                          )
-                          ON DELETE CASCADE,
-
-    result_id             BIGINT NOT NULL
-                          REFERENCES nccl_raw.node_result(result_id),
-
-    included              BOOLEAN NOT NULL,
-    exclusion_reason      TEXT,
-    added_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (baseline_version_id, result_id)
-);
-```
-
-This table must show exactly which raw results were included or excluded from every baseline version.
-
-### 5.7 `nccl_validation.health_class`
-
-```sql
-CREATE TABLE nccl_validation.health_class (
-    class_id       SMALLINT PRIMARY KEY CHECK (class_id BETWEEN 1 AND 5),
-    class_code     TEXT NOT NULL UNIQUE,
-    class_label    TEXT NOT NULL,
-    description    TEXT NOT NULL
-);
-```
-
-Seed with the five fixed health classes.
-
-### 5.8 `nccl_baseline.metric_threshold`
-
-Store five ranges for `BUS_BW` and five ranges for `LATENCY` per baseline version.
-
-```sql
-CREATE TABLE nccl_baseline.metric_threshold (
-    baseline_version_id   UUID NOT NULL
-                          REFERENCES nccl_baseline.baseline_version(
-                              baseline_version_id
-                          )
-                          ON DELETE CASCADE,
-
-    metric_name           TEXT NOT NULL
-                          CHECK (metric_name IN ('BUS_BW', 'LATENCY')),
-
-    class_id              SMALLINT NOT NULL
-                          REFERENCES nccl_validation.health_class(class_id),
-
-    lower_bound           DOUBLE PRECISION NOT NULL,
-    upper_bound           DOUBLE PRECISION,
-
-    unit                  TEXT NOT NULL,
-    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (
-        baseline_version_id,
-        metric_name,
-        class_id
-    ),
-
-    CHECK (lower_bound >= 0),
-    CHECK (upper_bound IS NULL OR lower_bound < upper_bound)
-);
-```
-
-The application must validate that ranges for a metric are:
-
-- Non-overlapping.
-- Contiguous.
-- Exactly five.
-- Covering all valid non-negative values.
-
-Example BUS_BW thresholds:
-
-```text
-Class 1: [47, infinity)
-Class 2: [42, 47)
-Class 3: [40, 42)
-Class 4: [35, 40)
-Class 5: [0, 35)
-```
-
-Latency is lower-is-better, so class 1 has the lowest range and class 5 the highest.
-
-### 5.9 `nccl_validation.evaluation_job`
-
-This is the durable work queue and replaces the raw result `classified` field.
-
-```sql
-CREATE TABLE nccl_validation.evaluation_job (
-    result_id          BIGINT PRIMARY KEY
-                       REFERENCES nccl_raw.node_result(result_id)
-                       ON DELETE CASCADE,
-
-    profile_id         UUID
-                       REFERENCES nccl_baseline.baseline_profile(profile_id),
-
-    status             TEXT NOT NULL
-                       CHECK (
-                           status IN (
-                               'PENDING',
-                               'WAITING_FOR_BASELINE',
-                               'PROCESSING',
-                               'RETRY',
-                               'COMPLETED',
-                               'FAILED'
-                           )
-                       ),
-
-    attempt_count      INTEGER NOT NULL DEFAULT 0,
-    claimed_by         TEXT,
-    claimed_at         TIMESTAMPTZ,
-    claim_token        UUID,
-    next_attempt_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at       TIMESTAMPTZ,
-    last_error         TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-State meaning:
-
-| State | Meaning |
+| Decision | Recommended default |
 |---|---|
-| `PENDING` | Ready to evaluate |
-| `WAITING_FOR_BASELINE` | Matching profile exists but no active baseline |
-| `PROCESSING` | Claimed by an evaluator |
-| `RETRY` | Temporary failure; retry later |
-| `COMPLETED` | Evaluation committed |
-| `FAILED` | Unrecoverable or retry limit reached |
-
-### 5.10 `nccl_validation.evaluation`
-
-Store one evaluation per raw result and baseline version.
-
-```sql
-CREATE TABLE nccl_validation.evaluation (
-    evaluation_id                     BIGINT
-                                      GENERATED ALWAYS AS IDENTITY
-                                      PRIMARY KEY,
-
-    result_id                         BIGINT NOT NULL
-                                      REFERENCES nccl_raw.node_result(result_id),
-
-    baseline_version_id               UUID NOT NULL
-                                      REFERENCES nccl_baseline.baseline_version(
-                                          baseline_version_id
-                                      ),
-
-    evaluation_scope                  TEXT NOT NULL
-                                      CHECK (
-                                          evaluation_scope IN (
-                                              'OUT_OF_SAMPLE',
-                                              'IN_SAMPLE',
-                                              'REEVALUATION'
-                                          )
-                                      ),
-
-    bus_bw_class                      SMALLINT NOT NULL
-                                      REFERENCES nccl_validation.health_class(
-                                          class_id
-                                      ),
-
-    bus_bw_severity_percentile        DOUBLE PRECISION NOT NULL
-                                      CHECK (
-                                          bus_bw_severity_percentile
-                                          BETWEEN 0 AND 100
-                                      ),
-
-    latency_class                     SMALLINT NOT NULL
-                                      REFERENCES nccl_validation.health_class(
-                                          class_id
-                                      ),
-
-    latency_severity_percentile       DOUBLE PRECISION NOT NULL
-                                      CHECK (
-                                          latency_severity_percentile
-                                          BETWEEN 0 AND 100
-                                      ),
-
-    overall_health_class              SMALLINT NOT NULL
-                                      REFERENCES nccl_validation.health_class(
-                                          class_id
-                                      ),
-
-    overall_severity_percentile       DOUBLE PRECISION NOT NULL
-                                      CHECK (
-                                          overall_severity_percentile
-                                          BETWEEN 0 AND 100
-                                      ),
-
-    evaluated_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    evaluator_version                 TEXT NOT NULL,
-
-    failure_code                      TEXT,
-    explanation                       TEXT,
-
-    UNIQUE (result_id, baseline_version_id),
-
-    CHECK (
-        overall_health_class = GREATEST(
-            bus_bw_class,
-            latency_class
-        )
-    ),
-    CHECK (
-        overall_severity_percentile = GREATEST(
-            bus_bw_severity_percentile,
-            latency_severity_percentile
-        )
-    )
-);
-```
-
-Do not duplicate node name, CUDA, PyTorch, GPU model, BUS_BW, LATENCY, baseline timestamp, or class labels here. Expose those through a joined view.
-
-## 6. Required indexes
-
-```sql
-CREATE INDEX node_result_node_time_idx
-ON nccl_raw.node_result(node_name, test_timestamp DESC);
-
-CREATE INDEX node_result_created_at_idx
-ON nccl_raw.node_result(created_at);
-
-CREATE INDEX baseline_profile_lookup_idx
-ON nccl_baseline.baseline_profile(
-    test_name,
-    test_definition_version,
-    gpu_model,
-    gpus_per_node,
-    cuda_version,
-    pytorch_version,
-    compiled_nccl_version,
-    runtime_nccl_package_version,
-    source_commit,
-    image_digest,
-    implementation_identity,
-    test_config_fingerprint
-);
-
-CREATE INDEX evaluation_job_pending_idx
-ON nccl_validation.evaluation_job(
-    next_attempt_at,
-    created_at
-)
-WHERE status IN ('PENDING', 'RETRY');
-
-CREATE INDEX evaluation_job_waiting_idx
-ON nccl_validation.evaluation_job(profile_id)
-WHERE status = 'WAITING_FOR_BASELINE';
-
-CREATE INDEX evaluation_result_idx
-ON nccl_validation.evaluation(result_id);
-
-CREATE INDEX evaluation_health_time_idx
-ON nccl_validation.evaluation(
-    overall_health_class,
-    evaluated_at DESC
-);
-```
-
-## 7. Result ingestion transaction
-
-When one NCCL run produces multiple node results:
-
-1. Insert one `test_run`.
-2. Insert all `node_result` rows.
-3. Insert all `nic_result` rows.
-4. Insert one `evaluation_job` per node result.
-5. Commit all of the above in one transaction.
-
-Use multi-row insert or `COPY` for large batches.
-
-Example behavior:
-
-```text
-BEGIN
-  insert test_run
-  insert node_result rows
-  insert nic_result rows
-  insert evaluation_job rows
-COMMIT
-```
-
-Insertion must be idempotent.
-
-Use:
-
-```text
-UNIQUE (run_id, node_name)
-```
-
-to prevent duplicate raw rows.
-
-## 8. Profile matching
-
-For each raw result:
-
-1. Join `node_result` to `test_run`.
-2. Build or compute a deterministic `test_config_fingerprint`.
-3. Match an existing `baseline_profile`.
-4. If none exists, create one with:
-   - `status = COLLECTING`
-   - `eligible_result_count = 0`
-   - `last_built_sample_count = 0`
-5. Store `profile_id` in the evaluation job.
-
-Profile creation must be concurrency-safe using a unique `profile_key` and `INSERT ... ON CONFLICT`.
-
-## 9. Baseline sample eligibility
-
-A result is eligible for baseline building only when:
-
-```text
-result_status = SUCCESS
-BUS_BW is not NULL
-LATENCY is not NULL
-BUS_BW > 0
-LATENCY > 0
-test environment matches the profile exactly
-result is not a duplicate
-no blocking NCCL/GPU/test error exists
-result passes configured sanity checks
-```
-
-Do not automatically allow every historical result into a baseline.
-
-At minimum exclude:
-
-- `TIMEOUT`
-- `TEST_ERROR`
-- `NO_RESULT`
-- Missing BUS_BW
-- Missing LATENCY
-- Invalid or impossible values
-- Mismatched test configuration
-
-The baseline builder must store included and excluded samples in `baseline_version_sample`.
-
-Avoid allowing degraded nodes to continuously pull the baseline lower. Support an eligibility policy such as:
-
-- Explicitly approved calibration data.
-- Known-good node cohort.
-- Robust outlier filtering.
-- Exclusion of known failed or remediated nodes.
-
-The exact statistical method should be versioned using `derivation_method_version`.
-
-### Calibration decision state machine
-
-Calibration is an append-only state machine serialized per `result_id` in
-PostgreSQL. The first decision is exactly version 1 `APPROVE`. Every later
-decision is `latest + 1` and alternates `APPROVE`/`REVOKE`; skipped versions,
-duplicate effective actions, and first-event revocation fail in a `BEFORE
-INSERT` trigger. Exact `decision_id` replay is idempotent, but its receipt
-reports the latest effective action rather than the historical event action.
-
-Runtime roles cannot insert ledger rows directly. They execute the
-security-definer `nccl_baseline.apply_calibration_decision(...)` function,
-whose search path is fixed to `pg_catalog`. If a revoked result is an included
-sample in the active version, that same transaction records an explicit
-failure reason, moves the version `ACTIVE → FAILED`, clears the profile active
-pointer, returns the profile to `COLLECTING`, and moves `PENDING`/`RETRY` jobs
-to `WAITING_FOR_BASELINE`. Raw rows, sample lineage, and existing evaluations
-are retained unchanged.
-
-## 10. Baseline creation and update rules
-
-### Initial build
-
-```text
-if active baseline does not exist
-and eligible_result_count >= 40
-then build the next version using 40 or more eligible samples
-```
-
-If the profile has no active pointer because its latest version is `FAILED`,
-the replacement version supersedes that latest failed version. The prior
-`last_built_sample_count` does not impose the +10 refinement gate while no
-active baseline exists.
-
-### Refinement
-
-```text
-if active baseline exists
-and eligible_result_count >= last_built_sample_count + 10
-then build next immutable version
-```
-
-Example:
-
-```text
-40 results → version 1
-50 results → version 2
-60 results → version 3
-70 results → version 4
-```
-
-Do not modify an existing baseline version in place.
-
-### Baseline build transaction
-
-For a profile:
-
-1. Acquire a transaction-level advisory lock for the profile.
-2. Re-read `eligible_result_count`.
-3. Re-check the 40/+10 rule.
-4. Select eligible results.
-5. Create a `BUILDING` baseline version.
-6. Insert sample lineage.
-7. Calculate distribution statistics.
-8. Calculate five BUS_BW ranges.
-9. Calculate five LATENCY ranges.
-10. Validate ranges.
-11. Mark the old active version `SUPERSEDED`.
-12. Mark the new version `ACTIVE`.
-13. Update:
-    - `baseline_profile.active_baseline_version_id`
-    - `baseline_profile.last_built_sample_count`
-    - `baseline_profile.status = ACTIVE`
-14. Move matching `WAITING_FOR_BASELINE` jobs to `PENDING`.
-15. Commit.
-
-Use a transaction-level advisory lock, for example:
-
-```sql
-SELECT pg_advisory_xact_lock(
-    hashtextextended(:profile_id::text, 0)
-);
-```
-
-Also rely on:
-
-```text
-UNIQUE (profile_id, version_number)
-```
-
-as the final correctness guarantee.
-
-## 11. Evaluation worker concurrency
-
-Multiple evaluator replicas must safely claim different jobs.
-
-Use:
-
-```sql
-SELECT result_id
-FROM nccl_validation.evaluation_job
-WHERE status IN ('PENDING', 'RETRY')
-    AND next_attempt_at <= now()
-ORDER BY created_at, result_id
-FOR UPDATE SKIP LOCKED
-LIMIT :batch_size;
-
--- For each locked result, generate a different UUID in the application:
-UPDATE nccl_validation.evaluation_job
-SET
-    status = 'PROCESSING',
-    claimed_by = :worker_id,
-    claimed_at = now(),
-    claim_token = :application_generated_uuid,
-    attempt_count = attempt_count + 1
-WHERE result_id = :result_id
-RETURNING result_id, attempt_count, claim_token;
-```
-
-Commit the claim immediately.
-
-Do not hold database row locks while running long calculations.
-Every later load, completion, waiting/failure transition, and retry must match
-the exact `claimed_by`, `attempt_count`, and `claim_token`. Recovery clears the
-token; reclaim always assigns a new application-generated UUID, even when the
-worker ID is reused.
-
-## 12. Evaluation logic
-
-For each claimed result:
-
-1. Read the raw node result and test-run metadata.
-2. Resolve the matching profile.
-3. Fetch the profile’s active baseline version.
-4. If no active baseline exists:
-   - Set job to `WAITING_FOR_BASELINE`.
-   - Do not create an evaluation row.
-5. If raw `result_status != SUCCESS`:
-   - Store `failure_code`.
-   - Assign class 5 only if product requirements explicitly map the failure to critical health.
-   - Otherwise mark the job `FAILED` and retain the raw failure state.
-6. Classify BUS_BW.
-7. Classify LATENCY.
-8. Calculate severity percentiles.
-9. Calculate overall class and overall severity.
-10. Insert the evaluation and complete the job in one transaction.
-
-### Metric classification
-
-BUS_BW is higher-is-better.
-
-Latency is lower-is-better.
-
-Class lookup:
-
-```sql
-SELECT class_id
-FROM nccl_baseline.metric_threshold
-WHERE baseline_version_id = :baseline_version_id
-  AND metric_name = :metric_name
-  AND :value >= lower_bound
-  AND (upper_bound IS NULL OR :value < upper_bound);
-```
-
-Exactly one threshold row must match.
-
-### Severity percentiles
-
-Use normalized severity percentiles where:
-
-```text
-0   = very healthy
-50  = near baseline median
-100 = very unhealthy
-```
-
-BUS_BW:
-
-```text
-higher BUS_BW → lower severity percentile
-lower BUS_BW  → higher severity percentile
-```
-
-Latency:
-
-```text
-lower latency  → lower severity percentile
-higher latency → higher severity percentile
-```
-
-Overall:
-
-```text
-overall_severity_percentile = GREATEST(
-    bus_bw_severity_percentile,
-    latency_severity_percentile
-)
-```
-
-Do not average percentiles because averaging can hide a critical metric.
-
-### Evaluation scope
-
-Use:
-
-- `IN_SAMPLE`: result was used to build the baseline version.
-- `OUT_OF_SAMPLE`: new production result evaluated against an existing baseline.
-- `REEVALUATION`: historical result intentionally evaluated against another baseline version.
-
-The first 40 calibration results should not be represented as independent production validation. They may be backfilled as `IN_SAMPLE`.
-
-## 13. Evaluation completion transaction
-
-The evaluation insert and job completion must be atomic.
-
-```sql
-BEGIN;
-
-INSERT INTO nccl_validation.evaluation (...)
-VALUES (...)
-ON CONFLICT (result_id, baseline_version_id)
-DO NOTHING;
-
--- On conflict, read and compare every immutable evaluation value exactly.
-
-UPDATE nccl_validation.evaluation_job
-SET
-    status = 'COMPLETED',
-    completed_at = now(),
-    claimed_by = NULL,
-    claimed_at = NULL,
-        claim_token = NULL,
-    last_error = NULL
-WHERE result_id = :result_id
-    AND status = 'PROCESSING'
-    AND claimed_by = :worker_id
-    AND attempt_count = :attempt_count
-    AND claim_token = :claim_token;
-
-COMMIT;
-```
-
-Require exactly one job row to update. The evaluation insert and claim
-completion roll back together on a stale receipt; immutable conflicts must
-match the existing evaluation exactly.
-
-## 14. Retry and stale claim handling
-
-If evaluation fails temporarily:
-
-```text
-status = RETRY
-claimed_by = NULL
-claimed_at = NULL
-claim_token = NULL
-last_error = error text
-next_attempt_at = backoff time
-```
-
-Use exponential backoff with a maximum delay.
-
-Example:
-
-```text
-attempt 1 → 2 seconds
-attempt 2 → 4 seconds
-attempt 3 → 8 seconds
-...
-maximum → 5 minutes
-```
-
-After a configured maximum attempt count, set:
-
-```text
-status = FAILED
-```
-
-Recover abandoned processing jobs:
-
-```sql
-UPDATE nccl_validation.evaluation_job
-SET
-    status = 'RETRY',
-    claimed_by = NULL,
-    claimed_at = NULL,
-    claim_token = NULL,
-    next_attempt_at = now(),
-    last_error = 'Worker claim expired'
-WHERE status = 'PROCESSING'
-  AND claimed_at < now() - INTERVAL '5 minutes';
-```
-
-## 15. Read views
-
-Create a view that exposes the final readable result without duplicating data:
-
-```text
-nccl_validation.latest_result_view
-```
-
-The view should include:
-
-- Node name.
-- Test timestamp.
-- LA timestamp.
-- Test-run metadata.
-- Profile ID.
-- Profile key.
-- Baseline version ID.
-- Baseline version number.
-- Baseline activation timestamp.
-- BUS_BW.
-- BUS_BW class ID and label.
-- BUS_BW severity percentile.
-- Latency.
-- Latency class ID and label.
-- Latency severity percentile.
-- Overall class ID and label.
-- Overall severity percentile.
-- Evaluation scope.
-- Evaluation timestamp.
-- Failure code.
-- Explanation.
-
-Also create a raw-result status view exposing a derived Boolean:
-
-```text
-classified = evaluation_job.status = 'COMPLETED'
-```
-
-Do not persist this Boolean in `node_result`.
-
-## 16. Configuration
-
-Use application configuration or environment variables for:
-
-```text
-DATABASE_URL
-EVALUATOR_BATCH_SIZE
-EVALUATOR_POLL_INTERVAL_SECONDS
-EVALUATOR_MAX_ATTEMPTS
-EVALUATOR_STALE_CLAIM_SECONDS
-BASELINE_MINIMUM_RESULTS=40
-BASELINE_UPDATE_INCREMENT=10
-BASELINE_BUILDER_INTERVAL_SECONDS
-EVALUATOR_VERSION
-DERIVATION_METHOD_VERSION
-```
-
-Do not hard-code database credentials.
-
-## 17. Logging and observability
-
-Use structured logs containing:
-
-- `run_id`
-- `result_id`
-- `node_name`
-- `profile_id`
-- `baseline_version_id`
-- `worker_id`
-- `job_status`
-- `attempt_count`
-- `bus_bw_class`
-- `latency_class`
-- `overall_health_class`
-- Duration
-- Error code
-
-Expose metrics such as:
-
-```text
-nccl_results_ingested_total
-nccl_evaluation_jobs_pending
-nccl_evaluation_jobs_waiting_for_baseline
-nccl_evaluation_jobs_processing
-nccl_evaluation_jobs_failed
-nccl_evaluations_completed_total
-nccl_baseline_profiles_collecting
-nccl_baseline_versions_created_total
-nccl_evaluation_duration_seconds
-nccl_baseline_build_duration_seconds
-```
-
-## 18. Suggested application modules
-
-```text
-src/
-├── config/
-├── db/
-│   ├── migrations/
-│   ├── models/
-│   └── repositories/
-├── ingestion/
-│   ├── test_run_ingester
-│   ├── node_result_ingester
-│   └── nic_result_ingester
-├── baseline/
-│   ├── profile_matcher
-│   ├── eligibility_filter
-│   ├── baseline_builder
-│   ├── threshold_builder
-│   └── percentile_model
-├── evaluation/
-│   ├── job_claimer
-│   ├── classifier
-│   ├── evaluator_worker
-│   └── retry_handler
-├── views/
-├── telemetry/
-└── tests/
-```
-
-The implementation language may be Python or Go. Prefer:
-
-- SQLAlchemy/psycopg for Python.
-- pgx/sqlc for Go.
-- Alembic, Goose, or another migration framework.
-- Explicit transactions.
-- Parameterized SQL.
-- Bounded connection pools.
-
-## 19. Native ingestion boundary
-
-Copied-SQLite conversion is not supported. Validation jobs build native
-normalized outbox payloads from canonical result, runtime evidence, and NCCL
-summary files. The raw summary latency is converted from milliseconds to
-canonical microseconds during native payload construction. PostgreSQL accepts
-only exact-provenance native payloads; historical `test-nccl.db` remains
-authoritative raw evidence and is not an evaluator input.
-
-## 20. Database ownership and destructive guards
-
-The runtime/worker database role must not own any database, NCCL schema, or
-relation. A reused role is accepted only after checking that it has no
-superuser, create-database, create-role, replication, or `BYPASSRLS` attribute
-and no memberships. Unsafe reuse fails before password rotation or grants; the
-provisioner never silently removes ownership or memberships. Both create and
-safe rotation explicitly apply `NOBYPASSRLS`.
-Create schemas and migrations with a dedicated migration owner, then grant the
-runtime role only the required schema usage, table DML, and sequence usage.
-Do not grant `CREATE`, ownership, trigger bypass, or schema drop privileges to
-the runtime role. For example, adapt these grants to deployment-managed role
-names:
-
-```sql
-GRANT USAGE ON SCHEMA nccl_raw, nccl_baseline, nccl_validation TO cval_nccl_runtime;
-GRANT SELECT, INSERT ON nccl_raw.test_run, nccl_raw.node_result,
-    nccl_raw.nic_result, nccl_raw.outbox_receipt TO cval_nccl_runtime;
-GRANT SELECT, UPDATE ON nccl_raw.outbox_scan_cursor TO cval_nccl_runtime;
-GRANT SELECT ON nccl_baseline.calibration_decision TO cval_nccl_runtime;
-REVOKE INSERT ON nccl_baseline.calibration_decision FROM cval_nccl_runtime;
-GRANT EXECUTE ON FUNCTION nccl_baseline.apply_calibration_decision(
-    UUID, BIGINT, TEXT, TEXT, TEXT, JSONB
-) TO cval_nccl_runtime;
-```
-
-Append-only/immutable triggers remain authoritative. `BEFORE TRUNCATE` guards
-cover the migration ledger and every raw, baseline, queue, lookup, and
-evaluation table. Disposable test cleanup is allowed only for database names
-matching `cval_test_[a-z0-9_]+` and requires the exact cleanup confirmation
-token.
-
-## 21. Required tests
-
-### Database tests
-
-- Foreign-key enforcement.
-- Unique `(run_id, node_name)`.
-- Unique `(profile_id, version_number)`.
-- Unique `(result_id, baseline_version_id)`.
-- Threshold ranges do not overlap.
-- Threshold ranges are contiguous.
-- Exactly five thresholds exist per metric/version.
-- Overall class equals the worse metric class.
-
-### Baseline tests
-
-- No baseline before 40 eligible results.
-- Version 1 created at 40.
-- No new version at 41–49.
-- Version 2 created at 50.
-- Previous version becomes `SUPERSEDED`.
-- Historical evaluations remain linked to old versions.
-- Two concurrent builders create only one version.
-
-### Evaluator tests
-
-- Multiple workers do not claim the same job.
-- Missing baseline produces `WAITING_FOR_BASELINE`.
-- Completed evaluation updates job in the same transaction.
-- Retry does not create a duplicate evaluation.
-- Stale processing jobs are recovered.
-- BUS_BW exact boundary values map to one class.
-- Latency exact boundary values map to one class.
-- Overall class uses the worse metric.
-- Overall percentile uses the worse percentile.
-
-### Ingestion tests
-
-- Re-ingesting the same run/node is idempotent.
-- Multiple node rows can be inserted in one transaction.
-- Failure during ingestion rolls back raw rows and evaluation jobs together.
-- NIC data is normalized correctly.
-
-## 22. Acceptance criteria
-
-The implementation is complete when:
-
-1. PostgreSQL migrations create all schemas, tables, constraints, indexes, and views.
-2. A batch NCCL result can be ingested atomically.
-3. Each node result creates one evaluation job.
-4. A new profile is created automatically for a new compatible environment.
-5. Profiles remain `COLLECTING` until 40 eligible results exist.
-6. Version 1 is built at 40 eligible results.
-7. New immutable versions are built every additional 10 eligible results.
-8. Waiting jobs become pending after baseline activation.
-9. Multiple evaluator replicas safely process jobs concurrently.
-10. BUS_BW and LATENCY receive classes 1–5.
-11. Overall class and severity use the worse metric.
-12. Evaluations store the exact baseline version used.
-13. Retries are idempotent.
-14. Raw data and historical evaluations are never overwritten.
-15. The readable validation view returns all expected node, baseline, metric, class, percentile, and status fields.
-16. Unit, integration, concurrency, and migration tests pass.
-
-## 23. Example end-to-end result
-
-```text
-Raw result
-  result_id: 1001
-  node: slc01-cl02-hgx-0101
-  BUS_BW: 44.5172 GB/s
-  LATENCY: 628.9703 us
-
-Matched profile
-  profile_id: PROF-B200-C132-PT212-V1
-
-Active baseline
-  baseline_version_id: BASE-B200-003
-  version_number: 3
-  sample_count: 60
-
-Classification
-  BUS_BW class: 2
-  BUS_BW severity percentile: 37
-  LATENCY class: 2
-  LATENCY severity percentile: 46
-
-Final
-  overall_health_class: 2
-  overall_severity_percentile: 46
-  evaluation_scope: OUT_OF_SAMPLE
-  evaluation_job.status: COMPLETED
-```
-
-## 24. Implementation status and field mapping
-
-Implemented as the self-contained optional `cval.nccl_eval` package. The base
-package has no Psycopg import; PostgreSQL support is installed through the
-`postgresql` project extra. Production-preparation manifests fail closed with
-zero PostgreSQL and evaluator replicas. NCCL images are reviewed digest pins;
-Git refs and the dedicated RWO storage class remain placeholders. The
-Python 3.12 lock includes exact hashes for all transitive/bootstrap versions,
-including setuptools, and has passed a clean bootstrap in the pinned image.
-Validation jobs never receive PostgreSQL credentials. They create immutable
-native `pending/<run>.json` before authoritative raw SQLite writes and an immutable
-`committed/<run>.json` marker after all writes succeed. The non-root NCCL
-process in the resident evaluator records durable INGESTED/REJECTED receipts,
-builds due baselines, recovers stale claims, evaluates the queue, and never
-deletes outbox files. See `docs/evals/nccl-rollout.md`.
-
-CLI operations provide nonwriting inspection. Exact apply confirmations include `schema`,
-`grant-runtime`, `ingest`, `emit-outbox`, `commit-outbox`, `ingest-outbox`,
-`calibration`, `build-baselines`, `evaluate`, `worker`,
-`resident`, and `recover`.
-Confirmation is checked before `DATABASE_URL` is read or a connection pool is
-created. `status` and inspection reports are read-only. Pools use explicit
-open/wait/close and bounded sizes; repository operations use explicit
-transactions.
-
-Normalized JSON maps as follows:
-
-| JSON input | PostgreSQL destination |
-|---|---|
-| `test_run.run_id` and execution timestamps | `nccl_raw.test_run` identity/timestamps |
-| test name and test-definition version | raw run plus baseline profile identity |
-| CUDA, PyTorch, compiled NCCL, runtime NCCL package, driver version | raw run evidence |
-| GPU model/count, driver compatibility group, topology class | raw run plus baseline profile identity |
-| collective, datatype, reduction, message size, iterations, nullable samples, warmup, latency unit, canonical config | `test_config` plus type-aware SHA-256 run/profile fingerprint |
-| each `node_results[]` item | one immutable `nccl_raw.node_result` and one durable evaluation job |
-| each `nics[]` item | one normalized `nccl_raw.nic_result` row |
-| latest append-only `calibration_decision` | calibration eligibility; no decision is excluded |
-
-The NCCL descriptor supplies only material test constants. GPU model,
-CUDA/PyTorch/compiled NCCL/runtime NCCL package versions, driver compatibility group, and topology class must
-come from runtime evidence in the ingestion payload. The descriptor's driver
-and topology source values are `runtime_evidence`; no live hardware versions
-are hard-coded.
-
-Native rows have no calibration decision and remain excluded until an
-append-only APPROVE event is applied.
-
-The migration creates only `nccl_raw`, `nccl_baseline`, and
-`nccl_validation` inside the connected `cval` database. It includes a checksum
-ledger, fixed class seed, FKs/checks/uniques/indexes/views, append-only raw
-guards, immutable baseline transition guards, exact sample lineage, and a
-deferred five-range semantic coverage constraint. Activation also validates
-both metric sets, included lineage count, supersession, the sole-active-version
-index, and profile pointer consistency. Baseline builds serialize per profile
-with `pg_advisory_xact_lock`; migration ledger inspection uses its own
-transaction advisory lock. Queue claims use short `FOR UPDATE SKIP LOCKED`
-transactions and per-row application UUID fencing tokens.
-Calibration inserts serialize per result and enforce contiguous alternating
-actions in SQL. Runtime callers execute only the security-definer calibration
-function; reused runtime roles are rejected if they own database-local objects,
-hold memberships/default privileges, or have direct ACLs outside the exact
-runtime allowlist. Included-sample revocation atomically fails the active
-baseline, clears the profile pointer, and parks ready/retry jobs while
-preserving history.
-The exact unresolved live prerequisites are maintained in
-`docs/evals/nccl-rollout.md`.
+| Verdict model | `improved` / `normal` / `underperforming` / `degraded` / `dnr` |
+| Initial calibration size | 40 explicitly reviewed results |
+| Candidate refresh | every additional 10 eligible results |
+| Activation | manual only |
+| Historical rows with incomplete profile facts | excluded unless explicitly selected |
+| Derived files | separate baseline and classification SQLite DBs |
+| Evaluator writers | exactly one resident writer |
+| Journal mode on shared PVC | rollback journal, not WAL |
+
+The main simplification is intentional: raw SQLite evidence plus two derived
+SQLite files and one resident writer. Everything else should use existing c-val
+baseline, classification, backup, and export machinery.
