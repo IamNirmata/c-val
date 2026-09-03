@@ -421,11 +421,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     db_add_run.add_argument("--db-path", default=active_config.storage.validation_db_path)
     db_add_run.set_defaults(handler=handle_db_add_run_results)
 
-    db_preflight_compat = subparsers.add_parser("db-preflight-result")
-    db_preflight_compat.add_argument("--result-json", type=Path, required=True)
-    db_preflight_compat.add_argument("--result-digest", required=True)
-    db_preflight_compat.set_defaults(handler=handle_db_preflight_result)
-
     db_add_storage = subparsers.add_parser("db-add-storage-result")
     db_add_storage.add_argument("node")
     db_add_storage.add_argument("timestamp")
@@ -1300,28 +1295,6 @@ def handle_db_add_run_results(args: argparse.Namespace) -> int:
     print(f"Added atomic validation run results: {args.node} {timestamp}")
     return 0
 
-
-
-def handle_db_preflight_result(args: argparse.Namespace) -> int:
-    """Validate result provenance and current raw DB targets without writing."""
-
-    from cval.storage.write_provenance import authorize_result_write
-
-    try:
-        authorization = authorize_result_write(
-            args.result_json,
-            result_digest=args.result_digest,
-            config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
-            config=args.cval_config,
-        )
-    except Exception as exc:  # noqa: BLE001 - hidden in-pod boundary
-        print(f"Raw DB write preflight failed: {exc}", file=sys.stderr)
-        return 1
-    print(
-        f"Raw DB write preflight passed: "
-        f"{authorization.result.node}-{authorization.result.timestamp}"
-    )
-    return 0
 
 
 def handle_db_add_storage_result(args: argparse.Namespace) -> int:

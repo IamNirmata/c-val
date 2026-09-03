@@ -104,6 +104,7 @@ import os
 from pathlib import Path
 
 from cval.config import load_config_snapshot
+from cval.storage.write_provenance import authorize_result_write
 from cval.validation.results import (
     ValidationResultV2,
     load_validation_result,
@@ -213,6 +214,12 @@ actual_result_digest = (
 )
 if os.environ.get("RESULT_DIGEST") != actual_result_digest:
     raise SystemExit("Result digest changed after structured validation")
+authorize_result_write(
+    Path(os.environ["CVAL_RESULT_JSON_FILE"]),
+    result_digest=actual_result_digest,
+    config_snapshot_b64=os.environ["CVAL_CONFIG_SNAPSHOT_B64"],
+    config=config,
+)
 PY
 }
 
@@ -469,14 +476,6 @@ if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
             NCCL_RUNTIME_EVIDENCE_FILE="$expected_runtime_evidence"
         fi
     assert_snapshot_runtime
-fi
-
-# Validate result/config provenance and every current raw DB target before events.
-if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
-    PYTHONPATH="$CVAL_REPO_DIR" python3 -m cval.cli \
-        db-preflight-result \
-        --result-json "$CVAL_RESULT_JSON_FILE" \
-        --result-digest "$result_digest"
 fi
 
 # Bind the complete result digest before the first current DB write.

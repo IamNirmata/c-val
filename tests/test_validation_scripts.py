@@ -195,6 +195,7 @@ printf '%s\n' \
 
         self.assertIn('Loading structured test result state from $CVAL_RESULT_JSON_FILE', script)
         self.assertIn('from cval.validation.results import load_validation_result', script)
+        self.assertIn('from cval.storage.write_provenance import authorize_result_write', script)
         self.assertIn('validation_result_to_env_lines', script)
         self.assertIn('PYTHONPATH="$CVAL_REPO_DIR"', script)
         self.assertNotIn('source "$CVAL_RESULT_ENV_FILE"', script)
@@ -508,11 +509,15 @@ printf '%s\n' \
         classify_script = (
             REPO_ROOT / "scripts" / "cval-baseline-classify.sh"
         ).read_text(encoding="utf-8")
+        common_script = (
+            REPO_ROOT / "scripts" / "cval-baseline-common.sh"
+        ).read_text(encoding="utf-8")
 
         for script in (build_script, classify_script):
-            self.assertIn("from cval.config import config_to_dict, load_config", script)
-            self.assertIn("config_to_dict(load_config(Path(path)))", script)
-            self.assertNotIn("tomllib.loads", script)
+            self.assertIn('source "$SCRIPT_DIR/cval-baseline-common.sh"', script)
+        self.assertIn("from cval.config import config_to_dict, load_config", common_script)
+        self.assertIn("config_to_dict(load_config(Path(path)))", common_script)
+        self.assertNotIn("tomllib.loads", common_script)
         self.assertIn("config_value tests.dltest.settings test_plan", build_script)
 
     def test_ibbw_monitor_reports_gbps(self) -> None:
