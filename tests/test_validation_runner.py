@@ -12,12 +12,42 @@ import unittest
 from pathlib import Path
 
 from cval.config import load_config
+from cval.validation.execution import TestPaths
 from cval.validation.registry import load_test_registry
 from cval.validation.results import ValidationResultV2, load_validation_result
-from cval.validation.runner import run_validation_tests
+from cval.validation.runner import _test_environment, run_validation_tests
 
 
 class ValidationRunnerTests(unittest.TestCase):
+    def test_preserves_supervisor_supplied_nccl_ibbw_path(self) -> None:
+        root = Path("/validation")
+        run_dir = root / "validation_tests/nccl/runs/node-a/node-a-123"
+        log_dir = root / "logs/nccl/node-a/node-a-123"
+        test_paths = TestPaths(
+            log_dir=log_dir,
+            stdout=log_dir / "stdout.log",
+            stderr=log_dir / "stderr.log",
+            events=log_dir / "events.jsonl",
+            run_dir=run_dir,
+            result=run_dir / "result.json",
+            summary=run_dir / "summary.json",
+            artifacts=run_dir / "artifacts",
+            workload_log=log_dir / "workload.log",
+        )
+        inherited = "/proc/self/fd/26/ibbw-node-a-123.log"
+
+        environment = _test_environment(
+            {"NCCL_IBBW_LOG_FILE": inherited},
+            registered_test=load_config().tests.registry.require("nccl"),
+            test_paths=test_paths,
+            validation_root=root,
+            node="node-a",
+            timestamp=123,
+            run_id="node-a-123",
+        )
+
+        self.assertEqual(environment["NCCL_IBBW_LOG_FILE"], inherited)
+
     def test_runs_dynamic_tests_in_order_and_preserves_canonical_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

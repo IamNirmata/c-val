@@ -672,7 +672,7 @@ def _test_environment(
         )
         ibbw_alias = aliases.get("ibbw_log")
         if ibbw_alias:
-            environment[ibbw_alias] = str(test_paths.artifacts / "ibbw.log")
+            environment.setdefault(ibbw_alias, str(test_paths.artifacts / "ibbw.log"))
     return environment
 
 
