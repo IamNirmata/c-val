@@ -12,7 +12,6 @@ import shutil
 from cval.storage.ingest import (
     NCCL_IB_PORT_COLUMNS,
     NCCL_LATEST_STATUS_VIEW,
-    NCCL_RANKING_VIEW,
     add_nccl_health_from_summary as _add_nccl_health_from_summary,
     add_nccl_health_result as _add_nccl_health_result,
     add_storage_result as _add_storage_result,
@@ -837,7 +836,7 @@ class NcclHealthIngestTests(unittest.TestCase):
         self.assertEqual(row[3:10], (20, "pytorch:26.05-py3", "13.0", "2.9.0", 26, 44.5, 628.2))
         self.assertEqual(row[10:], (46.1, 46.3))
 
-    def test_latest_status_and_five_run_ranking_views(self) -> None:
+    def test_latest_status_view_contains_raw_latest_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "nccl.db"
             for index, (bus_bw, latency) in enumerate(
@@ -872,10 +871,6 @@ class NcclHealthIngestTests(unittest.TestCase):
                     f"SELECT Node, timestamp, BUS_BW FROM {NCCL_LATEST_STATUS_VIEW} "
                     "ORDER BY Node"
                 ).fetchall()
-                ranking = connection.execute(
-                    f"SELECT node, bus_bw, bus_bw_pctl, latency, latency_pctl, mlx5_0 "
-                    f"FROM {NCCL_RANKING_VIEW}"
-                ).fetchall()
                 views = {
                     row[0]
                     for row in connection.execute(
@@ -884,10 +879,7 @@ class NcclHealthIngestTests(unittest.TestCase):
                 }
 
         self.assertEqual(latest, [("node-a", 106, 60.0), ("node-b", 203, 90.0)])
-        self.assertEqual([row[0] for row in ranking], ["node-a", "node-b"])
-        self.assertEqual(ranking[0], ("node-a", 40.0, 0.0, 30.0, 100.0, 4.0))
-        self.assertEqual(ranking[1], ("node-b", 80.0, 100.0, 8.0, 0.0, 8.0))
-        self.assertEqual(views, {NCCL_LATEST_STATUS_VIEW, NCCL_RANKING_VIEW})
+        self.assertEqual(views, {NCCL_LATEST_STATUS_VIEW})
 
     def test_add_nccl_health_rejects_invalid_summary_before_db_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

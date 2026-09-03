@@ -35,7 +35,6 @@ DEFAULT_NCCL_DB_PATH = _STORAGE_DEFAULTS.nccl_db_path
 NCCL_HEALTH_TABLE = "IB_HEALTH"
 NCCL_IB_PORT_COLUMNS = tuple(f"mlx5_{index}" for index in range(14))
 NCCL_LATEST_STATUS_VIEW = "LATEST_NODE_STATUS"
-NCCL_RANKING_VIEW = "NODE_RANKING"
 NCCL_PORT_LABEL_PATTERN = re.compile(
     r"^mlx5_(?:0|[1-9][0-9]*)(?:\.(?:[2-9]|[1-9][0-9]+))?$"
 )
@@ -135,21 +134,15 @@ def _create_nccl_health_table(connection: sqlite3.Connection) -> None:
 
 def _create_nccl_health_views(
     connection: sqlite3.Connection,
-    *,
-    replace: bool = False,
 ) -> None:
-    """Create the latest-node and rolling five-run ranking views."""
-
-    if replace:
-        connection.execute(f"DROP VIEW IF EXISTS {NCCL_LATEST_STATUS_VIEW}")
-        connection.execute(f"DROP VIEW IF EXISTS {NCCL_RANKING_VIEW}")
+    """Create the raw latest-node view."""
 
     for sql in nccl_health_view_sql().values():
         connection.execute(sql)
 
 
 def nccl_health_view_sql() -> dict[str, str]:
-    """Return the exact stable SQL definitions of both current views."""
+    """Return the stable raw latest-row SQL definition."""
 
     latest = f"""
         CREATE VIEW IF NOT EXISTS {NCCL_LATEST_STATUS_VIEW} AS
@@ -165,50 +158,7 @@ def nccl_health_view_sql() -> dict[str, str]:
         ORDER BY health.Node
         """
 
-    port_averages = ",\n                ".join(
-        f"AVG({column}) AS {column}" for column in NCCL_IB_PORT_COLUMNS
-    )
-    port_select = ",\n            ".join(NCCL_IB_PORT_COLUMNS)
-    ranking = f"""
-        CREATE VIEW IF NOT EXISTS {NCCL_RANKING_VIEW} AS
-        WITH recent AS (
-            SELECT
-                health.*,
-                ROW_NUMBER() OVER (
-                    PARTITION BY Node
-                    ORDER BY timestamp DESC
-                ) AS recency
-            FROM {NCCL_HEALTH_TABLE} AS health
-        ),
-        averages AS (
-            SELECT
-                Node AS node,
-                AVG(BUS_BW) AS bus_bw,
-                AVG(LATENCY) AS latency,
-                {port_averages}
-            FROM recent
-            WHERE recency <= 5
-            GROUP BY Node
-        ),
-        ranked AS (
-            SELECT
-                node,
-                bus_bw,
-                ROUND(100.0 * PERCENT_RANK() OVER (ORDER BY bus_bw), 2) AS bus_bw_pctl,
-                latency,
-                ROUND(100.0 * PERCENT_RANK() OVER (ORDER BY latency), 2) AS latency_pctl,
-                {port_select}
-            FROM averages
-            WHERE bus_bw IS NOT NULL AND latency IS NOT NULL
-        )
-        SELECT *
-        FROM ranked
-        ORDER BY bus_bw ASC, node ASC
-        """
-    return {
-        NCCL_LATEST_STATUS_VIEW: latest,
-        NCCL_RANKING_VIEW: ranking,
-    }
+    return {NCCL_LATEST_STATUS_VIEW: latest}
 
 
 def prepare_nccl_health_schema(
