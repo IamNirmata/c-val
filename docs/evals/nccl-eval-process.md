@@ -387,7 +387,7 @@ cval baseline classify --test-type nccl --store-results
 
 # read/export
 cval baseline list --test-type nccl
-cval classifications --test nccl --type csv
+cval results --classifications-only --test nccl --type csv
 cval results --test nccl --type csv
 ```
 

@@ -6,7 +6,7 @@ validation, read-only monitoring, and structured result inspection. Handlers are
 they parse arguments, call package modules, and format output.
 
 Public commands: config, tests, nodes, validate, status, plan, run, jobs, results,
-classifications, baseline, and nccl-eval.
+baseline, and nccl-eval.
 The db-add-* commands are in-pod ingestion hooks and stay out of --help.
 """
 
@@ -186,7 +186,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         required=True,
         metavar=(
             "{config,tests,nodes,validate,status,plan,run,jobs,results,"
-            "classifications,baseline,nccl-eval}"
+            "baseline,nccl-eval}"
         ),
     )
 
@@ -357,7 +357,16 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
     results.add_argument(
         "--test",
-        choices=["overall", "all", *target_catalog.names_for(RESULTS_EXPORT)],
+        choices=[
+            "overall",
+            "all",
+            *dict.fromkeys(
+                (
+                    *target_catalog.names_for(RESULTS_EXPORT),
+                    *target_catalog.names_for(CLASSIFICATIONS_EXPORT),
+                )
+            ),
+        ],
         required=True,
     )
     results.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
@@ -369,10 +378,16 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "--classification-db-path",
         help="Override one classification DB; defaults to per-target DBs",
     )
-    results.add_argument(
+    classification_mode = results.add_mutually_exclusive_group()
+    classification_mode.add_argument(
         "--no-classification",
         action="store_true",
         help="Do not join latest baseline classification columns into the CSV",
+    )
+    classification_mode.add_argument(
+        "--classifications-only",
+        action="store_true",
+        help="Export only latest baseline classification rows",
     )
     results.add_argument(
         "--nccl-db-path",
@@ -390,26 +405,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Do not join NCCL/storage metric columns into the CSV",
     )
     results.set_defaults(handler=handle_results)
-
-    classifications = subparsers.add_parser(
-        "classifications",
-        help="Export latest baseline classification verdicts to a local CSV",
-    )
-    classifications.add_argument(
-        "--test",
-        choices=["all", *target_catalog.names_for(CLASSIFICATIONS_EXPORT)],
-        default="all",
-    )
-    classifications.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
-    classifications.add_argument("--output-dir", type=Path, default=Path.cwd())
-    classifications.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
-    classifications.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    classifications.add_argument(
-        "--db-path",
-        default=None,
-        help="Override one classification DB; defaults to per-target DBs",
-    )
-    classifications.set_defaults(handler=handle_classifications)
 
     # In-pod ingestion commands; added without `help` so they stay out of --help.
     db_add_result = subparsers.add_parser("db-add-result")
@@ -1102,13 +1097,41 @@ def handle_results(args: argparse.Namespace) -> int:
     if args.result_type != "csv":
         raise ValueError("Only --type csv is currently supported")
 
+    test = args.test.lower()
+    if args.classifications_only:
+        from cval.storage.classification_status import (
+            filter_classification_rows,
+            write_classifications_csv,
+        )
+
+        catalog = build_operational_target_catalog(args.cval_config.tests.registry)
+        if test != "all":
+            resolve_operational_target(args.cval_config, test, CLASSIFICATIONS_EXPORT)
+        classifications = get_latest_classification_rows(
+            pod=args.pod,
+            namespace=args.namespace,
+            db_path=args.classification_db_path,
+            test_type=(None if test == "all" else test),
+            config=args.cval_config,
+        )
+        if test == "all":
+            enabled_targets = set(catalog.names_for(CLASSIFICATIONS_EXPORT))
+            classifications = [
+                row for row in classifications if row.test_type in enabled_targets
+            ]
+        selected = filter_classification_rows(classifications, test)
+        output_path = write_classifications_csv(
+            classifications, test, output_dir=args.output_dir
+        )
+        print(f"Wrote {len(selected)} {test} classification row(s) to {output_path}")
+        return 0
+
     rows = get_latest_status_rows(
         pod=args.pod,
         namespace=args.namespace,
         db_path=args.db_path,
         config=args.cval_config,
     )
-    test = args.test.lower()
     classifications = []
     if not args.no_classification and test != "nccl":
         selected_test = test
@@ -1177,42 +1200,6 @@ def handle_results(args: argparse.Namespace) -> int:
         output_label = export.row_label or f"{target.name} latest result"
     print(f"Wrote {len(selected)} {output_label} row(s) to {output_path}")
     return 0
-
-
-def handle_classifications(args: argparse.Namespace) -> int:
-    """Export latest baseline classification verdicts to a local CSV."""
-    from cval.storage.classification_status import (
-        filter_classification_rows,
-        get_latest_classification_rows,
-        write_classifications_csv,
-    )
-
-    if args.result_type != "csv":
-        raise ValueError("Only --type csv is currently supported")
-
-    catalog = build_operational_target_catalog(args.cval_config.tests.registry)
-    if args.test != "all":
-        from cval.validation.operations import resolve_operational_target
-
-        resolve_operational_target(
-            args.cval_config, args.test, CLASSIFICATIONS_EXPORT
-        )
-
-    rows = get_latest_classification_rows(
-        pod=args.pod,
-        namespace=args.namespace,
-        db_path=args.db_path,
-        test_type=(None if args.test == "all" else args.test),
-        config=args.cval_config,
-    )
-    if args.test == "all":
-        enabled_targets = set(catalog.names_for(CLASSIFICATIONS_EXPORT))
-        rows = [row for row in rows if row.test_type in enabled_targets]
-    selected = filter_classification_rows(rows, args.test)
-    output_path = write_classifications_csv(rows, args.test, output_dir=args.output_dir)
-    print(f"Wrote {len(selected)} {args.test} classification row(s) to {output_path}")
-    return 0
-
 
 
 def handle_validate(args: argparse.Namespace) -> int:

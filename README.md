@@ -41,7 +41,7 @@ per-target DBs and reported as `normal`, `degraded`, or `improved`.
 python -m cval.cli status
 python -m cval.cli validate --node <node> --git-ref <40-hex-commit> --submit --confirm submit
 python -m cval.cli baseline classify --test-type storage --store-results
-python -m cval.cli classifications --test all --type csv
+python -m cval.cli results --classifications-only --test all --type csv
 ```
 
 ## Validation tests

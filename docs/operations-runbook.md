@@ -4,7 +4,7 @@
 
 ```text
 cval status --output json
-cval classifications --test all --type csv
+cval results --classifications-only --test all --type csv
 ```
 
 These commands do not mutate Kubernetes or SQLite. `status`, `results`, and

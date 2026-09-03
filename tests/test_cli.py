@@ -119,7 +119,7 @@ class CliTests(unittest.TestCase):
         help_text = output.getvalue()
         self.assertIn(
             "{config,tests,nodes,validate,status,plan,run,jobs,results,"
-            "classifications,baseline,nccl-eval}",
+            "baseline,nccl-eval}",
             help_text,
         )
         self.assertNotIn("prioritize", help_text)
@@ -217,7 +217,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         classifications.assert_not_called()
 
-    def test_classifications_command_writes_csv(self) -> None:
+    def test_results_classifications_only_writes_csv(self) -> None:
         output = io.StringIO()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -243,7 +243,8 @@ class CliTests(unittest.TestCase):
                 with redirect_stdout(output):
                     exit_code = main(
                         [
-                            "classifications",
+                            "results",
+                            "--classifications-only",
                             "--test",
                             "storage",
                             "--type",
