@@ -221,19 +221,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     tests_validate.add_argument("--output", choices=["table", "json"], default="table")
     tests_validate.set_defaults(handler=handle_tests_validate)
 
-    tests_scaffold = tests_sub.add_parser(
-        "scaffold",
-        help="Inspect or create a disabled pass/fail-only test scaffold",
-    )
-    tests_scaffold.add_argument("test_id")
-    tests_scaffold.add_argument("--order", type=int, required=True)
-    tests_scaffold.add_argument(
-        "--apply", action="store_true", help="Create files after the exact confirmation"
-    )
-    tests_scaffold.add_argument("--confirm")
-    tests_scaffold.add_argument("--output", choices=["table", "json"], default="table")
-    tests_scaffold.set_defaults(handler=handle_tests_scaffold)
-
     # Machine-only catalog used by background loops. It is intentionally
     # omitted from public help and emits data, never shell assignments.
     operational_targets = subparsers.add_parser("operational-targets")
@@ -958,36 +945,6 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
             f"{state:<8} {test.config_path}"
         )
     return 0
-
-
-def handle_tests_scaffold(args: argparse.Namespace) -> int:
-    """Inspect or safely create one disabled pass/fail-only test directory."""
-
-    from cval.validation.scaffold import scaffold_validation_test
-
-    try:
-        payload = scaffold_validation_test(
-            args.test_id,
-            args.order,
-            repo_root=REPO_ROOT,
-            apply=args.apply,
-            confirmation=args.confirm,
-        )
-    except (FileExistsError, OSError, ValueError) as exc:
-        print(f"Scaffold error: {exc}", file=sys.stderr)
-        return 2
-    if args.output == "json":
-        print(json.dumps(payload, indent=2))
-        return 0
-    print(f"Validation test scaffold ({payload['mode']}): {payload['test_id']}")
-    print(f"Target: {payload['target_dir']}")
-    print("Files: " + ", ".join(payload["files"]))
-    print("\nDisabled registry stanza:\n" + str(payload["registry_stanza"]))
-    print("\nNext steps:")
-    for step in payload["next_commands"]:
-        print(f"  - {step}")
-    return 0
-
 
 
 def handle_operational_targets(args: argparse.Namespace) -> int:
