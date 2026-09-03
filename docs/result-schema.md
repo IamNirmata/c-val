@@ -1,41 +1,32 @@
-# Result and database schema
+# Result and raw database schema
 
 ## Canonical result envelope
 
-New validation runs write one `cval.results` JSON object under:
+New runs write `logs/job_logs/<node>/<run-id>/result.json`.
 
-`logs/job_logs/<node>/<run-id>/result.json`
+The `cval.results` object contains run identity, timestamps, image/framework
+versions, exact Git ref, effective configuration digest, aggregate outcome,
+errors, and a dynamic test map. Each test records selection state, order,
+phase, `pass`/`fail`/`incomplete`, timing, exit code, descriptor identity, logs,
+summary, artifacts, and message.
 
-The envelope contains run identity, timestamps, image/framework versions,
-checked-out Git ref, effective configuration digest, aggregate status, errors,
-and a dynamic test map. Each test records enabled/selected state, order, phase,
-status, times, duration, exit code, descriptor identity, logs, summary, result,
-artifacts, and message.
+The runner atomically replaces the envelope at each transition. Readers still
+accept historical `cval.results.v1` and `cval.results.v2` files without
+rewriting them.
 
-The runner validates and atomically replaces the envelope at each transition.
-The emitted shape is the proven dynamic schema previously called v2; only the
-public schema name changed. Readers continue to accept historical
-`cval.results.v2` and fixed `cval.results.v1` artifacts. Historical files are
-never rewritten or deleted.
+## Raw databases
 
-## Current raw databases
+- `metadata/validation.db`: `runs` and `latest_status`;
+- `metadata/test-storage.db`: one validated storage metric row per passing run;
+- `metadata/test-nccl.db`: one consolidated `IB_HEALTH` metric row per passing
+  NCCL run;
+- four `metadata/dltest_*.db` files: raw component metrics from passing rank
+  evidence.
 
-- `metadata/validation.db` — `runs` plus `latest_status`, authoritative pass/fail;
-- `metadata/test-storage.db` — storage metrics;
-- `metadata/test-nccl.db` — consolidated `IB_HEALTH` metrics and current views;
-- four `metadata/dltest_*.db` files — component metrics ingested from each
-  passing validation run and reconcilable from retained rank JSON.
+`validation-tests/db-update.sh` validates result/config provenance and exact
+database targets before writes. Required metric writes happen before the
+atomic built-in status set. DL writes are serialized by the metadata-directory
+lock.
 
-`validation-tests/db-update.sh` validates result/config provenance and writes
-only these current surfaces. DL writes use the same cross-process refresh lock
-as historical reconciliation so validation Jobs do not race maintenance.
-
-## Baseline and classification databases
-
-Baseline DBs store immutable baseline JSON plus lifecycle/provenance columns.
-Classification rows store timestamp, node, target, baseline identity, verdict,
-metric counts/fraction/worst deviation, and detailed metric JSON.
-
-Classifications are stored in separate target files under `baselines/`; readers
-merge the latest row for each `(node, test_type)`. See `baselines.md` for exact
-filenames and split preparation.
+These schemas contain test outcomes and measurements only. They do not contain
+framework-generated health classes, comparative verdicts, scores, or rankings.
