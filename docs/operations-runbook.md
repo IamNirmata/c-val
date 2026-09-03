@@ -12,16 +12,16 @@ cval results --test nccl --type csv
 
 These commands do not mutate Kubernetes or SQLite.
 
-## Audit loop
+## Continuous validation loop
 
-Run `scripts/cval-live.sh` in audit mode with an exact published Git commit.
-Audit mode reads inventory and latest status, plans all discovered candidates
-by default, and checks them in priority order. It submits and prunes nothing.
+Every operational `scripts/cval-live.sh` cycle is submit-capable and requires
+exact `CVAL_LIVE_CONFIRM=submit`. Each submission also passes the CLI's
+independent `--submit --confirm submit` gate with an exact published commit.
 
 Use the script's `start`, `status`, and `stop` commands for the persistent tmux
-session. `start` fetches the current branch from `origin`, rejects a stale
-explicit ref, and pins the session to that exact latest published commit.
-Stopping the session does not delete Kubernetes jobs.
+`run-once` and `run-loop` require the same environment confirmation. Stopping
+the session does not delete Kubernetes jobs, and pending-job pruning requires
+the separate exact `CVAL_PRUNE_CONFIRM=delete-pending` gate.
 
 ## Exact-commit validation
 
@@ -31,8 +31,8 @@ that commit, runs enabled storage, NCCL, and DL tests, validates canonical
 evidence, and writes raw SQLite databases. No evaluation or node-health
 assignment follows ingestion.
 
-The continuous submit loop additionally requires submit mode and its exact
-environment confirmation. Pending-job pruning has a separate exact gate.
+The continuous loop uses these same exact-commit submission gates for every
+job.
 
 ## Raw DL reconciliation
 

@@ -13,6 +13,8 @@ evaluator design.
 - `plan`, `nodes`, `status`, `jobs`, and `results` are read-only.
 - Validation submission requires an exact published commit plus explicit
   confirmation.
+- `cval-live` operational commands are submit-only and require exact
+  `CVAL_LIVE_CONFIRM=submit`; `start` pins the current remote branch tip.
 - The source-controlled Git ref is an all-zero fail-closed placeholder.
 - Test results never cordon, taint, reboot, delete, or otherwise mutate nodes.
 - Kubernetes calls are bounded and manifests contain no embedded credentials.

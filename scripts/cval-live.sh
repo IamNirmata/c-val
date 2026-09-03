@@ -3,34 +3,21 @@ set -euo pipefail
 
 # Start/stop a tmux-backed c-val live runner.
 #
-# The immutable operation mode is explicit and audit-first:
-# - audit (default): inventory, read latest_status, prioritize, check nodes in
-#   order, render, and select slots without submitting, monitoring, or pruning.
-# - submit: additionally requires CVAL_LIVE_CONFIRM=submit. The CLI submission
-#   remains independently gated by --submit --confirm submit.
-# - pruning is disabled unless submit mode also has
-#   CVAL_PRUNE_CONFIRM=delete-pending.
+# Every operational cycle submits validation work and requires
+# CVAL_LIVE_CONFIRM=submit. The CLI submission remains independently gated by
+# --submit --confirm submit. Pruning requires CVAL_PRUNE_CONFIRM=delete-pending.
 
 COMMAND=${1:-start}
 
 # Fail the independent submit startup gate before config helpers, worktree
 # operations, or any Kubernetes-capable command is invoked. Non-operational
-# help/status/stop/attach commands remain available regardless of mode env.
+# help/status/stop/attach commands remain available without submit confirmation.
 case "$COMMAND" in
     start|run-once|run-loop)
-        case "${CVAL_LIVE_MODE:-audit}" in
-            audit) ;;
-            submit)
-                if [[ "${CVAL_LIVE_CONFIRM:-}" != "submit" ]]; then
-                    echo "submit mode requires exact CVAL_LIVE_CONFIRM=submit" >&2
-                    exit 2
-                fi
-                ;;
-            *)
-                echo "CVAL_LIVE_MODE must be exactly audit or submit (got: ${CVAL_LIVE_MODE:-})" >&2
-                exit 2
-                ;;
-        esac
+        if [[ "${CVAL_LIVE_CONFIRM:-}" != "submit" ]]; then
+            echo "cval-live requires exact CVAL_LIVE_CONFIRM=submit" >&2
+            exit 2
+        fi
         ;;
 esac
 
@@ -40,7 +27,6 @@ SOURCE_REPO=${CVAL_SOURCE_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}
 CONFIG_PATH=${CVAL_CONFIG:-$SOURCE_REPO/config/cval.toml}
 SESSION_NAME=${CVAL_TMUX_SESSION:-cval-live}
 LOG_DIR=${CVAL_LIVE_LOG_DIR:-$SOURCE_REPO/run-logs/cval-live}
-LIVE_MODE=${CVAL_LIVE_MODE:-audit}
 LIVE_CONFIRM=${CVAL_LIVE_CONFIRM:-}
 PRUNE_CONFIRM=${CVAL_PRUNE_CONFIRM:-}
 
@@ -111,9 +97,8 @@ Commands:
   run-loop   Internal: run cycles forever
 
 Environment overrides:
-    CVAL_LIVE_MODE=audit                           # audit (default) or submit
-    CVAL_LIVE_CONFIRM=submit                       # required only for submit mode
-    CVAL_PRUNE_CONFIRM=delete-pending              # optional; submit mode only
+    CVAL_LIVE_CONFIRM=submit                       # required for every cycle
+    CVAL_PRUNE_CONFIRM=delete-pending              # optional independent gate
   CVAL_CONFIG=$CONFIG_PATH
     CVAL_BATCH_SIZE=<positive-integer>
     CVAL_DAYS_THRESHOLD=<days>
@@ -152,13 +137,6 @@ acquire_live_lock() {
 }
 
 validate_runtime_settings() {
-    case "$LIVE_MODE" in
-        audit|submit) ;;
-        *)
-            echo "CVAL_LIVE_MODE must be exactly audit or submit (got: $LIVE_MODE)" >&2
-            return 2
-            ;;
-    esac
     local name value
     for name in CVAL_BATCH_SIZE CVAL_KUBECTL_TIMEOUT_SECONDS; do
         case "$name" in
@@ -189,7 +167,7 @@ validate_runtime_settings() {
 }
 
 pruning_enabled() {
-    [[ "$LIVE_MODE" == "submit" && "$PRUNE_CONFIRM" == "delete-pending" ]]
+    [[ "$PRUNE_CONFIRM" == "delete-pending" ]]
 }
 
 resolve_git_ref() {
@@ -706,40 +684,6 @@ print(f"{len(data)}\t{len(latest)}")
 PY
 }
 
-write_audit_summary() {
-    python - "$@" <<'PY'
-import json
-import sys
-
-(
-    output_path,
-    git_ref,
-    git_ref_source,
-    free_nodes_count,
-    queue_count,
-    planned_count,
-    selected_nodes_csv,
-    plan_path,
-) = sys.argv[1:]
-payload = {
-    "schema": "cval.live-audit.v1",
-    "mode": "audit",
-    "action": "audit",
-    "cluster_mutations": 0,
-    "git_ref": git_ref,
-    "git_ref_source": git_ref_source,
-    "free_nodes_count": int(free_nodes_count),
-    "queue_count": int(queue_count),
-    "planned_count": int(planned_count),
-    "selected_nodes": [item for item in selected_nodes_csv.split(",") if item],
-    "plan_path": plan_path,
-}
-with open(output_path, "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-PY
-}
-
 collect_plan_inputs() {
     local cycle_dir="$1"
     local stem="$2"
@@ -844,11 +788,10 @@ PY
 
 select_available_nodes() {
     local plan_file="$1"
-    local limit="$2"
-    local cycle_dir="$3"
-    local stem="$4"
-    local expected_sha="$5"
-    shift 5
+    local cycle_dir="$2"
+    local stem="$3"
+    local expected_sha="$4"
+    shift 4
     local excluded=("$@")
     local candidate_file="$cycle_dir/$stem-priority-candidates.txt"
     python - "$plan_file" "${excluded[@]}" >"$candidate_file" <<'PY'
@@ -866,7 +809,6 @@ for job in payload.get("planned_jobs", []):
 PY
     SELECTED_AVAILABLE_NODES=""
     CHECKED_NODE_NAMES=""
-    local selected_count=0
     local node
     while IFS= read -r node; do
         [[ -n "$node" ]] || continue
@@ -895,10 +837,7 @@ PY
         CHECKED_NODE_NAMES=$(csv_append_unique "$CHECKED_NODE_NAMES" "$node")
         if [[ "$eligible" == "true" ]]; then
             SELECTED_AVAILABLE_NODES=$(csv_append_unique "$SELECTED_AVAILABLE_NODES" "$node")
-            selected_count=$((selected_count + 1))
-            if (( selected_count >= limit )); then
-                break
-            fi
+            break
         fi
     done <"$candidate_file"
 }
@@ -1208,10 +1147,6 @@ watch_existing_jobs_until_clear() {
 }
 
 resume_latest_cycle_if_needed() {
-    if [[ "$LIVE_MODE" != "submit" ]]; then
-        log "mode=audit; submitted-job resume disabled"
-        return 1
-    fi
     local cycle_dir
     cycle_dir=$(latest_cycle_dir_with_submits)
     if [[ -z "$cycle_dir" ]]; then
@@ -1295,7 +1230,7 @@ new_cycle_dir() {
 }
 
 log_operation_settings() {
-    log "mode=$LIVE_MODE config=$CONFIG_PATH"
+    log "config=$CONFIG_PATH"
     log "batch_size=$BATCH_SIZE plan_limit=$PLAN_LIMIT_SETTING days_threshold=$DAYS_THRESHOLD node_cooldown=${NODE_COOLDOWN_SECONDS}s kubectl_timeout=${KUBECTL_TIMEOUT_SECONDS}s"
     log "node_cooldown_state=$NODE_COOLDOWN_STATE_FILE"
     if pruning_enabled; then
@@ -1303,100 +1238,6 @@ log_operation_settings() {
     else
         log "pruning=disabled"
     fi
-}
-
-run_audit_cycle() {
-    require_command git
-    require_command kubectl
-    require_command timeout
-    require_command python
-
-    new_cycle_dir
-    local cycle_dir="$CYCLE_DIR"
-    resolve_git_ref || return "$?"
-    local git_ref="$RESOLVED_GIT_REF"
-    local git_ref_source="$RESOLVED_GIT_REF_SOURCE"
-    log_operation_settings
-    ensure_runner_worktree "$git_ref" || return "$?"
-
-    enter_runner_worktree "audit" || return "$?"
-    local plan_file="$cycle_dir/audit-plan.json"
-    local plan_error="$cycle_dir/audit-plan.stderr"
-    log "audit action=inspect: gpu inventory -> latest_status -> cooldown -> priority -> targeted availability checks"
-    local inputs_rc=0
-    collect_plan_inputs "$cycle_dir" audit "$git_ref" || inputs_rc=$?
-    if (( inputs_rc != 0 )); then
-        log "audit cycle failed: one or more read-only input components failed"
-        leave_runner_worktree "audit" "$inputs_rc" || return "$?"
-        return "$inputs_rc"
-    fi
-    local plan_rc=0
-    assert_runner_worktree "audit-plan-before" "$git_ref" || {
-        leave_runner_worktree "audit" 2 || return "$?"
-        return 2
-    }
-    python -m cval.cli --config "$CONFIG_PATH" plan \
-        --free-nodes "$PLAN_FREE_NODES" \
-        --db-status-json "$PLAN_STATUS_MAP" \
-        --threshold-days "$DAYS_THRESHOLD" \
-        --batch-size "$PLAN_LIMIT" \
-        --timestamp "$(date +%s)" \
-        --git-ref "$git_ref" \
-        --output json >"$plan_file" 2>"$plan_error" || plan_rc=$?
-    assert_runner_worktree "audit-plan-after" "$git_ref" || {
-        leave_runner_worktree "audit" 2 || return "$?"
-        return 2
-    }
-    if (( plan_rc != 0 )); then
-        log "audit component=plan status=failed exit_code=$plan_rc stderr=$plan_error"
-        [[ ! -s "$plan_error" ]] || cat "$plan_error" >&2
-        leave_runner_worktree "audit" "$plan_rc" || return "$?"
-        return "$plan_rc"
-    fi
-
-    local summary
-    local parse_rc=0
-    summary=$(json_plan_summary_tsv "$plan_file" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT") || parse_rc=$?
-    if (( parse_rc != 0 )); then
-        log "audit component=plan status=invalid-json exit_code=$parse_rc artifact=$plan_file"
-        leave_runner_worktree "audit" "$parse_rc" || return "$?"
-        return "$parse_rc"
-    fi
-    local candidate_nodes_count queue_count planned_count planned_nodes
-    IFS=$'\t' read -r candidate_nodes_count queue_count planned_count planned_nodes <<<"$summary"
-    local selected_nodes=""
-    if (( planned_count > 0 )); then
-        local selection_rc=0
-        select_available_nodes \
-            "$plan_file" "$BATCH_SIZE" "$cycle_dir" audit "$git_ref" \
-            || selection_rc=$?
-        if (( selection_rc != 0 )); then
-            leave_runner_worktree "audit" "$selection_rc" || return "$?"
-            return "$selection_rc"
-        fi
-        selected_nodes="$SELECTED_AVAILABLE_NODES"
-    fi
-    leave_runner_worktree "audit" 0 || return "$?"
-
-    log "audit component=inventory-and-status status=ok candidate_node_count=$candidate_nodes_count"
-    log "audit component=priority-and-render status=ok queue_count=$queue_count planned_count=$planned_count"
-    if [[ -n "$selected_nodes" ]]; then
-        log "audit action=inspect selected_nodes=$selected_nodes submitted_count=0"
-    elif (( queue_count > 0 )); then
-        log "audit state=no-currently-available-prioritized-node action=inspect submitted_count=0"
-    else
-        log "audit state=no-due-candidates action=inspect submitted_count=0"
-    fi
-    write_audit_summary \
-        "$cycle_dir/audit-summary.json" \
-        "$git_ref" \
-        "$git_ref_source" \
-        "$candidate_nodes_count" \
-        "$queue_count" \
-        "$planned_count" \
-        "$selected_nodes" \
-        "$(basename "$plan_file")"
-    log "audit cycle complete; artifacts in $cycle_dir"
 }
 
 run_submit_cycle() {
@@ -1628,7 +1469,7 @@ run_submit_cycle() {
 
             local selection_rc=0
             select_available_nodes \
-                "$plan_file" 1 "$cycle_dir" "$slot_stem" "$git_ref" \
+                "$plan_file" "$cycle_dir" "$slot_stem" "$git_ref" \
                 "${exclude_args[@]}" || selection_rc=$?
             if (( selection_rc != 0 )); then
                 leave_runner_worktree "submit" "$selection_rc" || return "$?"
@@ -1743,30 +1584,20 @@ run_submit_cycle() {
     log "cycle complete; artifacts in $cycle_dir"
 }
 
-run_cycle() {
-    if [[ "$LIVE_MODE" == "audit" ]]; then
-        run_audit_cycle
-    else
-        run_submit_cycle
-    fi
-}
-
 run_once() {
     require_command flock
     acquire_live_lock || return "$?"
-    if [[ "$LIVE_MODE" == "submit" ]]; then
-        local resume_rc=0
-        resume_latest_cycle_if_needed || resume_rc=$?
-        case "$resume_rc" in
-            0) return 0 ;;
-            1) ;;
-            *)
-                log "resume observation failed closed; deferring new cycle"
-                return "$resume_rc"
-                ;;
-        esac
-    fi
-    run_cycle
+    local resume_rc=0
+    resume_latest_cycle_if_needed || resume_rc=$?
+    case "$resume_rc" in
+        0) return 0 ;;
+        1) ;;
+        *)
+            log "resume observation failed closed; deferring new cycle"
+            return "$resume_rc"
+            ;;
+    esac
+    run_submit_cycle
 }
 
 run_loop() {
@@ -1774,21 +1605,19 @@ run_loop() {
     acquire_live_lock || return "$?"
     trap 'log "received stop signal; exiting loop"; exit 0' INT TERM
     while true; do
-        if [[ "$LIVE_MODE" == "submit" ]]; then
-            local resume_rc=0
-            resume_latest_cycle_if_needed || resume_rc=$?
-            if (( resume_rc == 0 )); then
-                log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
-                sleep "$LOOP_SLEEP_SECONDS"
-                continue
-            elif (( resume_rc != 1 )); then
-                log "resume observation failed closed; deferring new cycle"
-                log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
-                sleep "$LOOP_SLEEP_SECONDS"
-                continue
-            fi
+        local resume_rc=0
+        resume_latest_cycle_if_needed || resume_rc=$?
+        if (( resume_rc == 0 )); then
+            log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
+            sleep "$LOOP_SLEEP_SECONDS"
+            continue
+        elif (( resume_rc != 1 )); then
+            log "resume observation failed closed; deferring new cycle"
+            log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
+            sleep "$LOOP_SLEEP_SECONDS"
+            continue
         fi
-        if ! run_cycle; then
+        if ! run_submit_cycle; then
             log "cycle failed; see logs above"
         fi
         log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
@@ -1807,8 +1636,8 @@ start_session() {
     local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_LIVE_MODE=%q CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q CVAL_GIT_BRANCH=%q CVAL_GIT_REF=%q bash %q run-loop' \
-        "$LIVE_MODE" "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$GIT_BRANCH_SETTING" "$EXPLICIT_GIT_REF" "$SCRIPT_PATH"
+        'CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q CVAL_GIT_BRANCH=%q CVAL_GIT_REF=%q bash %q run-loop' \
+        "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$GIT_BRANCH_SETTING" "$EXPLICIT_GIT_REF" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \

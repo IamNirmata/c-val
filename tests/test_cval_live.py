@@ -283,8 +283,7 @@ class CvalLiveTests(unittest.TestCase):
         root: Path,
         *,
         due: bool = True,
-        mode: str | None = None,
-        confirm: str | None = None,
+        confirm: str | None = "submit",
         prune_confirm: str | None = None,
         git_ref: str | None = None,
         fail_component: str = "",
@@ -357,15 +356,12 @@ class CvalLiveTests(unittest.TestCase):
             "CVAL_TMUX_SESSION": "test-live",
         }
         for key in (
-            "CVAL_LIVE_MODE",
             "CVAL_LIVE_CONFIRM",
             "CVAL_PRUNE_CONFIRM",
             "CVAL_GIT_BRANCH",
             "CVAL_GIT_REF",
         ):
             env.pop(key, None)
-        if mode is not None:
-            env["CVAL_LIVE_MODE"] = mode
         if confirm is not None:
             env["CVAL_LIVE_CONFIRM"] = confirm
         if prune_confirm is not None:
@@ -416,52 +412,6 @@ class CvalLiveTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_default_audit_is_complete_read_only_inspection_without_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            env = self._environment(root)
-            old = Path(env["CVAL_LIVE_LOG_DIR"]) / "old"
-            old.mkdir(parents=True)
-            (old / "submit.json").write_text(
-                json.dumps(
-                    {
-                        "jobs": [
-                            {
-                                "node": NODE,
-                                "job_name": f"cval-{NODE}-old",
-                                "submitted": True,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            completed = self._run(env)
-            calls = self._calls(env)
-            summary = json.loads(
-                self._latest_artifact(env, "audit-summary.json").read_text(encoding="utf-8")
-            )
-
-        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        joined = "\n".join(calls)
-        self.assertIn("python\t-m cval.cli --config", joined)
-        self.assertIn(" nodes --inventory-only --output json", joined)
-        self.assertIn(f" nodes --check-node {NODE} --output json", joined)
-        self.assertIn(" status --output json", joined)
-        self.assertIn(" plan --free-nodes", joined)
-        self.assertNotIn("--submit", joined)
-        self.assertNotIn(" -m cval.cli jobs ", joined)
-        self.assertFalse(any("kubectl\t" in line for line in calls))
-        self.assertNotIn(" delete ", joined)
-        self.assertNotIn(" apply ", joined)
-        self.assertNotIn(" create ", joined)
-        self.assertEqual(summary["mode"], "audit")
-        self.assertEqual(summary["action"], "audit")
-        self.assertEqual(summary["cluster_mutations"], 0)
-        self.assertEqual(summary["selected_nodes"], [NODE])
-        self.assertIn("candidate_node_count=1", completed.stdout)
-        self.assertIn("queue_count=1 planned_count=1", completed.stdout)
-
     def test_default_plan_limit_covers_all_discovered_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -509,7 +459,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_submit_wrong_confirmation_fails_before_git_or_kubernetes(self) -> None:
         for confirm in (None, "wrong"):
             with self.subTest(confirm=confirm), tempfile.TemporaryDirectory() as tmpdir:
-                env = self._environment(Path(tmpdir), mode="submit", confirm=confirm)
+                env = self._environment(Path(tmpdir), confirm=confirm)
                 completed = self._run(env)
                 calls = self._calls(env)
 
@@ -540,7 +490,7 @@ class CvalLiveTests(unittest.TestCase):
 
     def test_submit_exact_gate_passes_cli_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            env = self._environment(Path(tmpdir), mode="submit", confirm="submit")
+            env = self._environment(Path(tmpdir))
             completed = self._run(env)
             calls = self._calls(env)
 
@@ -558,7 +508,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_successful_submission_records_latest_node_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            env = self._environment(root, mode="submit", confirm="submit")
+            env = self._environment(root)
             completed = self._run(env)
             state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
             rows = state.read_text(encoding="utf-8").splitlines()
@@ -581,7 +531,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_priority_first_checks_nodes_in_order_until_first_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            env = self._environment(root, mode="submit", confirm="submit")
+            env = self._environment(root)
             env["FAKE_TWO_NODES"] = "1"
             env["FAKE_BUSY_NODES"] = NODE
             env["FAKE_PLAN_JSON"] = json.dumps(
@@ -640,7 +590,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_active_node_cooldown_filters_before_plan_and_submits_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            env = self._environment(root, mode="submit", confirm="submit")
+            env = self._environment(root)
             env["CVAL_NODE_COOLDOWN_SECONDS"] = "14400"
             state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
             state.parent.mkdir(parents=True)
@@ -668,7 +618,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_failed_submission_does_not_create_cooldown_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            env = self._environment(root, mode="submit", confirm="submit")
+            env = self._environment(root)
             env["FAKE_PLAN_JSON"] = json.dumps(
                 {
                     "batch_size": 9,
@@ -702,8 +652,6 @@ class CvalLiveTests(unittest.TestCase):
             wrong_env = self._environment(
                 Path(tmpdir),
                 due=True,
-                mode="submit",
-                confirm="submit",
                 prune_confirm="wrong",
             )
             wrong = self._run(wrong_env)
@@ -719,8 +667,6 @@ class CvalLiveTests(unittest.TestCase):
             env = self._environment(
                 Path(tmpdir),
                 due=True,
-                mode="submit",
-                confirm="submit",
                 prune_confirm="delete-pending",
             )
             env["FAKE_JOB_PHASE"] = "Pending"
@@ -746,8 +692,6 @@ class CvalLiveTests(unittest.TestCase):
             root = Path(tmpdir)
             env = self._environment(
                 root,
-                mode="submit",
-                confirm="submit",
                 prune_confirm="delete-pending",
             )
             env["CVAL_NODE_COOLDOWN_SECONDS"] = "14400"
@@ -775,8 +719,6 @@ class CvalLiveTests(unittest.TestCase):
             env = self._environment(
                 root,
                 due=False,
-                mode="submit",
-                confirm="submit",
             )
             self._write_resume_submission(env)
             old = Path(env["CVAL_LIVE_LOG_DIR"]) / "old"
@@ -797,7 +739,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_resume_repairs_missing_cooldown_from_timestamped_submission(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            env = self._environment(root, mode="submit", confirm="submit")
+            env = self._environment(root)
             first = self._run(env)
             state = Path(env["CVAL_NODE_COOLDOWN_STATE_FILE"])
             state.unlink()
@@ -816,18 +758,18 @@ class CvalLiveTests(unittest.TestCase):
             ("release-ref", EXPLICIT_SHA, "explicit", False),
         ):
             with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as tmpdir:
-                env = self._environment(Path(tmpdir), git_ref=explicit)
+                env = self._environment(Path(tmpdir), due=False, git_ref=explicit)
                 completed = self._run(env)
                 calls = self._calls(env)
-                summary = json.loads(
-                    self._latest_artifact(env, "audit-summary.json").read_text(
-                        encoding="utf-8"
-                    )
-                )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertEqual(summary["git_ref"], expected_sha)
-            self.assertEqual(summary["git_ref_source"], expected_source)
+            plan_calls = [
+                line
+                for line in calls
+                if line.startswith("python\t") and " plan " in f" {line} "
+            ]
+            self.assertEqual(len(plan_calls), 1)
+            self.assertIn(f"--git-ref {expected_sha}", plan_calls[0])
             source_fetches = [
                 line
                 for line in calls
@@ -857,46 +799,21 @@ class CvalLiveTests(unittest.TestCase):
         self.assertNotIn("rev-parse --verify", joined)
         self.assertNotIn("checkout", joined)
         self.assertFalse(any("-m cval.cli" in line for line in calls))
-        self.assertNotIn("audit component=", failed.stdout)
-        self.assertNotIn("audit cycle complete", failed.stdout)
 
     def test_worktree_removed_after_checkout_fails_closed_before_cval_cli(self) -> None:
-        for scenario, mode, operation in (
-            ("audit", "audit", "audit"),
-            ("submit", "submit", "submit"),
-            ("resume", "submit", "resume-status"),
+        for scenario, operation in (
+            ("submit", "submit"),
+            ("resume", "resume-status"),
         ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
-                env = self._environment(
-                    root,
-                    mode=mode,
-                    confirm="submit" if mode == "submit" else None,
-                )
+                env = self._environment(root)
                 env["FAKE_GIT_INVALIDATE_AFTER_CHECKOUT"] = "1"
                 if scenario == "resume":
-                    old = Path(env["CVAL_LIVE_LOG_DIR"]) / "old"
-                    old.mkdir(parents=True)
-                    (old / "submit.json").write_text(
-                        json.dumps(
-                            {
-                                "jobs": [
-                                    {
-                                        "node": NODE,
-                                        "job_name": f"cval-{NODE}-123",
-                                        "submitted": True,
-                                    }
-                                ]
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
+                    self._write_resume_submission(env)
 
                 failed = self._run(env)
                 calls = self._calls(env)
-                summaries = list(
-                    Path(env["CVAL_LIVE_LOG_DIR"]).glob("*/audit-summary.json")
-                )
 
             joined = "\n".join(calls)
             self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
@@ -909,11 +826,6 @@ class CvalLiveTests(unittest.TestCase):
             self.assertNotIn(" plan --free-nodes", joined)
             self.assertNotIn("--submit", joined)
             self.assertNotIn("cycle complete", failed.stdout)
-            if scenario == "audit":
-                self.assertEqual(summaries, [])
-                self.assertNotIn(
-                    "audit component=priority-and-render status=ok", failed.stdout
-                )
             if scenario == "resume":
                 self.assertIn(
                     "resume observation failed closed; deferring new cycle",
@@ -922,19 +834,13 @@ class CvalLiveTests(unittest.TestCase):
 
     def test_post_entry_worktree_invalidation_fails_before_any_later_cli(self) -> None:
         for scenario, command in (
-            ("audit", "nodes"),
             ("submit", "nodes"),
             ("resume", "jobs"),
         ):
             for action in ("invalidate", "remove", "replace", "head"):
                 with self.subTest(scenario=scenario, action=action), tempfile.TemporaryDirectory() as tmpdir:
                     root = Path(tmpdir)
-                    mode = "submit" if scenario in {"submit", "resume"} else "audit"
-                    env = self._environment(
-                        root,
-                        mode=mode,
-                        confirm="submit" if mode == "submit" else None,
-                    )
+                    env = self._environment(root)
                     env["FAKE_INVALIDATE_AFTER_COMMAND"] = command
                     env["FAKE_INVALIDATE_ACTION"] = action
                     if scenario == "resume":
@@ -980,16 +886,11 @@ class CvalLiveTests(unittest.TestCase):
     return "$rc"
 }
 '''
-        for scenario in ("audit", "submit", "resume"):
+        for scenario in ("submit", "resume"):
             for action in ("invalidate", "remove", "replace", "head"):
                 with self.subTest(scenario=scenario, action=action), tempfile.TemporaryDirectory() as tmpdir:
                     root = Path(tmpdir)
-                    mode = "submit" if scenario in {"submit", "resume"} else "audit"
-                    env = self._environment(
-                        root,
-                        mode=mode,
-                        confirm="submit" if mode == "submit" else None,
-                    )
+                    env = self._environment(root)
                     env["FAKE_INVALIDATE_ACTION"] = action
                     bash_env = root / "bash-env.sh"
                     bash_env.write_text(bash_env_text, encoding="utf-8")
@@ -1012,7 +913,7 @@ class CvalLiveTests(unittest.TestCase):
             for action in ("invalidate", "remove", "replace", "head"):
                 with self.subTest(scenario=scenario, action=action), tempfile.TemporaryDirectory() as tmpdir:
                     root = Path(tmpdir)
-                    env = self._environment(root, mode="submit", confirm="submit")
+                    env = self._environment(root)
                     env["FAKE_JOB_PHASE"] = "Running"
                     env["FAKE_INVALIDATE_AFTER_COMMAND"] = "jobs"
                     env["FAKE_INVALIDATE_AFTER_OCCURRENCE"] = (
@@ -1070,18 +971,14 @@ class CvalLiveTests(unittest.TestCase):
 
                 failed = self._run(env)
                 calls = self._calls(env)
-                summaries = list(
-                    Path(env["CVAL_LIVE_LOG_DIR"]).glob("*/audit-summary.json")
-                )
 
             self.assertEqual(
                 failed.returncode, expected_rc, failed.stdout + failed.stderr
             )
             self.assertIn(
-                "runner worktree exit failed operation=audit", failed.stderr
+                "runner worktree exit failed operation=submit", failed.stderr
             )
-            self.assertEqual(summaries, [])
-            self.assertNotIn("audit cycle complete", failed.stdout)
+            self.assertNotIn("cycle complete", failed.stdout)
             cli_cwds = [
                 line
                 for line in calls
@@ -1098,7 +995,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_resume_watch_worktree_loss_fails_before_second_observation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            env = self._environment(root, mode="submit", confirm="submit")
+            env = self._environment(root)
             env["FAKE_JOB_PHASE"] = "Running"
             env["FAKE_INVALIDATE_AFTER_JOBS"] = "1"
             old = Path(env["CVAL_LIVE_LOG_DIR"]) / "old"
@@ -1160,7 +1057,7 @@ class CvalLiveTests(unittest.TestCase):
 
         for component, diagnostic in (
             ("nodes", "component=gpu-inventory status=failed exit_code=31"),
-            ("plan", "audit component=plan status=failed exit_code=33"),
+            ("plan", "submit component=preflight-plan status=failed exit_code=33"),
         ):
             with self.subTest(component=component), tempfile.TemporaryDirectory() as tmpdir:
                 env = self._environment(Path(tmpdir), fail_component=component)
@@ -1169,7 +1066,7 @@ class CvalLiveTests(unittest.TestCase):
             self.assertIn(diagnostic, failed.stdout)
             self.assertNotIn("state=no-due-candidates", failed.stdout)
 
-    def test_malformed_plan_json_is_a_failed_component_without_audit_summary(self) -> None:
+    def test_malformed_preflight_plan_json_fails_before_submission(self) -> None:
         valid_job = {
             "priority": 1,
             "node": NODE,
@@ -1238,11 +1135,13 @@ class CvalLiveTests(unittest.TestCase):
                     env["FAKE_TWO_NODES"] = "1"
                 env["FAKE_PLAN_JSON"] = json.dumps(payload)
                 failed = self._run(env)
-                summaries = list(Path(env["CVAL_LIVE_LOG_DIR"]).glob("*/audit-summary.json"))
+                calls = self._calls(env)
 
             self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
-            self.assertIn("audit component=plan status=invalid-json", failed.stdout)
-            self.assertEqual(summaries, [])
+            self.assertIn(
+                "submit component=preflight-plan status=invalid-json", failed.stdout
+            )
+            self.assertFalse(any(" --submit " in f" {line} " for line in calls))
 
     def test_current_cycle_unknown_or_jobs_failure_keeps_slot_and_submits_no_replacement(self) -> None:
         for phase, fail_component, diagnostic in (
@@ -1250,9 +1149,7 @@ class CvalLiveTests(unittest.TestCase):
             ("Completed", "jobs", "jobs observation failed exit_code=34"),
         ):
             with self.subTest(phase=phase, fail_component=fail_component), tempfile.TemporaryDirectory() as tmpdir:
-                env = self._environment(
-                    Path(tmpdir), mode="submit", confirm="submit"
-                )
+                env = self._environment(Path(tmpdir))
                 env["FAKE_JOB_PHASE"] = phase
                 env["FAKE_FAIL_COMPONENT"] = fail_component
                 failed = self._run(env)
@@ -1276,7 +1173,7 @@ class CvalLiveTests(unittest.TestCase):
         ):
             with self.subTest(phase=phase, fail_component=fail_component), tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
-                env = self._environment(root, mode="submit", confirm="submit")
+                env = self._environment(root)
                 env["FAKE_JOB_PHASE"] = phase
                 env["FAKE_FAIL_COMPONENT"] = fail_component
                 old = Path(env["CVAL_LIVE_LOG_DIR"]) / "old"
@@ -1311,8 +1208,6 @@ class CvalLiveTests(unittest.TestCase):
             with self.subTest(git_ref=git_ref), tempfile.TemporaryDirectory() as tmpdir:
                 env = self._environment(
                     Path(tmpdir),
-                    mode="submit",
-                    confirm="submit",
                     prune_confirm="delete-pending",
                     git_ref=git_ref,
                 )
@@ -1324,7 +1219,6 @@ class CvalLiveTests(unittest.TestCase):
                 )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertIn("CVAL_LIVE_MODE=submit", tmux_call)
             self.assertIn("CVAL_LIVE_CONFIRM=submit", tmux_call)
             self.assertIn("CVAL_PRUNE_CONFIRM=delete-pending", tmux_call)
             self.assertIn("CVAL_PLAN_LIMIT=9", tmux_call)
@@ -1339,7 +1233,6 @@ class CvalLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             env = self._environment(
                 Path(tmpdir),
-                mode="audit",
                 git_ref=EXPLICIT_SHA,
             )
             completed = self._run(env, "start")
@@ -1352,8 +1245,7 @@ class CvalLiveTests(unittest.TestCase):
     def test_status_and_stop_remain_nonmutating_without_submit_confirmation(self) -> None:
         for command in ("status", "stop"):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as tmpdir:
-                env = self._environment(Path(tmpdir))
-                env["CVAL_LIVE_MODE"] = "submit"
+                env = self._environment(Path(tmpdir), confirm=None)
                 completed = self._run(env, command)
                 calls = self._calls(env)
 
@@ -1368,7 +1260,7 @@ class CvalLiveTests(unittest.TestCase):
             for command in ("stop", "status", "attach", "help"):
                 with self.subTest(config_kind=config_kind, command=command), tempfile.TemporaryDirectory() as tmpdir:
                     root = Path(tmpdir)
-                    env = self._environment(root)
+                    env = self._environment(root, confirm=None)
                     config = root / "bad.toml"
                     if config_kind == "malformed":
                         config.write_text("not = [valid\n", encoding="utf-8")
@@ -1451,7 +1343,7 @@ class CvalLiveTests(unittest.TestCase):
                 after,
                 f"missing guard immediately after c-val invocation at source line {start + 1}",
             )
-        self.assertEqual(invocation_count, 12)
+        self.assertEqual(invocation_count, 11)
 
         git_commands = [
             line.strip()
