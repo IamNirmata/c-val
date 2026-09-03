@@ -18,13 +18,26 @@ TEMPLATE = (
 
 
 class FakeKubectlClient:
-    def __init__(self, stdout: str = "created") -> None:
+    def __init__(
+        self,
+        stdout: str = "created",
+        *,
+        stderr: str = "",
+        returncode: int = 0,
+    ) -> None:
         self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
         self.calls: list[tuple[list[str], str | None]] = []
 
     def run(self, args, check=True, input_text=None):
         self.calls.append((list(args), input_text))
-        return CommandResult(args=list(args), stdout=self.stdout, stderr="", returncode=0)
+        return CommandResult(
+            args=list(args),
+            stdout=self.stdout,
+            stderr=self.stderr,
+            returncode=self.returncode,
+        )
 
 
 class JobManagerTests(unittest.TestCase):
@@ -92,6 +105,19 @@ class JobManagerTests(unittest.TestCase):
 
         self.assertEqual(phase.phase, "Running")
         self.assertEqual(client.calls[0][0][:3], ["get", "vcjob", "-n"])
+
+    def test_get_job_phase_distinguishes_missing_from_observation_failure(self) -> None:
+        missing = FakeKubectlClient(
+            stderr='Error from server (NotFound): jobs.batch.volcano.sh "job" not found',
+            returncode=1,
+        )
+        unavailable = FakeKubectlClient(
+            stderr="Unable to connect to the server",
+            returncode=1,
+        )
+
+        self.assertEqual(get_job_phase("job", client=missing).phase, "Missing")
+        self.assertEqual(get_job_phase("job", client=unavailable).phase, "Unknown")
 
     def test_monitor_jobs_marks_nonterminal_timeout(self) -> None:
         client = FakeKubectlClient(stdout="Running")

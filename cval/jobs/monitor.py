@@ -15,7 +15,9 @@ from cval.config import load_config
 from cval.k8s.client import KubectlClient
 
 
-TERMINAL_PHASES = frozenset({"Completed", "Succeeded", "Failed", "Aborted", "Terminated"})
+TERMINAL_PHASES = frozenset(
+    {"Completed", "Succeeded", "Failed", "Aborted", "Terminated", "Missing"}
+)
 
 
 @dataclass(frozen=True)
@@ -60,8 +62,12 @@ def get_job_phase(
         result = kubectl.run(args, check=False)
     else:
         result = kubectl.run(args, check=False, timeout=timeout)
-    # Missing jobs or transient API failures are reported as Unknown, not raised.
-    phase = result.stdout.strip() if result.returncode == 0 else "Unknown"
+    if result.returncode == 0:
+        phase = result.stdout.strip() or "Unknown"
+    elif "(notfound)" in result.stderr.lower():
+        phase = "Missing"
+    else:
+        phase = "Unknown"
     return JobPhase(job_name=job_name, phase=phase or "Unknown")
 
 

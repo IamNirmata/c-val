@@ -1203,6 +1203,25 @@ class CvalLiveTests(unittest.TestCase):
             self.assertFalse(any(" plan --free-nodes" in line for line in calls))
             self.assertNotIn("no longer active", failed.stdout)
 
+    def test_resume_missing_job_clears_tracking_and_starts_new_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root)
+            self._write_resume_submission(env)
+            env["FAKE_JOB_PHASE"] = "Missing"
+            completed = self._run(env)
+            calls = self._calls(env)
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("latest submitted jobs are already terminal", completed.stdout)
+        self.assertNotIn("indeterminate", completed.stdout)
+        submit_calls = [
+            line
+            for line in calls
+            if line.startswith("python\t") and " --submit " in f" {line} "
+        ]
+        self.assertEqual(len(submit_calls), 1)
+
     def test_tmux_start_pins_latest_published_branch_commit(self) -> None:
         for git_ref in (None, ORIGIN_SHA):
             with self.subTest(git_ref=git_ref), tempfile.TemporaryDirectory() as tmpdir:

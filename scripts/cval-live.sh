@@ -965,7 +965,7 @@ for item in phases:
         raise ValueError("jobs JSON contains duplicate job rows")
     observed[job_name] = phase
 tracked_phases = [observed.get(job_name, "Unknown") for job_name in tracked]
-terminal = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}
+terminal = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated", "Missing"}
 if any(phase not in terminal | {"Pending", "Running"} for phase in tracked_phases):
     print("unknown")
 elif any(phase in {"Pending", "Running"} for phase in tracked_phases):
@@ -1095,7 +1095,7 @@ watch_existing_jobs_until_clear() {
             log "resume job $job_name phase=$phase"
 
             case "$phase" in
-                Completed|Succeeded|Failed|Aborted|Terminated)
+                Completed|Succeeded|Failed|Aborted|Terminated|Missing)
                     active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
                     ;;
                 Pending)
@@ -1366,7 +1366,7 @@ run_submit_cycle() {
                 log "job $job_name phase=$phase"
 
                 case "$phase" in
-                    Completed|Succeeded|Failed|Aborted|Terminated)
+                    Completed|Succeeded|Failed|Aborted|Terminated|Missing)
                         active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
                         completed_jobs=$(csv_append_unique "$completed_jobs" "$job_name")
                         ;;
