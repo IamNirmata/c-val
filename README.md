@@ -89,8 +89,7 @@ zero. NCCL images are pinned to
 reviewed digests; Git commits and the RWO storage class remain fail-closed
 placeholders. The complete Python 3.12 dependency lock is hash-pinned and its
 exact bootstrap has been verified in the pinned image. Reviewed phased
-overlays do not grant live apply approval. See
-[docs/evals/nccl-rollout.md](docs/evals/nccl-rollout.md).
+overlays do not grant live apply approval.
 
 Evaluator latency is canonicalized to microseconds. Native outbox ingestion
 converts the raw `IB_HEALTH.LATENCY` summary value from milliseconds to
@@ -103,6 +102,10 @@ schema, claim fencing, health-band derivation, role grants, and test contract.
 
 ## Documentation
 
-See [docs/README.md](docs/README.md), especially architecture, CLI,
-configuration, operations, baselines, result schema, lifecycle, and the current
-remaining-live-actions tracker.
+The maintained references are:
+
+- [architecture](docs/architecture.md);
+- [configuration](docs/configuration.md);
+- [operations](docs/operations-runbook.md);
+- [result schema](docs/result-schema.md);
+- [NCCL evaluator specification](docs/evals/nccl-eval-process.md).

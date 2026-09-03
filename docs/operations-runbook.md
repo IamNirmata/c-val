@@ -126,5 +126,5 @@ schemas fail closed. The source DB is retained.
   before activation; their later deletion requires separate approval.
 
 Do not apply, scale, rename/delete the live pod, run backup/split against the
-live PVC, or restart tmux until the remaining actions in `todo/cval-update.md`
-are explicitly approved.
+live PVC, or restart tmux without separate explicit approval for the exact
+operation and rollback procedure.
