@@ -40,6 +40,28 @@ def _enable_child_subreaper() -> None:
         raise OSError(error_number, os.strerror(error_number))
 
 
+def _secure_pass_fds() -> tuple[int, ...]:
+    raw = os.environ.get("CVAL_SECURE_RUN_FDS", "")
+    if not raw:
+        return ()
+    try:
+        descriptors = tuple(int(value) for value in raw.split(","))
+    except ValueError as exc:
+        raise OSError("CVAL_SECURE_RUN_FDS must contain integers") from exc
+    if any(descriptor < 0 for descriptor in descriptors):
+        raise OSError("CVAL_SECURE_RUN_FDS contains a negative descriptor")
+    if len(descriptors) != len(set(descriptors)):
+        raise OSError("CVAL_SECURE_RUN_FDS contains duplicate descriptors")
+    for descriptor in descriptors:
+        try:
+            os.fstat(descriptor)
+        except OSError as exc:
+            raise OSError(
+                f"CVAL_SECURE_RUN_FDS descriptor {descriptor} is not open"
+            ) from exc
+    return descriptors
+
+
 def _signal_process_group(process_group_id: int, signal_number: int) -> bool:
     try:
         os.killpg(process_group_id, signal_number)
@@ -174,9 +196,11 @@ def main(argv: list[str]) -> int:
             signal.signal(signal_number, forward_signal)
         if received_signal is not None:
             return 128 + received_signal
+        secure_pass_fds = _secure_pass_fds()
         process = subprocess.Popen(
             command,
             close_fds=True,
+            pass_fds=secure_pass_fds,
             start_new_session=True,
         )
         process_group_id = process.pid

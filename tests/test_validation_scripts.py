@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import stat
+import sys
 import tempfile
 import tomllib
 from contextlib import closing
@@ -80,6 +81,67 @@ class ValidationScriptTests(unittest.TestCase):
             ],
             check=True,
         )
+
+    def test_dl_metric_lock_preserves_only_secure_run_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metadata = root / "metadata"
+            metadata.mkdir(mode=0o700)
+            secure_path = root / "result.json"
+            unrelated_path = root / "unrelated.txt"
+            output_path = root / "observed.json"
+            secure_path.write_text("secure-result\n", encoding="utf-8")
+            unrelated_path.write_text("unrelated\n", encoding="utf-8")
+            secure_fd = os.open(secure_path, os.O_RDONLY)
+            unrelated_fd = os.open(unrelated_path, os.O_RDONLY)
+            try:
+                child = """
+import json
+import os
+import sys
+
+secure_fd = int(sys.argv[1])
+unrelated_fd = int(sys.argv[2])
+with os.fdopen(os.dup(secure_fd), encoding="utf-8") as handle:
+    secure_value = handle.read()
+try:
+    os.fstat(unrelated_fd)
+except OSError:
+    unrelated_open = False
+else:
+    unrelated_open = True
+with open(sys.argv[3], "w", encoding="utf-8") as handle:
+    json.dump({"secure_value": secure_value, "unrelated_open": unrelated_open}, handle)
+"""
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "scripts/dl-metric-lock.py"),
+                        str(metadata / ".dl-metric-ingest.lock"),
+                        "--",
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(secure_fd),
+                        str(unrelated_fd),
+                        str(output_path),
+                    ],
+                    env=os.environ | {"CVAL_SECURE_RUN_FDS": str(secure_fd)},
+                    pass_fds=(secure_fd, unrelated_fd),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+            finally:
+                os.close(unrelated_fd)
+                os.close(secure_fd)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                json.loads(output_path.read_text(encoding="utf-8")),
+                {"secure_value": "secure-result\n", "unrelated_open": False},
+            )
 
     def test_validation_test_directories_have_standard_footprint(self) -> None:
         for test_id in ("storage", "nccl", "dltest"):
