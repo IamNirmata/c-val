@@ -160,8 +160,9 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             catalog.targets[0].name = "changed"  # type: ignore[misc]
 
-    def test_parser_exposes_nccl_only_for_raw_results(self) -> None:
+    def test_results_modes_expose_nccl_only_for_raw_results(self) -> None:
         parser = build_parser(self.config)
+        catalog = build_operational_target_catalog(self.registry)
         baseline_targets = (
                 "storage",
                 "dltest",
@@ -176,8 +177,10 @@ class OperationalTargetCatalogTests(unittest.TestCase):
                     ["baseline", "classify", "--test-type", target, "--output", "json"]
                 )
                 self.assertIsInstance(parsed, argparse.Namespace)
-            with self.subTest(command="classifications", target=target):
-                parsed = parser.parse_args(["classifications", "--test", target])
+            with self.subTest(command="results-classifications", target=target):
+                parsed = parser.parse_args(
+                    ["results", "--classifications-only", "--test", target]
+                )
                 self.assertIsInstance(parsed, argparse.Namespace)
         for target in ("storage", "nccl", *baseline_targets[1:]):
             with self.subTest(command="results", target=target):
@@ -185,8 +188,8 @@ class OperationalTargetCatalogTests(unittest.TestCase):
                 self.assertIsInstance(parsed, argparse.Namespace)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(["baseline", "build", "--test-type", "nccl"])
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["classifications", "--test", "nccl"])
+        with self.assertRaisesRegex(ValueError, "does not support"):
+            catalog.require("nccl", CLASSIFICATIONS_EXPORT)
 
     def test_parser_discovers_synthetic_target_without_cli_constant_edit(self) -> None:
         synthetic = self._test("storage", test_id="synthetic", order=15)
@@ -218,7 +221,9 @@ class OperationalTargetCatalogTests(unittest.TestCase):
             "synthetic",
         )
         self.assertEqual(
-            parser.parse_args(["classifications", "--test", "synthetic"]).test,
+            parser.parse_args(
+                ["results", "--classifications-only", "--test", "synthetic"]
+            ).test,
             "synthetic",
         )
 
