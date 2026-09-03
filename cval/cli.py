@@ -47,7 +47,6 @@ from cval.storage.ingest import (
     add_nccl_health_from_summary,
     add_storage_result,
     add_validation_run_results,
-    add_validation_result,
     parse_timestamp,
 )
 from cval.validation.results import (
@@ -407,19 +406,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     results.set_defaults(handler=handle_results)
 
     # In-pod ingestion commands; added without `help` so they stay out of --help.
-    db_add_result = subparsers.add_parser("db-add-result")
-    db_add_result.add_argument("node")
-    db_add_result.add_argument("test")
-    db_add_result.add_argument("result", choices=["pass", "fail", "incomplete"])
-    db_add_result.add_argument("timestamp")
-    db_add_result.add_argument("--image-name", default="")
-    db_add_result.add_argument("--pytorch-version", default="")
-    db_add_result.add_argument("--cuda-version", default="")
-    db_add_result.add_argument("--result-json", type=Path, required=True)
-    db_add_result.add_argument("--result-digest", default="")
-    db_add_result.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    db_add_result.set_defaults(handler=handle_db_add_result)
-
     db_add_run = subparsers.add_parser("db-add-run-results")
     db_add_run.add_argument("node")
     db_add_run.add_argument("timestamp")
@@ -1278,36 +1264,6 @@ def _require_v2_db_target(authorization, db_path: str | Path, config_field: str)
         raise ValueError(
             f"Raw DB target does not match snapshot storage.{config_field}"
         )
-
-
-def handle_db_add_result(args: argparse.Namespace) -> int:
-    """Append one validation result row to the main SQLite DB."""
-
-    authorization = _raw_write_authorization(args)
-    values = validation_result_to_env(authorization.result)
-    expected_result = (
-        values["overall_result"]
-        if args.test == "all"
-        else authorization.result.tests.get(args.test).status
-        if args.test in authorization.result.tests
-        else None
-    )
-    if expected_result != args.result:
-        raise ValueError("Raw DB status row does not match validated result")
-    _require_v2_db_target(authorization, args.db_path, "validation_db_path")
-    timestamp = add_validation_result(
-        args.node,
-        args.test,
-        args.result,
-        args.timestamp,
-        image_name=args.image_name,
-        pytorch_version=args.pytorch_version,
-        cuda_version=args.cuda_version,
-        db_path=args.db_path,
-        _authorization=authorization,
-    )
-    print(f"Added validation result: {args.node} {args.test} {args.result} {timestamp}")
-    return 0
 
 
 def handle_db_add_run_results(args: argparse.Namespace) -> int:
