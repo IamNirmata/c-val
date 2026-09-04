@@ -388,7 +388,7 @@ class CvalLiveTests(unittest.TestCase):
 
     @staticmethod
     def _latest_artifact(env: dict[str, str], name: str) -> Path:
-        matches = sorted(Path(env["CVAL_LIVE_LOG_DIR"]).glob(f"*/{name}"))
+        matches = sorted(Path(env["CVAL_LIVE_LOG_DIR"]).rglob(name))
         if not matches:
             raise AssertionError(f"missing artifact: {name}")
         return matches[-1]
@@ -505,6 +505,37 @@ class CvalLiveTests(unittest.TestCase):
         self.assertIn("pruning=disabled", completed.stdout)
         self.assertFalse(any("kubectl\t" in line and " delete " in f" {line} " for line in calls))
 
+    def test_session_layout_is_compact_and_la_named(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = self._environment(root)
+            completed = self._run(env)
+            log_root = Path(env["CVAL_LIVE_LOG_DIR"])
+            session_name = (log_root / "current-session").read_text(
+                encoding="utf-8"
+            ).strip()
+            session = log_root / session_name
+            state = json.loads((session / "state.json").read_text(encoding="utf-8"))
+            jobs = (session / "jobs.csv").read_text(encoding="utf-8")
+            cycles = list((session / "cycles").iterdir())
+            loop_log_exists = (session / "loop.log").is_file()
+            summary_exists = (session / "SUMMARY.md").is_file()
+            node_snapshot_exists = (session / "nodes" / f"{NODE}.json").is_file()
+            repeated_node_files = list(cycles[0].glob("*-node-check-*.json"))
+
+        self.assertRegex(session_name, r"^\d{8}_\d{6}_P[DS]T(?:-\d+)?$")
+        self.assertTrue(loop_log_exists)
+        self.assertTrue(summary_exists)
+        self.assertEqual(len(cycles), 1)
+        self.assertRegex(cycles[0].name, r"^\d{8}_\d{6}_P[DS]T(?:-\d+)?$")
+        self.assertEqual(state["state"], "cycle-complete")
+        self.assertEqual(state["job_counts"]["Completed"], 1)
+        self.assertIn(f"cval-{NODE}-123", jobs)
+        self.assertTrue(node_snapshot_exists)
+        self.assertEqual(repeated_node_files, [])
+        self.assertNotIn('{"namespace"', completed.stdout)
+        self.assertNotIn('"planned_jobs"', completed.stdout)
+
     def test_successful_submission_records_latest_node_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -564,6 +595,19 @@ class CvalLiveTests(unittest.TestCase):
             )
             completed = self._run(env)
             calls = self._calls(env)
+            session = Path(env["CVAL_LIVE_LOG_DIR"]) / Path(
+                Path(env["CVAL_LIVE_LOG_DIR"]) / "current-session"
+            ).read_text(encoding="utf-8").strip()
+            busy_snapshot = json.loads(
+                (session / "nodes" / f"{NODE}.json").read_text(encoding="utf-8")
+            )
+            selected_snapshot = json.loads(
+                (
+                    session
+                    / "nodes"
+                    / f"{env['FAKE_NODE_2']}.json"
+                ).read_text(encoding="utf-8")
+            )
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         checks = [
@@ -581,9 +625,11 @@ class CvalLiveTests(unittest.TestCase):
         ]
         self.assertEqual(len(submit_calls), 1)
         self.assertIn(f"--free-nodes {env['FAKE_NODE_2']}", submit_calls[0])
-        self.assertIn(f"node={NODE} status=busy eligible=false", completed.stdout)
+        self.assertFalse(busy_snapshot["eligible"])
+        self.assertTrue(selected_snapshot["eligible"])
         self.assertIn(
-            f"node={env['FAKE_NODE_2']} status=ready eligible=true",
+            "component=node-scan status=ok checked_count=2 "
+            f"ineligible_count=1 selected={env['FAKE_NODE_2']}",
             completed.stdout,
         )
 
@@ -603,8 +649,8 @@ class CvalLiveTests(unittest.TestCase):
             completed = self._run(env)
             calls = self._calls(env)
             reports = sorted(
-                Path(env["CVAL_LIVE_LOG_DIR"]).glob(
-                    "*/preflight-node-cooldown.json"
+                Path(env["CVAL_LIVE_LOG_DIR"]).rglob(
+                    "preflight-node-cooldown.json"
                 )
             )
             report = json.loads(reports[-1].read_text(encoding="utf-8"))

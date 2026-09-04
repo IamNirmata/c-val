@@ -29,6 +29,9 @@ SESSION_NAME=${CVAL_TMUX_SESSION:-cval-live}
 LOG_DIR=${CVAL_LIVE_LOG_DIR:-$SOURCE_REPO/run-logs/cval-live}
 LIVE_CONFIRM=${CVAL_LIVE_CONFIRM:-}
 PRUNE_CONFIRM=${CVAL_PRUNE_CONFIRM:-}
+STATE_HELPER=${CVAL_LIVE_STATE_HELPER:-$SCRIPT_DIR/cval-live-state.py}
+SESSION_DIR=${CVAL_SESSION_DIR:-}
+declare -A LAST_JOB_PHASES=()
 
 config_value() {
     local section="$1"
@@ -82,6 +85,94 @@ load_operational_settings() {
     PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
     NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
     JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
+}
+
+la_now() {
+    TZ=America/Los_Angeles date +%Y-%m-%dT%H:%M:%S%:z
+}
+
+la_id() {
+    TZ=America/Los_Angeles date +%Y%m%d_%H%M%S_%Z
+}
+
+initialize_session() {
+    local git_ref="$1"
+    if [[ -n "$SESSION_DIR" ]]; then
+        if [[ ! -f "$SESSION_DIR/state.json" ]]; then
+            echo "cval-live session state is missing: $SESSION_DIR/state.json" >&2
+            return 2
+        fi
+        return 0
+    fi
+    local session_id
+    session_id=$(la_id)
+    SESSION_DIR="$LOG_DIR/$session_id"
+    local suffix=0
+    while [[ -e "$SESSION_DIR" ]]; do
+        suffix=$((suffix + 1))
+        SESSION_DIR="$LOG_DIR/$session_id-$suffix"
+    done
+    local pruning_args=()
+    pruning_enabled && pruning_args+=(--pruning-enabled)
+    python "$STATE_HELPER" init "$SESSION_DIR" \
+        --started-at "$(la_now)" \
+        --git-ref "$git_ref" \
+        --branch "${GIT_BRANCH_SETTING:-main}" \
+        --batch-size "$BATCH_SIZE" \
+        --plan-limit "$PLAN_LIMIT_SETTING" \
+        "${pruning_args[@]}"
+}
+
+session_update() {
+    local state="$1"
+    local message="$2"
+    local cycle_id="${3:-}"
+    [[ -n "$SESSION_DIR" ]] || return 0
+    local cycle_args=()
+    [[ -z "$cycle_id" ]] || cycle_args+=(--cycle-id "$cycle_id")
+    python "$STATE_HELPER" update "$SESSION_DIR" \
+        --updated-at "$(la_now)" \
+        --state "$state" \
+        --message "$message" \
+        "${cycle_args[@]}"
+}
+
+session_import_receipt() {
+    local receipt="$1"
+    [[ -n "$SESSION_DIR" ]] || return 0
+    python "$STATE_HELPER" receipt "$SESSION_DIR" \
+        --source "$receipt" \
+        --observed-at "$(la_now)"
+}
+
+session_record_job() {
+    local job_name="$1"
+    local phase="$2"
+    local deleted_at="${3:-}"
+    [[ -n "$SESSION_DIR" ]] || return 0
+    local deleted_args=()
+    [[ -z "$deleted_at" ]] || deleted_args+=(--deleted-at "$deleted_at")
+    python "$STATE_HELPER" job "$SESSION_DIR" \
+        --job-name "$job_name" \
+        --phase "$phase" \
+        --observed-at "$(la_now)" \
+        "${deleted_args[@]}"
+}
+
+session_record_node() {
+    local source="$1"
+    [[ -n "$SESSION_DIR" ]] || return 0
+    python "$STATE_HELPER" node "$SESSION_DIR" --source "$source"
+}
+
+record_job_observation() {
+    local job_name="$1"
+    local phase="$2"
+    session_record_job "$job_name" "$phase" || return "$?"
+    if [[ "${LAST_JOB_PHASES[$job_name]:-}" != "$phase" ]]; then
+        log "job $job_name phase=$phase"
+        LAST_JOB_PHASES[$job_name]="$phase"
+    fi
 }
 
 usage() {
@@ -162,6 +253,10 @@ validate_runtime_settings() {
     fi
     if [[ ! -f "$NODE_COOLDOWN_HELPER" ]]; then
         echo "Node cooldown helper not found: $NODE_COOLDOWN_HELPER" >&2
+        return 2
+    fi
+    if [[ ! -f "$STATE_HELPER" ]]; then
+        echo "cval-live state helper not found: $STATE_HELPER" >&2
         return 2
     fi
 }
@@ -809,11 +904,13 @@ for job in payload.get("planned_jobs", []):
 PY
     SELECTED_AVAILABLE_NODES=""
     CHECKED_NODE_NAMES=""
+    local checked_count=0
+    local ineligible_count=0
     local node
     while IFS= read -r node; do
         [[ -n "$node" ]] || continue
-        local check_file="$cycle_dir/$stem-node-check-$node.json"
-        local check_error="$check_file.stderr"
+        local check_file="$cycle_dir/node-check.json"
+        local check_error="$cycle_dir/node-check.stderr"
         local check_rc=0
         assert_runner_worktree "$stem-check-$node-before" "$expected_sha" || return "$?"
         python -m cval.cli --config "$CONFIG_PATH" nodes \
@@ -831,15 +928,20 @@ PY
             log "component=node-check node=$node status=invalid-json artifact=$check_file"
             return "$parse_rc"
         fi
+        session_record_node "$check_file" || return "$?"
         local eligible status_label free allocatable reason
         IFS=$'\t' read -r eligible status_label free allocatable reason <<<"$check_summary"
-        log "component=node-check node=$node status=$status_label eligible=$eligible free=$free/$allocatable reason=$reason"
+        checked_count=$((checked_count + 1))
         CHECKED_NODE_NAMES=$(csv_append_unique "$CHECKED_NODE_NAMES" "$node")
         if [[ "$eligible" == "true" ]]; then
             SELECTED_AVAILABLE_NODES=$(csv_append_unique "$SELECTED_AVAILABLE_NODES" "$node")
             break
         fi
+        ineligible_count=$((ineligible_count + 1))
     done <"$candidate_file"
+    local selected="${SELECTED_AVAILABLE_NODES:-none}"
+    log "component=node-scan status=ok checked_count=$checked_count ineligible_count=$ineligible_count selected=$selected"
+    session_update "planning" "node scan checked=$checked_count selected=$selected" "${CYCLE_ID:-}"
 }
 
 exclude_nodes_from_plan_snapshot() {
@@ -936,7 +1038,7 @@ PY
 }
 
 latest_cycle_dir_with_submits() {
-    find "$LOG_DIR" -mindepth 2 -maxdepth 2 \( -name 'submit.json' -o -name 'submit-*.json' \) -printf '%T@ %h\n' 2>/dev/null \
+    find "$LOG_DIR" -type f \( -name 'submit.json' -o -name 'submit-*.json' \) -printf '%T@ %h\n' 2>/dev/null \
         | sort -nr \
         | head -1 \
         | cut -d' ' -f2-
@@ -1036,7 +1138,10 @@ delete_job() {
     if ! run_kubectl delete vcjob -n "$NAMESPACE" "$job_name" --ignore-not-found=true | tee -a "$deleted_log"; then
         return 1
     fi
-    record_pruned_job "$cycle_dir" "$job_name" "$(date +%s)"
+    local deleted_at
+    deleted_at=$(date +%s)
+    record_pruned_job "$cycle_dir" "$job_name" "$deleted_at"
+    session_record_job "$job_name" "Pruned" "$(la_now)"
 }
 
 watch_existing_jobs_until_clear() {
@@ -1046,7 +1151,7 @@ watch_existing_jobs_until_clear() {
 
     enter_runner_worktree "resume-watch" || return "$?"
     while [[ -n "$active_jobs" ]]; do
-        local status_file="$cycle_dir/resume-status-$(date -u +%H%M%S).json"
+        local status_file="$cycle_dir/jobs.json"
         local status_error="$status_file.stderr"
         local status_rc=0
         assert_runner_worktree "resume-watch-jobs-before" "$expected_sha" || {
@@ -1065,8 +1170,6 @@ watch_existing_jobs_until_clear() {
             leave_runner_worktree "resume-watch" 2 || return "$?"
             return 2
         fi
-        cat "$status_file"
-
         local observation_state
         local observation_rc=0
         observation_state=$(json_jobs_observation_state "$status_file" "$active_jobs") || observation_rc=$?
@@ -1092,7 +1195,10 @@ watch_existing_jobs_until_clear() {
                 leave_runner_worktree "resume-watch" 2 || return "$?"
                 return 2
             fi
-            log "resume job $job_name phase=$phase"
+            record_job_observation "$job_name" "$phase" || {
+                leave_runner_worktree "resume-watch" 2 || return "$?"
+                return 2
+            }
 
             case "$phase" in
                 Completed|Succeeded|Failed|Aborted|Terminated|Missing)
@@ -1154,6 +1260,14 @@ resume_latest_cycle_if_needed() {
     fi
 
     repair_cycle_cooldowns "$cycle_dir" || return "$?"
+    local receipt
+    while IFS= read -r receipt; do
+        [[ -n "$receipt" ]] || continue
+        session_import_receipt "$receipt" || return 2
+    done < <(
+        find "$cycle_dir" -maxdepth 1 -type f \
+            \( -name 'submit.json' -o -name 'submit-*.json' \) -print | sort
+    )
 
     local jobs_csv
     jobs_csv=$(json_submitted_jobs_csv_from_dir "$cycle_dir")
@@ -1194,6 +1308,13 @@ resume_latest_cycle_if_needed() {
         log "resume jobs observation was invalid; deferring new submission cycle"
         return 2
     fi
+    IFS=',' read -r -a resumed_jobs <<< "$jobs_csv"
+    local resumed_job resumed_phase
+    for resumed_job in "${resumed_jobs[@]}"; do
+        [[ -n "$resumed_job" ]] || continue
+        resumed_phase=$(json_phase "$cycle_dir/resume-status.json" "$resumed_job")
+        record_job_observation "$resumed_job" "$resumed_phase" || return 2
+    done
     case "$observation_state" in
         active)
             log "resuming watch for active jobs from $cycle_dir: $jobs_csv"
@@ -1216,17 +1337,22 @@ resume_latest_cycle_if_needed() {
 }
 
 new_cycle_dir() {
-    mkdir -p "$LOG_DIR"
+    if [[ -z "$SESSION_DIR" || ! -d "$SESSION_DIR/cycles" ]]; then
+        echo "cval-live session directory is not initialized" >&2
+        return 2
+    fi
     local cycle_id
-    cycle_id=$(date -u +%Y%m%dT%H%M%SZ)
-    local cycle_dir="$LOG_DIR/$cycle_id"
+    cycle_id=$(la_id)
+    local cycle_dir="$SESSION_DIR/cycles/$cycle_id"
     local suffix=0
     while [[ -e "$cycle_dir" ]]; do
         suffix=$((suffix + 1))
-        cycle_dir="$LOG_DIR/$cycle_id-$suffix"
+        cycle_dir="$SESSION_DIR/cycles/$cycle_id-$suffix"
     done
     mkdir "$cycle_dir"
     CYCLE_DIR="$cycle_dir"
+    CYCLE_ID=$(basename "$cycle_dir")
+    session_update "planning" "collecting cycle inputs" "$CYCLE_ID"
 }
 
 log_operation_settings() {
@@ -1304,6 +1430,7 @@ run_submit_cycle() {
     if (( preflight_queue == 0 )); then
         log "submit state=no-due-candidates; preflight succeeded and no jobs will be submitted"
         leave_runner_worktree "submit" 0 || return "$?"
+        session_update "cycle-complete" "no due candidates" "$CYCLE_ID"
         log "cycle complete; artifacts in $cycle_dir"
         return 0
     fi
@@ -1315,7 +1442,7 @@ run_submit_cycle() {
     local idle_rounds=0
 
     while true; do
-        local status_file="$cycle_dir/status-$(date -u +%H%M%S).json"
+        local status_file="$cycle_dir/jobs.json"
         if [[ -n "$active_jobs" ]]; then
             local status_error="$status_file.stderr"
             local status_rc=0
@@ -1363,7 +1490,10 @@ run_submit_cycle() {
                 fi
                 local node
                 node=$(job_node_from_name "$job_name")
-                log "job $job_name phase=$phase"
+                record_job_observation "$job_name" "$phase" || {
+                    leave_runner_worktree "submit" 1 || return "$?"
+                    return 1
+                }
 
                 case "$phase" in
                     Completed|Succeeded|Failed|Aborted|Terminated|Missing)
@@ -1403,7 +1533,7 @@ run_submit_cycle() {
         active_count=$(csv_count "$active_jobs")
         local slots=$((BATCH_SIZE - active_count))
         while (( slots > 0 )); do
-            local slot_stem="slot-$slots-$(date -u +%H%M%S)"
+            local slot_stem="slot-$slots"
             inputs_rc=0
             collect_plan_inputs "$cycle_dir" "$slot_stem" "$git_ref" || inputs_rc=$?
             if (( inputs_rc != 0 )); then
@@ -1417,7 +1547,7 @@ run_submit_cycle() {
                 cycle_excluded_nodes=$(csv_append_unique "$cycle_excluded_nodes" "$node")
             done
             exclude_nodes_from_plan_snapshot "$cycle_excluded_nodes"
-            local plan_file="$cycle_dir/plan-$(date -u +%H%M%S)-slot-$slots.json"
+            local plan_file="$cycle_dir/plan-slot-$slots.json"
             log "rebuilding live ranked list for one open slot ($slots slot(s) available)"
             local plan_rc=0
             assert_runner_worktree "submit-slot-plan-before" "$git_ref" || {
@@ -1442,8 +1572,6 @@ run_submit_cycle() {
                 leave_runner_worktree "submit" "$plan_rc" || return "$?"
                 return "$plan_rc"
             fi
-            cat "$plan_file"
-
             if [[ ! -s "$plan_file" ]]; then
                 log "submit component=plan status=failed reason=empty-output"
                 leave_runner_worktree "submit" 1 || return "$?"
@@ -1508,7 +1636,6 @@ run_submit_cycle() {
                     leave_runner_worktree "submit" "$submit_rc" || return "$?"
                     return "$submit_rc"
                 fi
-                cat "$submit_file"
 
                 local submitted_identity
                 local submitted_parse_rc=0
@@ -1520,6 +1647,13 @@ run_submit_cycle() {
                 fi
                 local new_job submitted_node
                 IFS=$'\t' read -r new_job submitted_node <<<"$submitted_identity"
+                session_import_receipt "$submit_file" || {
+                    log "session receipt update failed after submitting $new_job; ending cycle"
+                    leave_runner_worktree "submit" 1 || return "$?"
+                    return 1
+                }
+                log "submitted job=$new_job node=$submitted_node timestamp=$run_timestamp"
+                session_update "watching" "tracking submitted jobs" "$CYCLE_ID"
                 if ! record_node_submission "$submitted_node" "$run_timestamp"; then
                     log "cooldown state update failed after submitting $new_job; ending cycle without further submissions"
                     leave_runner_worktree "submit" 1 || return "$?"
@@ -1581,16 +1715,23 @@ run_submit_cycle() {
     fi
 
     leave_runner_worktree "submit" "$final_status_rc" || return "$?"
+    session_update "cycle-complete" "cycle finished" "$CYCLE_ID"
     log "cycle complete; artifacts in $cycle_dir"
 }
 
 run_once() {
     require_command flock
     acquire_live_lock || return "$?"
+    resolve_git_ref || return "$?"
+    initialize_session "$RESOLVED_GIT_REF" || return "$?"
+    session_update "running" "starting one cycle"
     local resume_rc=0
     resume_latest_cycle_if_needed || resume_rc=$?
     case "$resume_rc" in
-        0) return 0 ;;
+        0)
+            session_update "cycle-complete" "resumed jobs reached terminal state"
+            return 0
+            ;;
         1) ;;
         *)
             log "resume observation failed closed; deferring new cycle"
@@ -1603,23 +1744,36 @@ run_once() {
 run_loop() {
     require_command flock
     acquire_live_lock || return "$?"
-    trap 'log "received stop signal; exiting loop"; exit 0' INT TERM
+    if [[ -z "$SESSION_DIR" ]]; then
+        if ! resolve_git_ref; then
+            log "cycle failed; see logs above"
+            sleep "$LOOP_SLEEP_SECONDS"
+            return "$?"
+        fi
+        initialize_session "$RESOLVED_GIT_REF" || return "$?"
+    fi
+    session_update "running" "loop started"
+    trap 'session_update "stopped" "received stop signal" || true; log "received stop signal; exiting loop"; exit 0' INT TERM
     while true; do
         local resume_rc=0
         resume_latest_cycle_if_needed || resume_rc=$?
         if (( resume_rc == 0 )); then
+            session_update "sleeping" "resumed jobs reached terminal state"
             log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
             sleep "$LOOP_SLEEP_SECONDS"
             continue
         elif (( resume_rc != 1 )); then
+            session_update "blocked" "resume observation failed closed"
             log "resume observation failed closed; deferring new cycle"
             log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
             sleep "$LOOP_SLEEP_SECONDS"
             continue
         fi
         if ! run_submit_cycle; then
+            session_update "failed" "cycle failed; inspect loop.log"
             log "cycle failed; see logs above"
         fi
+        session_update "sleeping" "waiting for next cycle"
         log "sleeping $LOOP_SLEEP_SECONDS seconds before next cycle"
         sleep "$LOOP_SLEEP_SECONDS"
     done
@@ -1633,11 +1787,12 @@ start_session() {
         return 2
     fi
 
-    local session_log="$LOG_DIR/tmux-$(date -u +%Y%m%dT%H%M%SZ).log"
+    initialize_session "$EXPLICIT_GIT_REF" || return "$?"
+    local session_log="$SESSION_DIR/loop.log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q CVAL_GIT_BRANCH=%q CVAL_GIT_REF=%q bash %q run-loop' \
-        "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$GIT_BRANCH_SETTING" "$EXPLICIT_GIT_REF" "$SCRIPT_PATH"
+        'CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_SESSION_DIR=%q CVAL_LIVE_STATE_HELPER=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q CVAL_GIT_BRANCH=%q CVAL_GIT_REF=%q bash %q run-loop' \
+        "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$SESSION_DIR" "$STATE_HELPER" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$GIT_BRANCH_SETTING" "$EXPLICIT_GIT_REF" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \
@@ -1647,6 +1802,8 @@ start_session() {
     tmux new-session -d -s "$SESSION_NAME" "bash -lc $(printf '%q' "$tmux_body")"
     echo "Started tmux session: $SESSION_NAME"
     echo "Attach with: $0 attach"
+    echo "Session: $SESSION_DIR"
+    echo "Summary: $SESSION_DIR/SUMMARY.md"
     echo "Logs: $session_log"
 }
 
@@ -1658,6 +1815,15 @@ stop_session() {
     fi
     tmux send-keys -t "$SESSION_NAME" C-c
     tmux kill-session -t "$SESSION_NAME"
+    local current_session_file="$LOG_DIR/current-session"
+    if [[ -f "$current_session_file" ]]; then
+        local current_session_name
+        current_session_name=$(<"$current_session_file")
+        if [[ "$current_session_name" =~ ^[A-Za-z0-9._-]+$ && -f "$LOG_DIR/$current_session_name/state.json" ]]; then
+            SESSION_DIR="$LOG_DIR/$current_session_name"
+            session_update "stopped" "session stopped by operator" || true
+        fi
+    fi
     echo "Stopped tmux session: $SESSION_NAME"
     echo "Kubernetes jobs were not deleted. Use cval jobs/status to inspect them."
 }
@@ -1671,10 +1837,20 @@ show_status() {
     fi
     if [[ -d "$LOG_DIR" ]]; then
         local latest_log
-        latest_log=$(ls -t "$LOG_DIR"/tmux-*.log 2>/dev/null | head -1 || true)
+        local current_session_name=""
+        [[ ! -f "$LOG_DIR/current-session" ]] || current_session_name=$(<"$LOG_DIR/current-session")
+        if [[ "$current_session_name" =~ ^[A-Za-z0-9._-]+$ && -f "$LOG_DIR/$current_session_name/loop.log" ]]; then
+            latest_log="$LOG_DIR/$current_session_name/loop.log"
+        else
+            latest_log=$(find "$LOG_DIR" -mindepth 2 -maxdepth 2 -type f -name loop.log -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+            [[ -n "$latest_log" ]] || latest_log=$(ls -t "$LOG_DIR"/tmux-*.log 2>/dev/null | head -1 || true)
+        fi
         if [[ -n "$latest_log" ]]; then
             echo "Latest log: $latest_log"
-            tail -40 "$latest_log"
+            local summary_file
+            summary_file="$(dirname "$latest_log")/SUMMARY.md"
+            [[ ! -f "$summary_file" ]] || cat "$summary_file"
+            tail -20 "$latest_log"
         fi
     fi
 }
