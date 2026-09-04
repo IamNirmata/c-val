@@ -27,6 +27,7 @@ class SimplifiedArchitectureTests(unittest.TestCase):
             "scripts/cval-baseline-common.sh",
             "scripts/cval-nccl-postgres-preflight.sh",
             "scripts/cval-split-classifications.py",
+            "scripts/cval.sh",
             "docs/run-history.md",
             "docs/u8-health-engine-design-report.md",
             "docs/u11-evaluator-rollout.md",
