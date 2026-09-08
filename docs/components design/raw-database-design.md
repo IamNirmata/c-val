@@ -8,7 +8,8 @@ c-val writes seven authoritative raw SQLite databases under
 are outside this design.
 
 `(node, timestamp)` is the shared run identity. DL metrics also use `run_key`.
-There are no cross-database foreign keys or evaluator/classification tables.
+The current writer creates no evaluator/classification tables or cross-database
+foreign keys. Retained historical objects are listed below.
 
 | Database | Main table | Row grain | Purpose |
 |---|---|---|---|
@@ -71,6 +72,44 @@ Every DL DB also has:
 - `cval_ingested_runs`: one receipt per ingested run.
 - `cval_ingest_metadata`: current generation ID, state, and update time.
 - `cval_ingest_migrations`: completed additive migrations.
+
+## Evaluator Read Contract
+
+Use explicit table names, never the first table in a database. Join DL rows by
+`node, cval_timestamp` to `runs.node, runs.timestamp`; read the stored `run_key`
+for receipts. Current keys are `<node>-<timestamp>`; older keys may start with
+`dltest-`. Do not reconstruct them from a hard-coded prefix.
+
+Read only committed status sets and their exact-run metrics, not independent
+latest-per-node rows. Deduplicate identical historical status rows; conflicting
+duplicates are indeterminate. DL generation IDs/state must agree before and
+after a bounded read; retain per-run receipts and rank-coverage checks. A global
+generation is a publication marker, not a run ID or an ingestion cursor.
+
+Run timestamps identify submissions, not arrival order: a delayed run can
+commit after a newer one. Do not process new results using only `MAX(timestamp)`.
+The DBs do not provide a complete hardware/test-config cohort; verified run
+provenance is needed before pooling measurements across environments.
+
+## Lightweight Review (2026-09-08 UTC)
+
+Read through `gcr-admin/gcr-admin-pvc-access` using SQLite `mode=ro` and
+`query_only=ON`: schema metadata, four status rows, one storage/NCCL row, and
+two rows per DL table. No full counts or integrity scans were repeated.
+
+- Latest aggregate sample: `slc01-cl02-hgx-0368`, timestamp `1788680072`;
+  all four statuses passed, and matching metrics existed in all seven DBs.
+- Four DL DBs shared completed generation
+  `1788818284360325-f35f4c9a11ca48d6b15003cbdc3ab65d`.
+- DL files were approximately 3.75 / 5.29 / 0.66 / 3.18 GB
+  (numerical / compute / collective / overlap).
+- Historical NCCL tables/views, including `NODE_RANKING`, remain present;
+  they are not evaluation inputs. This sampled review is not a full integrity
+  or freshness guarantee for every node.
+
+The proposed independent evaluator is described in
+[evaluation-engine-design.md](evaluation-engine-design.md); it must not update
+these raw databases.
 
 ## Accepted-Run Example
 
