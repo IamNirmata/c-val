@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cval-evaluation-engine-data
+  namespace: gcr-admin
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: REPLACE_WITH_APPROVED_BLOCK_STORAGE_CLASS
+  resources:
+    requests:
+      storage: 20Gi

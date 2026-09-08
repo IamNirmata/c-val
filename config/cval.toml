@@ -32,6 +32,22 @@ timeout_seconds = 6000
 poll_interval_seconds = 60
 pending_start_timeout_seconds = 480
 
+[sqlite_retry]
+attempts = 5
+delay_seconds = 2
+timeout_seconds = 5
+
+[evaluation]
+enabled = true
+output_db = "/evaluation/evaluation.db"
+shared_raw_storage = true
+poll_seconds = 60
+baseline_check_seconds = 3600
+batch_size = 20
+max_training_runs = 100
+query_timeout_seconds = 20
+max_metric_rows_per_run = 50000
+
 [storage]
 validation_db_path = "/data/continuous_validation/metadata/validation.db"
 storage_db_path = "/data/continuous_validation/metadata/test-storage.db"

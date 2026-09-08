@@ -90,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
     args.cval_config = config
     try:
+        if args.command.startswith("db-"):
+            from cval.storage.retry import load_retry_policy, retry_sqlite
+
+            return retry_sqlite(
+                lambda: args.handler(args), load_retry_policy(config_args.config)
+            )
         return args.handler(args)
     except BrokenPipeError:
         # Make `cval ... | head` behave like a normal Unix CLI instead of tracing.

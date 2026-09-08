@@ -30,3 +30,26 @@ summary_filename = "summary.json"
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
 capabilities = ["config", "export"]
+
+[evaluation]
+enabled = true
+baseline_script = "baseline.py"
+classification_script = "classification.py"
+refresh_seconds = 1209600
+window_seconds = 2419200
+holdout_seconds = 86400
+expires_seconds = 2419200
+min_nodes = 30
+quantile = 0.95
+min_relative_gap = 0.05
+min_mode_fraction = 0.9
+atol = 0.000001
+rtol = 0.01
+expected_ranks = 8
+require_hardware = true
+
+[evaluation.metrics]
+numerical_correctness = ["norm_output", "bias", "weight", "bias_hh_l0", "bias_ih_l0", "weight_hh_l0", "weight_ih_l0"]
+compute_performance = ["fp_cpu_time", "fp_gpu_time", "bp_cpu_time", "bp_gpu_time"]
+collective_performance = ["cpu_time", "gpu_time"]
+overlap_performance = ["coll_mean", "coll_stdev", "layer_mean", "layer_stdev"]

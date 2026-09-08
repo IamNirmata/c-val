@@ -1,8 +1,29 @@
 # Evaluation Engine
 
-**Proposal, 2026-09-08. Not deployed.** c-val continues to own discovery,
+**Design target, 2026-09-08. Not deployed.** c-val continues to own discovery,
 validation and raw SQLite evidence only. A separate evaluator reads that
 evidence and owns all derived thresholds/classes. No raw-row updates.
+
+## Implementation Status
+
+The first implementation is in [evaluation_engine](../../evaluation_engine/)
+with test-owned `baseline.py` / `classification.py` and `[evaluation]` sections
+in each `test_config.toml`. Global cadence/storage/retry settings live in
+[cval.toml](../../config/cval.toml). These settings are excluded from raw-run
+snapshots. See [deployment and operation](../../deploy/evaluation-engine/README.md)
+for the implemented command, limits, exact schema and rollout gates.
+
+V1 uses a fixed-name CPU Pod, DELETE-journaled derived DB, capped baseline
+training (100 recent candidate runs), rotating bounded reconciliation, and
+rank-specific cross-node thresholds. Numerical references are provisional
+consensus, not certified truth. Evaluation receipts commit before the cursor;
+replay refreshes observation time without duplicating comparison rows. The
+schema sketches below remain the broader target, not executable DDL.
+
+The shared raw DL WAL/NFS layout blocks safe concurrent deployment. Retries
+address BUSY/LOCKED only; the evaluator rejects shared-storage WAL until an
+approved quiesced migration or coherent local snapshot arrangement is in place.
+No live database journal mode is changed by the evaluator.
 
 ## Inputs and Draft Review
 

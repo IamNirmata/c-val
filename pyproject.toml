@@ -14,7 +14,7 @@ dependencies = ["PyYAML>=6.0,<7"]
 cval = "cval.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["cval*"]
+include = ["cval*", "evaluation_engine*"]
 
 [tool.ruff]
 line-length = 100

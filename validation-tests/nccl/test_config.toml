@@ -35,3 +35,23 @@ summary_filename = "summary.json"
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
 capabilities = ["config", "export"]
+
+[evaluation]
+enabled = true
+baseline_script = "baseline.py"
+classification_script = "classification.py"
+refresh_seconds = 1209600
+window_seconds = 2419200
+holdout_seconds = 86400
+expires_seconds = 2419200
+min_nodes = 30
+quantile = 0.95
+min_relative_gap = 0.05
+min_mode_fraction = 0.9
+atol = 0.000001
+rtol = 0.01
+expected_ranks = 8
+require_hardware = true
+
+[evaluation.metrics]
+nccl = ["BUS_BW", "LATENCY", "mlx5_4", "mlx5_7", "mlx5_8", "mlx5_9", "mlx5_10", "mlx5_11", "mlx5_12", "mlx5_13"]

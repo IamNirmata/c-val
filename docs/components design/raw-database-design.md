@@ -111,6 +111,13 @@ The proposed independent evaluator is described in
 [evaluation-engine-design.md](evaluation-engine-design.md); it must not update
 these raw databases.
 
+Raw `db-*` CLI ingestion retries complete commands for SQLite BUSY/LOCKED errors
+using `[sqlite_retry]` in the global config (five attempts, two seconds apart).
+The existing per-connection busy timeout remains in force. Digest validation and
+idempotency checks still run on retries; non-lock errors are not retried.
+This does not make cross-host WAL on NFS safe. The independent evaluator rejects
+that source layout pending a separately approved storage arrangement.
+
 ## Accepted-Run Example
 
 Run `slc01-cl02-hgx-0106-1788475963`, commit

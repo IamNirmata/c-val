@@ -28,3 +28,23 @@ summary_filename = "summary.txt"
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
 capabilities = ["config", "export"]
+
+[evaluation]
+enabled = true
+baseline_script = "baseline.py"
+classification_script = "classification.py"
+refresh_seconds = 1209600
+window_seconds = 2419200
+holdout_seconds = 86400
+expires_seconds = 2419200
+min_nodes = 30
+quantile = 0.95
+min_relative_gap = 0.05
+min_mode_fraction = 0.9
+atol = 0.000001
+rtol = 0.01
+expected_ranks = 1
+require_hardware = false
+
+[evaluation.metrics]
+storage = ["iodepth_read_1file_iops", "iodepth_read_1file_bw", "iodepth_write_1file_iops", "iodepth_write_1file_bw", "numjobs_read_nfiles_iops", "numjobs_read_nfiles_bw", "numjobs_write_nfiles_iops", "numjobs_write_nfiles_bw", "randread_iops", "randread_bw", "randwrite_iops", "randwrite_bw"]

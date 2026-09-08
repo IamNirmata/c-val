@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cval-evaluation-engine
+  namespace: gcr-admin
+  labels:
+    app: cval-evaluation-engine
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 120
+  nodeSelector:
+    kubernetes.io/hostname: slc01-cl02-ccpu-008
+    kubernetes.io/os: linux
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: evaluator
+      image: ghcr.io/iamnirmata/cval-evaluation-engine:REPLACE_WITH_PUBLISHED_COMMIT
+      args: ["--config", "/app/config/cval.toml", "--confirm", "evaluate"]
+      resources:
+        requests:
+          cpu: "2"
+          memory: 2Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: raw
+          mountPath: /data
+          readOnly: true
+        - name: output
+          mountPath: /evaluation
+        - name: temporary
+          mountPath: /tmp
+  volumes:
+    - name: raw
+      persistentVolumeClaim:
+        claimName: pvc-vast-gcr-admin
+        readOnly: true
+    - name: output
+      persistentVolumeClaim:
+        claimName: cval-evaluation-engine-data
+    - name: temporary
+      emptyDir:
+        sizeLimit: 256Mi
