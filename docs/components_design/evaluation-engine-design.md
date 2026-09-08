@@ -1,10 +1,14 @@
 # Evaluation Engine
 
-**Design target, 2026-09-08. Not deployed.** c-val continues to own discovery,
+**Broader design target, 2026-09-08; see implemented v1 below.** c-val continues to own discovery,
 validation and raw SQLite evidence only. A separate evaluator reads that
 evidence and owns all derived thresholds/classes. No raw-row updates.
 
 ## Implementation Status
+
+V1 was observed deployed at `3c04160` on 2026-09-08. Its actual tables, keys
+and transaction boundaries are in
+[evaluation-database-design.md](evaluation-database-design.md).
 
 The first implementation is in [evaluation_engine](../../evaluation_engine/)
 with test-owned `baseline.py` / `classification.py` and `[evaluation]` sections
