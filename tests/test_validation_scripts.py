@@ -26,6 +26,27 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ValidationScriptTests(unittest.TestCase):
+    def test_dl_metric_lock_holds_posix_lock_until_child_exits(self) -> None:
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / ".dl-metric-ingest.lock"
+            holder = subprocess.Popen(
+                [sys.executable, str(REPO_ROOT / "scripts/dl-metric-lock.py"), str(lock_path), "--", sys.executable, "-u", "-c", "import sys; print('ready', flush=True); sys.stdin.readline()"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                self.assertIn("POSIX", holder.stdout.readline())
+                self.assertEqual(holder.stdout.readline().strip(), "ready")
+                with lock_path.open("r+") as contender:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.lockf(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                _output, error = holder.communicate("finish\n", timeout=10)
+                self.assertEqual(holder.returncode, 0, error)
+            with lock_path.open("r+") as contender:
+                fcntl.lockf(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_nccl_summary_finalizer_parses_hca_samples_and_requires_them(self) -> None:
         self.assertEqual(
             summarize_ibbw(

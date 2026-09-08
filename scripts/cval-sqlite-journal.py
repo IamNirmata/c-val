@@ -62,9 +62,9 @@ def migrate(metadata: Path, backup_root: Path, seconds: int):
     backup_root = canonical(backup_root)
     if backup_root.is_relative_to(metadata):
         raise ValueError("backup directory must be outside metadata")
-    lock = os.open(metadata, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    lock = os.open(metadata / ".dl-metric-ingest.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         sources = [canonical(metadata / f"dltest_{component}.db") for component in COMPONENTS]
         required = sum(path.stat().st_size + (path.with_name(path.name + "-wal").stat().st_size if path.with_name(path.name + "-wal").exists() else 0) for path in sources)
         parent = backup_root.parent

@@ -34,7 +34,7 @@ transaction only after required metric writes succeed. It is the completion
 marker. Earlier metric rows can exist without final status after a late
 ingestion failure; audits must correlate exact timestamps.
 
-The four DL writes are serialized by one metadata-directory lock and publish
+The four DL writes are serialized by one persistent POSIX record lock and publish
 the same completed generation ID. Schema owners are
 [`ingest.py`](../../cval/storage/ingest.py) and
 [`dltest_ingest.py`](../../cval/storage/dltest_ingest.py).
@@ -120,6 +120,8 @@ that source layout. New DL writer connections require DELETE journaling with
 FULL durability and reject preexisting WAL. A separately approved, quiesced
 four-DB migration creates verified SQLite backups before changing journal mode;
 no schema, run identity, or raw metrics are removed.
+Cross-node preflight found directory `flock` ineffective on this NFS mount;
+compatible writers lock `metadata/.dl-metric-ingest.lock` with `fcntl.lockf`.
 
 ## Accepted-Run Example
 

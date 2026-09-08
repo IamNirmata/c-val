@@ -1,4 +1,4 @@
-"""Verify NFS SQLite and directory locks using two approved CPU pods."""
+"""Verify NFS SQLite and POSIX record locks using two approved CPU pods."""
 
 import argparse
 from contextlib import closing
@@ -13,9 +13,9 @@ import sys
 
 
 def hold(path):
-    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with closing(sqlite3.connect(path, timeout=5)) as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS locking_probe(value INTEGER)")
             connection.commit()
@@ -30,13 +30,13 @@ def hold(path):
 
 
 def check(path, expected):
-    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_NOFOLLOW)
     try:
-        directory_locked = False
+        record_locked = False
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            directory_locked = True
+            record_locked = True
         with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0)) as connection:
             sqlite_locked = False
             try:
@@ -51,15 +51,23 @@ def check(path, expected):
                     connection.commit()
                 else:
                     connection.rollback()
-        if directory_locked != expected or sqlite_locked != expected:
-            raise RuntimeError(f"cross-node locks failed: directory={directory_locked}, sqlite={sqlite_locked}, expected={expected}")
-        print(json.dumps({"expected_locked": expected, "directory_locked": directory_locked, "sqlite_locked": sqlite_locked, "ok": True}), flush=True)
+        valid = record_locked == expected and sqlite_locked == expected
+        print(json.dumps({"expected_locked": expected, "record_locked": record_locked, "sqlite_locked": sqlite_locked, "ok": valid}), flush=True)
+        if not valid:
+            raise RuntimeError("cross-node record or SQLite lock validation failed")
     finally:
         os.close(descriptor)
 
 
 def remote(namespace, pod, code, role, path):
     return ["kubectl", "--request-timeout=25s", "exec", "-i", "-n", namespace, pod, "--", "python3", "-u", "-c", code, "--role", role, "--database", str(path)]
+
+
+def run_check(command):
+    result = subprocess.run(command, capture_output=True, text=True, timeout=35)
+    print(result.stdout, end="", flush=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr[-1000:])
 
 
 def main():
@@ -82,7 +90,7 @@ def main():
         try:
             if not select.select([process.stdout], [], [], 30)[0] or process.stdout.readline().strip() != "locked":
                 raise RuntimeError("holder failed to acquire scratch locks")
-            subprocess.run(remote(args.namespace, args.probe, code, "blocked", args.database), check=True, timeout=35)
+            run_check(remote(args.namespace, args.probe, code, "blocked", args.database))
         finally:
             try:
                 _stdout, stderr = process.communicate("release\n", timeout=30)
@@ -92,7 +100,7 @@ def main():
                 process.kill()
                 process.communicate()
                 raise
-        subprocess.run(remote(args.namespace, args.probe, code, "released", args.database), check=True, timeout=35)
+        run_check(remote(args.namespace, args.probe, code, "released", args.database))
         print(json.dumps({"cross_node_locking": "passed", "reader": args.reader, "probe": args.probe}), flush=True)
 
 

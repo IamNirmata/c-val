@@ -100,7 +100,7 @@ def main(test_name=None, operation="all"):
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_arguments: stopping.set())
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while not stopping.is_set():
             try:
                 report = run_once(settings, args.revision, operation=operation)

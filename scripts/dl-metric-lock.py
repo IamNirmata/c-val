@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely serialize DL metric ingestion on its stable metadata directory inode."""
+"""Serialize DL ingestion with a stable POSIX record lock on shared storage."""
 
 from __future__ import annotations
 
@@ -29,6 +29,12 @@ def _directory_identity(path: Path) -> tuple[int, int]:
 def _assert_path_identity(path: Path, expected: tuple[int, int]) -> None:
     if _directory_identity(path) != expected:
         raise OSError("DL metric lock directory path/device/inode changed")
+
+
+def _assert_lock_identity(path: Path, expected: tuple[int, int]) -> None:
+    metadata = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or (metadata.st_dev, metadata.st_ino) != expected:
+        raise OSError("DL metric lock file path/device/inode changed")
 
 
 def _enable_child_subreaper() -> None:
@@ -124,7 +130,7 @@ def _terminate_process_group(
     deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
     if not _wait_for_process_group(process, process_group_id, deadline=deadline):
         _signal_process_group(process_group_id, signal.SIGKILL)
-        # Do not release the directory flock while a commanded process remains.
+        # Keep the record lock while any commanded process remains.
         _wait_for_process_group(process, process_group_id, deadline=None)
     try:
         process.wait(timeout=0)
@@ -150,6 +156,7 @@ def main(argv: list[str]) -> int:
     lock_directory = marker_path.parent
     command = argv[3:]
     fd = -1
+    lock_fd = -1
     process: subprocess.Popen[bytes] | None = None
     process_group_id: int | None = None
     group_reaped = False
@@ -187,9 +194,15 @@ def main(argv: list[str]) -> int:
             raise OSError("DL metric lock directory must not be group/other writable")
         _assert_path_identity(canonical_directory, identity)
 
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_fd = os.open(marker_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        lock_metadata = os.fstat(lock_fd)
+        lock_identity = (lock_metadata.st_dev, lock_metadata.st_ino)
+        if not stat.S_ISREG(lock_metadata.st_mode) or lock_metadata.st_nlink != 1 or lock_metadata.st_uid != os.geteuid() or stat.S_IMODE(lock_metadata.st_mode) & 0o022:
+            raise OSError("DL metric lock file is unsafe")
+        fcntl.lockf(lock_fd, fcntl.LOCK_EX)
         _assert_path_identity(canonical_directory, identity)
-        print(f"acquired DL metric lock (directory): {canonical_directory}", flush=True)
+        _assert_lock_identity(marker_path, lock_identity)
+        print(f"acquired DL metric lock (POSIX): {marker_path}", flush=True)
         _enable_child_subreaper()
         for signal_number in (signal.SIGINT, signal.SIGTERM):
             previous_signal_handlers[signal_number] = signal.getsignal(signal_number)
@@ -223,6 +236,7 @@ def main(argv: list[str]) -> int:
                 break
             except subprocess.TimeoutExpired:
                 _assert_path_identity(canonical_directory, identity)
+                _assert_lock_identity(marker_path, lock_identity)
         if received_signal is not None:
             _terminate_process_group(
                 process,
@@ -232,6 +246,7 @@ def main(argv: list[str]) -> int:
             group_reaped = True
             return 128 + received_signal
         _assert_path_identity(canonical_directory, identity)
+        _assert_lock_identity(marker_path, lock_identity)
         if _process_group_exists(process_group_id):
             _terminate_process_group(process, process_group_id)
             group_reaped = True
@@ -259,6 +274,8 @@ def main(argv: list[str]) -> int:
             _terminate_process_group(process, process_group_id)
         for signal_number, handler in previous_signal_handlers.items():
             signal.signal(signal_number, handler)
+        if lock_fd >= 0:
+            os.close(lock_fd)
         if fd >= 0:
             os.close(fd)
 

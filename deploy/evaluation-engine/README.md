@@ -45,17 +45,21 @@ SQLite [does not support cross-host WAL](https://www.sqlite.org/wal.html).
 DELETE journaling and FULL durability, and refuse to change an existing WAL DB
 implicitly. Before rollout, pause the submission loop, drain/cancel old writers,
 and use [cval-sqlite-journal.py](../../scripts/cval-sqlite-journal.py) with explicit
-migration/quiescence confirmation. It holds the ingestion directory lock, backs
+migration/quiescence confirmation. It holds the stable ingestion record lock, backs
 up each DB through SQLite, converts only the four DL journal modes, and retains
 a verification manifest. Tables, receipts and sampled metrics must not change.
 
 The selected deployment uses the existing NFSv4.1 PVC with remote locks enabled,
 DELETE journaling, and one derived writer. Run [check_locking.py](check_locking.py)
 between the reader and a second CPU pod before use. This verifies SQLite and
-directory-lock exclusion/release; it is not a guarantee against storage outages.
+POSIX record-lock exclusion/release; it is not a guarantee against storage outages.
 Any failed lock test blocks rollout. A dedicated block PVC remains preferable
 when provisioning permission is available; [pvc.yaml](pvc.yaml) is an optional
 template, not required or applied by this deployment.
+
+The live preflight disproved directory `flock` exclusion across CPU nodes.
+Raw ingestion, migration and the evaluator now use `fcntl.lockf` on persistent
+regular files. Never unlink/replace a lock file while any participant may run.
 
 Missing provenance, references, rank coverage, or receipt/generation mismatch
 remain `unclassified`; they never inherit a global baseline. Current DL/NCCL
