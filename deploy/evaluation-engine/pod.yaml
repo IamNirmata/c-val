@@ -55,7 +55,7 @@ spec:
         capabilities:
           drop: ["ALL"]
       volumeMounts:
-        - name: raw
+        - name: output
           mountPath: /data
           readOnly: true
         - name: output
@@ -67,10 +67,6 @@ spec:
         - name: temporary
           mountPath: /tmp
   volumes:
-    - name: raw
-      persistentVolumeClaim:
-        claimName: pvc-vast-gcr-admin
-        readOnly: true
     - name: output
       persistentVolumeClaim:
         claimName: pvc-vast-gcr-admin

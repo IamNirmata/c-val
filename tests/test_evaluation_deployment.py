@@ -22,6 +22,10 @@ class EvaluationDeploymentTests(unittest.TestCase):
         mounts = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
         self.assertTrue(mounts["/data"]["readOnly"])
         self.assertEqual(mounts["/evaluation"]["name"], "output")
+        self.assertEqual(mounts["/data"]["name"], mounts["/evaluation"]["name"])
+        claims = [volume for volume in spec["volumes"] if "persistentVolumeClaim" in volume]
+        self.assertEqual(len(claims), 1)
+        self.assertFalse(claims[0]["persistentVolumeClaim"].get("readOnly", False))
         self.assertIn("@sha256:", container["image"])
         self.assertEqual(mounts["/evaluation"]["subPath"], "continuous_validation/evaluation-engine")
         self.assertEqual(spec["initContainers"][0]["command"], ["python", "/source/bootstrap.py"])

@@ -89,6 +89,8 @@ UID 0 is needed for existing root-owned private result summaries; capabilities
 are dropped and root/raw filesystems read-only. `/evaluation` is a writable
 subPath `continuous_validation/evaluation-engine` on the existing claim. Raw
 `/data` remains read-only. Provision that isolated directory explicitly first.
+Use one PVC volume with two container mounts; enforce `/data` read-only at the
+mount rather than presenting the same CSI volume twice with conflicting modes.
 
 The default deployment uses a digest-pinned public Python image and immutable
 ConfigMaps containing a Git archive of the exact commit and an offline PyYAML
