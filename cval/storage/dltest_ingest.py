@@ -706,9 +706,16 @@ def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db_path = safe_writable_file_path(db_path)
     connection = connect_sqlite_file(db_path, mode="rwc", timeout=30)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA synchronous=NORMAL")
-    return connection
+    try:
+        if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+            raise RuntimeError("DL database uses WAL; quiesce writers and migrate to DELETE before ingestion")
+        if connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
+            raise RuntimeError("DL database requires DELETE journaling")
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
+    except Exception:
+        connection.close()
+        raise
 
 
 def ensure_iterations_column(

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cval-evaluation-lock-probe
+  namespace: gcr-admin
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 900
+  nodeSelector:
+    kubernetes.io/hostname: slc01-cl02-ccpu-009
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+  containers:
+    - name: probe
+      image: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+      command: ["python", "-c", "import signal; signal.pause()"]
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {cpu: "1", memory: 256Mi}
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - name: scratch
+          mountPath: /data/continuous_validation/evaluation-engine
+          subPath: continuous_validation/evaluation-engine
+  volumes:
+    - name: scratch
+      persistentVolumeClaim: {claimName: pvc-vast-gcr-admin}

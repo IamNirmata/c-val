@@ -20,10 +20,13 @@ consensus, not certified truth. Evaluation receipts commit before the cursor;
 replay refreshes observation time without duplicating comparison rows. The
 schema sketches below remain the broader target, not executable DDL.
 
-The shared raw DL WAL/NFS layout blocks safe concurrent deployment. Retries
-address BUSY/LOCKED only; the evaluator rejects shared-storage WAL until an
-approved quiesced migration or coherent local snapshot arrangement is in place.
-No live database journal mode is changed by the evaluator.
+The evaluator rejects shared-storage WAL. Deployment preparation now includes
+compatible DELETE/FULL raw writers, a gated SQLite-backup/journal migration,
+and a cross-node locking probe. The selected RBAC-compatible deployment uses
+the existing NFSv4.1 claim with isolated output and verified remote locks, plus
+an exact source ConfigMap and offline dependency. No raw mode is changed by the
+evaluator itself. The block-PVC architecture below remains the preferred target
+when storage provisioning is available.
 
 ## Inputs and Draft Review
 

@@ -12,13 +12,35 @@ spec:
   nodeSelector:
     kubernetes.io/hostname: slc01-cl02-ccpu-008
     kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
   securityContext:
     seccompProfile:
       type: RuntimeDefault
+  initContainers:
+    - name: install-exact-source
+      image: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+      command: ["python", "/source/bootstrap.py"]
+      env: []
+      resources:
+        requests: {cpu: "1", memory: 512Mi}
+        limits: {cpu: "2", memory: 1Gi}
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+      volumeMounts:
+        - {name: source, mountPath: /source, readOnly: true}
+        - {name: dependency, mountPath: /dependency, readOnly: true}
+        - {name: application, mountPath: /app}
+        - {name: temporary, mountPath: /tmp}
   containers:
     - name: evaluator
-      image: ghcr.io/iamnirmata/cval-evaluation-engine:REPLACE_WITH_PUBLISHED_COMMIT
+      image: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+      command: ["python", "-m", "evaluation_engine"]
       args: ["--config", "/app/config/cval.toml", "--confirm", "evaluate"]
+      workingDir: /app
+      env: []
       resources:
         requests:
           cpu: "2"
@@ -38,6 +60,10 @@ spec:
           readOnly: true
         - name: output
           mountPath: /evaluation
+          subPath: continuous_validation/evaluation-engine
+        - name: application
+          mountPath: /app
+          readOnly: true
         - name: temporary
           mountPath: /tmp
   volumes:
@@ -47,7 +73,13 @@ spec:
         readOnly: true
     - name: output
       persistentVolumeClaim:
-        claimName: cval-evaluation-engine-data
+        claimName: pvc-vast-gcr-admin
+    - name: application
+      emptyDir: {sizeLimit: 64Mi}
+    - name: source
+      configMap: {name: RENDER_EXACT_SOURCE_CONFIGMAP}
+    - name: dependency
+      configMap: {name: RENDER_EXACT_DEPENDENCY_CONFIGMAP}
     - name: temporary
       emptyDir:
         sizeLimit: 256Mi

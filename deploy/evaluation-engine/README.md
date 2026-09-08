@@ -40,13 +40,22 @@ digest and idempotency checks remain. Non-lock errors are not blindly retried.
 Derived writes use short transactions and DELETE journaling; raw connections
 use `mode=ro`, `query_only=ON`, query deadlines and row limits.
 
-**Deployment blocker:** raw DL files currently use WAL on shared NFS. SQLite
-[does not support cross-host WAL](https://www.sqlite.org/wal.html).
-`shared_raw_storage=true` rejects these sources rather than pretending retries
-fix the filesystem contract. Use an approved quiesced journal-mode migration
-with all writers configured compatibly, or a coherent local snapshot service.
-This implementation neither changes raw journal modes nor copies live DB files.
-Set `shared_raw_storage=false` only for a supported local/single-host source.
+SQLite [does not support cross-host WAL](https://www.sqlite.org/wal.html).
+`shared_raw_storage=true` keeps rejecting WAL sources. Current DL writers use
+DELETE journaling and FULL durability, and refuse to change an existing WAL DB
+implicitly. Before rollout, pause the submission loop, drain/cancel old writers,
+and use [cval-sqlite-journal.py](../../scripts/cval-sqlite-journal.py) with explicit
+migration/quiescence confirmation. It holds the ingestion directory lock, backs
+up each DB through SQLite, converts only the four DL journal modes, and retains
+a verification manifest. Tables, receipts and sampled metrics must not change.
+
+The selected deployment uses the existing NFSv4.1 PVC with remote locks enabled,
+DELETE journaling, and one derived writer. Run [check_locking.py](check_locking.py)
+between the reader and a second CPU pod before use. This verifies SQLite and
+directory-lock exclusion/release; it is not a guarantee against storage outages.
+Any failed lock test blocks rollout. A dedicated block PVC remains preferable
+when provisioning permission is available; [pvc.yaml](pvc.yaml) is an optional
+template, not required or applied by this deployment.
 
 Missing provenance, references, rank coverage, or receipt/generation mismatch
 remain `unclassified`; they never inherit a global baseline. Current DL/NCCL
@@ -60,7 +69,16 @@ test-config digest and environment; cross-storage-target pooling is not enabled.
 Always restart, 2 CPU, 2Gi request/4Gi limit; no GPU or RDMA, API token, or writes
 to `/data`. CPU node `slc01-cl02-ccpu-008` matches the inspected PVC reader.
 UID 0 is needed for existing root-owned private result summaries; capabilities
-are dropped and root/raw filesystems read-only. Output uses a separate PVC.
+are dropped and root/raw filesystems read-only. `/evaluation` is a writable
+subPath `continuous_validation/evaluation-engine` on the existing claim. Raw
+`/data` remains read-only. Provision that isolated directory explicitly first.
+
+The default deployment uses a digest-pinned public Python image and immutable
+ConfigMaps containing a Git archive of the exact commit and an offline PyYAML
+wheel. [render.py](render.py) creates the two ConfigMaps and Pod manifest;
+[bootstrap.py](bootstrap.py) verifies their SHA-256 digests before extraction.
+No private registry credentials or dependency network access are needed at
+startup. An exact-commit custom image remains an alternative:
 
 Build from a clean checkout of the exact published revision:
 
@@ -70,13 +88,18 @@ docker build -f deploy/evaluation-engine/Dockerfile \
   -t <registry>/cval-evaluation-engine:<published-SHA> .
 ```
 
-Before separately approved apply: resolve raw WAL storage, choose a real block
-StorageClass in [pvc.yaml](pvc.yaml), publish the CPU image, pin its digest in
-the Pod, verify node capacity and read-only source preflight. No manifest has
-been applied. Never run a second pod against the same output; the worker also
-holds an exclusive process lock. Stop/replacement/delete are separately gated.
+Before separately approved apply: verify quiescence, backups, journal modes,
+cross-node locks, source digests, CPU capacity, and read-only source preflight.
+The ConfigMap renderer accepts only a complete Git SHA and refuses overwrite
+of its output manifests. Never run a second pod against the same output; the
+worker holds an exclusive process lock. Stop/replacement/delete are gated.
 This fixed-name Pod restarts containers, not a deleted Pod; node-loss recovery
 requires operator replacement. A Deployment would generate a suffixed pod name.
+
+Rollback: stop the evaluator and keep its output/ConfigMaps; do not revert the
+compatible raw writer after migration. Migration backups can be restored only
+while all readers/writers are quiesced and before subsequent raw writes, under
+separate approval. Restart cval-live only at the latest compatible remote tip.
 
 ## Data and Recovery
 

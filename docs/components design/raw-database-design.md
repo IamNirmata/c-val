@@ -116,7 +116,10 @@ using `[sqlite_retry]` in the global config (five attempts, two seconds apart).
 The existing per-connection busy timeout remains in force. Digest validation and
 idempotency checks still run on retries; non-lock errors are not retried.
 This does not make cross-host WAL on NFS safe. The independent evaluator rejects
-that source layout pending a separately approved storage arrangement.
+that source layout. New DL writer connections require DELETE journaling with
+FULL durability and reject preexisting WAL. A separately approved, quiesced
+four-DB migration creates verified SQLite backups before changing journal mode;
+no schema, run identity, or raw metrics are removed.
 
 ## Accepted-Run Example
 

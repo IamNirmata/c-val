@@ -36,6 +36,35 @@ from cval.validation.runtime import effective_config_digest
 from tests.test_results_v2 import payload as result_v2_payload
 
 
+class DLConnectionTests(unittest.TestCase):
+    def test_new_writer_uses_rollback_journal_and_full_durability(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "metrics.db"
+            with closing(connect(path)) as connection:
+                self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+                self.assertEqual(connection.execute("PRAGMA synchronous").fetchone()[0], 2)
+                with connection:
+                    connection.execute("CREATE TABLE sample (value INTEGER)")
+                    connection.execute("INSERT INTO sample VALUES (7)")
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as reader:
+                reader.execute("PRAGMA query_only=ON")
+                self.assertEqual(reader.execute("SELECT value FROM sample").fetchall(), [(7,)])
+            self.assertFalse(path.with_name(path.name + "-wal").exists())
+
+    def test_existing_wal_requires_explicit_migration(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "metrics.db"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                with connection:
+                    connection.execute("CREATE TABLE sample (value INTEGER)")
+                    connection.execute("INSERT INTO sample VALUES (7)")
+            before = path.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, "quiesce writers and migrate"):
+                connect(path)
+            self.assertEqual(path.read_bytes(), before)
+
+
 def ingest_dltest_results(
     results_root=None, output_dir=None, *, config=None, only_missing=False
 ):
