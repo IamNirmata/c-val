@@ -49,6 +49,19 @@ migration/quiescence confirmation. It holds the stable ingestion record lock, ba
 up each DB through SQLite, converts only the four DL journal modes, and retains
 a verification manifest. Tables, receipts and sampled metrics must not change.
 
+The [SQLite backup API](https://www.sqlite.org/backup.html) stages each snapshot
+in a private temporary directory under `--staging-directory` (default `/tmp`).
+Choose node-local storage with capacity for the largest DB plus a 20% margin.
+The tool streams the closed snapshot to a new PVC backup file in 1 MiB chunks,
+fsyncs it, and verifies its full SHA-256 before permitting source conversion.
+It retains that checksum in the manifest and removes only its private temporary
+staging directory. An incomplete PVC backup is retained, never overwritten.
+This avoids page-sized synchronous backup writes on NFS. Metric evidence uses
+six bounded rowid-tail samples plus all receipts, schema and generation markers.
+Progress includes stages, SQLite status, pages and elapsed time; the per-DB
+backup deadline also covers publication and checksum verification.
+`--check-backup-source` is a read-only first-batch diagnostic using memory only.
+
 The selected deployment uses the existing NFSv4.1 PVC with remote locks enabled,
 DELETE journaling, and one derived writer. Run [check_locking.py](check_locking.py)
 between the reader and a second CPU pod before use. This verifies SQLite and
