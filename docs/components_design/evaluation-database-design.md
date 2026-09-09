@@ -97,3 +97,17 @@ Audit with SQLite `mode=ro` and `PRAGMA query_only=ON`; sample exact identities
 instead of scanning raw DL history. Inspect evaluation errors and coverage,
 not just the worker heartbeat. Deployment details:
 [deploy/evaluation-engine/README.md](../../deploy/evaluation-engine/README.md).
+
+## Readable NCCL Export
+
+An existing detailed NCCL CSV can be rendered without database access or
+reclassification:
+
+```bash
+python -m evaluation_engine.report --input /path/to/nccl.csv --output-dir /path/to/reports
+```
+
+This writes a new `_readable.csv` and `_summary.md`, preserving the source.
+Raw status, stored class, missing-evidence reasons, metric coverage, baseline
+expiry and test age are separate fields. `not_classified` means no stored class,
+not a failing test. Evaluation time can reflect replay of old raw evidence.
