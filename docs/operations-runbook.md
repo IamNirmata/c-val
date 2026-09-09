@@ -48,3 +48,9 @@ writers, exact backup confirmation, and exact quiescence confirmation.
 Verification is read-only and validates the published manifest, checksums,
 hardlinks, metadata, and SQLite integrity. Backup never restores or deletes
 source data.
+
+## PVC organization
+
+Use [pvc-layout.md](components_design/pvc-layout.md) for the retained-path map,
+bounded inventory, and explicitly gated legacy archive/rollback. Canonical
+raw DB, result and log paths must not be renamed or replaced by symlinks.
