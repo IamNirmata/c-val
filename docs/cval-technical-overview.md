@@ -125,7 +125,7 @@ Phase timeouts total **90 minutes**; the configured monitoring timeout is **100 
 | Submission cooldown | 4 hours per node | Limits repeat submissions; separate from result freshness |
 | Job resources | 8 GPUs, 100 CPU, 1,500 GiB memory, 256 GiB shared-memory volume, one RDMA allocation | Full-node-scale reservation; RDMA resource count is not a physical-link count |
 | Image | `nvcr.io/nvidia/pytorch:26.05-py3` | Configured tag, not an immutable image digest |
-| Monitoring | 60-second polling; 480-second pending-start timeout | Execution/observation controls, not performance thresholds |
+| Monitoring | 60-second polling; 1,200-second (20-minute) pending-start timeout | Execution/observation controls, not performance thresholds |
 
 Opportunism limits direct competition for busy GPUs but can leave those nodes with stale evidence. Diagnostic traffic can still affect shared storage and fabric. [C1] [C3]
 

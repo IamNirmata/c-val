@@ -82,7 +82,7 @@ class MonitoringConfig:
 
     timeout_seconds: float = 6000
     poll_interval_seconds: float = 60
-    pending_start_timeout_seconds: int = 480
+    pending_start_timeout_seconds: int = 1200
 
 
 @dataclass(frozen=True)

@@ -82,7 +82,7 @@ load_operational_settings() {
     NODE_COOLDOWN_HELPER=${CVAL_NODE_COOLDOWN_HELPER:-$SCRIPT_DIR/cval-node-cooldown.py}
     WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring timeout_seconds 3600)}
     WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
-    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 480)}
+    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 1200)}
     NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
     JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
 }

@@ -30,7 +30,7 @@ confirmation_phrase = "submit"
 # mode enough time for every sequential test deadline plus ingestion grace.
 timeout_seconds = 6000
 poll_interval_seconds = 60
-pending_start_timeout_seconds = 480
+pending_start_timeout_seconds = 1200
 
 [sqlite_retry]
 attempts = 5
