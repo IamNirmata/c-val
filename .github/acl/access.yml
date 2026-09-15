@@ -6,9 +6,7 @@ resource: repository
 where:
 configuration:
   manageAccess:
-  - member: v-srsreenath
-    role: Maintain
-  - member: erdman
-    role: Maintain
-  - member: cesarmart
-    role: Maintain
+    - member: v-srsreenath
+      role: Maintain
+    - member: erdman
+      role: Maintain
