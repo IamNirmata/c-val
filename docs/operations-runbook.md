@@ -62,13 +62,22 @@ inside the source (`backups/`) excludes itself to avoid recursion. A sibling
 directory on the same PVC is a rollback copy, not independent disaster recovery.
 The tool creates the external destination during approved apply, not preview.
 
+When `/data/continuous_validation/dl_unit_test_evaluation` must remain outside
+the operation, pass `--exclude-dl-unit-test-evaluation` to both preview and apply.
+Only that exact top-level directory is excluded, before any stat, traversal,
+hashing, or copying. Its files may change independently; they are not covered by
+this backup. Similarly named directories and historical copies elsewhere remain
+included. Version 3 manifests record the exclusion; verification still accepts
+version 1 and 2 backups. Hardlinks escaping the included tree remain rejected.
+
 Use `--preserve-history-bytes` when retained `backups/`, `archive/`, or `archives/`
 contains old journals or incomplete database snapshots. Those historical trees
 are then copied and SHA-256 verified byte-for-byte, without SQLite recovery or
-integrity claims. Current databases, including `metadata/`, `evaluation-engine/`
-and `dl_unit_test_evaluation/`, still reject sidecars and require quiescence.
-Hardlinks across current and historical trees are rejected. Version 2 manifests
-record this policy; verification continues to accept earlier version 1 backups.
+integrity claims. All included current databases, including `metadata/` and
+`evaluation-engine/`, still reject sidecars and require quiescence. An excluded
+`dl_unit_test_evaluation/` tree is not inspected. Hardlinks across current and
+historical trees are rejected. The historical-byte policy is recorded in the
+manifest separately from exclusions.
 
 Verification is read-only and validates the published manifest, checksums,
 hardlinks, metadata, and current SQLite integrity. Byte-preserved historical
@@ -95,8 +104,10 @@ contain older run records. `logs/validation_tests/<test>/runs` contains detailed
 summaries, artifacts, retained plans and rank JSON. These are different evidence
 types, not interchangeable copies. They share one `logs/` root after migration.
 `metadata/`, `evaluation-engine/`, and `dl_unit_test_evaluation/` are not moved.
-The protected `dl_unit_test_evaluation/` tree is fingerprinted before and after
-consolidation; its files are read for backup/audit but never edited by migration.
+When the verified backup excludes `dl_unit_test_evaluation/`, consolidation skips
+its content and fingerprint checks too. Rollback never touches that directory.
+Without the explicit exclusion, the earlier fingerprint checks still apply.
+Consolidation accepts no other omitted source directories, including `backups/`.
 
 ### Approved consolidation workflow
 
@@ -104,7 +115,9 @@ Use an exact published checkout for these operator templates. Resolve every
 placeholder and separately approve the exact command and rollback before each
 live mutation; these examples are not evidence that a migration has run.
 
-1. Inventory with `scripts/cval-pvc-layout.py --receipts`. Identify all writers,
+1. Review `scripts/cval-pvc-layout.py --plan-consolidate` and backup preview with
+	`--exclude-dl-unit-test-evaluation`; avoid whole-root inventory/content audits
+	when the excluded directory must not be inspected. Identify all included writers,
 	including the live loop, validation jobs, evaluator, and interactive clients.
 	A blocked loop or a Kubernetes Ready condition is not proof of quiescence.
 2. Stop writers under separate approval. Retain the exact evaluator Pod spec
@@ -113,8 +126,8 @@ live mutation; these examples are not evidence that a migration has run.
 3. Inspect capacity, create the complete backup, then verify its manifest:
 
 	```bash
-	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --preserve-history-bytes
-	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --preserve-history-bytes --apply --confirm backup --quiesced --confirm-quiesced writers-stopped
+	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --preserve-history-bytes --exclude-dl-unit-test-evaluation
+	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --preserve-history-bytes --exclude-dl-unit-test-evaluation --apply --confirm backup --quiesced --confirm-quiesced writers-stopped
 	bash scripts/cval-backup.sh --verify /data/cval-backup/<verified-backup>
 	```
 
@@ -134,8 +147,8 @@ live mutation; these examples are not evidence that a migration has run.
 	Only empty original directories are removed. The original backup remains
 	untouched and independently verifiable. A failed move retains its manifest
 	for rollback; it does not authorize continuing with a partial layout.
-5. Audit all planned destinations, unchanged raw DB evidence, and protected
-	directory fingerprints. Historical receipts/result JSON retain original
+5. Audit all planned destinations and unchanged included raw DB evidence. Do not
+	inspect or fingerprint the excluded directory. Historical receipts/result JSON retain original
 	absolute paths; the explicit evidence resolver and artifact downloader
 	recognize relocated paths without rewriting those records.
 6. Restart only the reviewed exact-commit writers with separate approval. Follow

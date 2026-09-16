@@ -36,10 +36,11 @@ from cval.validation.secure_fs import (  # noqa: E402
 )
 
 SCHEMA = "cval.backup"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CONFIRMATION = "backup"
 QUIESCENCE_CONFIRMATION = "writers-stopped"
 EXCLUDED = ["backups/"]
+DL_EVALUATION_EXCLUSION = "dl_unit_test_evaluation/"
 HISTORY_ROOTS = {"backups", "archive", "archives"}
 SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 READ_CHUNK = 1024 * 1024
@@ -104,6 +105,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--destination-root", type=Path)
     parser.add_argument("--safety-margin-percent", type=float, default=10.0)
     parser.add_argument("--preserve-history-bytes", action="store_true")
+    parser.add_argument("--exclude-dl-unit-test-evaluation", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--quiesced", action="store_true")
@@ -118,6 +120,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             or args.confirm_quiesced is not None
             or args.destination_root is not None
             or args.preserve_history_bytes
+            or args.exclude_dl_unit_test_evaluation
         )
         if incompatible:
             parser.error("--verify cannot be combined with backup/apply options")
@@ -165,9 +168,14 @@ def is_history_path(relative: str) -> bool:
     return Path(relative).parts[0] in HISTORY_ROOTS
 
 
+def backup_exclusions(destination_inside_source: bool, exclude_dl_unit_test_evaluation: bool) -> list[str]:
+    return (EXCLUDED if destination_inside_source else []) + ([DL_EVALUATION_EXCLUSION] if exclude_dl_unit_test_evaluation else [])
+
+
 def inventory_tree(
     root_fd: int, *, exclude_backups: bool, reject_sidecars: bool = True,
     preserve_history_bytes: bool = False,
+    exclude_dl_unit_test_evaluation: bool = False,
 ) -> dict[str, TreeEntry]:
     entries: dict[str, TreeEntry] = {}
 
@@ -183,6 +191,8 @@ def inventory_tree(
             except UnicodeEncodeError as exc:
                 raise BackupError(f"source name is not valid UTF-8: {relative}/{name!r}") from exc
             if relative == "." and exclude_backups and name == "backups":
+                continue
+            if relative == "." and exclude_dl_unit_test_evaluation and name == DL_EVALUATION_EXCLUSION.rstrip("/"):
                 continue
             child_relative = name if relative == "." else f"{relative}/{name}"
             metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -331,6 +341,7 @@ def capacity_plan(
     *,
     destination_inside_source: bool,
     preserve_history_bytes: bool = False,
+    exclude_dl_unit_test_evaluation: bool = False,
 ) -> dict[str, object]:
     if preserve_history_bytes:
         for group in hardlink_groups(inventory).values():
@@ -349,6 +360,7 @@ def capacity_plan(
         "same_filesystem": os.fstat(source_fd).st_dev == os.fstat(destination_fd).st_dev,
         "same_source_storage": destination_inside_source,
         "preserve_history_bytes": preserve_history_bytes,
+        "exclude_dl_unit_test_evaluation": exclude_dl_unit_test_evaluation,
     }
 
 
@@ -360,7 +372,8 @@ def print_inspection(
     print("c-val whole-root backup inspection (created nothing)")
     print(f"source: {source}")
     print(f"destination: {destination}")
-    print("excluded: " + ("backups/" if plan["same_source_storage"] else "none"))
+    excluded = backup_exclusions(bool(plan["same_source_storage"]), bool(plan.get("exclude_dl_unit_test_evaluation")))
+    print("excluded: " + (", ".join(excluded) if excluded else "none"))
     if plan.get("preserve_history_bytes"):
         print("historical snapshots: byte-preserved, not database-validated (archive/, archives/, backups/)")
     print(f"source file count: {plan['source_file_count']}")
@@ -736,7 +749,7 @@ def create_backup(
             )
 
         _test_hook_after_copy(source)
-        post_inventory = inventory_tree(source_fd, exclude_backups=bool(plan["same_source_storage"]), preserve_history_bytes=bool(plan.get("preserve_history_bytes")))
+        post_inventory = inventory_tree(source_fd, exclude_backups=bool(plan["same_source_storage"]), preserve_history_bytes=bool(plan.get("preserve_history_bytes")), exclude_dl_unit_test_evaluation=bool(plan.get("exclude_dl_unit_test_evaluation")))
         post_digest = inventory_digest(post_inventory)
         if not inventories_equal(inventory, post_inventory) or pre_digest != post_digest:
             raise BackupError("source tree changed during backup; staged backup rejected")
@@ -763,7 +776,7 @@ def create_backup(
             "destination": str(destination),
             "started_at": started_at,
             "completed_at": completed_at,
-            "excluded": EXCLUDED if plan["same_source_storage"] else [],
+            "excluded": backup_exclusions(bool(plan["same_source_storage"]), bool(plan.get("exclude_dl_unit_test_evaluation"))),
             "quiescence": {
                 "declared": True,
                 "confirmation": QUIESCENCE_CONFIRMATION,
@@ -881,9 +894,10 @@ def _load_manifest(backup: Path, backup_fd: int) -> dict[str, Any]:
     }
     if set(value) != required:
         raise BackupError("manifest has missing or unexpected top-level fields")
-    if value["schema"] != SCHEMA or value["schema_version"] not in (1, SCHEMA_VERSION):
+    if value["schema"] != SCHEMA or value["schema_version"] not in (1, 2, SCHEMA_VERSION):
         raise BackupError("manifest schema is not supported")
-    if value["excluded"] not in (EXCLUDED, []):
+    allowed_exclusions = (EXCLUDED, [], EXCLUDED + [DL_EVALUATION_EXCLUSION], [DL_EVALUATION_EXCLUSION]) if value["schema_version"] == 3 else (EXCLUDED, [])
+    if value["excluded"] not in allowed_exclusions:
         raise BackupError("manifest exclusion set is invalid")
     if not isinstance(value["source_root"], str) or not Path(value["source_root"]).is_absolute():
         raise BackupError("manifest source_root is invalid")
@@ -926,6 +940,10 @@ def _load_manifest(backup: Path, backup_fd: int) -> dict[str, Any]:
         raise BackupError("manifest capacity record is invalid")
     if type(capacity.get("preserve_history_bytes", False)) is not bool or (value["schema_version"] == 1 and capacity.get("preserve_history_bytes")):
         raise BackupError("manifest historical preservation policy is invalid")
+    if type(capacity.get("exclude_dl_unit_test_evaluation", False)) is not bool:
+        raise BackupError("manifest DL evaluation exclusion policy is invalid")
+    if (DL_EVALUATION_EXCLUSION in value["excluded"]) != capacity.get("exclude_dl_unit_test_evaluation", False):
+        raise BackupError("manifest DL evaluation exclusion policy is inconsistent")
     return value
 
 
@@ -974,6 +992,8 @@ def verify_backup(backup: Path) -> dict[str, object]:
             if set(raw) != required:
                 raise BackupError("manifest file entry has missing or unexpected fields")
             path = _safe_manifest_path(raw["path"], field="file")
+            if any(path == excluded.rstrip("/") or path.startswith(excluded) for excluded in manifest["excluded"]):
+                raise BackupError(f"manifest contains an excluded file: {path}")
             if path in file_items:
                 raise BackupError(f"duplicate manifest file path: {path}")
             file_items[path] = raw
@@ -991,6 +1011,8 @@ def verify_backup(backup: Path) -> dict[str, object]:
                 path = "."
             else:
                 path = _safe_manifest_path(raw_path, field="directory")
+            if any(path == excluded.rstrip("/") or path.startswith(excluded) for excluded in manifest["excluded"]):
+                raise BackupError(f"manifest contains an excluded directory: {path}")
             if path in directory_items:
                 raise BackupError(f"duplicate manifest directory path: {path}")
             directory_items[path] = raw
@@ -1162,6 +1184,7 @@ def verify_backup(backup: Path) -> dict[str, object]:
             "total_unique_bytes": unique_source_bytes,
             "restore_ready": True,
             "history_preserved_as_is": bool(manifest["capacity"].get("preserve_history_bytes")),
+            "excluded": manifest["excluded"],
         }
     finally:
         os.close(backup_fd)
@@ -1224,7 +1247,7 @@ def run(argv: list[str]) -> int:
     destination_fd: int | None = None
     try:
         source_identity = descriptor_identity(source_fd)
-        initial_inventory = inventory_tree(source_fd, exclude_backups=exclude_backups, preserve_history_bytes=args.preserve_history_bytes)
+        initial_inventory = inventory_tree(source_fd, exclude_backups=exclude_backups, preserve_history_bytes=args.preserve_history_bytes, exclude_dl_unit_test_evaluation=args.exclude_dl_unit_test_evaluation)
         if "manifest.json" in initial_inventory:
             raise BackupError("source root manifest.json conflicts with backup manifest name")
         _ancestor, destination_ancestor_fd = _existing_destination_ancestor(
@@ -1237,6 +1260,7 @@ def run(argv: list[str]) -> int:
             args.safety_margin_percent,
             destination_inside_source=_is_within(destination_root, source),
             preserve_history_bytes=args.preserve_history_bytes,
+            exclude_dl_unit_test_evaluation=args.exclude_dl_unit_test_evaluation,
         )
         if not args.apply:
             print_inspection(source, destination, initial_plan)
@@ -1249,7 +1273,7 @@ def run(argv: list[str]) -> int:
         os.close(destination_ancestor_fd)
         destination_ancestor_fd = None
         destination_fd = _ensure_destination_root(destination_root)
-        inventory = inventory_tree(source_fd, exclude_backups=exclude_backups, preserve_history_bytes=args.preserve_history_bytes)
+        inventory = inventory_tree(source_fd, exclude_backups=exclude_backups, preserve_history_bytes=args.preserve_history_bytes, exclude_dl_unit_test_evaluation=args.exclude_dl_unit_test_evaluation)
         if not inventories_equal(inventory, initial_inventory):
             initial_without_root = dict(initial_inventory)
             current_without_root = dict(inventory)
@@ -1266,6 +1290,7 @@ def run(argv: list[str]) -> int:
             args.safety_margin_percent,
             destination_inside_source=_is_within(destination_root, source),
             preserve_history_bytes=args.preserve_history_bytes,
+            exclude_dl_unit_test_evaluation=args.exclude_dl_unit_test_evaluation,
         )
         if not plan["capacity_sufficient"]:
             raise BackupError("destination capacity became insufficient before staging")

@@ -119,6 +119,79 @@ class BackupScriptTests(unittest.TestCase):
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertEqual((previous / "retained.txt").read_bytes(), b"previous backup evidence")
 
+    def test_exclusion_skips_dl_evaluation_without_stat_or_traversal(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            (root / "dl_unit_test_evaluation").mkdir()
+            (root / "dl_unit_test_evaluation/live.db-journal").write_bytes(b"excluded")
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            original_stat = os.stat
+
+            def guarded_stat(path, *arguments, **keywords):
+                if "dl_unit_test_evaluation" in Path(path).parts:
+                    raise AssertionError("excluded directory was inspected")
+                return original_stat(path, *arguments, **keywords)
+
+            try:
+                with patch.object(module.os, "stat", side_effect=guarded_stat):
+                    inventory = module.inventory_tree(descriptor, exclude_backups=False, exclude_dl_unit_test_evaluation=True)
+                self.assertEqual(set(inventory), {".", "metadata", "metadata/value.txt"})
+            finally:
+                os.close(descriptor)
+
+    def test_excluded_directory_changes_do_not_invalidate_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            protected = root / "dl_unit_test_evaluation"
+            protected.mkdir()
+            (protected / "script.py").write_bytes(b"source")
+            (protected / "live.db-journal").write_bytes(b"journal")
+            destination = Path(tmpdir) / "external"
+            preview = self._run(root, "--destination-root", str(destination), "--exclude-dl-unit-test-evaluation")
+            self.assertEqual(preview.returncode, 0, preview.stderr)
+            self.assertIn("excluded: dl_unit_test_evaluation/", preview.stdout)
+            applied = self._apply(root, "--destination-root", str(destination), "--exclude-dl-unit-test-evaluation", env={"_CVAL_BACKUP_TEST_MUTATE_RELATIVE": "dl_unit_test_evaluation/script.py"})
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            backup = Path(json.loads(applied.stdout)["backup"])
+            manifest = json.loads((backup / "manifest.json").read_text())
+            self.assertEqual(manifest["excluded"], ["dl_unit_test_evaluation/"])
+            self.assertFalse((backup / "dl_unit_test_evaluation").exists())
+            self.assertEqual((backup / "metadata/value.txt").read_bytes(), b"value")
+            verified = self._run(None, "--verify", str(backup))
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertEqual(json.loads(verified.stdout)["excluded"], ["dl_unit_test_evaluation/"])
+
+    def test_dl_exclusion_does_not_skip_similarly_named_or_nested_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            for name in ("dl_unit_test_evaluation", "dl_unit_test_evaluation-other", "archives/dl_unit_test_evaluation"):
+                directory = root / name
+                directory.mkdir(parents=True)
+                (directory / "keep.txt").write_text(name)
+            result = self._apply(root, "--exclude-dl-unit-test-evaluation")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            backup = Path(json.loads(result.stdout)["backup"])
+            self.assertEqual(json.loads((backup / "manifest.json").read_text())["excluded"], ["backups/", "dl_unit_test_evaluation/"])
+            self.assertFalse((backup / "dl_unit_test_evaluation").exists())
+            self.assertTrue((backup / "dl_unit_test_evaluation-other/keep.txt").is_file())
+            self.assertTrue((backup / "archives/dl_unit_test_evaluation/keep.txt").is_file())
+
+    def test_verify_keeps_supporting_prior_backup_manifest_versions(self) -> None:
+        for version in (1, 2):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
+                root = self._root(Path(tmpdir))
+                result = self._apply(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                backup = Path(json.loads(result.stdout)["backup"])
+                path = backup / "manifest.json"
+                manifest = json.loads(path.read_text())
+                manifest["schema_version"] = version
+                manifest["capacity"].pop("exclude_dl_unit_test_evaluation")
+                path.write_text(json.dumps(manifest))
+                verified = self._run(None, "--verify", str(backup))
+                self.assertEqual(verified.returncode, 0, verified.stderr)
+
     def test_publish_falls_back_in_owner_only_directory_when_renameat2_is_unsupported(
         self,
     ) -> None:
@@ -373,7 +446,7 @@ class BackupScriptTests(unittest.TestCase):
             manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
             files = {item["path"]: item for item in manifest["files"]}
             self.assertEqual(manifest["schema"], "cval.backup")
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
             self.assertTrue(manifest["quiescence"]["declared"])
             self.assertEqual(
                 manifest["consistency"]["pre_inventory_sha256"],

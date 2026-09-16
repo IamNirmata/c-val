@@ -19,7 +19,7 @@ SPEC.loader.exec_module(LAYOUT)
 
 
 class PvcLayoutTests(unittest.TestCase):
-    def _consolidation_fixture(self, parent):
+    def _consolidation_fixture(self, parent, *backup_options):
         root = parent / "raw"
         for name in ("dltest/node/old", "logs/dltest/node/current", "validation_tests/dltest/runs/node/new", "archive/old", "archives/new", "dl_unit_test_evaluation", "metadata", "storage/node", "logs/storage/node"):
             path = root / name
@@ -29,7 +29,7 @@ class PvcLayoutTests(unittest.TestCase):
         completed = subprocess.run(
             [sys.executable, str(Path(LAYOUT.__file__).with_name("cval-backup.py")),
              "--source", str(root), "--destination-root", str(parent / "cval-backup"),
-             "--apply", "--confirm", "backup", "--quiesced", "--confirm-quiesced", "writers-stopped"],
+             "--apply", "--confirm", "backup", "--quiesced", "--confirm-quiesced", "writers-stopped", *backup_options],
             capture_output=True, text=True, check=True, timeout=20,
         )
         return root, Path(json.loads(completed.stdout)["backup"])
@@ -54,6 +54,49 @@ class PvcLayoutTests(unittest.TestCase):
             LAYOUT.backup_tool().verify_backup(backup)
             self.assertEqual(LAYOUT.rollback_consolidation(root, transaction, confirm="restore-layout", sources_idle="idle")["state"], "rolled_back")
             self.assertEqual(before, {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()})
+
+    def test_consolidation_and_rollback_ignore_explicitly_excluded_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, backup = self._consolidation_fixture(Path(directory), "--exclude-dl-unit-test-evaluation")
+            protected = root / "dl_unit_test_evaluation"
+            (protected / "record.txt").write_text("new independent work after backup")
+            (protected / "data.db-journal").write_bytes(b"live excluded journal")
+            before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            fingerprint = LAYOUT.tree_fingerprint
+            original_stat = LAYOUT.os.stat
+
+            def guarded_fingerprint(path, **options):
+                if path == protected or path.is_relative_to(protected):
+                    raise AssertionError("excluded directory was fingerprinted")
+                return fingerprint(path, **options)
+
+            def guarded_stat(path, *arguments, **options):
+                if not isinstance(path, int) and "dl_unit_test_evaluation" in Path(path).parts:
+                    raise AssertionError("excluded directory was inspected")
+                return original_stat(path, *arguments, **options)
+
+            with patch.object(LAYOUT, "tree_fingerprint", side_effect=guarded_fingerprint), patch.object(LAYOUT.os, "stat", side_effect=guarded_stat):
+                plan = LAYOUT.consolidation_plan(root)
+                result = LAYOUT.apply_consolidation(root, backup, plan["plan_sha256"], confirm="consolidate", sources_idle="idle")
+                self.assertIsNone(result["protected_unchanged"])
+                self.assertEqual(result["excluded"], ["dl_unit_test_evaluation/"])
+                transaction = Path(result["transaction"])
+                manifest = json.loads((transaction / "manifest.json").read_text())
+                self.assertIsNone(manifest["protected"])
+                self.assertEqual(manifest["excluded"], ["dl_unit_test_evaluation/"])
+                LAYOUT.rollback_consolidation(root, transaction, confirm="restore-layout", sources_idle="idle")
+            self.assertEqual(before, {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()})
+            self.assertFalse((backup / "dl_unit_test_evaluation").exists())
+
+    def test_exclusion_does_not_relax_included_source_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, backup = self._consolidation_fixture(Path(directory), "--exclude-dl-unit-test-evaluation")
+            (root / "metadata/record.txt").write_text("included data changed")
+            plan = LAYOUT.consolidation_plan(root)
+            with self.assertRaisesRegex(ValueError, "source tree changed"):
+                LAYOUT.apply_consolidation(root, backup, plan["plan_sha256"], confirm="consolidate", sources_idle="idle")
+            self.assertTrue((root / "dltest/node/old/record.txt").is_file())
+            self.assertFalse(backup.with_name(backup.name + "-layout").exists())
 
     def test_consolidation_requires_gates_current_backup_and_collision_free_plan(self):
         for condition in ("confirmation", "quiescence", "digest", "changed_backup_source", "collision"):

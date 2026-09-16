@@ -291,15 +291,16 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
         saved = tool._load_manifest(backup, backup_fd)
     finally:
         os.close(backup_fd)
-    if saved["source_root"] != str(root) or saved["excluded"]:
-        raise ValueError("verified backup must include the entire source root without exclusions")
+    if saved["source_root"] != str(root) or saved["excluded"] not in ([], [tool.DL_EVALUATION_EXCLUSION]):
+        raise ValueError("verified backup must cover the source except an explicit DL evaluation exclusion")
+    exclude_dl_evaluation = tool.DL_EVALUATION_EXCLUSION in saved["excluded"]
     transaction = backup.with_name(backup.name + "-layout")
     if root.stat().st_dev != backup.parent.stat().st_dev:
         raise ValueError("rollback evidence must be on the source filesystem for identity-preserving moves")
     with consolidation_lock(backup.parent):
         _path, root_fd = open_directory_no_symlinks(root)
         try:
-            inventory = tool.inventory_tree(root_fd, exclude_backups=False, preserve_history_bytes=saved["capacity"].get("preserve_history_bytes", False))
+            inventory = tool.inventory_tree(root_fd, exclude_backups=False, preserve_history_bytes=saved["capacity"].get("preserve_history_bytes", False), exclude_dl_unit_test_evaluation=exclude_dl_evaluation)
             if tool.inventory_digest(inventory) != saved["consistency"]["post_inventory_sha256"]:
                 raise ValueError("source tree changed since the verified backup")
             if consolidation_plan(root) != plan:
@@ -309,10 +310,10 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
                 if tree_fingerprint(root / operation["source"], backup_files=files, relative=operation["source"]) != operation["source_state"]:
                     raise ValueError("source changed before consolidation")
             protected = root / "dl_unit_test_evaluation"
-            protected_before = tree_fingerprint(protected) if protected.exists() else None
+            protected_before = None if exclude_dl_evaluation else tree_fingerprint(protected) if protected.exists() else None
             transaction.mkdir(mode=0o700)
             transaction_fd = os.open(transaction, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            manifest = {"schema_version": "cval.pvc-consolidation.v1", "state": "in_progress", "plan": plan, "backup": str(backup), "protected": protected_before}
+            manifest = {"schema_version": "cval.pvc-consolidation.v1", "state": "in_progress", "plan": plan, "backup": str(backup), "protected": protected_before, "excluded": saved["excluded"]}
             try:
                 save_manifest(transaction_fd, manifest)
                 for relative in plan["create_directories"]:
@@ -360,7 +361,7 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
                 os.close(transaction_fd)
         finally:
             os.close(root_fd)
-    return {"state": "complete", "transaction": str(transaction), "moved_entries": len(plan["operations"]), "protected_unchanged": True}
+    return {"state": "complete", "transaction": str(transaction), "moved_entries": len(plan["operations"]), "protected_unchanged": None if exclude_dl_evaluation else True, "excluded": saved["excluded"]}
 
 
 def rollback_consolidation(root: Path, transaction: Path, *, confirm: str, sources_idle: str) -> dict:
