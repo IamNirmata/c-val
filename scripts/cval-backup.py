@@ -36,10 +36,11 @@ from cval.validation.secure_fs import (  # noqa: E402
 )
 
 SCHEMA = "cval.backup"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CONFIRMATION = "backup"
 QUIESCENCE_CONFIRMATION = "writers-stopped"
 EXCLUDED = ["backups/"]
+HISTORY_ROOTS = {"backups", "archive", "archives"}
 SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 READ_CHUNK = 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
@@ -102,6 +103,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--source", type=Path, default=Path("/data/continuous_validation"))
     parser.add_argument("--destination-root", type=Path)
     parser.add_argument("--safety-margin-percent", type=float, default=10.0)
+    parser.add_argument("--preserve-history-bytes", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--quiesced", action="store_true")
@@ -115,6 +117,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             or args.quiesced
             or args.confirm_quiesced is not None
             or args.destination_root is not None
+            or args.preserve_history_bytes
         )
         if incompatible:
             parser.error("--verify cannot be combined with backup/apply options")
@@ -158,8 +161,13 @@ def _kind(metadata: os.stat_result, path: str) -> str:
     raise BackupError(f"refusing {label} in backup source: {path}")
 
 
+def is_history_path(relative: str) -> bool:
+    return Path(relative).parts[0] in HISTORY_ROOTS
+
+
 def inventory_tree(
-    root_fd: int, *, exclude_backups: bool, reject_sidecars: bool = True
+    root_fd: int, *, exclude_backups: bool, reject_sidecars: bool = True,
+    preserve_history_bytes: bool = False,
 ) -> dict[str, TreeEntry]:
     entries: dict[str, TreeEntry] = {}
 
@@ -191,7 +199,7 @@ def inventory_tree(
                 finally:
                     os.close(child_fd)
             else:
-                if reject_sidecars and child_relative.endswith(SIDECAR_SUFFIXES):
+                if reject_sidecars and child_relative.endswith(SIDECAR_SUFFIXES) and not (preserve_history_bytes and is_history_path(child_relative)):
                     raise BackupError(
                         "live SQLite sidecar present; checkpoint and quiesce writers first: "
                         f"{child_relative}"
@@ -322,7 +330,12 @@ def capacity_plan(
     margin_percent: float,
     *,
     destination_inside_source: bool,
+    preserve_history_bytes: bool = False,
 ) -> dict[str, object]:
+    if preserve_history_bytes:
+        for group in hardlink_groups(inventory).values():
+            if len({is_history_path(entry.path) for entry in group}) > 1:
+                raise BackupError("hardlink crosses current and historical evidence: " + group[0].path)
     apparent = unique_bytes(inventory)
     required = required_bytes(apparent, margin_percent)
     free = available_bytes(destination_fd)
@@ -335,6 +348,7 @@ def capacity_plan(
         "capacity_sufficient": free >= required,
         "same_filesystem": os.fstat(source_fd).st_dev == os.fstat(destination_fd).st_dev,
         "same_source_storage": destination_inside_source,
+        "preserve_history_bytes": preserve_history_bytes,
     }
 
 
@@ -347,6 +361,8 @@ def print_inspection(
     print(f"source: {source}")
     print(f"destination: {destination}")
     print("excluded: " + ("backups/" if plan["same_source_storage"] else "none"))
+    if plan.get("preserve_history_bytes"):
+        print("historical snapshots: byte-preserved, not database-validated (archive/, archives/, backups/)")
     print(f"source file count: {plan['source_file_count']}")
     print(f"apparent unique bytes (hardlinks deduplicated): {plan['apparent_unique_bytes']}")
     print(f"destination filesystem free bytes: {plan['destination_free_bytes']}")
@@ -666,7 +682,10 @@ def create_backup(
                     source_digest = _sha256_fd(source_file_fd)
                     _assert_entry(source_file_fd, entry, "while hashing")
                     sqlite_file = _sqlite_magic(source_file_fd)
-                    if sqlite_file:
+                    if plan.get("preserve_history_bytes") and is_history_path(entry.path):
+                        backup_size, backup_digest = _copy_regular(source_file_fd, target, entry)
+                        method = "history-byte-copy"
+                    elif sqlite_file:
                         backup_size, backup_digest = _copy_sqlite(
                             source_file_fd, target, entry
                         )
@@ -717,7 +736,7 @@ def create_backup(
             )
 
         _test_hook_after_copy(source)
-        post_inventory = inventory_tree(source_fd, exclude_backups=bool(plan["same_source_storage"]))
+        post_inventory = inventory_tree(source_fd, exclude_backups=bool(plan["same_source_storage"]), preserve_history_bytes=bool(plan.get("preserve_history_bytes")))
         post_digest = inventory_digest(post_inventory)
         if not inventories_equal(inventory, post_inventory) or pre_digest != post_digest:
             raise BackupError("source tree changed during backup; staged backup rejected")
@@ -862,7 +881,7 @@ def _load_manifest(backup: Path, backup_fd: int) -> dict[str, Any]:
     }
     if set(value) != required:
         raise BackupError("manifest has missing or unexpected top-level fields")
-    if value["schema"] != SCHEMA or value["schema_version"] != SCHEMA_VERSION:
+    if value["schema"] != SCHEMA or value["schema_version"] not in (1, SCHEMA_VERSION):
         raise BackupError("manifest schema is not supported")
     if value["excluded"] not in (EXCLUDED, []):
         raise BackupError("manifest exclusion set is invalid")
@@ -905,6 +924,8 @@ def _load_manifest(backup: Path, backup_fd: int) -> dict[str, Any]:
     capacity = value["capacity"]
     if not isinstance(capacity, dict) or capacity.get("capacity_sufficient") is not True:
         raise BackupError("manifest capacity record is invalid")
+    if type(capacity.get("preserve_history_bytes", False)) is not bool or (value["schema_version"] == 1 and capacity.get("preserve_history_bytes")):
+        raise BackupError("manifest historical preservation policy is invalid")
     return value
 
 
@@ -1012,8 +1033,11 @@ def verify_backup(backup: Path) -> dict[str, object]:
                 or any(character not in "0123456789abcdef" for character in digest)
             ):
                 raise BackupError(f"manifest checksum is invalid: {path}")
-            if item["method"] not in {"regular-copy", "sqlite-backup", "hardlink"}:
+            if item["method"] not in {"regular-copy", "sqlite-backup", "hardlink", "history-byte-copy"}:
                 raise BackupError(f"manifest copy method is invalid: {path}")
+            historical = manifest["capacity"].get("preserve_history_bytes", False) and is_history_path(path)
+            if item["method"] == "history-byte-copy" and not historical:
+                raise BackupError(f"historical byte-copy is not permitted for this path: {path}")
             if not isinstance(item["sqlite"], bool):
                 raise BackupError(f"manifest SQLite marker is invalid: {path}")
             source_identity = _require_identity(
@@ -1056,6 +1080,8 @@ def verify_backup(backup: Path) -> dict[str, object]:
             source_size = _require_int(
                 source_identity["size"], f"files[{path}].source.size"
             )
+            if historical and (digest != source_sha256 or size != source_size):
+                raise BackupError(f"historical evidence was not preserved byte-for-byte: {path}")
             descriptor, metadata = _open_backup_file(backup_fd, path)
             try:
                 actual_digest = _sha256_fd(descriptor)
@@ -1073,7 +1099,7 @@ def verify_backup(backup: Path) -> dict[str, object]:
                 os.close(descriptor)
             if sqlite_magic != item["sqlite"]:
                 raise BackupError(f"backup SQLite marker mismatch: {path}")
-            if sqlite_magic:
+            if sqlite_magic and not historical:
                 _sqlite_quick_check(backup / path)
             backup_key = (metadata.st_dev, metadata.st_ino)
             if backup_key not in seen_backup_inodes:
@@ -1135,6 +1161,7 @@ def verify_backup(backup: Path) -> dict[str, object]:
             "files": len(file_items),
             "total_unique_bytes": unique_source_bytes,
             "restore_ready": True,
+            "history_preserved_as_is": bool(manifest["capacity"].get("preserve_history_bytes")),
         }
     finally:
         os.close(backup_fd)
@@ -1197,7 +1224,7 @@ def run(argv: list[str]) -> int:
     destination_fd: int | None = None
     try:
         source_identity = descriptor_identity(source_fd)
-        initial_inventory = inventory_tree(source_fd, exclude_backups=exclude_backups)
+        initial_inventory = inventory_tree(source_fd, exclude_backups=exclude_backups, preserve_history_bytes=args.preserve_history_bytes)
         if "manifest.json" in initial_inventory:
             raise BackupError("source root manifest.json conflicts with backup manifest name")
         _ancestor, destination_ancestor_fd = _existing_destination_ancestor(
@@ -1209,6 +1236,7 @@ def run(argv: list[str]) -> int:
             initial_inventory,
             args.safety_margin_percent,
             destination_inside_source=_is_within(destination_root, source),
+            preserve_history_bytes=args.preserve_history_bytes,
         )
         if not args.apply:
             print_inspection(source, destination, initial_plan)
@@ -1221,7 +1249,7 @@ def run(argv: list[str]) -> int:
         os.close(destination_ancestor_fd)
         destination_ancestor_fd = None
         destination_fd = _ensure_destination_root(destination_root)
-        inventory = inventory_tree(source_fd, exclude_backups=exclude_backups)
+        inventory = inventory_tree(source_fd, exclude_backups=exclude_backups, preserve_history_bytes=args.preserve_history_bytes)
         if not inventories_equal(inventory, initial_inventory):
             initial_without_root = dict(initial_inventory)
             current_without_root = dict(inventory)
@@ -1237,6 +1265,7 @@ def run(argv: list[str]) -> int:
             inventory,
             args.safety_margin_percent,
             destination_inside_source=_is_within(destination_root, source),
+            preserve_history_bytes=args.preserve_history_bytes,
         )
         if not plan["capacity_sufficient"]:
             raise BackupError("destination capacity became insufficient before staging")

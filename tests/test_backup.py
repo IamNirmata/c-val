@@ -232,6 +232,69 @@ class BackupScriptTests(unittest.TestCase):
             self.assertIn("live SQLite sidecar present", completed.stderr)
             self.assertFalse((root / "backups").exists())
 
+    def test_historical_snapshots_are_explicitly_preserved_as_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            historical = root / "backups/.old.staging/baselines"
+            historical.mkdir(parents=True)
+            database = historical / "classification.db"
+            database.write_bytes(b"SQLite format 3\x00retained incomplete snapshot")
+            journal = historical / "classification.db-journal"
+            journal.write_bytes(b"retained journal")
+            before = {path: path.read_bytes() for path in (database, journal)}
+            destination = Path(tmpdir) / "cval-backup"
+            rejected = self._run(root, "--destination-root", str(destination))
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("sidecar", rejected.stderr)
+            applied = self._apply(root, "--destination-root", str(destination), "--preserve-history-bytes")
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            backup = Path(json.loads(applied.stdout)["backup"])
+            manifest = json.loads((backup / "manifest.json").read_text())
+            self.assertTrue(manifest["capacity"]["preserve_history_bytes"])
+            for original, content in before.items():
+                self.assertEqual((backup / original.relative_to(root)).read_bytes(), content)
+                self.assertEqual(original.read_bytes(), content)
+            verified = self._run(None, "--verify", str(backup))
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertTrue(json.loads(verified.stdout)["history_preserved_as_is"])
+
+    def test_history_option_does_not_relax_current_database_protection(self) -> None:
+        for directory in ("metadata", "evaluation-engine", "dl_unit_test_evaluation"):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmpdir:
+                root = self._root(Path(tmpdir))
+                sidecar = root / directory / "data.db-journal"
+                sidecar.parent.mkdir(exist_ok=True)
+                sidecar.write_bytes(b"current journal")
+                result = self._apply(root, "--destination-root", str(Path(tmpdir) / "external"), "--preserve-history-bytes")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("sidecar", result.stderr)
+                self.assertEqual(sidecar.read_bytes(), b"current journal")
+
+    def test_history_option_rejects_hardlinks_to_current_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            (root / "archives").mkdir()
+            os.link(root / "metadata/value.txt", root / "archives/alias.txt")
+            result = self._apply(root, "--destination-root", str(Path(tmpdir) / "external"), "--preserve-history-bytes")
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("crosses current and historical", result.stderr)
+            self.assertFalse((Path(tmpdir) / "external").exists())
+
+    def test_verify_rejects_history_exemption_for_current_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            applied = self._apply(root)
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            backup = Path(json.loads(applied.stdout)["backup"])
+            manifest_path = backup / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["capacity"]["preserve_history_bytes"] = True
+            manifest["files"][0]["method"] = "history-byte-copy"
+            manifest_path.write_text(json.dumps(manifest))
+            result = self._run(None, "--verify", str(backup))
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("not permitted for this path", result.stderr)
+
     def test_concurrent_mutation_rejects_and_cleans_staging(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._root(Path(tmpdir))
@@ -310,7 +373,7 @@ class BackupScriptTests(unittest.TestCase):
             manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
             files = {item["path"]: item for item in manifest["files"]}
             self.assertEqual(manifest["schema"], "cval.backup")
-            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertTrue(manifest["quiescence"]["declared"])
             self.assertEqual(
                 manifest["consistency"]["pre_inventory_sha256"],

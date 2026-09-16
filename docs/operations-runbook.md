@@ -62,9 +62,18 @@ inside the source (`backups/`) excludes itself to avoid recursion. A sibling
 directory on the same PVC is a rollback copy, not independent disaster recovery.
 The tool creates the external destination during approved apply, not preview.
 
+Use `--preserve-history-bytes` when retained `backups/`, `archive/`, or `archives/`
+contains old journals or incomplete database snapshots. Those historical trees
+are then copied and SHA-256 verified byte-for-byte, without SQLite recovery or
+integrity claims. Current databases, including `metadata/`, `evaluation-engine/`
+and `dl_unit_test_evaluation/`, still reject sidecars and require quiescence.
+Hardlinks across current and historical trees are rejected. Version 2 manifests
+record this policy; verification continues to accept earlier version 1 backups.
+
 Verification is read-only and validates the published manifest, checksums,
-hardlinks, metadata, and SQLite integrity. Backup never restores or deletes
-source data.
+hardlinks, metadata, and current SQLite integrity. Byte-preserved historical
+snapshots are verified as retained evidence, not as recovered databases.
+Backup never restores or deletes source data.
 
 ## PVC organization
 
@@ -104,8 +113,8 @@ live mutation; these examples are not evidence that a migration has run.
 3. Inspect capacity, create the complete backup, then verify its manifest:
 
 	```bash
-	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup
-	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --apply --confirm backup --quiesced --confirm-quiesced writers-stopped
+	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --preserve-history-bytes
+	bash scripts/cval-backup.sh --source /data/continuous_validation --destination-root /data/cval-backup --preserve-history-bytes --apply --confirm backup --quiesced --confirm-quiesced writers-stopped
 	bash scripts/cval-backup.sh --verify /data/cval-backup/<verified-backup>
 	```
 

@@ -299,7 +299,7 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
     with consolidation_lock(backup.parent):
         _path, root_fd = open_directory_no_symlinks(root)
         try:
-            inventory = tool.inventory_tree(root_fd, exclude_backups=False)
+            inventory = tool.inventory_tree(root_fd, exclude_backups=False, preserve_history_bytes=saved["capacity"].get("preserve_history_bytes", False))
             if tool.inventory_digest(inventory) != saved["consistency"]["post_inventory_sha256"]:
                 raise ValueError("source tree changed since the verified backup")
             if consolidation_plan(root) != plan:
