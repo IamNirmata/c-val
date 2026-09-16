@@ -30,7 +30,8 @@ class Context:
         self.now = int(time.time()) if now is None else now
         self.database = Database(settings)
 
-    def read(self, filename, sql, parameters=()):
+    def read(self, filename, sql, parameters=(), *, max_rows=None):
+        row_limit = self.settings.max_metric_rows_per_run if max_rows is None else max_rows
         path = canonical_sqlite_path(filename, must_exist=True)
         if self.settings.shared_raw_storage:
             with path.open("rb") as handle:
@@ -43,30 +44,36 @@ class Context:
                 connection.row_factory = sqlite3.Row
                 deadline = time.monotonic() + self.settings.query_timeout_seconds
                 connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
-                rows = connection.execute(sql, parameters).fetchmany(self.settings.max_metric_rows_per_run + 1)
-                if len(rows) > self.settings.max_metric_rows_per_run:
+                rows = connection.execute(sql, parameters).fetchmany(row_limit + 1)
+                if len(rows) > row_limit:
                     raise EvidenceError("row_limit_exceeded")
                 return [dict(row) for row in rows]
         return retry_sqlite(operation, self.settings.retry)
 
     def json_file(self, path):
         root = Path(self.settings.raw.runtime.validation_root)
-        path = safe_existing_evidence_path(path, expected_path=path, allowed_root=root, expect_directory=False, description="evaluation evidence")
+        path = safe_existing_evidence_path(path, expected_path=path, allowed_root=root, expect_directory=False, description="evaluation evidence", allow_relocated=True)
         if path.stat().st_size > 8 * 1024 * 1024:
             raise EvidenceError("oversized_provenance")
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def candidates(self):
-        rows = self.read(self.settings.raw.storage.validation_db_path, "SELECT rowid,node,timestamp,test,result,image_name,pytorch_version,cuda_version FROM runs ORDER BY rowid")
-        groups = {}
-        for row in rows:
-            key = row["node"], row["timestamp"]
-            run = groups.setdefault(key, {"node": key[0], "timestamp": key[1], "rows": {}, "conflict": False, "sequence": row["rowid"]})
-            identity = {field: row[field] for field in row if field != "rowid"}
-            previous = run["rows"].get(row["test"])
-            run["conflict"] |= previous is not None and previous != identity
-            run["rows"][row["test"]] = identity
-        return sorted(groups.values(), key=lambda run: run["sequence"])
+    def candidates(self, *, after=0, limit=None, window=None):
+        limit = self.settings.batch_size if limit is None else limit
+        filename = self.settings.raw.storage.validation_db_path
+        where = "WHERE timestamp>=? AND timestamp<?" if window is not None else ""
+        order = "timestamp DESC,sequence DESC" if window is not None else "sequence"
+        parameters = (*(window or ()), after, limit)
+        keys = self.read(filename, f"SELECT node,timestamp,MIN(rowid) AS sequence FROM runs {where} GROUP BY node,timestamp HAVING MIN(rowid)>? ORDER BY {order} LIMIT ?", parameters, max_rows=limit)
+        runs = []
+        for key in keys:
+            rows = self.read(filename, "SELECT node,timestamp,test,result,image_name,pytorch_version,cuda_version FROM runs WHERE node=? AND timestamp=? ORDER BY rowid", (key["node"], key["timestamp"]))
+            run = key | {"rows": {}, "conflict": False}
+            for row in rows:
+                previous = run["rows"].get(row["test"])
+                run["conflict"] |= previous is not None and previous != row
+                run["rows"][row["test"]] = row
+            runs.append(run)
+        return runs
 
     def provenance(self, run, test):
         if run["conflict"] or set(run["rows"]) != {"storage", "nccl", "dltest", "all"}:

@@ -69,7 +69,7 @@ class SecureRunSupervisorTests(unittest.TestCase):
                 )
                 summary = (
                     validation_root
-                    / "validation_tests/smoke/runs/node-a/node-a-123/summary.json"
+                    / "logs/validation_tests/smoke/runs/node-a/node-a-123/summary.json"
                 )
                 self.assertEqual(summary.read_bytes(), b'{"ok":true}\n')
                 self.assertEqual(stat.S_IMODE(summary.stat().st_mode), 0o600)
@@ -119,7 +119,7 @@ class SecureRunSupervisorTests(unittest.TestCase):
                 self.assertFalse(
                     (
                         validation_root
-                        / "validation_tests/smoke/runs/node-a/node-a-123/summary.json"
+                        / "logs/validation_tests/smoke/runs/node-a/node-a-123/summary.json"
                     ).exists()
                 )
             finally:
@@ -190,7 +190,7 @@ summary_filename = "summary.json"
                 validation_root=str(root),
                 validation_tests_dir=str(repo / "validation-tests"),
                 dl_results_root_path=str(
-                    root / "validation_tests/dltest/runs"
+                    root / "logs/validation_tests/dltest/runs"
                 ),
             ),
             tests=replace(base.tests, registry=registry),
@@ -295,7 +295,7 @@ summary_filename = "summary.json"
             self.assertFalse((run_dir / ".run-active").exists())
             self.assertFalse((root / "metadata/node-run-history.db").exists())
             self.assertEqual(
-                list((root / "validation_tests").glob("*/*_results.db")),
+                list((root / "logs/validation_tests").glob("*/*_results.db")),
                 [],
             )
 
@@ -690,8 +690,8 @@ mkdir -m 700 "$canonical"
             (test_dir / "run-test.sh").write_text(
                 """#!/bin/bash
 set -euo pipefail
-mv "$SWAP_VALIDATION_ROOT/validation_tests" "$SWAP_VALIDATION_ROOT/validation_tests-retained"
-ln -s "$SWAP_OUTSIDE" "$SWAP_VALIDATION_ROOT/validation_tests"
+mv "$SWAP_VALIDATION_ROOT/logs/validation_tests" "$SWAP_VALIDATION_ROOT/logs/validation_tests-retained"
+ln -s "$SWAP_OUTSIDE" "$SWAP_VALIDATION_ROOT/logs/validation_tests"
 printf 'anchored\n' > "$CVAL_TEST_OUTPUT_DIR/artifact.txt"
 printf '{"ok":true}\n' > "$CVAL_TEST_SUMMARY_FILE"
 """,
@@ -753,7 +753,7 @@ summary_filename = "summary.json"
             self.assertEqual(list(outside.iterdir()), [])
             retained_run = (
                 validation_root
-                / "validation_tests-retained/smoke/runs/node-a/node-a-123"
+                / "logs/validation_tests-retained/smoke/runs/node-a/node-a-123"
             )
             self.assertEqual(
                 (retained_run / "artifacts/artifact.txt").read_text(encoding="utf-8"),
@@ -764,7 +764,7 @@ summary_filename = "summary.json"
                 result["artifacts"],
                 str(
                     validation_root
-                    / "validation_tests/smoke/runs/node-a/node-a-123/artifacts"
+                    / "logs/validation_tests/smoke/runs/node-a/node-a-123/artifacts"
                 ),
             )
             self.assertTrue(

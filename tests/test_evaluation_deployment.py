@@ -11,7 +11,7 @@ import yaml
 class EvaluationDeploymentTests(unittest.TestCase):
     def test_cpu_pod_is_separate_and_read_only(self):
         root = Path(__file__).resolve().parents[1]
-        pod = yaml.safe_load((root / "deploy/evaluation-engine/pod.yaml").read_text())
+        pod = yaml.safe_load((root / "ymls/cval-evaluation-engine.yaml").read_text())
         self.assertEqual(pod["metadata"]["name"], "cval-evaluation-engine")
         spec = pod["spec"]
         self.assertFalse(spec["automountServiceAccountToken"])
@@ -21,6 +21,12 @@ class EvaluationDeploymentTests(unittest.TestCase):
         self.assertNotIn("nvidia.com/gpu", container["resources"]["requests"])
         mounts = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
         self.assertTrue(mounts["/data"]["readOnly"])
+        self.assertEqual(mounts["/data/continuous_validation"], {
+            "name": "output",
+            "mountPath": "/data/continuous_validation",
+            "subPath": "continuous_validation",
+            "readOnly": False,
+        })
         self.assertEqual(mounts["/evaluation"]["name"], "output")
         self.assertEqual(mounts["/data"]["name"], mounts["/evaluation"]["name"])
         claims = [volume for volume in spec["volumes"] if "persistentVolumeClaim" in volume]
@@ -29,18 +35,32 @@ class EvaluationDeploymentTests(unittest.TestCase):
         self.assertIn("@sha256:", container["image"])
         self.assertEqual(mounts["/evaluation"]["subPath"], "continuous_validation/evaluation-engine")
         self.assertEqual(spec["initContainers"][0]["command"], ["python", "/source/bootstrap.py"])
+        self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
+        self.assertTrue(mounts["/app"]["readOnly"])
+        self.assertEqual(mounts["/root/.vscode-server"]["name"], "vscode-server")
+        self.assertFalse(mounts["/root/.vscode-server"].get("readOnly", False))
+        volumes = {volume["name"]: volume for volume in spec["volumes"]}
+        self.assertEqual(volumes["vscode-server"]["emptyDir"], {"sizeLimit": "2Gi"})
+        self.assertEqual(container["resources"]["requests"]["ephemeral-storage"], "2Gi")
+        self.assertEqual(container["resources"]["limits"]["ephemeral-storage"], "4Gi")
+        self.assertFalse((root / "deploy/evaluation-engine/pod.yaml").exists())
 
     def test_rendered_bundle_is_immutable_and_exact(self):
         root = Path(__file__).resolve().parents[1]
         specification = importlib.util.spec_from_file_location("render_eval", root / "deploy/evaluation-engine/render.py")
         renderer = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(renderer)
-        template = yaml.safe_load((root / "deploy/evaluation-engine/pod.yaml").read_text())
+        template = yaml.safe_load((root / "ymls/cval-evaluation-engine.yaml").read_text())
         source, dependency, pod = renderer.manifests("a" * 40, b"source", "pass", "dependency.whl", b"wheel", template)
         self.assertTrue(source["immutable"])
         self.assertTrue(dependency["immutable"])
         self.assertEqual(pod["metadata"]["annotations"]["cval/source-commit"], "a" * 40)
         self.assertEqual(len(pod["spec"]["containers"][0]["env"]), 7)
+        mounts = {mount["mountPath"]: mount for mount in pod["spec"]["containers"][0]["volumeMounts"]}
+        self.assertEqual(mounts["/root/.vscode-server"]["name"], "vscode-server")
+        self.assertEqual(mounts["/data/continuous_validation"]["subPath"], "continuous_validation")
+        self.assertFalse(mounts["/data/continuous_validation"]["readOnly"])
+        self.assertTrue(mounts["/data"]["readOnly"])
 
     def test_lock_probe_detects_contention_and_release(self):
         script = Path(__file__).resolve().parents[1] / "deploy/evaluation-engine/check_locking.py"

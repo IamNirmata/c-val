@@ -18,7 +18,7 @@ from evaluation_engine.config import load_settings
 from evaluation_engine.runtime import Context
 
 
-def process_test(context, test, runs, operation="all"):
+def process_test(context, test, runs=None, operation="all"):
     settings = context.settings
     task = "baseline:" + test.name
     saved = context.database.read("SELECT payload,updated_at FROM worker_state WHERE task=?", (task,))
@@ -27,7 +27,11 @@ def process_test(context, test, runs, operation="all"):
     due = not saved or context.now - saved[0][1] >= settings.baseline_check_seconds or previous.get("policy_digest") != test.policy_digest or previous.get("revision") != context.revision
     if operation != "classify" and due:
         try:
-            built = test.baseline.build(context, test, runs)
+            training = runs
+            if training is None:
+                cutoff = context.now - test.settings["holdout_seconds"]
+                training = context.candidates(limit=settings.max_training_runs + 1, window=(cutoff - test.settings["window_seconds"], cutoff))
+            built = test.baseline.build(context, test, training)
             report.update(built)
             context.database.state(task, built | {"policy_digest": test.policy_digest, "revision": context.revision}, context.now)
         except Exception as exc:
@@ -38,9 +42,14 @@ def process_test(context, test, runs, operation="all"):
     task = "classify:" + test.name
     saved = context.database.read("SELECT payload FROM worker_state WHERE task=?", (task,))
     previous = json.loads(saved[0][0]).get("sequence", 0) if saved else 0
-    selected = [run for run in runs if run["sequence"] > previous][:settings.batch_size]
-    if not selected:
-        selected = runs[:settings.batch_size]
+    if runs is None:
+        selected = context.candidates(after=previous)
+        if not selected:
+            selected = context.candidates()
+    else:
+        selected = [run for run in runs if run["sequence"] > previous][:settings.batch_size]
+        if not selected:
+            selected = runs[:settings.batch_size]
     written = sum(int(test.classification.classify(context, test, run)) for run in selected)
     sequence = selected[-1]["sequence"] if selected else 0
     context.database.state(task, {"sequence": sequence, "processed": len(selected), "written": written}, context.now)
@@ -50,11 +59,10 @@ def process_test(context, test, runs, operation="all"):
 def run_once(settings, revision, now=None, operation="all"):
     context = Context(settings, revision, now)
     context.database.initialize()
-    runs = context.candidates()
     report = {"timestamp": context.now, "tests": {}}
     for test in settings.tests:
         try:
-            report["tests"][test.name] = process_test(context, test, runs, operation)
+            report["tests"][test.name] = process_test(context, test, operation=operation)
         except Exception as exc:
             report["tests"][test.name] = {"error": str(exc)}
     context.database.state("worker", {"state": "idle", "revision": revision, "tests": report["tests"]}, context.now)

@@ -44,9 +44,9 @@ def main():
     revision = subprocess.run(["git", "rev-parse", "--verify", args.revision + "^{commit}"], cwd=REPO, check=True, capture_output=True, text=True).stdout.strip()
     if revision != args.revision:
         parser.error("--revision must be the exact commit")
-    bundle = subprocess.run(["git", "archive", "--format=tar.gz", revision, "cval", "evaluation_engine", "config", "validation-tests", "ymls"], cwd=REPO, check=True, capture_output=True).stdout
+    bundle = subprocess.run(["git", "archive", "--format=tar.gz", revision, "cval", "evaluation_engine", "config", "validation-tests", "ymls", "scripts", "deploy/evaluation-engine", "pyproject.toml", "tests"], cwd=REPO, check=True, capture_output=True).stdout
     bootstrap = subprocess.run(["git", "show", revision + ":deploy/evaluation-engine/bootstrap.py"], cwd=REPO, check=True, capture_output=True, text=True).stdout
-    template = subprocess.run(["git", "show", revision + ":deploy/evaluation-engine/pod.yaml"], cwd=REPO, check=True, capture_output=True, text=True).stdout
+    template = subprocess.run(["git", "show", revision + ":ymls/cval-evaluation-engine.yaml"], cwd=REPO, check=True, capture_output=True, text=True).stdout
     documents = manifests(revision, bundle, bootstrap, args.wheel.name, args.wheel.read_bytes(), yaml.safe_load(template))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for filename, document in zip(("source-configmap.yaml", "dependency-configmap.yaml", "pod.yaml"), documents, strict=True):

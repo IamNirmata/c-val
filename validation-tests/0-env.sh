@@ -35,9 +35,9 @@ export CVAL_PYTORCH_VERSION CVAL_CUDA_VERSION
 
 # Canonical global logs and per-test run roots on the shared validation PVC.
 CVAL_JOB_LOG_DIR=${CVAL_JOB_LOG_DIR:-$CVAL_VALIDATION_ROOT/logs/job_logs/$GCRNODE/$CVAL_RUN_ID}
-STORAGE_RUN_DIR=${STORAGE_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID}
-NCCL_RUN_DIR=${NCCL_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID}
-DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
+STORAGE_RUN_DIR=${STORAGE_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID}
+NCCL_RUN_DIR=${NCCL_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID}
+DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
 export CVAL_JOB_LOG_DIR STORAGE_RUN_DIR NCCL_RUN_DIR DLTEST_RUN_DIR
 
 # Legacy output variable names now point at each canonical artifacts directory.

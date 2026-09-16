@@ -31,7 +31,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.runtime.repo_dir, "/workspace/c-val")
         self.assertEqual(
             config.runtime.dl_results_root_path,
-            "/data/continuous_validation/validation_tests/dltest/runs",
+            "/data/continuous_validation/logs/validation_tests/dltest/runs",
         )
         self.assertTrue(config.tests.registry.require("storage").enabled)
         self.assertTrue(config.tests.registry.require("nccl").enabled)

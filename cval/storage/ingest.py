@@ -448,8 +448,12 @@ def _parse_nccl_health_evidence(
     )
     evidence_root = (
         Path(authorization.config.runtime.validation_root)
-        / "validation_tests/nccl/runs"
+        / "logs/validation_tests/nccl/runs"
     )
+    legacy_root = Path(authorization.config.runtime.validation_root) / "validation_tests/nccl/runs"
+    legacy_artifacts = legacy_root / result.node / expected_run_id / "artifacts"
+    if Path(ibbw_log_path).parent == legacy_artifacts:
+        evidence_root = legacy_root
     artifacts = evidence_root / result.node / expected_run_id / "artifacts"
     expected_logs = {
         artifacts / "ibbw.log",

@@ -16,7 +16,7 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
-from cval.config import CvalConfig, JobTemplateConfig, load_config
+from cval.config import CvalConfig, JobTemplateConfig, is_exact_commit, load_config
 from cval.models import RenderedJob
 from cval.validation.runtime import build_runtime_environment, encode_runtime_environment
 
@@ -165,6 +165,20 @@ def render_validation_job(
     remaining = [placeholder for placeholder in known_placeholders if placeholder in yaml_text]
     if remaining:
         raise ValueError(f"Template still contains placeholder(s): {', '.join(remaining)}")
+    if config.job.source_configmap or config.job.source_sha256:
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", config.job.source_configmap) or not re.fullmatch(r"[a-f0-9]{64}", config.job.source_sha256) or not is_exact_commit(resolved_git_ref):
+            raise ValueError("offline source requires a ConfigMap name, SHA-256, and exact commit")
+        manifest = yaml.load(yaml_text, Loader=_UniqueKeySafeLoader)
+        pod = manifest["spec"]["tasks"][0]["template"]["spec"]
+        container = pod["containers"][0]
+        if any(volume.get("name") == "exact-source" for volume in pod.get("volumes", [])) or any(mount.get("mountPath") == "/cval-source" for mount in container.get("volumeMounts", [])):
+            raise ValueError("offline source volume conflicts with the template")
+        if any(entry.get("name") == "CVAL_SOURCE_SHA256" for entry in container["env"]):
+            raise ValueError("template must not supply an unverified source digest")
+        pod["volumes"].append({"name": "exact-source", "configMap": {"name": config.job.source_configmap, "items": [{"key": "source.tar.gz", "path": "source.tar.gz"}]}})
+        container["volumeMounts"].append({"name": "exact-source", "mountPath": "/cval-source", "readOnly": True})
+        container["env"].append({"name": "CVAL_SOURCE_SHA256", "value": config.job.source_sha256})
+        yaml_text = yaml.safe_dump(manifest, sort_keys=False)
     _validate_semantic_runtime_manifest(
         yaml_text,
         expected_runtime_environment=runtime_replacements[

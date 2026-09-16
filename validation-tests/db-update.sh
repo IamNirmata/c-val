@@ -23,7 +23,7 @@ GCRNODE=${GCRNODE:-unknown}
 GCRTIME=${GCRTIME:-unknown}
 CVAL_RUN_ID=${CVAL_RUN_ID:-${GCRNODE:-unknown}-${GCRTIME:-unknown}}
 CVAL_JOB_LOG_DIR=${CVAL_JOB_LOG_DIR:-$CVAL_VALIDATION_ROOT/logs/job_logs/${GCRNODE:-unknown}/$CVAL_RUN_ID}
-DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
+DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
 export CVAL_RUN_ID CVAL_JOB_LOG_DIR
 
 emit_cval_event() {
@@ -248,9 +248,9 @@ else:
 PY
 }
 
-STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID/artifacts}
+STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID/artifacts}
 echo "Storage Output dir: $STORAGE_OUTPUT_DIR"
-NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID/artifacts}
+NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID/artifacts}
 echo "NCCL Output dir: $NCCL_OUTPUT_DIR"
 NCCL_RUN_DIR=${NCCL_RUN_DIR:-$(dirname "$NCCL_OUTPUT_DIR")}
 NCCL_SUMMARY_FILE=${NCCL_SUMMARY_FILE:-$NCCL_RUN_DIR/summary.json}
@@ -410,7 +410,7 @@ if [[ "$STRUCTURED_RESULT_LOADED" == true ]]; then
                 echo "STORAGE_OUTPUT_DIR does not match the validated v2 result" >&2
                 exit 1
         fi
-        expected_dltest_run_dir="$CVAL_VALIDATION_ROOT/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID"
+        expected_dltest_run_dir="$CVAL_VALIDATION_ROOT/logs/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID"
         if [[ "${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}" != "$expected_dltest_run_dir" ]]; then
                 echo "DLTEST_RUN_DIR does not match the canonical v2 run" >&2
                 exit 1

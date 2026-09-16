@@ -326,6 +326,7 @@ def reserve_secure_run_layout(
                 owned.append(_create_file(test_log_fd, name))
 
             run_relative = (
+                "logs",
                 "validation_tests",
                 test_id,
                 "runs",
@@ -663,7 +664,7 @@ def _add_builtin_compatibility_paths(
         if test_id not in BUILTIN_TEST_IDS:
             continue
         prefix = test_id.upper()
-        canonical_run = canonical_root / "validation_tests" / test_id / "runs" / node / run_id
+        canonical_run = canonical_root / "logs/validation_tests" / test_id / "runs" / node / run_id
         environment[f"{prefix}_RUN_DIR"] = _fd_path(run_fd)
         environment[f"{prefix}_OUTPUT_DIR"] = _fd_path(artifacts_fd)
         environment[f"CVAL_CANONICAL_{prefix}_RUN_DIR"] = str(canonical_run)

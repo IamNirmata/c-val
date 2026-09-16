@@ -216,14 +216,14 @@ printf '%s\n' \
         self.assertTrue(paths[0].endswith("logs/job_logs/node-a/node-a-123/result.json"))
         self.assertTrue(
             paths[1].endswith(
-                "validation_tests/storage/runs/node-a/node-a-123/artifacts"
+                "logs/validation_tests/storage/runs/node-a/node-a-123/artifacts"
             )
         )
         self.assertTrue(
-            paths[2].endswith("validation_tests/nccl/runs/node-a/node-a-123/summary.json")
+            paths[2].endswith("logs/validation_tests/nccl/runs/node-a/node-a-123/summary.json")
         )
         self.assertTrue(
-            paths[3].endswith("validation_tests/dltest/runs/node-a/node-a-123/summary.json")
+            paths[3].endswith("logs/validation_tests/dltest/runs/node-a/node-a-123/summary.json")
         )
 
     def test_env_script_creates_no_compatibility_directories(self) -> None:
@@ -231,8 +231,8 @@ printf '%s\n' \
             root = Path(tmpdir)
             external = root / "outside"
             external.mkdir()
-            (root / "validation_tests").mkdir()
-            (root / "validation_tests/storage").symlink_to(
+            (root / "logs/validation_tests").mkdir(parents=True)
+            (root / "logs/validation_tests/storage").symlink_to(
                 external,
                 target_is_directory=True,
             )
@@ -318,7 +318,7 @@ printf '%s\n' \
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             metadata = root / "metadata"
-            dl_results = root / "validation_tests/dltest/runs"
+            dl_results = root / "logs/validation_tests/dltest/runs"
             config_path = root / "cval.toml"
             config_path.write_text(
                 "\n".join(
@@ -474,7 +474,7 @@ printf '%s\n' \
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             metadata = root / "metadata"
-            dl_results = root / "validation_tests/dltest/runs"
+            dl_results = root / "logs/validation_tests/dltest/runs"
             config_path = root / "cval.toml"
             config_path.write_text(
                 "\n".join(
@@ -1377,7 +1377,7 @@ bash "$1/db-update.sh"
                 "CVAL_JOB_LOG_DIR": str(result_path.parent),
                 "NCCL_SUMMARY_FILE": str(
                     root
-                    / "validation_tests/nccl/runs/node-a/node-a-123/summary.json"
+                    / "logs/validation_tests/nccl/runs/node-a/node-a-123/summary.json"
                 ),
             }
             completed = subprocess.run(

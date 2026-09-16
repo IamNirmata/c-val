@@ -21,7 +21,7 @@ from cval.validation.runner import _test_environment, run_validation_tests
 class ValidationRunnerTests(unittest.TestCase):
     def test_preserves_supervisor_supplied_nccl_ibbw_path(self) -> None:
         root = Path("/validation")
-        run_dir = root / "validation_tests/nccl/runs/node-a/node-a-123"
+        run_dir = root / "logs/validation_tests/nccl/runs/node-a/node-a-123"
         log_dir = root / "logs/nccl/node-a/node-a-123"
         test_paths = TestPaths(
             log_dir=log_dir,
@@ -92,7 +92,7 @@ class ValidationRunnerTests(unittest.TestCase):
 
             first_run = (
                 validation_root
-                / "validation_tests"
+                / "logs/validation_tests"
                 / "first"
                 / "runs"
                 / "node-a"
@@ -361,7 +361,7 @@ exit 0
             registry = self._registry(root, {"smoke": True})
             stale_dir = (
                 root
-                / "data/validation_tests/smoke/runs/node-a/node-a-123"
+                / "data/logs/validation_tests/smoke/runs/node-a/node-a-123"
             )
             stale_dir.mkdir(parents=True)
             stale_file = stale_dir / "stale.txt"
@@ -464,7 +464,7 @@ while :; do :; done
             result_path = root / "data/logs/job_logs/node-a/node-a-123/result.json"
             pid_path = (
                 root
-                / "data/validation_tests/signal-test/runs/node-a/node-a-123/artifacts/pid"
+                / "data/logs/validation_tests/signal-test/runs/node-a/node-a-123/artifacts/pid"
             )
             try:
                 deadline = time.monotonic() + 5.0

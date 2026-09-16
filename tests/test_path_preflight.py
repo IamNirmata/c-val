@@ -41,8 +41,8 @@ class RunPathPreflightTests(unittest.TestCase):
             root = Path(tmpdir) / "data"
             outside = Path(tmpdir) / "outside"
             outside.mkdir()
-            (root / "validation_tests").mkdir(parents=True)
-            (root / "validation_tests/smoke").symlink_to(
+            (root / "logs/validation_tests").mkdir(parents=True)
+            (root / "logs/validation_tests/smoke").symlink_to(
                 outside,
                 target_is_directory=True,
             )

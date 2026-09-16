@@ -542,11 +542,9 @@ def _validation_root_test_path(value: Any, test_id: str, field_name: str) -> str
     if path.is_absolute():
         raise ValueError(f"{field_name} must be relative to runtime.validation_root")
     normalized = Path(*path.parts)
-    expected = Path("validation_tests") / test_id
-    try:
-        normalized.relative_to(expected)
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must stay under {expected}") from exc
+    expected = Path("logs/validation_tests") / test_id
+    if not any(normalized.is_relative_to(prefix) for prefix in (expected, Path("validation_tests") / test_id)):
+        raise ValueError(f"{field_name} must stay under {expected}")
     if any(part in {"", ".", ".."} for part in normalized.parts):
         raise ValueError(f"{field_name} contains an invalid path segment")
     return normalized.as_posix()

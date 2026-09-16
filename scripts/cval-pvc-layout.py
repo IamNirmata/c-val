@@ -8,17 +8,22 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
 import sqlite3
 import stat
+import sys
 import time
 from collections import Counter
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 COMPONENTS = (
@@ -50,7 +55,7 @@ def archive_plan(root: Path, archive_name: str) -> dict:
         raise ValueError("root must be an existing canonical absolute directory")
     if re.fullmatch(r"[0-9]{8}_[0-9]{6}_P[DS]T", archive_name) is None:
         raise ValueError("archive name must be YYYYMMDD_HHMMSS_PDT or PST")
-    archive = root / "archive"
+    archive = root / "archives"
     if archive.is_symlink() or (archive.exists() and not archive.is_dir()):
         raise ValueError("archive parent must be a real directory")
     target = archive / archive_name
@@ -91,6 +96,340 @@ def plan_digest(plan: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def tree_fingerprint(path: Path, *, backup_files: dict | None = None, relative: str = "") -> dict:
+    from cval.validation.secure_fs import open_directory_no_symlinks
+
+    _parent, parent_fd = open_directory_no_symlinks(path.parent)
+    digest = hashlib.sha256()
+    files = 0
+    size = 0
+    device = os.fstat(parent_fd).st_dev
+
+    def visit(directory_fd, name, suffix):
+        nonlocal files, size
+        identity = entry_identity(name, dir_fd=directory_fd)
+        if identity["device"] != device:
+            raise ValueError(f"consolidation refuses mount boundary: {path}/{suffix}")
+        payload = [suffix, identity]
+        if stat.S_ISDIR(identity["mode"]):
+            descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            try:
+                for child in sorted(os.listdir(descriptor)):
+                    visit(descriptor, child, child if suffix == "." else suffix + "/" + child)
+            finally:
+                os.close(descriptor)
+        else:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+            content = hashlib.sha256()
+            with os.fdopen(descriptor, "rb") as handle:
+                if os.fstat(handle.fileno()).st_ino != identity["inode"]:
+                    raise ValueError("file identity changed during consolidation inventory")
+                while chunk := handle.read(1024 * 1024):
+                    content.update(chunk)
+            payload.append(content.hexdigest())
+            files += 1
+            size += identity["size"]
+            if backup_files is not None:
+                key = relative if suffix == "." else relative + "/" + suffix
+                saved = backup_files.get(key, {})
+                if saved.get("source_sha256") != content.hexdigest() or saved.get("source_size") != identity["size"]:
+                    raise ValueError(f"source does not match verified backup: {key}")
+        if entry_identity(name, dir_fd=directory_fd) != identity:
+            raise ValueError(f"source changed during consolidation inventory: {path}/{suffix}")
+        digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+
+    try:
+        identity = entry_identity(path.name, dir_fd=parent_fd)
+        visit(parent_fd, path.name, ".")
+        return {"identity": identity, "tree_sha256": digest.hexdigest(), "files": files, "bytes": size}
+    finally:
+        os.close(parent_fd)
+
+
+def consolidation_plan(root: Path) -> dict:
+    from cval.storage.paths import EVIDENCE_RELOCATIONS
+    from cval.validation.secure_fs import open_directory_no_symlinks
+
+    if not root.is_absolute() or root.resolve() != root or not root.is_dir():
+        raise ValueError("root must be an existing canonical absolute directory")
+    operations = []
+    merged = []
+    conflicts = []
+    parents = set()
+
+    def visit(source, destination):
+        source_path, destination_path = root / source, root / destination
+        source_identity = entry_identity(source_path)
+        if source_identity["device"] != root.stat().st_dev:
+            raise ValueError(f"source is a mount boundary: {source}")
+        if destination_path.resolve() != destination_path:
+            raise ValueError(f"destination is not canonical: {destination}")
+        if not destination_path.exists():
+            operations.append({"source": source, "destination": destination, "action": "move", "source_state": tree_fingerprint(source_path)})
+            parent = destination_path.parent
+            while parent != root and not parent.exists():
+                parents.add(str(parent.relative_to(root)))
+                parent = parent.parent
+            return
+        target_identity = entry_identity(destination_path)
+        if stat.S_ISDIR(source_identity["mode"]) and stat.S_ISDIR(target_identity["mode"]):
+            _opened, descriptor = open_directory_no_symlinks(source_path)
+            try:
+                names = sorted(os.listdir(descriptor))
+            finally:
+                os.close(descriptor)
+            for name in names:
+                visit(source + "/" + name, destination + "/" + name)
+            merged.append({"source": source, "identity": source_identity})
+        elif stat.S_ISREG(source_identity["mode"]) and stat.S_ISREG(target_identity["mode"]):
+            source_state, target_state = tree_fingerprint(source_path), tree_fingerprint(destination_path)
+            def contents(path):
+                with path.open("rb") as handle:
+                    return hashlib.file_digest(handle, "sha256").hexdigest()
+            metadata = ("mode", "uid", "gid", "mtime_ns", "size")
+            if contents(source_path) == contents(destination_path) and all(source_identity[field] == target_identity[field] for field in metadata):
+                operations.append({"source": source, "destination": destination, "action": "duplicate", "source_state": source_state, "destination_state": target_state})
+            else:
+                conflicts.append({"source": source, "destination": destination, "reason": "different_content_or_metadata"})
+        else:
+            conflicts.append({"source": source, "destination": destination, "reason": "different_entry_types"})
+
+    for source, destination in EVIDENCE_RELOCATIONS.items():
+        if (root / source).exists() or (root / source).is_symlink():
+            visit(source, destination)
+    plan = {
+        "schema_version": "cval.pvc-consolidation-plan.v1", "root": str(root),
+        "root_identity": {key: value for key, value in entry_identity(root).items() if key in {"device", "inode"}},
+        "operations": operations, "merged_directories": merged,
+        "create_directories": sorted(parents, key=lambda value: (value.count("/"), value)),
+        "conflicts": conflicts,
+    }
+    return plan | {"plan_sha256": plan_digest(plan)}
+
+
+def backup_tool():
+    specification = importlib.util.spec_from_file_location("cval_layout_backup", Path(__file__).with_name("cval-backup.py"))
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+def move_entry(source_root: Path, source: str, target_root: Path, target: str) -> None:
+    from cval.validation.secure_fs import open_directory_no_symlinks, open_parent_at
+
+    descriptors = []
+    try:
+        for root, relative in ((source_root, source), (target_root, target)):
+            _path, root_fd = open_directory_no_symlinks(root)
+            descriptors.append(root_fd)
+            parent_fd, name = open_parent_at(root_fd, relative)
+            descriptors.append(parent_fd)
+            if len(descriptors) == 2:
+                source_fd, source_name = parent_fd, name
+            else:
+                target_fd, target_name = parent_fd, name
+        try:
+            rename_noreplace(source_fd, source_name, target_fd, target_name)
+        except OSError as error:
+            if error.errno not in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+                raise
+            metadata = os.fstat(target_fd)
+            if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise ValueError("rename fallback requires an owner-controlled destination") from error
+            try:
+                os.stat(target_name, dir_fd=target_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.rename(source_name, target_name, src_dir_fd=source_fd, dst_dir_fd=target_fd)
+            else:
+                raise FileExistsError(target)
+        os.fsync(source_fd)
+        os.fsync(target_fd)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+@contextmanager
+def consolidation_lock(parent: Path):
+    from cval.validation.secure_fs import open_directory_no_symlinks
+
+    _path, parent_fd = open_directory_no_symlinks(parent)
+    lock_fd = None
+    try:
+        metadata = os.fstat(parent_fd)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise ValueError("consolidation evidence directory must be owner-controlled")
+        lock_fd = os.open(".pvc-consolidation.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent_fd)
+        metadata = os.fstat(lock_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise ValueError("consolidation lock must be a private regular file")
+        fcntl.lockf(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        os.close(parent_fd)
+
+
+def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confirm: str, sources_idle: str) -> dict:
+    from cval.validation.secure_fs import open_directory_no_symlinks, open_parent_at
+
+    if confirm != "consolidate" or sources_idle != "idle":
+        raise ValueError("consolidation requires --confirm consolidate --confirm-sources-idle idle")
+    plan = consolidation_plan(root)
+    if plan["plan_sha256"] != expected_digest or plan["conflicts"]:
+        raise ValueError("consolidation plan changed or has unresolved collisions")
+    if not plan["operations"] and not plan["merged_directories"]:
+        raise ValueError("nothing to consolidate")
+    if not backup.is_absolute() or backup.resolve() != backup or backup.is_relative_to(root):
+        raise ValueError("consolidation requires a canonical backup outside the source root")
+    tool = backup_tool()
+    tool.verify_backup(backup)
+    _path, backup_fd = open_directory_no_symlinks(backup)
+    try:
+        saved = tool._load_manifest(backup, backup_fd)
+    finally:
+        os.close(backup_fd)
+    if saved["source_root"] != str(root) or saved["excluded"]:
+        raise ValueError("verified backup must include the entire source root without exclusions")
+    transaction = backup.with_name(backup.name + "-layout")
+    if root.stat().st_dev != backup.parent.stat().st_dev:
+        raise ValueError("rollback evidence must be on the source filesystem for identity-preserving moves")
+    with consolidation_lock(backup.parent):
+        _path, root_fd = open_directory_no_symlinks(root)
+        try:
+            inventory = tool.inventory_tree(root_fd, exclude_backups=False)
+            if tool.inventory_digest(inventory) != saved["consistency"]["post_inventory_sha256"]:
+                raise ValueError("source tree changed since the verified backup")
+            if consolidation_plan(root) != plan:
+                raise ValueError("consolidation plan changed while acquiring lock")
+            files = {entry["path"]: entry for entry in saved["files"]}
+            for operation in plan["operations"]:
+                if tree_fingerprint(root / operation["source"], backup_files=files, relative=operation["source"]) != operation["source_state"]:
+                    raise ValueError("source changed before consolidation")
+            protected = root / "dl_unit_test_evaluation"
+            protected_before = tree_fingerprint(protected) if protected.exists() else None
+            transaction.mkdir(mode=0o700)
+            transaction_fd = os.open(transaction, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            manifest = {"schema_version": "cval.pvc-consolidation.v1", "state": "in_progress", "plan": plan, "backup": str(backup), "protected": protected_before}
+            try:
+                save_manifest(transaction_fd, manifest)
+                for relative in plan["create_directories"]:
+                    parent_fd, name = open_parent_at(root_fd, relative)
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                    finally:
+                        os.close(parent_fd)
+                for operation in plan["operations"]:
+                    source, destination = operation["source"], operation["destination"]
+                    if tree_fingerprint(root / source) != operation["source_state"]:
+                        raise ValueError(f"consolidation source changed: {source}")
+                    if operation["action"] == "duplicate":
+                        if tree_fingerprint(root / destination) != operation["destination_state"]:
+                            raise ValueError(f"duplicate destination changed: {destination}")
+                        retained = "duplicates/" + source
+                        (transaction / retained).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        move_entry(root, source, transaction, retained)
+                        actual = transaction / retained
+                    else:
+                        move_entry(root, source, root, destination)
+                        actual = root / destination
+                    if tree_fingerprint(actual) != operation["source_state"]:
+                        raise ValueError(f"moved evidence changed: {actual}")
+                for entry in plan["merged_directories"]:
+                    parent_fd, name = open_parent_at(root_fd, entry["source"])
+                    try:
+                        current = entry_identity(name, dir_fd=parent_fd)
+                        if any(current[key] != entry["identity"][key] for key in ("device", "inode", "mode", "uid", "gid")):
+                            raise ValueError("source directory identity changed")
+                        os.rmdir(name, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                    finally:
+                        os.close(parent_fd)
+                if protected_before is not None and tree_fingerprint(protected) != protected_before:
+                    raise ValueError("protected dl_unit_test_evaluation directory changed")
+                manifest["state"] = "complete"
+                save_manifest(transaction_fd, manifest)
+            except Exception as error:
+                manifest.update(state="failed", error=str(error))
+                save_manifest(transaction_fd, manifest)
+                raise
+            finally:
+                os.close(transaction_fd)
+        finally:
+            os.close(root_fd)
+    return {"state": "complete", "transaction": str(transaction), "moved_entries": len(plan["operations"]), "protected_unchanged": True}
+
+
+def rollback_consolidation(root: Path, transaction: Path, *, confirm: str, sources_idle: str) -> dict:
+    from cval.storage.paths import EVIDENCE_RELOCATIONS
+    from cval.validation.secure_fs import open_directory_no_symlinks, read_regular_file_at
+
+    if confirm != "restore-layout" or sources_idle != "idle":
+        raise ValueError("rollback requires --confirm restore-layout --confirm-sources-idle idle")
+    if not transaction.is_absolute() or transaction.resolve() != transaction or transaction.is_relative_to(root):
+        raise ValueError("rollback evidence must be canonical and outside the source root")
+    with consolidation_lock(transaction.parent):
+        _path, transaction_fd = open_directory_no_symlinks(transaction)
+        try:
+            manifest = json.loads(read_regular_file_at(transaction_fd, "manifest.json", max_bytes=64 * 1024 * 1024))
+            plan = manifest["plan"]
+            if manifest.get("schema_version") != "cval.pvc-consolidation.v1" or plan.get("schema_version") != "cval.pvc-consolidation-plan.v1" or plan.get("root") != str(root) or plan_digest(plan) != plan.get("plan_sha256"):
+                raise ValueError("invalid consolidation manifest")
+            if any(entry_identity(root)[key] != value for key, value in plan["root_identity"].items()):
+                raise ValueError("source root identity changed")
+            restore = []
+            for operation in plan["operations"]:
+                source = Path(operation["source"])
+                prefix = EVIDENCE_RELOCATIONS.get(source.parts[0]) if source.parts else None
+                if source.is_absolute() or ".." in source.parts or prefix is None or operation["destination"] != str(Path(prefix).joinpath(*source.parts[1:])) or operation["action"] not in {"move", "duplicate"}:
+                    raise ValueError("non-allowlisted consolidation operation")
+                original = root / source
+                actual = root / operation["destination"] if operation["action"] == "move" else transaction / "duplicates" / source
+                if original.exists() or original.is_symlink():
+                    if tree_fingerprint(original) != operation["source_state"] or actual.exists():
+                        raise ValueError(f"rollback refuses source collision: {source}")
+                elif tree_fingerprint(actual) == operation["source_state"]:
+                    restore.append((operation, actual))
+                else:
+                    raise ValueError(f"rollback evidence changed: {source}")
+            for entry in reversed(plan["merged_directories"]):
+                relative = Path(entry["source"])
+                if relative.is_absolute() or ".." in relative.parts or relative.parts[0] not in EVIDENCE_RELOCATIONS:
+                    raise ValueError("non-allowlisted rollback directory")
+                path = root / relative
+                if not path.exists():
+                    path.mkdir(mode=stat.S_IMODE(entry["identity"]["mode"]))
+                open_path, descriptor = open_directory_no_symlinks(path)
+                os.close(descriptor)
+                if open_path != path:
+                    raise ValueError("rollback source directory is not canonical")
+            for operation, actual in reversed(restore):
+                if operation["action"] == "move":
+                    move_entry(root, operation["destination"], root, operation["source"])
+                else:
+                    move_entry(transaction, "duplicates/" + operation["source"], root, operation["source"])
+                if tree_fingerprint(root / operation["source"]) != operation["source_state"]:
+                    raise ValueError("restored evidence identity changed")
+            for entry in plan["merged_directories"]:
+                identity = entry["identity"]
+                path = root / entry["source"]
+                os.chmod(path, stat.S_IMODE(identity["mode"]), follow_symlinks=False)
+                os.chown(path, identity["uid"], identity["gid"], follow_symlinks=False)
+                os.utime(path, ns=(identity["mtime_ns"], identity["mtime_ns"]), follow_symlinks=False)
+            for relative in reversed(plan["create_directories"]):
+                path = root / relative
+                if path.exists():
+                    path.rmdir()
+            manifest["state"] = "rolled_back"
+            save_manifest(transaction_fd, manifest)
+            return {"state": "rolled_back", "transaction": str(transaction)}
+        finally:
+            os.close(transaction_fd)
+
+
 def rename_noreplace(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
     library = ctypes.CDLL(None, use_errno=True)
     rename = getattr(library, "renameat2", None)
@@ -113,11 +452,11 @@ def locked_archive(root: Path, *, create: bool):
         descriptors.append(root_fd)
         if create:
             try:
-                os.mkdir("archive", 0o700, dir_fd=root_fd)
+                os.mkdir("archives", 0o700, dir_fd=root_fd)
                 os.fsync(root_fd)
             except FileExistsError:
                 pass
-        archive_fd = os.open("archive", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        archive_fd = os.open("archives", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
         descriptors.append(archive_fd)
         metadata = os.fstat(archive_fd)
         if metadata.st_dev != os.fstat(root_fd).st_dev:
@@ -350,6 +689,11 @@ def main() -> int:
     operation.add_argument("--plan-archive", action="store_true")
     operation.add_argument("--apply-archive", action="store_true")
     operation.add_argument("--rollback-archive", action="store_true")
+    operation.add_argument("--plan-consolidate", action="store_true")
+    operation.add_argument("--apply-consolidate", action="store_true")
+    operation.add_argument("--rollback-consolidate", action="store_true")
+    parser.add_argument("--backup-dir", type=Path)
+    parser.add_argument("--transaction", type=Path)
     parser.add_argument("--archive-name")
     parser.add_argument("--plan-sha256")
     parser.add_argument("--confirm")
@@ -359,6 +703,22 @@ def main() -> int:
         parser.error("root must be an existing canonical absolute directory")
     if not 1 <= args.entry_limit <= 100000 or not 0 < args.seconds_per_entry <= 60:
         parser.error("invalid inventory bounds")
+    if args.plan_consolidate or args.apply_consolidate or args.rollback_consolidate:
+        try:
+            if args.plan_consolidate:
+                report = consolidation_plan(args.root)
+            elif args.apply_consolidate:
+                if args.backup_dir is None:
+                    raise ValueError("consolidation requires --backup-dir")
+                report = apply_consolidation(args.root, args.backup_dir, args.plan_sha256, confirm=args.confirm, sources_idle=args.confirm_sources_idle)
+            else:
+                if args.transaction is None:
+                    raise ValueError("rollback requires --transaction")
+                report = rollback_consolidation(args.root, args.transaction, confirm=args.confirm, sources_idle=args.confirm_sources_idle)
+            print(json.dumps(report, sort_keys=True, indent=2))
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            parser.error(str(error))
+        return 0
     if args.plan_archive or args.apply_archive or args.rollback_archive:
         if not args.archive_name:
             parser.error("archive operations require --archive-name")

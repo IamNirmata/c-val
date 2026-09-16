@@ -5,6 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 
+EVIDENCE_RELOCATIONS = {
+    "archive": "archives",
+    "dltest": "logs/dltest",
+    "nccl": "logs/nccl",
+    "storage": "logs/storage",
+    "results": "logs/results",
+    "validation_tests": "logs/validation_tests",
+}
+
+
 def safe_writable_file_path(
     value: str | Path,
     *,
@@ -47,6 +57,7 @@ def safe_existing_evidence_path(
     expect_directory: bool,
     description: str = "validation evidence",
     allow_missing: bool = False,
+    allow_relocated: bool = False,
 ) -> Path:
     """Require one canonical existing evidence path without symlink traversal."""
 
@@ -62,6 +73,15 @@ def safe_existing_evidence_path(
     _reject_existing_symlinks(root, description)
     _reject_existing_symlinks(path, description)
     if not path.exists():
+        relative = path.relative_to(root)
+        destination = EVIDENCE_RELOCATIONS.get(relative.parts[0]) if relative.parts else None
+        if allow_relocated and destination is not None:
+            relocated = root / destination / Path(*relative.parts[1:])
+            if relocated.exists() or relocated.is_symlink():
+                return safe_existing_evidence_path(
+                    relocated, expected_path=relocated, allowed_root=root,
+                    expect_directory=expect_directory, description=description,
+                )
         if not allow_missing:
             raise ValueError(f"{description} path does not exist: {path}")
         resolved_root = root.resolve(strict=False)

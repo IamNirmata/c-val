@@ -97,6 +97,28 @@ class BackupScriptTests(unittest.TestCase):
             self.assertIn("--confirm-quiesced writers-stopped", completed.stdout)
             self.assertEqual([path.name for path in (root / "backups").iterdir()], ["old"])
 
+    def test_external_backup_includes_existing_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            previous = root / "backups/old"
+            previous.mkdir(parents=True)
+            (previous / "retained.txt").write_bytes(b"previous backup evidence")
+            destination = Path(tmpdir) / "cval-backup"
+            inspected = self._run(root, "--destination-root", str(destination))
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            self.assertIn("excluded: none", inspected.stdout)
+            self.assertIn("source file count: 2", inspected.stdout)
+            self.assertFalse(destination.exists())
+
+            completed = self._apply(root, "--destination-root", str(destination))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            backup = Path(json.loads(completed.stdout)["backup"])
+            self.assertEqual((backup / "backups/old/retained.txt").read_bytes(), b"previous backup evidence")
+            self.assertEqual(json.loads((backup / "manifest.json").read_text())["excluded"], [])
+            verified = self._run(None, "--verify", str(backup))
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertEqual((previous / "retained.txt").read_bytes(), b"previous backup evidence")
+
     def test_publish_falls_back_in_owner_only_directory_when_renameat2_is_unsupported(
         self,
     ) -> None:
@@ -367,7 +389,7 @@ class BackupScriptTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
             self.assertEqual(list((root / "backups").iterdir()), [existing])
 
-    def test_external_destination_is_supported_and_backups_stay_excluded(self) -> None:
+    def test_existing_external_destination_includes_nested_backups(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             parent = Path(tmpdir)
             root = self._root(parent)
@@ -385,8 +407,8 @@ class BackupScriptTests(unittest.TestCase):
             self.assertEqual(applied.returncode, 0, applied.stderr)
             backup = Path(json.loads(applied.stdout)["backup"])
             manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["excluded"], ["backups/"])
-            self.assertFalse((backup / "backups").exists())
+            self.assertEqual(manifest["excluded"], [])
+            self.assertEqual((backup / "backups/old/ignored.txt").read_text(), "ignored")
             self.assertTrue((root / "backups/old/ignored.txt").exists())
 
 

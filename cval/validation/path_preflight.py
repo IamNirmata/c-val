@@ -45,7 +45,7 @@ def preflight_run_paths(
         paths.extend(
             (
                 root / "logs" / test_id / node / run_id,
-                root / "validation_tests" / test_id / "runs" / node / run_id,
+                root / "logs/validation_tests" / test_id / "runs" / node / run_id,
             )
         )
     for path in paths:

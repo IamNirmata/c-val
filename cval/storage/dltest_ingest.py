@@ -4,7 +4,7 @@ The DL artifact layout has changed over time. The scanner is intentionally
 recursive and accepts both of these shapes:
 
   /data/continuous_validation/dltest/<node>/dltest-<node>-<timestamp>/workdir/test_plans/<plan>/runs/*.json
-    /data/continuous_validation/validation_tests/dltest/runs/<node>/<node>-<timestamp>/artifacts/workdir/test_plans/<plan>/runs/*.json
+    /data/continuous_validation/logs/validation_tests/dltest/runs/<node>/<node>-<timestamp>/artifacts/workdir/test_plans/<plan>/runs/*.json
 
 The four output DBs preserve the DL suite's raw metric categories:
 ``numerical_correctness``, ``compute_performance``, ``collective_performance``,

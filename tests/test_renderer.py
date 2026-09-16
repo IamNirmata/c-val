@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import hashlib
+import io
+import os
 import re
+import subprocess
+import sys
+import tarfile
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,6 +20,7 @@ from cval.jobs.renderer import (
 )
 from cval.validation.runtime import _decode_runtime_environment, effective_config_digest
 from cval.validation.registry import ValidationTestRegistry, load_test_registry
+import yaml
 
 
 TEMPLATE = (
@@ -23,6 +30,42 @@ COMMIT = "a" * 40
 
 
 class RendererTests(unittest.TestCase):
+    def test_offline_source_requires_complete_exact_identity(self) -> None:
+        config = load_config()
+        for source_name, source_digest, revision in (("", "b" * 64, COMMIT), ("source", "", COMMIT), ("source", "b" * 64, "main"), ("invalid/name", "b" * 64, COMMIT)):
+            with self.subTest(source=source_name, revision=revision), self.assertRaisesRegex(ValueError, "offline source requires"):
+                render_validation_job(TEMPLATE, "node-a", git_ref=revision, cval_config=replace(config, job=replace(config.job, source_configmap=source_name, source_sha256=source_digest)))
+
+    def test_offline_bootstrap_verifies_digest_and_archive_commit(self) -> None:
+        config = load_config()
+        config = replace(config, job=replace(config.job, source_configmap="cval-exact-source", source_sha256="b" * 64))
+        rendered = render_validation_job(TEMPLATE, "node-a", git_ref=COMMIT, cval_config=config)
+        pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
+        container = pod["containers"][0]
+        self.assertEqual(pod["volumes"][-1]["configMap"]["name"], "cval-exact-source")
+        self.assertTrue(container["volumeMounts"][-1]["readOnly"])
+        script = container["args"][0].split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = io.BytesIO()
+            with tarfile.open(fileobj=payload, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": COMMIT}) as archive:
+                entry = tarfile.TarInfo("marker.txt")
+                entry.size = 5
+                archive.addfile(entry, io.BytesIO(b"exact"))
+            source = root / "source.tar.gz"
+            source.write_bytes(payload.getvalue())
+            digest = hashlib.sha256(payload.getvalue()).hexdigest()
+            script = script.replace('Path("/cval-source/source.tar.gz")', f"Path({str(source)!r})")
+            for condition, revision, checksum in (("valid", COMMIT, digest), ("wrong-commit", "c" * 40, digest), ("wrong-digest", COMMIT, "0" * 64)):
+                with self.subTest(condition=condition):
+                    destination = root / condition
+                    result = subprocess.run([sys.executable, "-c", script], env=os.environ | {"CVAL_GIT_REF": revision, "CVAL_SOURCE_SHA256": checksum, "CVAL_REPO_DIR": str(destination)}, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode == 0, condition == "valid", result.stderr)
+                    if condition == "valid":
+                        self.assertEqual((destination / "marker.txt").read_bytes(), b"exact")
+                    else:
+                        self.assertFalse(destination.exists())
+
     def test_renders_specific_node_job(self) -> None:
         rendered = render_validation_job(
           TEMPLATE,

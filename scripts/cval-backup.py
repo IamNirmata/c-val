@@ -346,7 +346,7 @@ def print_inspection(
     print("c-val whole-root backup inspection (created nothing)")
     print(f"source: {source}")
     print(f"destination: {destination}")
-    print("excluded: backups/")
+    print("excluded: " + ("backups/" if plan["same_source_storage"] else "none"))
     print(f"source file count: {plan['source_file_count']}")
     print(f"apparent unique bytes (hardlinks deduplicated): {plan['apparent_unique_bytes']}")
     print(f"destination filesystem free bytes: {plan['destination_free_bytes']}")
@@ -717,7 +717,7 @@ def create_backup(
             )
 
         _test_hook_after_copy(source)
-        post_inventory = inventory_tree(source_fd, exclude_backups=True)
+        post_inventory = inventory_tree(source_fd, exclude_backups=bool(plan["same_source_storage"]))
         post_digest = inventory_digest(post_inventory)
         if not inventories_equal(inventory, post_inventory) or pre_digest != post_digest:
             raise BackupError("source tree changed during backup; staged backup rejected")
@@ -744,7 +744,7 @@ def create_backup(
             "destination": str(destination),
             "started_at": started_at,
             "completed_at": completed_at,
-            "excluded": EXCLUDED,
+            "excluded": EXCLUDED if plan["same_source_storage"] else [],
             "quiescence": {
                 "declared": True,
                 "confirmation": QUIESCENCE_CONFIRMATION,
@@ -864,7 +864,7 @@ def _load_manifest(backup: Path, backup_fd: int) -> dict[str, Any]:
         raise BackupError("manifest has missing or unexpected top-level fields")
     if value["schema"] != SCHEMA or value["schema_version"] != SCHEMA_VERSION:
         raise BackupError("manifest schema is not supported")
-    if value["excluded"] != EXCLUDED:
+    if value["excluded"] not in (EXCLUDED, []):
         raise BackupError("manifest exclusion set is invalid")
     if not isinstance(value["source_root"], str) or not Path(value["source_root"]).is_absolute():
         raise BackupError("manifest source_root is invalid")
@@ -1179,6 +1179,7 @@ def run(argv: list[str]) -> int:
     source = lexical_absolute(args.source)
     destination_root = lexical_absolute(args.destination_root or source / "backups")
     validate_layout(source, destination_root)
+    exclude_backups = destination_root == source / "backups"
     timestamp = os.environ.get("CVAL_BACKUP_TIMESTAMP") or datetime.now(
         timezone.utc
     ).strftime("%Y%m%dT%H%M%SZ")
@@ -1196,7 +1197,7 @@ def run(argv: list[str]) -> int:
     destination_fd: int | None = None
     try:
         source_identity = descriptor_identity(source_fd)
-        initial_inventory = inventory_tree(source_fd, exclude_backups=True)
+        initial_inventory = inventory_tree(source_fd, exclude_backups=exclude_backups)
         if "manifest.json" in initial_inventory:
             raise BackupError("source root manifest.json conflicts with backup manifest name")
         _ancestor, destination_ancestor_fd = _existing_destination_ancestor(
@@ -1220,7 +1221,7 @@ def run(argv: list[str]) -> int:
         os.close(destination_ancestor_fd)
         destination_ancestor_fd = None
         destination_fd = _ensure_destination_root(destination_root)
-        inventory = inventory_tree(source_fd, exclude_backups=True)
+        inventory = inventory_tree(source_fd, exclude_backups=exclude_backups)
         if not inventories_equal(inventory, initial_inventory):
             initial_without_root = dict(initial_inventory)
             current_without_root = dict(inventory)

@@ -82,15 +82,21 @@ test-config digest and environment; cross-storage-target pooling is not enabled.
 
 ## Pod
 
-[pod.yaml](pod.yaml) defines the exact fixed name `cval-evaluation-engine`,
+[ymls/cval-evaluation-engine.yaml](../../ymls/cval-evaluation-engine.yaml) is the
+canonical template defining the exact fixed name `cval-evaluation-engine`,
 Always restart, 2 CPU, 2Gi request/4Gi limit; no GPU or RDMA, API token, or writes
-to `/data`. CPU node `slc01-cl02-ccpu-008` matches the inspected PVC reader.
+outside `/data/continuous_validation` within `/data`. CPU node
+`slc01-cl02-ccpu-008` matches the inspected PVC reader.
 UID 0 is needed for existing root-owned private result summaries; capabilities
-are dropped and root/raw filesystems read-only. `/evaluation` is a writable
-subPath `continuous_validation/evaluation-engine` on the existing claim. Raw
-`/data` remains read-only. Provision that isolated directory explicitly first.
-Use one PVC volume with two container mounts; enforce `/data` read-only at the
-mount rather than presenting the same CSI volume twice with conflicting modes.
+are dropped and the root filesystem remains read-only. `/evaluation` is a
+writable subPath `continuous_validation/evaluation-engine` on the existing claim.
+The entire `/data/continuous_validation` tree is writable through a second
+subPath mount; the rest of `/data` remains read-only. Existing file permissions
+still apply; no recursive chmod/chown is performed. Raw SQLite connections in
+the evaluator remain read-only, but filesystem protection no longer prevents
+interactive tools from changing raw evidence. Preserve all raw evidence.
+Use one PVC volume with three container mounts rather than presenting the same
+CSI volume twice with conflicting modes. Provision subPath directories first.
 
 The default deployment uses a digest-pinned public Python image and immutable
 ConfigMaps containing a Git archive of the exact commit and an offline PyYAML
@@ -115,6 +121,57 @@ worker holds an exclusive process lock. Stop/replacement/delete are gated.
 This fixed-name Pod restarts containers, not a deleted Pod; node-loss recovery
 requires operator replacement. A Deployment would generate a suffixed pod name.
 
+### VS Code attachment
+
+The template keeps `readOnlyRootFilesystem: true` and mounts a dedicated,
+disk-backed `emptyDir` at `/root/.vscode-server` with a 2Gi size limit. The
+container requests 2Gi of ephemeral storage and limits it to 4Gi, allowing
+headroom for `/tmp`, application files and logs. This is node-local storage,
+not a new PVC and not part of the raw or derived databases.
+
+Attach to the `evaluator` container using VS Code Dev Containers after the
+updated pod is deployed. Allow VS Code to install its matching server and
+extensions in that directory; do not hard-code a different server build into
+the Python bootstrap. Installation requires download access or a matching
+server supplied through an approved offline transfer. Kubernetes exec/attach
+permissions are also required. This mount addresses installation writes, not
+authentication, network, or extension-compatibility failures.
+
+The volume survives container restarts but is lost on pod deletion/recreation.
+Server builds and extensions must then be installed again. Increase its size
+if multiple builds/extensions exceed 2Gi. `/app` stays read-only, but
+`/data/continuous_validation` is writable, including raw evidence and evaluation
+output. VS Code extensions run as UID 0 and can modify that entire subtree;
+attach only trusted clients/extensions and avoid heavy interactive work while
+the evaluator is processing.
+
+### Recreate or update
+
+Keep template edits under `ymls/` and retain the bootstrap, renderer and offline
+dependency tooling here. Publish the reviewed commit first, then render from
+that exact SHA (which must contain the new template path):
+
+```bash
+python3 deploy/evaluation-engine/render.py \
+  --revision <exact-published-40-hex-SHA> \
+  --wheel <reviewed-PyYAML-wheel> \
+  --output-dir <new-release-directory>
+```
+
+The renderer emits `source-configmap.yaml`, `dependency-configmap.yaml` and
+`pod.yaml`. Do not apply the template directly: its ConfigMap names are
+intentional placeholders. Existing immutable ConfigMaps remain available for
+rollback; keep the old rendered Pod manifest too.
+
+Adding a volume/mount to an existing standalone Pod requires replacement, not
+an in-place apply. Separately approve the exact ConfigMap apply, graceful Pod
+deletion and rendered Pod creation commands. Wait for the old pod to terminate
+before creating its replacement; retain the PVC and never run two evaluators
+against the same output. Verify source annotation, init completion, worker
+logs, mount permissions and actual VS Code attachment after replacement.
+Rollback recreates the old rendered Pod only after the replacement terminates;
+it does not delete or restore database contents automatically.
+
 Rollback: stop the evaluator and keep its output/ConfigMaps; do not revert the
 compatible raw writer after migration. Migration backups can be restored only
 while all readers/writers are quiesced and before subsequent raw writes, under
@@ -130,13 +187,33 @@ Comparison rows, summary and evaluation receipt commit together. The scan
 cursor commits afterward; a crash in between replays idempotently. Repeated
 observations refresh `evaluated_at`, not immutable comparison payloads.
 
-The small raw status catalog is scanned in rowid order; a persisted rotating
-cursor evaluates bounded batches and revisits old identities for late arrivals
-and repairs. This is bounded reconciliation, not timestamp-only discovery.
+The raw status catalog is queried in bounded pages of complete `(node,timestamp)`
+identities ordered by their first rowid. The per-metric row cap is not a cap on
+the whole catalog. A persisted rotating cursor revisits old identities for late
+arrivals and repairs. This is bounded reconciliation, not timestamp-only discovery.
 Outputs can lag by a sweep; do not infer raw freshness from an evaluation alone.
-Baseline training is capped at `max_training_runs=100`, reported when truncated.
+Baseline discovery separately fetches at most `max_training_runs + 1` identities
+inside the training window, then trains on at most `max_training_runs=100`.
+`bounded=true` means more candidates exist; the reported candidate count is the
+bounded number fetched, not a full catalog count.
 Large metric DBs are read only by exact node/timestamp, never fully loaded.
 No automatic pruning: monitor output disk growth and retain referenced baselines.
+
+DL metric coverage is checked against the retained plan and run-summary plan/
+iteration identity, independently of observed DB rows or baseline thresholds.
+The test-owned contract expands selected numerical and timing metrics per task,
+overlap layer/collective pair, and rank. Supported layer constructors are parsed
+without executing the layer expression; optional bias/affine parameters are
+respected. Unknown layer contracts stay unclassified until explicitly supported.
+Missing or extra selected metric identities produce
+`dl_required_metric_coverage_mismatch`, exclude training evidence, and cannot
+produce a healthy test class. The required-key digest is part of the DL cohort,
+so older baselines without this coverage contract cannot be reused silently.
+
+New artifacts live under `logs/validation_tests`. Historical paths in retained
+JSON and SQLite receipts are not rewritten; read-only evaluation resolves the
+explicit legacy-to-logs mapping after the approved PVC migration. See the
+[operations runbook](../../docs/operations-runbook.md#approved-consolidation-workflow).
 
 Worker JSON reports and `worker_state` expose progress/errors. New tests add
 their own two scripts and `[evaluation]` policy; no central dispatch map change.

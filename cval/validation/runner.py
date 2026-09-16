@@ -736,7 +736,7 @@ def _test_paths(
     test_id = registered_test.id
     log_dir = validation_root / "logs" / test_id / node / run_id
     run_dir = (
-        validation_root / "validation_tests" / test_id / "runs" / node / run_id
+        validation_root / "logs/validation_tests" / test_id / "runs" / node / run_id
     )
     _require_below(validation_root, log_dir, "test log directory")
     _require_below(validation_root, run_dir, "test run directory")

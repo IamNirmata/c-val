@@ -324,6 +324,9 @@ max_bytes = 25 * 1024 * 1024
 run_id = node + "-" + ts
 candidates = sorted(glob.glob(root + "/logs/*/" + node + "/" + run_id))
 candidates += sorted(
+    glob.glob(root + "/logs/validation_tests/*/runs/" + node + "/" + run_id)
+)
+candidates += sorted(
     glob.glob(root + "/validation_tests/*/runs/" + node + "/" + run_id)
 )
 candidates += [
@@ -333,6 +336,11 @@ candidates += [
     root + "/dltest/" + node + "/dltest-" + node + "-" + ts,
     root + "/results/" + node + "/cval-results-" + node + "-" + ts + ".json",
     root + "/results/" + node + "/cval-results-" + node + "-" + ts + ".env",
+    root + "/logs/storage/" + node + "/storage-" + node + "-" + ts,
+    root + "/logs/nccl/" + node + "/nccl-" + node + "-" + ts,
+    root + "/logs/dltest/" + node + "/dltest-" + node + "-" + ts,
+    root + "/logs/results/" + node + "/cval-results-" + node + "-" + ts + ".json",
+    root + "/logs/results/" + node + "/cval-results-" + node + "-" + ts + ".env",
 ]
 
 def add_file(zf, path):

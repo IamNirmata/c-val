@@ -63,8 +63,10 @@ class JobConfig:
     )
     job_prefix: str = "cval"
     image_name: str = ""
-    git_repo: str = "https://github.com/IamNirmata/c-val.git"
+    git_repo: str = "https://github.com/msr-central/c-val.git"
     git_ref: str = "0" * 40
+    source_configmap: str = ""
+    source_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,7 @@ class RuntimeConfig:
     validation_tests_dir: str = "/workspace/c-val/validation-tests"
     dl_unit_test_dir: str = "/data/continuous_validation/deep-learning-unit-test-main"
     dl_results_root_path: str = (
-        "/data/continuous_validation/validation_tests/dltest/runs"
+        "/data/continuous_validation/logs/validation_tests/dltest/runs"
     )
 
 
@@ -358,6 +360,8 @@ def _build_config(
             job_prefix=_str(job, "job_prefix", defaults.job.job_prefix),
             git_repo=_str(job, "git_repo", defaults.job.git_repo),
             git_ref=_str(job, "git_ref", defaults.job.git_ref),
+            source_configmap=_str(job, "source_configmap", defaults.job.source_configmap),
+            source_sha256=_str(job, "source_sha256", defaults.job.source_sha256),
         ),
         policy=PolicyConfig(
             namespace_allowlist=_str_tuple(

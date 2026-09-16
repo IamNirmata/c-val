@@ -526,9 +526,13 @@ def validate_current_dl_write(
     )
     evidence_root = (
         Path(auth.config.runtime.validation_root)
-        / "validation_tests/dltest/runs"
+        / "logs/validation_tests/dltest/runs"
     )
     expected_run = evidence_root / result.node / expected_run_id
+    legacy_root = Path(auth.config.runtime.validation_root) / "validation_tests/dltest/runs"
+    if Path(results_root) == legacy_root / result.node / expected_run_id:
+        evidence_root = legacy_root
+        expected_run = evidence_root / result.node / expected_run_id
     if (
         isinstance(result, ValidationResultV2)
         and Path(test_result.artifacts) != expected_run / "artifacts"
@@ -656,10 +660,14 @@ def validate_current_write(
     if operation in {"storage", "nccl"} and evidence_path is not None:
         evidence_root = (
             Path(auth.config.runtime.validation_root)
-            / "validation_tests"
+            / "logs/validation_tests"
             / operation
             / "runs"
         )
+        legacy_root = Path(auth.config.runtime.validation_root) / "validation_tests" / operation / "runs"
+        legacy_evidence = legacy_root / result.node / expected_run_id / ("artifacts" if operation == "storage" else "summary.json")
+        if Path(evidence_path) == legacy_evidence:
+            evidence_root = legacy_root
         expected_evidence = (
             evidence_root
             / result.node
