@@ -168,3 +168,25 @@ python3 scripts/cval-pvc-layout.py --root /data/continuous_validation --rollback
 Rollback does not restore database contents or prune backups. Restoring a database
 snapshot is a different, separately approved operation. Preserve the persistent
 lock files and both backup/migration manifests.
+
+### New evidence after backup
+
+Consolidation rejects source changes before its lengthy backup recheck and again
+under the migration lock. If the only change is a completely new top-level
+directory outside the move plan and the excluded directory, back it up separately
+with the existing backup tool and verify that supplemental backup. Both live
+backup creation and the revised consolidation command need exact approval.
+
+Pass the verified snapshot using `--supplemental-backup` with `--apply-consolidate`.
+The helper requires the combined file/directory set to match the source exactly:
+no removed, modified, overlapping, or unbacked entries are permitted. Only the
+source root's directory size, timestamps and link count may differ to accommodate
+the addition. Its identity, mode, and all descendant evidence still must match.
+The supplement's source bytes are checked before moves, and its path and manifest
+digest are retained in the migration transaction. The original backup is never
+rewritten. Rollback reverses the original moves only, leaving the added directory
+and both backups intact. Post-migration audits must account for both manifests.
+
+The helper emits stage and move-count messages to stderr. Retain these with the
+exit status in pod-local logs as well as local run logs; a disconnected terminal
+or an empty local log is not evidence that a migration finished successfully.

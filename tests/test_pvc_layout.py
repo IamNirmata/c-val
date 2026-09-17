@@ -98,6 +98,70 @@ class PvcLayoutTests(unittest.TestCase):
             self.assertTrue((root / "dltest/node/old/record.txt").is_file())
             self.assertFalse(backup.with_name(backup.name + "-layout").exists())
 
+    def _supplemental_fixture(self, parent):
+        root, backup = self._consolidation_fixture(parent, "--exclude-dl-unit-test-evaluation")
+        added = root / "new_schema_dl_unit_test_eval"
+        added.mkdir()
+        (added / "database_schema.md").write_text("new independent schema")
+        completed = subprocess.run(
+            [sys.executable, str(Path(LAYOUT.__file__).with_name("cval-backup.py")),
+             "--source", str(added), "--destination-root", str(parent / "supplemental"),
+             "--apply", "--confirm", "backup", "--quiesced", "--confirm-quiesced", "writers-stopped"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+        return root, backup, Path(json.loads(completed.stdout)["backup"])
+
+    def test_verified_supplement_preserves_new_directory_through_migration_and_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, backup, supplement = self._supplemental_fixture(Path(directory))
+            before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            manifest_before = (backup / "manifest.json").read_bytes()
+            plan = LAYOUT.consolidation_plan(root)
+            result = LAYOUT.apply_consolidation(root, backup, plan["plan_sha256"], confirm="consolidate", sources_idle="idle", supplemental_backup=supplement)
+            transaction = Path(result["transaction"])
+            manifest = json.loads((transaction / "manifest.json").read_text())
+            self.assertEqual(manifest["supplemental_backup"], str(supplement))
+            self.assertEqual(len(manifest["supplemental_manifest_sha256"]), 64)
+            self.assertEqual((root / "new_schema_dl_unit_test_eval/database_schema.md").read_text(), "new independent schema")
+            self.assertEqual((backup / "manifest.json").read_bytes(), manifest_before)
+            LAYOUT.rollback_consolidation(root, transaction, confirm="restore-layout", sources_idle="idle")
+            self.assertEqual(before, {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()})
+
+    def test_supplement_refuses_other_changes_or_incomplete_evidence(self):
+        for condition in ("original_changed", "original_missing", "unbacked", "supplement_source_changed", "supplement_tampered", "overlapping_source", "excluded_source"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
+                root, backup, supplement = self._supplemental_fixture(Path(directory))
+                if condition == "original_changed":
+                    (root / "metadata/record.txt").write_text("modified original data")
+                elif condition == "original_missing":
+                    (root / "metadata/record.txt").unlink()
+                elif condition == "unbacked":
+                    (root / "unbacked.txt").write_text("additional evidence")
+                elif condition == "supplement_source_changed":
+                    (root / "new_schema_dl_unit_test_eval/database_schema.md").write_text("new edit")
+                elif condition == "supplement_tampered":
+                    (supplement / "database_schema.md").write_text("bad copy")
+                else:
+                    manifest = json.loads((supplement / "manifest.json").read_text())
+                    manifest["source_root"] = str(root / ("metadata" if condition == "overlapping_source" else "dl_unit_test_evaluation"))
+                    (supplement / "manifest.json").write_text(json.dumps(manifest))
+                plan = LAYOUT.consolidation_plan(root)
+                with self.assertRaises((ValueError, RuntimeError)):
+                    LAYOUT.apply_consolidation(root, backup, plan["plan_sha256"], confirm="consolidate", sources_idle="idle", supplemental_backup=supplement)
+                self.assertTrue((root / "dltest").is_dir())
+                self.assertFalse(backup.with_name(backup.name + "-layout").exists())
+
+    def test_source_mismatch_fails_before_large_backup_recheck(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, backup = self._consolidation_fixture(Path(directory), "--exclude-dl-unit-test-evaluation")
+            (root / "new-unbacked.txt").write_text("new evidence")
+            plan = LAYOUT.consolidation_plan(root)
+            helper = LAYOUT.backup_tool()
+            with patch.object(LAYOUT, "backup_tool", return_value=helper), patch.object(helper, "verify_backup") as verify:
+                with self.assertRaisesRegex(ValueError, "source tree changed"):
+                    LAYOUT.apply_consolidation(root, backup, plan["plan_sha256"], confirm="consolidate", sources_idle="idle")
+                verify.assert_not_called()
+
     def test_consolidation_requires_gates_current_backup_and_collision_free_plan(self):
         for condition in ("confirmation", "quiescence", "digest", "changed_backup_source", "collision"):
             with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:

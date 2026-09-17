@@ -272,11 +272,63 @@ def consolidation_lock(parent: Path):
         os.close(parent_fd)
 
 
-def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confirm: str, sources_idle: str) -> dict:
+def consolidation_evidence(tool, root: Path, saved: dict, supplemental_backup: Path | None) -> dict:
+    from cval.storage.paths import EVIDENCE_RELOCATIONS
+    from cval.validation.secure_fs import open_directory_no_symlinks
+
+    if supplemental_backup is None:
+        return saved
+    if not supplemental_backup.is_absolute() or supplemental_backup.resolve() != supplemental_backup or supplemental_backup.is_relative_to(root):
+        raise ValueError("supplemental backup must be canonical and outside the source")
+    tool.verify_backup(supplemental_backup)
+    _path, descriptor = open_directory_no_symlinks(supplemental_backup)
+    try:
+        supplement = tool._load_manifest(supplemental_backup, descriptor)
+    finally:
+        os.close(descriptor)
+    relative = Path(supplement["source_root"]).relative_to(root)
+    prefix = relative.as_posix()
+    original_paths = {record["path"] for group in ("files", "directories") for record in saved[group]}
+    if len(relative.parts) != 1 or prefix in {".", "..", "dl_unit_test_evaluation"} or prefix in EVIDENCE_RELOCATIONS or prefix in original_paths or supplement["excluded"]:
+        raise ValueError("supplement must completely cover one new top-level directory outside the move plan")
+    combined = dict(saved)
+    for group in ("files", "directories"):
+        additions = [dict(record, path=prefix if record["path"] == "." else prefix + "/" + record["path"]) for record in supplement[group]]
+        combined[group] = saved[group] + additions
+    combined["supplemental_backup"] = str(supplemental_backup)
+    combined["supplemental_manifest_sha256"] = plan_digest(supplement)
+    combined["supplemental_source"] = prefix
+    return combined
+
+
+def require_source_inventory(tool, inventory: dict, saved: dict) -> None:
+    if not saved.get("supplemental_backup"):
+        if tool.inventory_digest(inventory) != saved["consistency"]["post_inventory_sha256"]:
+            raise ValueError("source tree changed since the verified backup")
+        return
+    expected = {}
+    for kind, group in (("file", "files"), ("directory", "directories")):
+        for record in saved[group]:
+            relative = record["path"]
+            if relative in expected:
+                raise ValueError("overlapping backup evidence")
+            expected[relative] = {"type": kind, "mode": record["mode"], **record["source_identity"]}
+    if set(expected) != set(inventory):
+        raise ValueError("source contains missing or unbacked entries")
+    for relative, fields in expected.items():
+        for field, value in fields.items():
+            if relative == "." and field in {"size", "mtime_ns", "ctime_ns", "nlink"}:
+                continue
+            if getattr(inventory[relative], field) != value:
+                raise ValueError(f"source changed since backup: {relative}: {field}")
+
+
+def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confirm: str, sources_idle: str, supplemental_backup: Path | None = None) -> dict:
     from cval.validation.secure_fs import open_directory_no_symlinks, open_parent_at
 
     if confirm != "consolidate" or sources_idle != "idle":
         raise ValueError("consolidation requires --confirm consolidate --confirm-sources-idle idle")
+    print(json.dumps({"stage": "plan_check", "root": str(root)}), file=sys.stderr, flush=True)
     plan = consolidation_plan(root)
     if plan["plan_sha256"] != expected_digest or plan["conflicts"]:
         raise ValueError("consolidation plan changed or has unresolved collisions")
@@ -285,7 +337,6 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
     if not backup.is_absolute() or backup.resolve() != backup or backup.is_relative_to(root):
         raise ValueError("consolidation requires a canonical backup outside the source root")
     tool = backup_tool()
-    tool.verify_backup(backup)
     _path, backup_fd = open_directory_no_symlinks(backup)
     try:
         saved = tool._load_manifest(backup, backup_fd)
@@ -293,7 +344,18 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
         os.close(backup_fd)
     if saved["source_root"] != str(root) or saved["excluded"] not in ([], [tool.DL_EVALUATION_EXCLUSION]):
         raise ValueError("verified backup must cover the source except an explicit DL evaluation exclusion")
+    saved = consolidation_evidence(tool, root, saved, supplemental_backup)
     exclude_dl_evaluation = tool.DL_EVALUATION_EXCLUSION in saved["excluded"]
+    print(json.dumps({"stage": "source_preflight", "supplemental_backup": saved.get("supplemental_backup")}), file=sys.stderr, flush=True)
+    _path, source_fd = open_directory_no_symlinks(root)
+    try:
+        preview = tool.inventory_tree(source_fd, exclude_backups=False, preserve_history_bytes=saved["capacity"].get("preserve_history_bytes", False), exclude_dl_unit_test_evaluation=exclude_dl_evaluation)
+        require_source_inventory(tool, preview, saved)
+    finally:
+        os.close(source_fd)
+    print(json.dumps({"stage": "backup_verification", "backup": str(backup)}), file=sys.stderr, flush=True)
+    tool.verify_backup(backup)
+    print(json.dumps({"stage": "backup_verified"}), file=sys.stderr, flush=True)
     transaction = backup.with_name(backup.name + "-layout")
     if root.stat().st_dev != backup.parent.stat().st_dev:
         raise ValueError("rollback evidence must be on the source filesystem for identity-preserving moves")
@@ -301,21 +363,26 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
         _path, root_fd = open_directory_no_symlinks(root)
         try:
             inventory = tool.inventory_tree(root_fd, exclude_backups=False, preserve_history_bytes=saved["capacity"].get("preserve_history_bytes", False), exclude_dl_unit_test_evaluation=exclude_dl_evaluation)
-            if tool.inventory_digest(inventory) != saved["consistency"]["post_inventory_sha256"]:
-                raise ValueError("source tree changed since the verified backup")
+            require_source_inventory(tool, inventory, saved)
             if consolidation_plan(root) != plan:
                 raise ValueError("consolidation plan changed while acquiring lock")
             files = {entry["path"]: entry for entry in saved["files"]}
             for operation in plan["operations"]:
                 if tree_fingerprint(root / operation["source"], backup_files=files, relative=operation["source"]) != operation["source_state"]:
                     raise ValueError("source changed before consolidation")
+            if supplemental_backup is not None:
+                prefix = saved["supplemental_source"]
+                tree_fingerprint(root / prefix, backup_files=files, relative=prefix)
             protected = root / "dl_unit_test_evaluation"
             protected_before = None if exclude_dl_evaluation else tree_fingerprint(protected) if protected.exists() else None
             transaction.mkdir(mode=0o700)
             transaction_fd = os.open(transaction, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             manifest = {"schema_version": "cval.pvc-consolidation.v1", "state": "in_progress", "plan": plan, "backup": str(backup), "protected": protected_before, "excluded": saved["excluded"]}
+            if supplemental_backup is not None:
+                manifest.update({key: saved[key] for key in ("supplemental_backup", "supplemental_manifest_sha256")})
             try:
                 save_manifest(transaction_fd, manifest)
+                print(json.dumps({"stage": "moves_started", "entries": len(plan["operations"]), "transaction": str(transaction)}), file=sys.stderr, flush=True)
                 for relative in plan["create_directories"]:
                     parent_fd, name = open_parent_at(root_fd, relative)
                     try:
@@ -323,7 +390,7 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
                         os.fsync(parent_fd)
                     finally:
                         os.close(parent_fd)
-                for operation in plan["operations"]:
+                for index, operation in enumerate(plan["operations"], start=1):
                     source, destination = operation["source"], operation["destination"]
                     if tree_fingerprint(root / source) != operation["source_state"]:
                         raise ValueError(f"consolidation source changed: {source}")
@@ -339,6 +406,8 @@ def apply_consolidation(root: Path, backup: Path, expected_digest: str, *, confi
                         actual = root / destination
                     if tree_fingerprint(actual) != operation["source_state"]:
                         raise ValueError(f"moved evidence changed: {actual}")
+                    if index % 100 == 0 or index == len(plan["operations"]):
+                        print(json.dumps({"stage": "moves_progress", "completed": index, "total": len(plan["operations"])}), file=sys.stderr, flush=True)
                 for entry in plan["merged_directories"]:
                     parent_fd, name = open_parent_at(root_fd, entry["source"])
                     try:
@@ -694,12 +763,15 @@ def main() -> int:
     operation.add_argument("--apply-consolidate", action="store_true")
     operation.add_argument("--rollback-consolidate", action="store_true")
     parser.add_argument("--backup-dir", type=Path)
+    parser.add_argument("--supplemental-backup", type=Path)
     parser.add_argument("--transaction", type=Path)
     parser.add_argument("--archive-name")
     parser.add_argument("--plan-sha256")
     parser.add_argument("--confirm")
     parser.add_argument("--confirm-sources-idle")
     args = parser.parse_args()
+    if args.supplemental_backup is not None and not args.apply_consolidate:
+        parser.error("--supplemental-backup requires --apply-consolidate")
     if not args.root.is_absolute() or args.root.resolve() != args.root or not args.root.is_dir():
         parser.error("root must be an existing canonical absolute directory")
     if not 1 <= args.entry_limit <= 100000 or not 0 < args.seconds_per_entry <= 60:
@@ -711,7 +783,7 @@ def main() -> int:
             elif args.apply_consolidate:
                 if args.backup_dir is None:
                     raise ValueError("consolidation requires --backup-dir")
-                report = apply_consolidation(args.root, args.backup_dir, args.plan_sha256, confirm=args.confirm, sources_idle=args.confirm_sources_idle)
+                report = apply_consolidation(args.root, args.backup_dir, args.plan_sha256, confirm=args.confirm, sources_idle=args.confirm_sources_idle, supplemental_backup=args.supplemental_backup)
             else:
                 if args.transaction is None:
                     raise ValueError("rollback requires --transaction")
