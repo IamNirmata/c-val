@@ -482,6 +482,40 @@ class BackupScriptTests(unittest.TestCase):
             self.assertTrue(verification["restore_ready"])
             self.assertEqual(verification["files"], 2)
 
+    def test_verify_accepts_manifest_above_old_limit_and_keeps_new_bound(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            applied = self._apply(root)
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            backup = Path(json.loads(applied.stdout)["backup"])
+            manifest_path = backup / "manifest.json"
+            with manifest_path.open("ab") as handle:
+                for _chunk in range(64):
+                    handle.write(b" " * (1024 * 1024))
+            self.assertGreater(manifest_path.stat().st_size, 64 * 1024 * 1024)
+            verified = self._run(None, "--verify", str(backup))
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertTrue(json.loads(verified.stdout)["restore_ready"])
+            with patch.object(module, "MAX_MANIFEST_BYTES", 64 * 1024 * 1024):
+                with self.assertRaisesRegex(ValueError, "Input exceeds"):
+                    module.verify_backup(backup)
+            with manifest_path.open("r+b") as handle:
+                handle.truncate(module.MAX_MANIFEST_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "Input exceeds"):
+                module.verify_backup(backup)
+
+    def test_writer_refuses_manifest_larger_than_reader_limit(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(Path(tmpdir))
+            with patch.object(module, "MAX_MANIFEST_BYTES", 1), patch.object(module, "_publish_staging") as publish:
+                with self.assertRaisesRegex(module.BackupError, "backup manifest exceeds"):
+                    module.run(["--source", str(root), "--apply", "--confirm", "backup", "--quiesced", "--confirm-quiesced", "writers-stopped"])
+                publish.assert_not_called()
+            self.assertEqual(list((root / "backups").iterdir()), [])
+            self.assertEqual((root / "metadata/value.txt").read_bytes(), b"value")
+
     def test_verify_rejects_tampering_and_unexpected_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._root(Path(tmpdir))

@@ -44,7 +44,7 @@ DL_EVALUATION_EXCLUSION = "dl_unit_test_evaluation/"
 HISTORY_ROOTS = {"backups", "archive", "archives"}
 SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 READ_CHUNK = 1024 * 1024
-MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+MAX_MANIFEST_BYTES = 128 * 1024 * 1024
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
 DIRECTORY_FLAGS |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 DIRECTORY_FLAGS |= getattr(os, "O_NONBLOCK", 0)
@@ -797,6 +797,8 @@ def create_backup(
         manifest_payload = (
             json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
         ).encode("utf-8")
+        if len(manifest_payload) > MAX_MANIFEST_BYTES:
+            raise BackupError(f"backup manifest exceeds {MAX_MANIFEST_BYTES} bytes; refusing publication")
         manifest_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         manifest_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         manifest_fd = os.open(staging / "manifest.json", manifest_flags, 0o600)
