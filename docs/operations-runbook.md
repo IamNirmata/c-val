@@ -45,6 +45,71 @@ checkout directory. It then runs the same descriptor-anchored supervisor.
 Publishing the ConfigMap and submitting the Job remain separate gated operations.
 Do not put personal Git credentials in a ConfigMap, Pod environment, or manifest.
 
+## Scheduler-selected test job
+
+[ymls/test-job.yml](../ymls/test-job.yml) exercises Volcano submission, validation
+tests and raw ingestion without c-val node discovery or prioritization. It has
+no node selector, node affinity or pod affinity, and does not tolerate cordoned
+nodes. Volcano chooses a node with the requested GPU/CPU/memory/RDMA resources.
+The actual node comes from the Downward API; Kubernetes expands it into the
+canonical run ID. The job name uses `scheduled`, not a claimed target node.
+
+Render explicitly with `node_name=None`; the ordinary node-specific workflow
+does not accept this template. Both templates use the same exact-source
+bootstrap, runtime configuration and descriptor-anchored supervisor. This is a
+template, not a directly deployable file. Set `CVAL_GIT_REF` to a published
+40-hex commit and `CVAL_CONFIG` to the reviewed operator configuration, including
+`job.source_configmap` and `job.source_sha256` when using the internal repository
+without in-pod credentials. Render to stdout for review:
+
+```bash
+python3 - <<'PY'
+import os
+from pathlib import Path
+from cval.config import load_config
+from cval.jobs.renderer import render_validation_job_from_file
+
+config = load_config(os.environ.get("CVAL_CONFIG"))
+job = render_validation_job_from_file(
+	Path("ymls/test-job.yml"),
+	node_name=None,
+	git_ref=os.environ["CVAL_GIT_REF"],
+	cval_config=config,
+	job_template_config=config.job_template,
+)
+print(job.yaml_text, end="")
+PY
+```
+
+Review and separately approve the exact rendered create and cancellation
+commands. Use a fresh job timestamp for each run, and discover the assigned node
+from its pod before auditing that exact `(node,timestamp)` in canonical results
+and the seven raw databases. A successful quick test does not certify discovery,
+prioritization, or the live loop; keep the specific-node acceptance gate for those.
+
+## PVC-access pod
+
+[ymls/gcr-admin-pvc-access.yml](../ymls/gcr-admin-pvc-access.yml) is the canonical
+CPU utility pod, with the existing claim mounted writable at `/data`. Its image
+is digest-pinned to the observed Python 3.12 image. It starts without package
+downloads or a Git clone; Python and standard-library SQLite are ready for c-val
+read-only status/export queries. NumPy, pandas and a repository checkout are not
+installed automatically. Install additional interactive tools explicitly if
+needed; only `/data` is persistent.
+
+The pod keeps the `pvcaccess` container name, requests 2 CPU/2 GiB, and limits
+memory to 8 GiB. `/workspace`, `/tmp`, and `/root/.vscode-server` are disposable
+volumes. The exec readiness probe checks the Python/SQLite runtime, not PVC
+latency or node health. No liveness probe interrupts long interactive tasks.
+No API token is mounted. The pod does not read or modify PVC contents at startup.
+
+Replacement interrupts exec/VS Code sessions and discards pod-local tools and
+workspace files, but retains the PVC. Save the original spec without status,
+server-managed metadata or scheduler-assigned `nodeName` for rollback. Separately
+approve graceful deletion, creation from the canonical manifest, and conditional
+rollback. Do not force-delete an unresponsive pod or change/recreate the PVC.
+Verify a bounded Python/SQLite exec and read-only c-val status query after Ready.
+
 ## Raw DL reconciliation
 
 `db-rebuild-dltest-metrics` can append missing raw DL metric evidence from

@@ -1,0 +1,132 @@
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  generateName: jobname-placeholder
+  namespace: namespace-placeholder
+spec:
+  queue: queue-placeholder
+  minAvailable: 1
+  plugins:
+    ssh: []
+    svc: []
+    env: []
+  tasks:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            app: app-label-placeholder
+            role: server
+        spec:
+          schedulerName: volcano
+          restartPolicy: Never
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: shared-memory-size-placeholder
+            - name: sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: data
+              persistentVolumeClaim:
+                claimName: pvc-claim-placeholder
+          tolerations:
+            - key: "rdma-toleration-key-placeholder"
+              operator: "Exists"
+              effect: "NoSchedule"
+            - key: "gpu-toleration-key-placeholder"
+              operator: "Exists"
+              effect: "NoSchedule"
+          containers:
+            - name: server
+              image: container-image-placeholder
+              env:
+                - name: GCRNODE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: GCRTIME
+                  value: "time-placeholder"
+                - name: CVAL_RUN_ID
+                  value: "$(GCRNODE)-time-placeholder"
+                - name: GCRRESULT1
+                  value: fail
+                - name: GCRRESULT2
+                  value: fail
+                - name: GCRRESULT3
+                  value: fail
+                - name: CVAL_GIT_REPO
+                  value: "git-repo-placeholder"
+                - name: CVAL_GIT_REF
+                  value: "git-ref-placeholder"
+                - name: CVAL_IMAGE_NAME
+                  value: "image-name-placeholder"
+                - name: CVAL_REPO_DIR
+                  value: "runtime-repo-dir-placeholder"
+                - name: CVAL_VALIDATION_ROOT
+                  value: "runtime-validation-root-placeholder"
+                - name: CVAL_RUNTIME_ENV_B64
+                  value: "runtime-environment-b64-placeholder"
+              volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: sys
+                  mountPath: /sys
+                  readOnly: true
+                - name: data
+                  mountPath: /data
+              ports:
+                - name: rdma
+                  containerPort: 18515
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  if [[ -n "${CVAL_SOURCE_SHA256:-}" ]]; then
+                    python3 - <<'PY'
+                  import hashlib
+                  import io
+                  import os
+                  from pathlib import Path
+                  import re
+                  import tarfile
+
+                  revision = os.environ["CVAL_GIT_REF"]
+                  expected = os.environ["CVAL_SOURCE_SHA256"]
+                  if not re.fullmatch(r"[0-9a-f]{40}", revision) or revision == "0" * 40 or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                      raise ValueError("exact source revision and SHA-256 required")
+                  payload = Path("/cval-source/source.tar.gz").read_bytes()
+                  if hashlib.sha256(payload).hexdigest() != expected:
+                      raise ValueError("offline source SHA-256 mismatch")
+                  with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                      if archive.pax_headers.get("comment") != revision:
+                          raise ValueError("offline archive commit mismatch")
+                      destination = Path(os.environ["CVAL_REPO_DIR"])
+                      destination.mkdir(parents=True, exist_ok=False)
+                      archive.extractall(destination, filter="data")
+                  PY
+                  else
+                    git init "$CVAL_REPO_DIR"
+                    git -C "$CVAL_REPO_DIR" remote add origin "$CVAL_GIT_REPO"
+                    git -C "$CVAL_REPO_DIR" fetch --depth=1 origin "$CVAL_GIT_REF"
+                    git -C "$CVAL_REPO_DIR" checkout --detach FETCH_HEAD
+                    test "$(git -C "$CVAL_REPO_DIR" rev-parse HEAD)" = "$CVAL_GIT_REF"
+                  fi
+                  cd "$CVAL_REPO_DIR"
+                  printf '%s' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env
+                  source /tmp/cval-runtime.env
+                  exec python3 -m cval.validation.supervisor
+              resources:
+                requests:
+                  gpu-resource-name-placeholder: "gpu-count-placeholder"
+                  cpu: "cpu-placeholder"
+                  memory: "memory-placeholder"
+                  rdma-resource-name-placeholder: "rdma-count-placeholder"
+                limits:
+                  gpu-resource-name-placeholder: "gpu-count-placeholder"
+                  cpu: "cpu-placeholder"
+                  memory: "memory-placeholder"
+                  rdma-resource-name-placeholder: "rdma-count-placeholder"

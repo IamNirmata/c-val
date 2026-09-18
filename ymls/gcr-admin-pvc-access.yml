@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gcr-admin-pvc-access
+  namespace: gcr-admin
+  labels:
+    app: gcr-admin-pvc-access
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 30
+  nodeSelector:
+    kubernetes.io/hostname: slc01-cl02-ccpu-008
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: pvcaccess
+      image: python:3.12@sha256:7ad6d21a25a94b2c00e685e82c2fd298de814353d9ee0e3f7f2cd4fca063df60
+      imagePullPolicy: IfNotPresent
+      workingDir: /workspace
+      command: ["python", "-u", "-c"]
+      args:
+        - |
+          import signal
+          import threading
+
+          stopping = threading.Event()
+          signal.signal(signal.SIGTERM, lambda *_arguments: stopping.set())
+          signal.signal(signal.SIGINT, lambda *_arguments: stopping.set())
+          print("PVC access ready", flush=True)
+          stopping.wait()
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+      resources:
+        requests:
+          cpu: "2"
+          memory: 2Gi
+          ephemeral-storage: 1Gi
+        limits:
+          cpu: "2"
+          memory: 8Gi
+          ephemeral-storage: 8Gi
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      readinessProbe:
+        exec:
+          command: ["python", "-c", "import sqlite3; print(sqlite3.sqlite_version)"]
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+      volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: workspace
+          mountPath: /workspace
+        - name: temporary
+          mountPath: /tmp
+        - name: vscode-server
+          mountPath: /root/.vscode-server
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: pvc-vast-gcr-admin
+    - name: workspace
+      emptyDir:
+        sizeLimit: 4Gi
+    - name: temporary
+      emptyDir:
+        sizeLimit: 2Gi
+    - name: vscode-server
+      emptyDir:
+        sizeLimit: 2Gi

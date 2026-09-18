@@ -94,7 +94,7 @@ def make_job_name(
 
 def render_validation_job(
     template_text: str,
-    node_name: str,
+    node_name: str | None,
     timestamp: int | None = None,
     job_prefix: str | None = None,
     git_repo: str | None = None,
@@ -102,7 +102,7 @@ def render_validation_job(
     job_template_config: JobTemplateConfig | None = None,
     cval_config: CvalConfig | None = None,
 ) -> RenderedJob:
-    """Render one validation job manifest for one target node."""
+    """Render a pinned job, or a scheduler-selected test when node_name is None."""
 
     config = cval_config or load_config()
     resolved_job_prefix = job_prefix if job_prefix is not None else config.job.job_prefix
@@ -116,18 +116,19 @@ def render_validation_job(
         raise ValueError("GPU and RDMA resource names must be distinct YAML keys")
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)
     job_name = make_job_name(
-        node_name,
+        "scheduled" if node_name is None else node_name,
         rendered_timestamp,
         job_prefix=resolved_job_prefix,
         image_name=resolved_image_name,
     )
 
     required_placeholders = [
-        "nodename-placeholder",
         "time-placeholder",
         "jobname-placeholder",
         "runtime-environment-b64-placeholder",
     ]
+    if node_name is not None:
+        required_placeholders.append("nodename-placeholder")
     # These placeholders are required by the legacy template and core scheduler logic.
     missing = [
         placeholder
@@ -137,8 +138,22 @@ def render_validation_job(
     if missing:
         raise ValueError(f"Template is missing placeholder(s): {', '.join(missing)}")
     _validate_runtime_bootstrap(template_text)
+    if node_name is None:
+        if not is_exact_commit(resolved_git_ref):
+            raise ValueError("Scheduler-selected tests require an exact commit")
+        template = yaml.load(template_text, Loader=_UniqueKeySafeLoader)
+        pod = template["spec"]["tasks"][0]["template"]["spec"]
+        if pod.get("nodeName") or pod.get("nodeSelector") or pod.get("affinity"):
+            raise ValueError("Scheduler-selected test template must not set node placement")
+        environment = pod["containers"][0]["env"]
+        nodes = [entry for entry in environment if entry.get("name") == "GCRNODE"]
+        run_ids = [entry for entry in environment if entry.get("name") == "CVAL_RUN_ID"]
+        if len(nodes) != 1 or nodes[0].get("valueFrom", {}).get("fieldRef", {}).get("fieldPath") != "spec.nodeName" or "value" in nodes[0]:
+            raise ValueError("Scheduler-selected test must obtain GCRNODE from spec.nodeName")
+        if len(run_ids) != 1 or run_ids[0].get("value") != "$(GCRNODE)-time-placeholder" or environment.index(nodes[0]) >= environment.index(run_ids[0]):
+            raise ValueError("Scheduler-selected test run ID must use the assigned GCRNODE")
 
-    yaml_text = template_text.replace("nodename-placeholder", node_name)
+    yaml_text = template_text.replace("nodename-placeholder", node_name or "")
     yaml_text = yaml_text.replace("time-placeholder", str(rendered_timestamp))
     yaml_text = yaml_text.replace("generateName: jobname-placeholder", f"name: {job_name}")
     yaml_text = yaml_text.replace("jobname-placeholder", job_name)
@@ -188,7 +203,7 @@ def render_validation_job(
 
     return RenderedJob(
         job_name=job_name,
-        node_name=node_name,
+        node_name=node_name or "",
         timestamp=rendered_timestamp,
         git_ref=resolved_git_ref,
         yaml_text=yaml_text,
@@ -505,7 +520,7 @@ def _validate_semantic_runtime_manifest(
 
 def render_validation_job_from_file(
     template_path: Path,
-    node_name: str,
+    node_name: str | None,
     timestamp: int | None = None,
     job_prefix: str | None = None,
     git_repo: str | None = None,

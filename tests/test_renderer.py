@@ -27,9 +27,46 @@ TEMPLATE = (
         Path(__file__).resolve().parents[1] / "ymls/specific-node-job.yml"
 ).read_text(encoding="utf-8")
 COMMIT = "a" * 40
+SCHEDULER_TEMPLATE = (Path(__file__).resolve().parents[1] / "ymls/test-job.yml").read_text(encoding="utf-8")
 
 
 class RendererTests(unittest.TestCase):
+    def test_scheduler_selected_template_uses_assigned_node_and_standard_runner(self) -> None:
+        config = load_config()
+        config = replace(config, job=replace(config.job, source_configmap="cval-exact-source", source_sha256="b" * 64))
+        rendered = render_validation_job(SCHEDULER_TEMPLATE, None, timestamp=12345, git_ref=COMMIT, cval_config=config)
+        manifest = yaml.safe_load(rendered.yaml_text)
+        pod = manifest["spec"]["tasks"][0]["template"]["spec"]
+        self.assertEqual(manifest["apiVersion"], "batch.volcano.sh/v1alpha1")
+        self.assertEqual(rendered.node_name, "")
+        self.assertIn("-scheduled-", rendered.job_name)
+        self.assertFalse(any(key in pod for key in ("nodeSelector", "nodeName", "affinity")))
+        self.assertNotIn("node.kubernetes.io/unschedulable", {entry["key"] for entry in pod["tolerations"]})
+        container = pod["containers"][0]
+        environment = {entry["name"]: entry for entry in container["env"]}
+        self.assertEqual(environment["GCRNODE"]["valueFrom"]["fieldRef"]["fieldPath"], "spec.nodeName")
+        self.assertEqual(environment["CVAL_RUN_ID"]["value"], "$(GCRNODE)-12345")
+        self.assertEqual(environment["CVAL_GIT_REF"]["value"], COMMIT)
+        self.assertEqual(pod["volumes"][-1]["configMap"]["name"], "cval-exact-source")
+        pinned = yaml.safe_load(render_validation_job(TEMPLATE, "node-a", timestamp=12345, git_ref=COMMIT, cval_config=config).yaml_text)["spec"]["tasks"][0]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["resources"], pinned["resources"])
+        self.assertEqual(environment["CVAL_RUNTIME_ENV_B64"]["value"], next(entry["value"] for entry in pinned["env"] if entry["name"] == "CVAL_RUNTIME_ENV_B64"))
+        executable = lambda script: "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+        self.assertEqual(executable(container["args"][0]), executable(pinned["args"][0]))
+        subprocess.run(["bash", "-n"], input=container["args"][0], text=True, check=True)
+        self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
+
+    def test_scheduler_selected_render_rejects_unsafe_binding_and_moving_ref(self) -> None:
+        with self.assertRaisesRegex(ValueError, "nodename-placeholder"):
+            render_validation_job(SCHEDULER_TEMPLATE, "node-a", git_ref=COMMIT)
+        with self.assertRaisesRegex(ValueError, "node placement"):
+            render_validation_job(TEMPLATE, None, git_ref=COMMIT)
+        with self.assertRaisesRegex(ValueError, "exact commit"):
+            render_validation_job(SCHEDULER_TEMPLATE, None, git_ref="main")
+        for original, replacement in (("spec.nodeName", "metadata.name"), ("$(GCRNODE)-time-placeholder", "synthetic-time-placeholder")):
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, "Scheduler-selected test"):
+                render_validation_job(SCHEDULER_TEMPLATE.replace(original, replacement), None, git_ref=COMMIT)
+
     def test_offline_source_requires_complete_exact_identity(self) -> None:
         config = load_config()
         for source_name, source_digest, revision in (("", "b" * 64, COMMIT), ("source", "", COMMIT), ("source", "b" * 64, "main"), ("invalid/name", "b" * 64, COMMIT)):
