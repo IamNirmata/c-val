@@ -199,19 +199,15 @@ counts through dense code, moved files or deleted safety tests.
 
 ## Implementation Strategy
 
-Each row is an independently reviewable phase, not permission for a live action.
-Runtime changes must publish an isolated exact commit and pass separately approved
-cluster acceptance before activation. Do not run old and new writers in parallel.
+The [redesign development plan](redesign-development-plan.md) owns the ordered
+phases, task checklists, changes, dependencies and completion criteria. Agree
+contracts first, close correctness gaps, then consolidate control, runtime and
+persistence before delivery hardening and approved compatibility retirement.
 
-| Phase | Components | Change | Exit Evidence |
-| --- | --- | --- | --- |
-| 0. Agree boundaries | All | Review these docs; inventory external callers and representative fixtures. | Explicit ownership, retained contracts and scoped acceptance criteria. |
-| 1. Close correctness gaps | C1-C4, C7 | Config propagation, one eligibility gate, partial receipts, exact-run exports/verification. | Busy/unknown/stale/partial-create regressions and passing exact-run fixtures. |
-| 2. Consolidate control | C2-C4 | Replace duplicate shell orchestration one path at a time. | Equivalent cooldown/resume/prune behavior; lower measured subprocess/API counts. |
-| 3. Simplify secure runtime | C1, C5-C6 | Shared evidence reservation and compatibility mapping; pin dependencies. | Hostile-path/signal tests; identical outcomes/artifacts; measured startup cost. |
-| 4. Consolidate persistence | C6-C7 | Private DL transaction helper; bounded exact-run readers. | Unchanged seven-store rows/receipts and failure-injection results. |
-| 5. Finish delivery/recovery | C8-C9 | Runtime bundle closure, combined recovery tests and CI checks. | Offline startup, smaller measured bundle, restore verification and preserved history. |
-| 6. Retire proven redundancy | C2 and docs | Remove approved unused interfaces and stale duplicate explanations. | Caller migration evidence, link checks and no lost operational contract. |
+Each change is independently reviewable, not permission for a live action.
+Runtime changes must publish an isolated exact commit and pass the plan's
+[release gate](redesign-development-plan.md#release-gate) before activation.
+Do not run old and new writers in parallel.
 
 Before each phase: use the narrowest existing tests and record baseline behavior.
 For controller refactors, replay saved/fake observations without submitting Jobs.
@@ -244,7 +240,8 @@ claimed before measurement on a comparable workload.
 | Document | Owns |
 | --- | --- |
 | [Major-component overview](major-components-overview.md) | Component map, baseline measurements and links. |
-| This document | Proposed architecture, contracts, process and migration strategy. |
+| This document | Proposed architecture, contracts, process and migration principles. |
+| [Development plan](redesign-development-plan.md) | Ordered phases, task checklists, expected changes and completion gates. |
 | Individual component pages | Current responsibility, issues, ratings and proposed design. |
 | [Current architecture](../architecture.md) | Implemented runtime, not future promises. |
 | [Configuration](../configuration.md), [runbook](../operations-runbook.md), [result schema](../result-schema.md) | Current settings, operating commands and data formats. |

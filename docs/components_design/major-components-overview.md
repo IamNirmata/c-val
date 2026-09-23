@@ -12,8 +12,9 @@ repair or automatically cordon nodes. Post-processing is outside this framework.
 Nine logical components are proposed below. They share one Python package and
 bounded command-line adapters; they are not nine services or new frameworks.
 
-Read [Redesign.md](Redesign.md) for architecture, contracts and implementation
-sequence. Component pages describe the baseline first, then proposed changes.
+Read [Redesign.md](Redesign.md) for architecture and contracts, and the
+[development plan](redesign-development-plan.md) for phases and task checklists.
+Component pages describe the baseline first, then proposed changes.
 
 | ID | Major Component | Purpose | Current Anchor |
 | --- | --- | --- | --- |
