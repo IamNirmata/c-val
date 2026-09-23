@@ -276,3 +276,4 @@ approval. Keep raw evidence, operational logs and rollback assets.
 | Results, progress and ingestion contracts | [docs/result-schema.md](docs/result-schema.md) |
 | Evaluator deployment and operations | [deploy/evaluation-engine/README.md](deploy/evaluation-engine/README.md) |
 | Cleanup candidates and retention decisions | [docs/cleanup-review.md](docs/cleanup-review.md) |
+| Prioritized framework improvements | [docs/cval-improvement-plan.md](docs/cval-improvement-plan.md) |
