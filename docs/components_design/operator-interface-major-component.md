@@ -2,6 +2,11 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Commands should clearly say what was requested, what happened and what remains
+unknown. An empty answer means there were no records, not that a read failed.
+
 ## Overview
 
 Give people and automation one predictable interface to inspection and explicitly
@@ -58,7 +63,7 @@ responsibilities today; this attribution does not imply they should keep doing s
 ## Proposed Design
 
 Keep the public names during migration. Route `run` and `validate` through one
-job-control operation; `validate` adds watch and evidence verification. Keep
+job-control operation and admission lock; `validate` adds watch and evidence verification. Keep
 `plan` strictly read-only. Move decisions out of handlers only when this removes
 duplicate behavior, not merely to create more files.
 
@@ -66,6 +71,25 @@ Return structured operation outcomes, including partial submission receipts and
 forbidden/unavailable states. Keep diagnostics on stderr and automation data on
 stdout. Inventory external usage before retiring hidden hooks; retain required
 rebuild/recovery operations outside normal ingestion.
+
+### Reporting Contract
+
+Use the shared [outcome and evidence contract](Redesign.md#outcome-and-evidence-contract).
+An inspection command can succeed while returning failed test results. Successful
+command execution is not a promise that the inspected validation passed.
+
+| Operation Result | Output and Exit Behavior |
+| --- | --- |
+| Read completed, no records | Successful empty result, with scope/time when supported. |
+| Read forbidden, unavailable or malformed | Nonzero exit and explicit reason; never substitute an empty list. |
+| Some creates succeeded, others failed/uncertain | Nonzero exit with every known receipt and unattempted identity retained. |
+| Validation evidence complete but a selected test failed | Report the failure and complete evidence; validation acceptance is false. |
+| Export read failed | Do not publish an apparently complete CSV; retain diagnostics separately. |
+
+Normalize results internally, then adapt to existing command schemas. Do not wrap
+all current JSON outputs in a new envelope or change numeric exit codes without
+caller tests and migration notes. Buffer/atomically publish local exports only
+after a complete read; define any intentional partial export explicitly.
 
 ## Mode Inventory
 
@@ -104,5 +128,7 @@ These removals predate the redesign; they are not new implementation work.
 
 Preserve tested command/help/output contracts or publish a deliberate migration.
 Reject invalid source and missing approval before mutation; make fake second-create
-failure return prior receipts. Priority P1 for interface cleanup, P0 for bypass
+failure return prior receipts. Add empty-versus-unavailable and failed-test-versus-
+failed-command cases, including machine-readable stderr/stdout separation.
+Priority P1 for interface cleanup, P0 for bypass
 closure; medium risk to external callers. No command retirement is authorized here.

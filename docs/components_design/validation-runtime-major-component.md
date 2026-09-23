@@ -2,6 +2,12 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Give each run its own protected output locations, run the selected tests and
+keep the records even when something fails. Finish the result before ingestion;
+do not keep changing the document that database writes are authorized against.
+
 ## Overview
 
 Execute the ordered test catalog inside one Job while retaining trustworthy
@@ -70,21 +76,43 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
 
 1. All production execution enters through the supervisor. Reuse its reservation
    primitive for standalone tests/callers through an explicit adapter before
-   retiring alternate path creation; do not weaken checks to reduce lines.
+   retiring alternate path creation. Share the secure implementation, not a forced
+   supervisor subprocess for every unit test; retain pure testable execution helpers.
 2. Define one run context containing immutable identity, checked catalog and owned
    evidence handles. Map legacy child environment at one boundary.
-3. Keep a small explicit test state machine: selected, setup, running, then
-   pass/fail/incomplete with timestamps and reason. Disabled is never pass.
+3. Keep phase and outcome separate. Preserve existing phases such as finished,
+   setup_failed, timed_out and interrupted, alongside pass/fail/incomplete and
+   timestamps/reasons. Disabled is never pass; do not invent replacement raw enums.
 4. Keep one process-group/deadline utility for setup and workload children. Signals
    must retain incomplete evidence and terminate only owned descendants.
 5. Continue atomic canonical result transitions, immutable ingestion digest binding
    and writer revalidation. Separate terminal test outcome from ingestion outcome
    in reporting; preserve historical formats and paths unchanged.
 
+## Evidence Lifecycle
+
+| Stage | Allowed Change | Failure Behavior |
+| --- | --- | --- |
+| Reserve | Create this run's canonical paths and marker through owned descriptors. | Reject reuse or unsafe paths before test execution. |
+| Execute | Runner owns result transitions; tests write only their supplied outputs. | Preserve failure/incomplete state and bounded diagnostics. |
+| Finalize | Validate the terminal result and bind its immutable digest. | Invalid/missing result cannot authorize ingestion. |
+| Ingest | C7 writes authorized stores; progress/logs may append. | Do not mutate the bound result to hide or retry a failed ingestion. |
+| Finish | Retain result, raw records and terminal ingestion outcome. | An exit code alone does not establish acceptance. |
+
+If no valid final result can be bound after interruption, retain available evidence
+without publishing final raw status. A retry of ingestion needs the same authorized
+snapshot and digest; rerunning workloads under the same run ID is not recovery.
+
+Historical files remain readable, but missing historical provenance is reported
+as limited evidence rather than synthesized into modern acceptance. Filesystem
+guards prevent accidental/path-substitution errors; they do not sandbox malicious
+benchmark code running with the same container privileges.
+
 ## Acceptance and Risk
 
 Replay dynamic test ordering, timeouts, termination, setup failures and disabled
 tests. Reuse [hostile-path/descriptor tests](../../tests/test_secure_supervisor.py)
 for symlink swaps, run reuse, file identity changes and interruption. Compare
-canonical schemas/events and retained files before/after the refactor.
+canonical schemas/events and retained files before/after the refactor. Test signal
+arrival before binding, result mutation after binding and ingestion-only retry.
 Priority P1; high risk because mistakes undermine evidence integrity.

@@ -2,6 +2,12 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+A backup is useful only if it can be verified and restored without losing newer
+work. Moving folders is not data recovery or space reclamation. Maintenance must
+stop when it cannot prove which files, writers and backup version are involved.
+
 ## Overview
 
 Protect retained evidence during backup, journaling changes, layout changes and
@@ -11,8 +17,9 @@ of validation or cleanup side effects of a code release.
 ## Details and Purpose
 
 Read-only inspection consumes filesystem/receipt metadata and reports capacity,
-coverage and constraints. A mutation additionally needs a reviewed exact plan,
-quiescence, verified backup, explicit action approval and a rollback procedure.
+coverage and constraints. Backup creation needs capacity, quiescence and approval;
+a layout/journal mutation additionally needs its reviewed plan and verified backup.
+Restore needs its own verified source, destination policy and approval.
 Output is verified preserved evidence and a durable operation manifest.
 
 ## Current Process Flow
@@ -75,6 +82,32 @@ rollback must validate the recorded identities, backup manifest and destination
 collisions before touching data. No auto-prune, automatic restore or metadata
 rewrite belongs in the controller.
 
+## Recovery Proof
+
+| Stage | Proof Needed |
+| --- | --- |
+| Backup creation | Current source inventory, capacity, all relevant writers quiesced and a verified published manifest. |
+| Layout/journal change | Exact plan/identities, compatible verified backup, operation-specific approval and retained progress receipt. |
+| Isolated restore exercise | Recovered rows, artifacts, receipts and metadata; successful path-sensitive evidence reads. |
+| Live restore or rollback | No collision or newer writes being overwritten; known current consumers and separately approved compatible recovery. |
+
+A copy on the same PVC is a rollback copy, not independent disaster recovery.
+Integrity checking the backup is necessary but does not prove the consuming runtime
+can read a restored tree. Exercise restore separately before relying on it.
+
+Canonical artifacts may contain absolute paths. Test restoration at the expected
+logical root in an isolated environment, or use an already reviewed relocation
+mapping. Do not edit historical paths/digests or introduce symlinks to make a
+restore appear valid. Relocation-aware reading is not general migration permission.
+
+Quiescence covers validation Jobs, interactive writers and retained independent
+consumers, not only the host loop. Recheck volatile preconditions under the operation
+lock. Filesystem lock/rename/durability behavior is storage-specific; repeat its
+preflight when the storage backend changes rather than assuming portability.
+
+Capacity pressure pauses admission or maintenance and requires an operator decision;
+it never grants automatic pruning of raw records, logs or rollback assets.
+
 ## Retained Paths
 
 Configured/current code targets at the design baseline, not a new live PVC audit:
@@ -130,4 +163,6 @@ four-DB generation and backups before changing journal mode. DB audits use
 Verify restored raw rows, receipts, artifacts, metadata and identities. Exercise
 insufficient capacity, active writers, tampered backups, partial moves, missing
 sources and occupied rollback destinations. Record bounded/partial coverage.
+Include a valid backup whose restored absolute paths are unusable, an apparently
+stopped controller with another writer active, and interruption before manifest publication.
 Priority P2; low risk for offline test additions, high risk for any live mutation.

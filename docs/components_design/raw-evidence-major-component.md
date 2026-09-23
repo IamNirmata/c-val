@@ -2,6 +2,12 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Check the records for the exact run you asked about, not whichever rows are newest.
+A failing test can have complete evidence. A database read failure means the
+evidence could not be checked, not that the test passed or its records are absent.
+
 ## Overview
 
 Turn canonical test outputs into authorized test-owned raw records, then expose
@@ -75,15 +81,55 @@ SQLite retry/URI and status. Workload plugins belong to C6; config paths to C1.
 2. Keep result/config/path revalidation at every writer boundary. Retry only bounded
    BUSY/LOCKED operations; retain the same DL lock during retries. Never roll back
    prior stores by deleting raw rows after a later store fails.
-3. Provide one read-only exact-run verifier for C2/C4. Require node/timestamp,
-   source/config identity, canonical result and digest, expected statuses, required
-   metric evidence/receipts and stable DL generation. Return per-store evidence
-   with explicit pass/fail/incomplete/unavailable reasons, not a health verdict.
+3. Provide one read-only exact-run verifier for C2/C4 using the protocol below.
+   Return raw outcomes and evidence completeness separately; C4 applies acceptance.
+   Follow C6's test-owned requirements, including result-only custom tests.
 4. Query the requested run, not only `latest_status`; a newer completed run must
    not hide evidence for the run being accepted. Export exact-run joins or expose
    separate metric timestamps/age and missing values.
 5. Keep reads bounded with `mode=ro` and `query_only=ON`; measure query plans before
    proposing additive indexes. Do not silently repair or migrate an audit target.
+
+## Exact-Run Verification Protocol
+
+1. Start from the caller's expected run/job/source/config identity, not values
+   copied from the observed result and then compared to themselves. Resolve only
+   the reviewed evidence root and test-owned destinations.
+2. Read the canonical envelope safely; verify identity, schema and the bound
+   ingestion digest. Derive the selected tests from that run's immutable definition,
+   not the operator's current config. Unknown historical fields stay unknown.
+3. Derive expected outputs from the outcome: passing built-ins require their
+   metrics; failures require the relevant diagnostic evidence; disabled tests do
+   not require metrics. Do not invent a DB or receipt table for a result-only test.
+4. Read the exact status set and required metric rows/receipts. Check duplicate
+   consistency, values, units/shape, rank coverage and matching run identity.
+5. When DL metrics are required, sample all four completed generations before and
+   after reading. Changed/in-progress generations mean a bounded retry or deferred
+   observation, not proof that an older run is corrupt. Stable generations do not
+   make all seven stores one atomic transaction.
+6. Return per-source observation state, retained evidence references and completeness.
+   A complete failed run remains a valid observation, but fails validation acceptance.
+
+Missing expected evidence after confirmed terminal ingestion is incomplete;
+contradictory records are conflicting. Transport denial/failure is forbidden or
+unavailable, never converted to missing. Every read/retry shares the caller's
+remaining deadline; audits never repair data or acquire writer authority.
+
+## Read Cost and Write Failures
+
+Scheduling needs a bounded history/provenance projection, not a complete rank-metric
+scan for every node on every cycle. C7 owns that projection; C3 owns its
+[coverage policy](discovery-scheduling-major-component.md#coverage-policy).
+Use node/run keys and existing indexes, with explicit coverage limits.
+
+A failed required metric write cannot authorize final status. Failure after the
+final commit, such as writing a terminal log event, can leave committed rows without
+a completion acknowledgement. Retain both facts; never delete rows or claim no
+write occurred. C4 must stop automatic admission on unresolved storage failures.
+
+Disk-full, permission and durability errors need explicit diagnosis, not evidence
+pruning. Retrying the same authorized ingestion is distinct from rerunning the
+benchmark; divergent digests require investigation rather than replacement.
 
 ## Existing Store Contract
 
@@ -121,6 +167,9 @@ Changing journaling requires the separately approved recovery workflow.
 Carried from the superseded raw database note; not remeasured or a live-state claim.
 Do not use these values to size a new backup or approve a rollout.
 
+<details>
+<summary>Dated measurements and accepted-run examples</summary>
+
 | Database | 2026-09-04 Size | Recorded Rows/Runs |
 | --- | ---: | --- |
 | validation | 954,368 B | 6,984 statuses; 477 nodes |
@@ -148,6 +197,8 @@ randread/randwrite IOPS 32683.598307/20242.567658; NCCL BUS_BW/LATENCY
 44.530298/628.785377 with 29 samples; sample DL metrics norm_output 82.0,
 bp_cpu_time 0.062, collective cpu_time 0.102 and overlap coll_mean 6.581.
 
+</details>
+
 ## Acceptance and Risk
 
 Compare all seven stores, schemas, receipts and generations on fixtures before
@@ -155,4 +206,6 @@ and after consolidation. Inject lock contention, divergent receipts, partial
 ingestion, stale exports, unavailable readers and corrupt provenance. Reuse
 [ingest](../../tests/test_ingest.py), [DL](../../tests/test_dltest_ingest.py) and
 [export](../../tests/test_operational_export_compatibility.py) tests.
+Add concurrent newer ingestion during an old-run read, disabled/result-only tests,
+complete failed runs, forged self-consistent identities and bounded read exhaustion.
 Priority P0 for read correctness, P1 for simplification; high integrity risk.

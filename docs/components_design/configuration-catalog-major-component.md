@@ -3,6 +3,11 @@
 Status: proposed redesign. Current baseline and counting rules:
 [component overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Choose the settings once and give every component the same values. Editing a
+configuration file later must not silently change a running Job or controller.
+
 ## Overview
 
 Turn reviewed configuration and repository-local test descriptors into one
@@ -71,20 +76,39 @@ Workload descriptors are counted under C6, not twice here.
 
 ## Proposed Design
 
-1. Construct an immutable run definition at the application boundary; explicitly
-   pass configuration to discovery, rendering, control and ingestion. No ambient
-   reload inside an operation.
+1. Resolve config once per command and once at continuous-controller startup.
+   Freeze it across that session's cycles; changing source, tests or settings
+   requires a new reviewed session, not a hidden reload. Pass it explicitly.
 2. Keep the current snapshot/descriptor formats initially. Derive compatibility
-   environment values from that checked snapshot in one owner.
+   environment values from that checked snapshot in one owner. Ingestion retries
+   must use the run's original snapshot, not the operator's current config.
 3. Separate descriptor validation from optional adapter execution. Reuse checked
    adapter instances only within one operation; never cache across source changes.
 4. Keep configuration dataclasses and registry helpers. Do not introduce a DI
    container, remote plugin marketplace, second config format or generic database API.
+5. Separate exact run provenance from [coverage compatibility](discovery-scheduling-major-component.md#coverage-policy).
+   A source SHA identifies a run; it does not by itself decide whether a docs-only
+   change invalidates previous workload coverage. Define the compared test inputs.
+
+## Boundaries and Failure Cases
+
+| Boundary | Required Behavior |
+| --- | --- |
+| Invalid config or missing descriptor | Fail before admission or evidence creation; no fallback to defaults. |
+| Environment disagrees with snapshot | Reject, except explicitly named transport/path mappings validated by the runtime. |
+| Inspection without cluster access | Parse local config/descriptors without requiring remote source publication. |
+| Adapter import | Treat repository Python as trusted executable code, not a sandboxed extension. |
+| Secret inputs | Keep credentials out of snapshots, digests, reports and child environments unless explicitly required. |
+
+Confining an adapter's path does not restrict what its Python code can execute.
+No new plugin capabilities or on-disk identity fields are implied without a
+reviewed version/compatibility decision.
 
 ## Acceptance and Risk
 
 Custom resources and tolerations must reach every consumer. Snapshot round trips,
 descriptor tampering, disabled tests, adapter failures and resource mismatches
-must retain fail-closed behavior. Reuse [config tests](../../tests/test_config.py)
+must retain fail-closed behavior. Test config-file changes during a session and
+retries after a newer config is installed. Reuse [config tests](../../tests/test_config.py)
 and [runtime tests](../../tests/test_validation_runtime.py).
 Priority P0; medium implementation risk because configuration reaches all components.

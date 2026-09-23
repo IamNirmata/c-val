@@ -2,8 +2,16 @@
 
 Status: design proposal, not implemented or approved for live mutation.
 Baseline: `647848a6279d992d4327aecadece3a4aaf3e7b7e`, 2026-09-23.
+Second-pass review: `37a69ca`; source-size baseline unchanged.
 Start with the [major-component map](major-components-overview.md); it owns the
 component inventory, measured sizes and individual design links.
+
+## In Simple Terms
+
+The controller chooses when a test may start; the Job runs it; the evidence layer
+checks what was saved. A failed test with complete records is useful evidence,
+not a successful validation. A finished Job with unreadable records is unverified.
+Simplification means fewer independent decisions, not fewer safety checks.
 
 ## Goal and Scope
 
@@ -22,12 +30,23 @@ or automatic cleanup. Historical data from removed services stays untouched.
 | Decision | Reason |
 | --- | --- |
 | One Python package; nine logical components | Separate responsibilities without nine services or new deployment overhead. |
-| One active host controller per configured scope | Keep bounded scheduling and recovery understandable; multi-controller HA is not an initial goal. |
+| One designated control host with serialized submitters | Controller, `run` and `validate` share admission state/locking; no automatic cross-host failover. |
 | One supervisor and registry-driven runner per Job | Preserve secure evidence ownership and test isolation. |
 | Kubernetes/Volcano, kubectl and shared PVC remain | Reuse the current platform; do not add an operator, broker or scheduler backend. |
 | Current seven raw stores remain test-owned | Preserve provenance and avoid a generic per-test database or dual-write history. |
 | Existing Python/stdlib/PyYAML stack | No ORM, dependency-injection container or general plugin framework. FIO/PyTorch remain workload engines. |
-| Exact source and immutable inputs | A run must be reproducible and attributable, not dependent on mutable ambient defaults. |
+| Exact source and immutable inputs | Make inputs attributable; do not promise identical timings or hardware conditions. |
+
+### Alternatives Not Selected
+
+| Alternative | Why Not Now |
+| --- | --- |
+| New operator, broker or workflow engine | Adds state/deployment failure modes without solving the known local contracts. |
+| Rewrite all components at once | Makes evidence and behavior differences hard to attribute or roll back. |
+| Normalize every test into one new database | Conflicts with test-owned persistence and requires unnecessary historical migration. |
+| Remove path/identity checks or historical readers for line count | Reduces safety/compatibility, not duplicated responsibility. |
+
+Reconsider a choice only with measured need and a separately reviewed scope change.
 
 ## Highest-Impact Gaps
 
@@ -45,13 +64,15 @@ These are source-review findings, not evidence of a current cluster incident.
 
 ```mermaid
 flowchart TB
+   PreparedSource[C8 Offline exact-source preparation] --> Bundle[Verified source artifact]
     subgraph Host[Host control process]
         C2[C2 Operator interface] --> C1[C1 Immutable configuration and catalog]
         C1 --> C3[C3 Discovery and scheduling]
         C3 --> C4[C4 Job control and reconciliation]
-        C4 --> C8[C8 Manifest and source preparation]
+      C4 --> Render[C8 Render selected Job]
     end
-    C8 --> Gate[Exact approval plus fresh eligibility]
+   Bundle --> Render
+   Render --> Gate[C4 Serialized admission and final live check]
     Gate --> Cluster[Kubernetes and Volcano Job]
     subgraph Pod[Validation Job]
         C5[C5 Secure supervisor and runner] --> C6[C6 Test workloads]
@@ -63,7 +84,8 @@ flowchart TB
     Files --> Verify[C7 Read-only exact-run verifier]
     Raw --> Verify
     Verify --> C4
-    Raw --> C3
+   Raw --> History[C7 Bounded history projection]
+   History --> C3
     Verify --> C2
     C9[C9 Separately approved recovery] -.-> Files
     C9 -.-> Raw
@@ -72,6 +94,9 @@ flowchart TB
 The controller owns lifecycle, not raw measurement interpretation. Test workloads
 cannot authorize jobs. Evidence readers cannot repair databases. Source rendering
 cannot activate a deployment. Recovery tools remain outside the normal run path.
+Source preparation happens once per reviewed release, not per candidate. C7 readers
+run through the existing read-only PVC-access mechanism; no network data service
+or full rank-metric scan is required for every scheduling pass.
 
 ## Component Contracts
 
@@ -80,24 +105,77 @@ Reuse existing dataclasses and serialization where possible.
 
 | Contract | Owner | Minimum Contents | Consumer |
 | --- | --- | --- | --- |
-| Run definition | C1 | Exact source, immutable config/digests, ordered tests, resource requirements | C3-C8 |
-| Observation/eligibility | C3 | Node identity, observation time, config identity, capacity, explicit state/reasons | C4 and CLI |
-| Candidate | C3 | Node, complete coverage timestamp, priority reason | C4 |
-| Intent/receipt | C4 | Run/job/node identity, manifest/config/source hashes, outcome and observed UID | Resume and reporting |
+| Run definition | C1 | Exact source, immutable config/digests, selected test set, resource requirements | C3-C8 |
+| Observation/eligibility | C3 | Node name/UID, observation time, config identity, capacity, state/reasons | C4 and CLI |
+| Candidate | C3 | Node, compatible coverage timestamp, priority reason | C4 |
+| Intent/receipt | C4 | Scope, run/job/node identity, requested-manifest/config/source hashes, approval binding and observed UID | Resume and reporting |
 | Canonical result/events | C5 | Existing `cval.results` and `cval.event.v1`; paths, outcomes and provenance | C7 and operators |
 | Test measurements | C6 | Test-owned summary/artifacts and explicit persistence requirements | Specific C7 writer |
-| Evidence verification | C7 | Exact-run canonical checks, per-store rows/receipts, missingness and error states | C4 acceptance and C2 export |
+| Evidence verification | C7 | Expected identity, raw outcome, outcome-specific completeness, per-source observations and limits | C4 acceptance and C2 export |
 | Source receipt | C8 | Published SHA, archive hash, immutable object identity | C4 and release approval |
 | Maintenance plan/receipt | C9 | Scope, identities, capacity, backup/plan hashes and operation state | Approved recovery only |
 
-Configuration is resolved once per operation. Snapshot or environment input that
-disagrees with that definition is an error, not an override. New extension points
-must have a real caller and a versioned contract; no speculative plugin capabilities.
+Configuration is resolved once per command or controller session, then frozen.
+Snapshot/environment disagreement is an error, not an override. Restart/admission
+must not silently adopt an edited config. New fields need compatibility/version
+decisions; these conceptual contracts do not require a new type for every table row.
+
+## Invariants and Trust
+
+| Invariant | Owner and Enforcement Point |
+| --- | --- |
+| No create without matching approval, durable intent and fresh eligibility | C4 admission, using C1 inputs and C3 observations. |
+| No supported submitter bypasses node/slot reservations | C4 shared admission lock on the designated host. |
+| No acceptance from logs, Job phase or latest status alone | C4 acceptance over C7's exact-run evidence report. |
+| No status publication after required metric-write failure | C7 coordinator plus independent writer authorization. |
+| No run-ID reuse to retry workloads | C4 intent allocation and C5 canonical reservation. |
+| No implicit backup, repair, prune or rollout | Separate C8/C9/operator approvals; not a consequence of another command. |
+
+Trust reviewed repository/adapters and the controlled runtime image as executable
+code. Hashes prove correspondence to trusted expected inputs, not authorship or
+security against a privileged actor who can alter both evidence and expectations.
+Descriptor/path guards are necessary but do not sandbox malicious workload code.
+Keep credentials out of retained snapshots/logs and use the minimum required access.
+
+## Outcome and Evidence Contract
+
+Keep these dimensions separate in reports; do not replace existing raw outcome
+values or historical formats with a new combined status.
+
+| Dimension | Question | Examples |
+| --- | --- | --- |
+| Execution | What happened to the identified Job? | Pending, Running, terminal, Missing, observation unavailable |
+| Test outcome | What did the selected tests report? | pass, fail, incomplete; disabled is not pass |
+| Evidence | Are the records expected for that outcome present and consistent? | complete, incomplete, conflicting, forbidden, unavailable |
+| Acceptance | Is this requested validation proven successful? | Accepted only when the nonempty requested test set and every positive check are satisfied |
+
+| Example | Evidence Result | Acceptance |
+| --- | --- | --- |
+| Successful terminal Job, selected tests pass, exact records match | Complete | Accepted |
+| Successful terminal Job, a test fails, failure records are complete | Complete | Not accepted; retain the valid failure observation |
+| Successful terminal Job, logs say pass, raw reads fail | Unavailable | Unverified; never infer pass |
+| Failed/aborted Job with preserved diagnostic records | May be complete for the failure | Not accepted |
+| Requested test was disabled or required output is missing | Incomplete requested coverage | Not accepted |
+
+Expected evidence depends on the immutable selected test set and each outcome.
+Passing built-ins require their metric evidence; failed tests do not require
+passing metrics that were deliberately not written. A registered result-only
+test needs canonical evidence but no invented raw database. C6 defines these
+test-owned requirements; C7 checks them and C4 decides acceptance.
+Disabled catalog entries are not failures by themselves; disabling a test required
+by the reviewed request makes that request unsatisfied. Preserve existing aggregate
+semantics for all selected enabled tests; optional-pass behavior is not introduced.
+
+Job observations come from Kubernetes; run/test identity and outcome come from
+canonical results; ingestion completeness comes from matching raw rows/receipts
+and provenance. Progress logs help diagnosis but cannot override any of these.
+Contradictions are reported, not resolved by selecting the most favorable source.
 
 ## End-to-End Process
 
-1. Resolve reviewed configuration and the test catalog; verify exact published
-   source. Read-only commands remain useful without any mutation approval.
+1. Resolve reviewed configuration and the test catalog. Admission verifies known-
+   published exact source; local descriptor/config inspection does not require a
+   remote query or mutation approval.
 2. Read inventory and committed validation history with bounded calls. Build a
    deterministic queue; show unavailable history separately from an empty database.
 3. C4 excludes cooldown/outstanding work and selects a slot. Render only that Job,
@@ -112,22 +190,24 @@ must have a real caller and a versioned contract; no speculative plugin capabili
    enabled tests in catalog order with bounded process-group cleanup.
 7. Bind the canonical result. Write required passing-test metrics, then the final
    built-in status transaction. Preserve partial evidence on failure.
-8. Observe terminal Job phase and run the C7 exact-run verifier. Acceptance requires
-   successful execution, expected test outcomes, provenance, ingestion completion
-   and matching raw evidence. A Completed Job alone is insufficient.
+8. Observe terminal Job phase and run the C7 exact-run verifier. Report execution,
+   test outcome and evidence separately; derive acceptance using the
+   [outcome and evidence contract](#outcome-and-evidence-contract).
 9. Retain logs, receipts, failures and unresolved work; proceed to another candidate
    only when slot state is known. No automatic prune, repair or rollout follows.
 
-Freshness describes coverage, not health. A complete failing run is an observation;
-missing required coverage is not fresh. Retry/cooldown must prevent failure storms
-without hiding failures or redefining them as passes.
+Freshness describes compatible workload coverage, not health or evidence completeness.
+A setup failure can be fully documented without exercising the workload. C3 owns
+the [coverage policy](discovery-scheduling-major-component.md#coverage-policy);
+C4 owns observation age at create and cooldown. No retry storm or hidden pass inference.
 
 ## Lifecycle and Failure Handling
 
 ```mermaid
 stateDiagram-v2
     [*] --> Candidate
-    Candidate --> Intent: eligible and authorized
+   Candidate --> Intent: request prepared and intent durably recorded
+   Intent --> NotSubmitted: final check rejects before create
     Intent --> Submitted: confirmed create
     Intent --> Uncertain: lost response
     Uncertain --> Submitted: exact identity observed
@@ -135,19 +215,28 @@ stateDiagram-v2
     Submitted --> Running
     Submitted --> Terminal: terminal before running observed
     Running --> Terminal
-    Terminal --> Verified: successful exact-run evidence
-    Terminal --> Rejected: failed or incomplete evidence
+   Terminal --> EvidenceCheck
+   EvidenceCheck --> Reported: complete incomplete or conflicting evidence
+   EvidenceCheck --> EvidenceDeferred: read forbidden or unavailable
+   EvidenceDeferred --> EvidenceCheck: bounded read retry
     Blocked --> Uncertain: explicit bounded reconciliation
-    Verified --> [*]
-    Rejected --> [*]
+   NotSubmitted --> [*]
+   Reported --> [*]
 ```
+
+`Reported` means the facts are recorded, not that the run passed. Acceptance is
+computed from the separate dimensions above. Deferred observation does not
+rewrite a test outcome or authorize another Job for the same run.
 
 | Failure | Required Behavior |
 | --- | --- |
 | Discovery timeout or forbidden read | Stop selection; do not treat it as no nodes or fresh history. |
 | Node becomes busy | Reject/requeue without create; keep the reason. A prior read is not a reservation. |
+| Intent cannot be persisted | Do not create; fix state durability before admitting work. |
 | Create response lost | Reconcile the same identity; no blind resubmit or deletion. |
+| One NotFound after a lost response | Preserve uncertainty; absence in one read does not prove the request never took effect. |
 | Partial batch failure | Return created, uncertain, failed and unattempted identities. |
+| Receipt write fails after successful create | Stop admission; retain intent and returned identity for recovery. |
 | Restart after create but before receipt | Recover from durable intent and matching Job identity; reject name/UID conflicts. |
 | Job missing, API unavailable or unknown phase | Keep those distinct; none implies successful acceptance. |
 | Test timeout/signal | Stop only owned child groups, retain logs and incomplete outcomes. |
@@ -155,9 +244,12 @@ stateDiagram-v2
 | Evidence disagrees or cannot be read | Report unverified/conflicting/unavailable, never infer pass. |
 | Maintenance interruption | Retain transaction manifest; separately approve validated resume or rollback. |
 
-The supported deployment starts with one active controller. Local process locks
-alone do not prove cross-host exclusivity; verify ownership before starting a
-replacement. Do not claim exactly-once creation or race-free capacity from reads.
+Use the [C4 admission protocol](job-control-major-component.md#admission-and-recovery-protocol),
+not separate `run`/`validate` locks. Unknown ownership, admission uncertainty and
+pending required verification retain tracked capacity within the existing inflight
+budget. No automatic ownership takeover follows a lost heartbeat or local lock.
+Reconciliation compares expected workload fields as well as identities, not raw
+object hashes after Kubernetes defaulting. Exactly-once creation is not promised.
 
 ## Storage and Security
 
@@ -175,6 +267,10 @@ All audits use read-only SQLite connections and `query_only=ON`. Bounded reads
 must surface partial coverage. Retain logs without secrets; approvals bind scope,
 source/config/manifest identity and rollback. A CLI confirmation never authorizes
 unrelated deletion, DB repair, backup, migration or workload restart.
+DL generation changes during a read cause a bounded retry/deferred report, not a
+historical-data rewrite. Retain old-format readability without inventing missing
+provenance. Passing evidence checks must use expected identity from the request,
+not merely self-consistency among observed files.
 
 ## Lean Code Organization
 
@@ -203,6 +299,8 @@ The [redesign development plan](redesign-development-plan.md) owns the ordered
 phases, task checklists, changes, dependencies and completion criteria. Agree
 contracts first, close correctness gaps, then consolidate control, runtime and
 persistence before delivery hardening and approved compatibility retirement.
+The plan distinguishes preferred rollout order from actual prerequisites. Offline
+regression checks start in Phase 0; they are not deferred until packaging work.
 
 Each change is independently reviewable, not permission for a live action.
 Runtime changes must publish an isolated exact commit and pass the plan's
@@ -253,9 +351,25 @@ do not read or modify conversation archives or user-owned untracked files.
 
 ## Decisions Before Implementation
 
-Confirm external users before retiring aliases/writer hooks; validate Kubernetes
-request edge cases against the deployed version; agree coverage/freshness behavior
-when enabled tests change; choose the pinned image/DL-source supply process.
-These decisions affect implementation details, not the raw-only scope or safety
-requirements. No new service, database or public plugin capability is authorized
-by this document.
+| Decision | Owner | Blocks |
+| --- | --- | --- |
+| Exact workload compatibility inputs and missing-history behavior | C1/C3/C6/C7 | Coverage-policy implementation, not read-only inventory. |
+| Designated host, state durability and ownership-transfer procedure | C4 | Any new admission/reconciliation implementation. |
+| Supported Kubernetes resource-accounting cases | C3 | Eligibility equivalence claims. |
+| Immutable image/DL artifact supply and recorded identity format | C6/C8 | Dependency pinning rollout. |
+| External users and migration window for each retired interface | C2 | Retirement only; fixes can preserve existing commands. |
+
+Do not silently choose a new service, database, public plugin capability or
+on-disk schema to resolve these decisions. Record the smallest compatible choice
+and the counterexample its acceptance test must reject.
+
+## Terms in Plain Language
+
+| Term | Meaning |
+| --- | --- |
+| Admission | The final controlled decision to create this exact Job. |
+| Intent / receipt | What was requested / what was actually observed to happen. |
+| Canonical evidence | The designated result and artifact paths for this run. |
+| Provenance | Recorded identity of code, settings, inputs and outputs. |
+| DL generation | A shared publication marker across four stores, not a run ID. |
+| Quiescence | The operation's required readers/writers are stopped, not merely the controller. |

@@ -3,6 +3,12 @@
 Design baseline: `647848a6279d992d4327aecadece3a4aaf3e7b7e` (2026-09-23).
 This is a proposed redesign, not implemented behavior or live-state evidence.
 
+## In Simple Terms
+
+There are three jobs: decide when validation may run, execute the tests, and check
+the saved evidence. The nine components divide responsibility for those jobs;
+they are not nine programs to deploy or nine new abstractions to build.
+
 ## Scope
 
 c-val discovers eligible capacity, runs registered tests and verifies retained
@@ -16,6 +22,16 @@ Read [Redesign.md](Redesign.md) for architecture and contracts, and the
 [development plan](redesign-development-plan.md) for phases and task checklists.
 Component pages describe the baseline first, then proposed changes.
 
+## Reading Guide
+
+1. Use this page for boundaries and measured size.
+2. Read the [architecture](Redesign.md) for shared contracts and failure decisions.
+3. Read an individual component for its current issues and proposed changes.
+4. Use the [development plan](redesign-development-plan.md) for tasks and gates.
+
+"Current" refers to the source baseline, not a live-cluster claim. "Proposed"
+requires implementation and verification. The task list is not rollout approval.
+
 | ID | Major Component | Purpose | Current Anchor |
 | --- | --- | --- | --- |
 | C1 | [Configuration and test catalog](configuration-catalog-major-component.md) | One immutable definition of settings, tests and resource requirements. | [Configuration](../../cval/config.py) |
@@ -24,7 +40,7 @@ Component pages describe the baseline first, then proposed changes.
 | C4 | [Job control](job-control-major-component.md) | Own submission, reconciliation, cooldown and bounded monitoring. | [Job manager](../../cval/jobs/manager.py) |
 | C5 | [Validation runtime](validation-runtime-major-component.md) | Reserve evidence safely and supervise registry-driven execution. | [Supervisor](../../cval/validation/supervisor.py) |
 | C6 | [Test workloads](test-workloads-major-component.md) | Own storage, NCCL and DL execution, settings and measurements. | [Test descriptors](../../config/cval.toml) |
-| C7 | [Raw evidence](raw-evidence-major-component.md) | Authorize test-owned writes and expose exact-run verification and exports. | [Ingestion](../../cval/storage/run_ingest.py) |
+| C7 | [Raw evidence](raw-evidence-major-component.md) | Authorize test-owned writes; read history and report exact-run evidence completeness. | [Ingestion](../../cval/storage/run_ingest.py) |
 | C8 | [Source delivery](source-delivery-major-component.md) | Build verified, exact-commit source and self-contained Job startup. | [Source renderer](../../scripts/cval-source.py) |
 | C9 | [Recovery and maintenance](recovery-maintenance-major-component.md) | Inspect, back up and restore evidence under separate approval. | [Backup](../../scripts/cval-backup.py) |
 
@@ -47,6 +63,20 @@ flowchart LR
 Tests, documentation and release acceptance apply across components. Raw database
 ownership stays test-specific; shared orchestration does not justify a generic
 per-test database, a message broker or another long-running service.
+
+## Execution Boundaries
+
+| Where | Components | May Do |
+| --- | --- | --- |
+| Designated control host | C1-C4; C8 rendering | Inspect, prepare and serialize approved submissions. |
+| Validation Job | C1 snapshot; C5-C6; C7 writers | Run tests and write only authorized evidence. |
+| Read-only client/PVC reader | C2; C7 readers | Inspect/export; never silently repair data. |
+| Release or maintenance command | C8-C9 | Prepare artifacts offline; mutate only under separate approval. |
+
+C7 is shared library code used in different processes, not a new data service.
+Configuration, observation and storage helpers are reused across these boundaries.
+See the [outcome contract](Redesign.md#outcome-and-evidence-contract) for why
+complete evidence and a passing validation are different results.
 
 ## Baseline Size
 

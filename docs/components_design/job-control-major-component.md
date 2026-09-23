@@ -2,6 +2,12 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Before starting a Job, record exactly what should start. If the reply is lost,
+look for that same Job instead of starting another one. A second command must
+not bypass the first command's reservation of the node and validation slot.
+
 ## Overview
 
 Own the complete lifecycle of an approved validation request: select an available
@@ -15,7 +21,7 @@ request exact-run verification. Run one active controller per configured scope.
 | Candidate queue and session receipts | Cooldown, outstanding jobs and bounded concurrency | Next selected candidate |
 | Exact source, reviewed config and approval | Whether this precise create is authorized now | Submission intent and receipt |
 | Kubernetes observations | Submitted/running/terminal/unknown; retain unresolved slots | Recoverable lifecycle state |
-| C7 verification report | Whether a successful run is accepted as complete evidence | Operator report, never a health class |
+| C7 verification report | Apply the separate execution/outcome/evidence acceptance rule | Operator report, never a health class |
 
 Rendering belongs to C8, eligibility rules to C3 and evidence verification to C7.
 No observation failure authorizes deletion, replacement or a duplicate submit.
@@ -75,8 +81,9 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 1. Keep shell only for process/session launch. Move one bounded lifecycle pass into
    existing Python orchestration and share it between continuous and targeted runs.
 2. Before create, durably retain intent in existing session storage: job name,
-   node/run identity, source SHA, configuration and manifest digests. This is
-   operational state, not a new raw history database.
+   node/run identity, source SHA, configuration and requested-manifest digests.
+   Version changes need compatible readers; keep old records. This is operational
+   state, not a new raw history database.
 3. Recheck C3 eligibility at the create boundary. Preserve full-node resource
    isolation; a read is not a Kubernetes reservation and cannot eliminate races.
 4. Record each result immediately. On timeout, reconcile exact name and identity;
@@ -85,13 +92,64 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 5. One state transition function handles both resume and active observation. Pass
    a shared deadline to calls; batch named-job reads without converting API errors
    into missing jobs. Retain UID once observed to detect replacements.
-6. Request C7 verification after terminal execution. Persist partial outcomes and
-   leave all evidence/jobs intact unless an independent action was approved.
+6. Request C7 verification after terminal execution. Apply the
+   [outcome and evidence contract](Redesign.md#outcome-and-evidence-contract): a
+   complete failure record is reportable but not accepted. Preserve jobs/evidence.
+
+## Admission and Recovery Protocol
+
+The initial deployment has one designated control host per cluster identity,
+namespace and validation root. `run`, `validate` and the live loop must share
+its admission library, state directory and lock. Read-only clients may run
+elsewhere; another host must not submit without a separately approved ownership
+transfer. Local locks do not provide cross-host fencing or automatic failover.
+Scopes with overlapping node inventories must share admission ownership; changing
+a job prefix or evidence root does not make concurrent controllers independent.
+
+1. Under the admission lock, check ownership and existing reservations, choose a
+   fresh run identity and render the exact request. Reject known name/run collisions;
+   keep the same identity through retries. A prefix alone never proves ownership.
+2. Persist the approved intent with atomic replacement and required file/directory
+   durability. Reserve node and slot before any create. Persistence failure blocks
+   creation; approval must match the request's source/config/manifest identity.
+3. Recheck C3 eligibility immediately before the bounded create. Retain node UID
+   and check for identity/config changes. Never hold the admission lock for the
+   entire workload; use durable reservations and short serialized state transitions.
+4. Persist the observed Job UID and outcome before admitting more work. Failed
+   receipt persistence after creation stops admission; the prior intent and returned
+   identity must remain available for reconciliation.
+5. Reconcile using cluster/namespace, exact name, run/node bindings, source/config
+   and expected workload fields; require the saved UID once known. Kubernetes adds
+   defaults, so compare controlled fields, not a hash of the entire returned object.
+
+The requested-manifest hash and annotations help identity checks but do not prove
+the returned workload is unchanged. Do not adopt a foreign Job or changed UID
+because its name happens to match.
+
+| Situation | Slot and Retry Rule |
+| --- | --- |
+| Create response lost or timed out | Keep node/slot reserved; read the same identity with a bounded deadline. |
+| Single NotFound after uncertain create | Not proof that creation never happened; no new identity or blind retry. |
+| Matching Job observed | Retain receipt and derive cooldown from confirmed submission, not from a planning attempt. |
+| Ownership conflict, state corruption or unavailable observation | Stop admission; retain unresolved work for explicit reconciliation. |
+| Terminal execution, evidence read still unavailable | Retain pending verification in the existing inflight budget; do not resubmit the run. |
+| Terminal run with complete failure evidence | Report failure and release its tracked slot; preserve normal cooldown. |
+
+Once a bounded check proves evidence incomplete/conflicting rather than unreadable,
+retain that report and release terminal execution tracking. Block same-run reuse;
+any recovery or later validation has its own policy/approval and cooldown checks.
+
+Use one deadline per bounded operation, including API reads and verification;
+persist observation timestamps but use a monotonic clock for elapsed time.
+Restart reads saved records and re-observes reality; it never invents a successful
+submission, empty queue or fresh approval from missing/corrupt state.
 
 ## Acceptance and Risk
 
 Test crashes before/after create and receipt persistence, second-create failure,
 lost responses, UID conflict, unknown state, missing Jobs, clock/deadline limits,
-cooldown repair and restart. Preserve [live-loop regressions](../../tests/test_cval_live.py).
+cooldown repair and restart. Add concurrent `run`/`validate`, intent-write failure,
+receipt-write failure, node-UID change and unknown ownership transfer cases.
+Preserve [live-loop regressions](../../tests/test_cval_live.py).
 Measure subprocess/API counts without caching eligibility across creates.
 Priority P0 for correctness, P1 for consolidation; high mutation/restart risk.

@@ -2,6 +2,12 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Each test must say what it ran, what it measured and which files prove the result.
+The framework should not guess a test's meaning or create a database just because
+a new test was registered.
+
 ## Overview
 
 Own what is tested and what each measurement means. The framework supplies
@@ -75,8 +81,9 @@ are not in this repository and are excluded from these numbers.
 1. Keep one descriptor plus setup/run/summary code per test; reuse the runner for
    process handling. Avoid a universal benchmark engine or forced rewrite of FIO/PyTorch.
 2. Build a reviewed image with dependencies preinstalled and pinned by digest.
-   Pin external DL source and copied plan content; record identities in canonical
-   provenance. Fail preflight before lengthy work if dependencies differ.
+   Use an immutable external DL artifact or verified run-local copy, not a mutable
+   shared checkout after a one-time hash. Pin copied plan content and record actual
+   identities in canonical provenance. Reject mismatches before workload execution.
 3. Separate setup, execution and ingestion timings so optimization measures real
    GPU reservation cost. Keep bounded controller concurrency as the initial
    shared-resource budget rather than adding a new traffic-scheduling service.
@@ -84,10 +91,41 @@ are not in this repository and are excluded from these numbers.
    persistence must reuse authorization and explicit destinations without changing
    existing raw stores or expanding the plugin API silently.
 
+## Test-Owned Evidence Requirements
+
+Define these requirements in reviewed test/writer code first; a generic persistence
+plugin protocol is not needed for the current three families.
+
+| Result Case | Required Evidence |
+| --- | --- |
+| Passing built-in test | Canonical outcome, valid summary, required finite metrics, expected ranks/artifacts and its configured raw writes. |
+| Fully executed failing test | Canonical phase/outcome, reason and required diagnostic outputs; no fabricated passing metric rows. |
+| Setup failure, timeout or interruption | Phase, reason and retained available logs; explicitly incomplete workload coverage. |
+| Disabled/unselected test | Explicit selection state; no execution claim and no required metric writes. |
+| Registered result-only test | Canonical result and declared artifacts; no implicit new database. |
+
+C6 owns metric units, required keys, rank coverage and parser validity; C7 checks
+the corresponding evidence. A summary file existing is not proof that all required
+measurements exist. Preserve the current rule that all selected enabled tests
+participate in the aggregate outcome; adding optional-pass semantics is separate work.
+
+## Reproducibility Limits
+
+Record image/source/plan identities together with observed framework/driver and
+hardware context when supported. A pinned image does not freeze host drivers,
+thermal state or shared-fabric load, and does not promise identical timings.
+Separate dependency upgrades from orchestration refactors and compare equivalent
+test settings. Measurements show raw behavior; this does not add classifications.
+
+Setup preflight must not modify shared benchmark source or install dependencies
+into the host/PVC as a hidden side effect. Test temporary work stays under its
+owned run directory; cleanup must never target another run's retained artifacts.
+
 ## Acceptance and Risk
 
 Compare summaries, rank coverage and raw metrics on fixed fixtures, then use
 separately approved exact-commit GPU acceptance. Exercise missing tools, changed
 DL source/plan, partial ranks and failed subprocesses. Measure startup overhead;
-do not claim benchmark speedups from packaging alone.
+test source changes between preflight and launch and a result-only custom test.
+Do not claim benchmark speedups from packaging alone.
 Priority P1; medium risk to reproducibility and benchmark comparability.

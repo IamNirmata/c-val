@@ -2,6 +2,11 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+First ask whether a node is safe to use now. Separately ask whether its tests are
+due. A recent failed test is still a recent observation, not a healthy result.
+
 ## Overview
 
 Answer two separate questions: which nodes could run validation, and which nodes
@@ -68,17 +73,49 @@ and the Kubernetes/scheduler package initializers. Tests:
    the effective config. Pass an explicit policy for automatic versus targeted
    cordoned-node validation; neither allows active GPU work or unknown readiness.
 2. Inventory once per planning pass; check selected nodes again immediately before
-   create through the same function. C4 owns freshness and mutation timing.
-3. Keep the small pure priority function. Define freshness from a complete committed
-   run covering required enabled tests; record outcome separately. A failed but
-   complete run is evidence, not a reason for an uncontrolled retry storm.
+   create through the same function. C3 owns coverage-age rules; C4 owns observation
+   age at admission, cooldown and create timing. Record node UID to detect replacement.
+3. Keep the small pure priority function. Apply the coverage policy below before
+   ordering candidates. C7 supplies read-only history/provenance; do not add direct
+   SQL or a second result store to the scheduler.
 4. Keep snapshot inputs for offline inspection; they can never authorize submission.
    Retain bounded calls and distinguish empty capacity from inaccessible evidence.
+
+## Coverage Policy
+
+Proposed policy to pin in Phase 0 fixtures, separate from admission and acceptance:
+
+| Observation | Scheduling Meaning |
+| --- | --- |
+| One run fully executed the requested compatible test set with complete expected evidence | Use its timestamp for coverage, even if a fully executed test reported fail. |
+| Setup failure, timeout, interruption or missing required test output | Not full coverage; cooldown still prevents immediate retry storms. |
+| Newly enabled test or changed execution-relevant test inputs | Previous coverage does not satisfy the new request. |
+| Docs-only or host polling change | Does not invalidate coverage when workload compatibility is established. |
+| Readable history without proven compatible evidence | Due with an explicit reason; never invent a compatible identity. |
+| Forbidden/unavailable history | Pause automatic admission; do not reinterpret it as never tested. |
+
+Compare the required test set, descriptor/workload inputs and recorded dependency
+identity, not only the global config digest or latest per-node timestamp. C1/C6
+must specify which inputs affect compatibility. Do not combine unrelated per-test
+runs into a complete run implicitly or rewrite historical rows to add missing identity.
+
+## Observation Limits
+
+Node and pod reads are not an atomic reservation. Use structured responses,
+validate node identity and reject unsupported resource-accounting cases as unknown.
+Add deployed-version fixtures for init containers, overhead and supported quantity
+forms before claiming scheduler-equivalent accounting. Keep Kubernetes resource
+requests and node placement constraints as the final scheduling protection.
+
+Keep automatic and targeted policies distinct: a drained cordon exception is not
+a bypass for quarantine taints, resource shortage or unknown workload state.
 
 ## Acceptance and Risk
 
 Use fixtures for custom config, missing/false Ready, busy GPUs, partial CPU/memory/
 RDMA, allowed cordon versus quarantine taints, malformed quantities, API failures
-and stale coverage. Preserve stable queue order and zero renders during planning.
+and stale/changed coverage. Include complete-failure versus setup-failure fixtures,
+node-name reuse with a different UID and unreadable history. Preserve stable queue
+order and zero renders during planning.
 Measure Kubernetes calls per candidate pass before claiming efficiency gains.
 Priority P0; medium risk because a false positive permits unsafe work.

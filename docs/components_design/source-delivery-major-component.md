@@ -2,6 +2,12 @@
 
 Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
+## In Simple Terms
+
+Publishing code, making it available to the cluster and starting Jobs with it are
+three different actions. Keep proof of the exact code and settings at every step;
+a hash only helps when its expected value came from a reviewed source.
+
 ## Overview
 
 Make approved validation Jobs run the exact reviewed source with a verified,
@@ -78,10 +84,40 @@ The PVC access template is C9; global configuration is C1.
    activation. Verify each observed identity; preserve previous artifacts and
    approval records. Never automatically apply a rollback on failed acceptance.
 
+## Identity Chain
+
+| Identity | What It Establishes | What It Does Not Establish |
+| --- | --- | --- |
+| Published Git SHA | Reviewed source revision in the configured repository | Container/dependency identity or current deployment. |
+| Archive SHA-256 and embedded Git identity | Exact prepared bundle bytes and declared revision | Trust if both payload and expected hash came from an unreviewed source. |
+| Config digest | The admitted effective test/settings definition | Compatibility of every prior run or permission to mutate. |
+| Requested-manifest digest | The reviewed create request | Byte-for-byte equality with Kubernetes' defaulted object. |
+| Image/DL artifact identities | Pinned workload inputs | Identical drivers, hardware conditions or timings. |
+| Observed Job UID | The concrete created resource | Passing tests or complete raw evidence. |
+
+Validate controlled workload fields as well as labels/annotations on readback.
+SHA syntax alone is not publication verification. Controller startup must retain
+current-remote-tip enforcement; an explicitly approved targeted validation may
+use a known-published exact revision. Inspection and rendering remain nonmutating.
+
+## Placement and Packaging Boundaries
+
+Keep targeted and scheduler-selected templates distinct. A scheduler-selected quick
+test cannot prove a prechecked target node or c-val priority selection; it is not
+a substitute for targeted release acceptance. Record its actual assigned node.
+
+Runtime bundle trimming must prove both successful startup and the failure paths
+for ingestion, locking and recovery helpers used in-pod. Test without the host
+checkout or undeclared network access. Declare interpreter/dependencies through
+the reviewed image; do not quietly add downloads to recover missing bundle files.
+Retain both supported source transports until an explicit caller/operations decision.
+
 ## Acceptance and Risk
 
 Require clean offline startup from the exact archive, valid placement/resources
 for both templates, rejection of unsafe YAML/bootstrap variants and mismatched
 archive identity/hash. Measure compressed runtime size before/after exclusions.
+Test missing helpers, unexpected admission-time manifest changes and a ConfigMap
+created successfully while the active controller still uses its previous source.
 Validate the published exact commit on a fully free Ready node only after approval.
 Priority P2 for size reduction; medium startup/release risk.
