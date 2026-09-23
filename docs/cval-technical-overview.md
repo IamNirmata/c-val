@@ -112,7 +112,7 @@ Opportunism limits direct competition for busy GPUs but can leave those nodes wi
 | Canonical artifacts | `cval.results`, `cval.event.v1` progress, logs, summaries, run identity and configuration identity; historical result formats remain readable |
 Strict audit queries require SQLite `mode=ro` and `query_only=ON`. Bounded reads,
 retry policy, exact identities, POSIX locks and DELETE journaling protect raw
-ingestion on shared storage. See the [raw database contract](components_design/raw-database-design.md)
+ingestion on shared storage. See the [raw database contract](components_design/raw-evidence-major-component.md#existing-store-contract)
 and [result schema](result-schema.md). No derived store or evaluation cursor is
 part of the current framework.
 

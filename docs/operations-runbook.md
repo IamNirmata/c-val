@@ -30,7 +30,7 @@ exact-source checks still run before creating the selected Job through the
 confirmed `run` path.
 
 `candidates` replaces the former `planned_jobs` output; there is no rendered-plan
-inspection mode. See the [CLI migration inventory](components_design/cli-design.md#removed-settings-and-migration)
+inspection mode. See the [CLI migration inventory](components_design/operator-interface-major-component.md#removed-settings-and-migration)
 for retired flags and their replacements.
 
 ## Continuous validation loop
@@ -337,7 +337,7 @@ Backup never restores or deletes source data.
 
 ## PVC organization
 
-Use [pvc-layout.md](components_design/pvc-layout.md) for the retained-path map,
+Use the [recovery component](components_design/recovery-maintenance-major-component.md#retained-paths) for the retained-path map,
 bounded inventory, and earlier archive history. The current code writes new
 detailed test evidence under `logs/validation_tests`; existing PVC contents are
 not migrated automatically by a code update. No compatibility symlinks are used.

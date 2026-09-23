@@ -11,7 +11,9 @@ rationale and label deferred proposals rather than repeating operating steps.
 | [Configuration](configuration.md) | Effective settings and configuration sources |
 | [Operations runbook](operations-runbook.md) | Planning contract and reviewed operational procedures |
 | [Result schema](result-schema.md) | Canonical evidence and raw database contracts |
-| [CLI interface decisions](components_design/cli-design.md) | Retained interfaces, removed flags and deferred decisions |
+| [Operator interface](components_design/operator-interface-major-component.md#mode-inventory) | Current modes, migration inventory and proposed interface changes |
+| [Major components](components_design/major-components-overview.md) | Responsibility map, baseline measurements and component designs |
+| [Redesign proposal](components_design/Redesign.md) | Proposed architecture and phased implementation; not current behavior |
 | [Cleanup review](cleanup-review.md) | Approved cleanup, recorded acceptance and remaining scope |
 
 Code and effective configuration define behavior. Dated acceptance and rollout

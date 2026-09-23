@@ -16,7 +16,7 @@ acceptance passed before the live loop was restarted at that commit.
 The 2026-09-23 settings cleanup also removes single-choice format switches,
 legacy TSV, optional validation ZIP export and duplicate public CLI overrides
 for config-owned targets, job settings and policy limits. The
-[remaining control inventory](components_design/cli-design.md#mode-inventory)
+[remaining control inventory](components_design/operator-interface-major-component.md#mode-inventory)
 records replacements. Validation settings, raw writers and canonical evidence
 are retained.
 
@@ -55,7 +55,7 @@ creation for invalid templates. Existing preflight, fresh eligibility, cooldown,
 resume, pruning and worktree/source guards remain. Malformed candidate JSON and
 a returned commit differing from the requested commit fail closed. See the
 [planning contract](operations-runbook.md#candidate-inspection) for the default
-candidate JSON shape and the [CLI inventory](components_design/cli-design.md#mode-inventory)
+candidate JSON shape and the [CLI inventory](components_design/operator-interface-major-component.md#mode-inventory)
 for retained controls. Callers must migrate from `planned_jobs`
 to `candidates`; this is an intentional planning-interface change.
 

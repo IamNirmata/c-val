@@ -1,0 +1,108 @@
+# C2: Operator Interface
+
+Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+
+## Overview
+
+Give people and automation one predictable interface to inspection and explicitly
+approved work. Parse input and format output here; business decisions belong to
+configuration, discovery, job control and evidence owners.
+
+## Details and Purpose
+
+Inputs are command arguments plus reviewed configuration. Outputs are stable JSON,
+human-readable tables, raw CSV exports and meaningful exit codes. Read-only
+inspection must remain independently usable when mutation is not authorized.
+An approval flag is not permission to delete, prune, restart or migrate anything.
+
+## Current Process Flow
+
+```mermaid
+flowchart LR
+    Args[Arguments] --> Config[Load effective config]
+    Config --> Parser[Build parser and resolve command]
+    Parser --> Handler[Command handler]
+    Handler --> Owner[Component operation]
+    Owner --> Output[JSON table or CSV]
+```
+
+## Codebase Size
+
+| Kind | Files | Physical Lines |
+| --- | ---: | ---: |
+| Code | 1 | 1,064 |
+| Configuration | 0 | 0 |
+| Tests | 1 | 841 |
+
+Counted: [CLI](../../cval/cli.py) and [CLI tests](../../tests/test_cli.py).
+The installed entry-point declaration is counted under C8. Handlers span other
+responsibilities today; this attribution does not imply they should keep doing so.
+
+## Functionality Assessment
+
+| Category | Functionality | Decision |
+| --- | --- | --- |
+| Critical | Read-only commands, explicit submission gates, exact source identity, failure exit codes | Preserve. |
+| Good | JSON for automation, tables for people, descriptor inspection | Retain a small predictable interface. |
+| Not important | Alias pairs and individual writer hooks no longer used by normal ingestion | Review external users before deprecation. |
+| Useless | New single-choice output selectors or duplicate config overrides | Do not reintroduce removed controls. |
+
+## Current Issues
+
+1. One parser mixes operators, ingestion compatibility and repair commands.
+2. `run` and `validate` use different orchestration paths; explicit node lists in
+   `run` can bypass discovery. CLI parsing cannot be the final safety boundary.
+3. JSON errors are not one stable contract, and some lower readers collapse
+   unavailable observations into empty output. Shared result/error handling is needed.
+
+## Proposed Design
+
+Keep the public names during migration. Route `run` and `validate` through one
+job-control operation; `validate` adds watch and evidence verification. Keep
+`plan` strictly read-only. Move decisions out of handlers only when this removes
+duplicate behavior, not merely to create more files.
+
+Return structured operation outcomes, including partial submission receipts and
+forbidden/unavailable states. Keep diagnostics on stderr and automation data on
+stdout. Inventory external usage before retiring hidden hooks; retain required
+rebuild/recovery operations outside normal ingestion.
+
+## Mode Inventory
+
+Current supported contracts carried forward from the former CLI design note:
+
+| Surface | Supported Behavior |
+| --- | --- |
+| `config`; `tests list/describe/validate` | Effective JSON config; descriptor inspection and local validation. |
+| `nodes` | Discovery, inventory-only, or targeted node check. |
+| `plan` | Candidate queue only; no rendered Job and no mutation. |
+| `plan/run` inputs | Live discovery or explicit node list; no history, live history or JSON snapshot. Explicit empty nodes remain empty. |
+| `run`; `validate` | Confirmed batch submission; confirmed one-node submission/watch/verification. |
+| `jobs`; `status` | Snapshot/watch of named Jobs; read-only latest raw status. |
+| `results` | Raw CSV; test selection, `all`/`overall` alias and status-only option. |
+| Live-loop commands | Start, stop, status, attach, run-once and internal run-loop; separate prune approval. |
+| Hidden writer hooks | `db-add-run-results`, `db-add-storage-result`, `db-add-nccl-health`, `db-add-dltest-run`. |
+| Maintenance hook | `db-rebuild-dltest-metrics`; explicit repair rather than normal execution. |
+
+Exact source, run timestamp, deadlines, selection filters and export destination
+remain purposeful inputs. NCCL recovery confirmation, immutable-result arguments
+and rebuild `--only-missing` are safety/data contracts, not cosmetic clutter.
+
+## Removed Settings and Migration
+
+These removals predate the redesign; they are not new implementation work.
+
+| Removed Controls | Current Replacement |
+| --- | --- |
+| `config --output`; `results --type`; TSV status/history | Fixed JSON config, CSV exports, JSON automation/history. |
+| `plan --candidates-only`, `--include-yaml` and render options | One candidate-only plan; render on confirmed submission. |
+| `validate --download`, `--download-dir` | Retained canonical PVC evidence; no automatic ZIP export. |
+| Public namespace, PVC-pod and raw-DB overrides | Reviewed cluster/storage configuration. |
+| Public template, prefix, repository and policy-limit overrides | Reviewed job/policy configuration; exact Git ref remains explicit. |
+
+## Acceptance and Risk
+
+Preserve tested command/help/output contracts or publish a deliberate migration.
+Reject invalid source and missing approval before mutation; make fake second-create
+failure return prior receipts. Priority P1 for interface cleanup, P0 for bypass
+closure; medium risk to external callers. No command retirement is authorized here.

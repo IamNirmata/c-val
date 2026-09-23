@@ -98,7 +98,7 @@ Include `--live-status` to use existing validation history; without a history
 input, candidates are treated as never tested. Add `--output json` for automation.
 The live loop checks candidate eligibility, then renders only the selected node
 at confirmed submission. There is no alternate planning mode. See the
-[CLI mode inventory](docs/components_design/cli-design.md#mode-inventory) for
+[CLI mode inventory](docs/components_design/operator-interface-major-component.md#mode-inventory) for
 remaining options and proposed retirements.
 
 Inspect known job names or export raw results:
@@ -243,6 +243,8 @@ are not deleted by a source change. Keep raw evidence, logs and rollback assets.
 | Technical overview and research | [docs/cval-technical-overview.md](docs/cval-technical-overview.md) |
 | Progress and future work | [docs/cval-progress.md](docs/cval-progress.md) |
 | Framework architecture | [docs/architecture.md](docs/architecture.md) |
+| Major components and measured codebase | [docs/components_design/major-components-overview.md](docs/components_design/major-components-overview.md) |
+| Proposed architecture and redesign strategy | [docs/components_design/Redesign.md](docs/components_design/Redesign.md) |
 | Configuration reference | [docs/configuration.md](docs/configuration.md) |
 | Operations and backups | [docs/operations-runbook.md](docs/operations-runbook.md) |
 | Results, progress and ingestion contracts | [docs/result-schema.md](docs/result-schema.md) |
