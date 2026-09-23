@@ -47,6 +47,16 @@ class GenericRegistryResultTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, field):
                     self._registry(root, {"smoke": False})
 
+    def test_descriptor_rejects_downstream_evaluation_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._root(tmpdir)
+            self._write_pass_fail_test(root, "smoke", order=40)
+            descriptor = root / "validation-tests/smoke/test_config.toml"
+            with descriptor.open("a", encoding="utf-8") as handle:
+                handle.write("\n[evaluation]\nenabled = true\n")
+            with self.assertRaisesRegex(ValueError, "evaluation"):
+                self._registry(root, {"smoke": True})
+
     def test_disabled_test_is_present_but_never_executed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._root(tmpdir)

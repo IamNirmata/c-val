@@ -11,8 +11,6 @@ rationale and label deferred proposals rather than repeating operating steps.
 | [Configuration](configuration.md) | Effective settings and configuration sources |
 | [Operations runbook](operations-runbook.md) | Planning contract and reviewed operational procedures |
 | [Result schema](result-schema.md) | Canonical evidence and raw database contracts |
-| [Evaluator deployment](../deploy/evaluation-engine/README.md) | Independent evaluator's current Pod and operating procedure |
-| [Evaluation database](components_design/evaluation-database-design.md) | Derived evaluator schema and raw-to-derived mapping |
 | [CLI interface decisions](components_design/cli-design.md) | Retained interfaces, removed flags and deferred decisions |
 | [Cleanup review](cleanup-review.md) | Approved cleanup, recorded acceptance and remaining scope |
 
@@ -34,8 +32,10 @@ records describe the observed revision, not an assertion of present live state.
    generic runner.
 7. Validate canonical artifacts and write raw status and metric databases.
 8. Retain result JSON, logs, events, and test artifacts.
+9. Verify successful terminal Jobs and exact-run raw ingestion.
 
-No step derives a node-health verdict, class, score, or ranking.
+The framework ends at verified raw evidence. No downstream evaluator,
+classification, scoring or remediation service is part of this repository.
 
 ## Repository Boundaries
 
@@ -56,11 +56,10 @@ Both the pinned and scheduler-selected templates use one packaged
 runtime contract. Each generated Job contains its full startup script; no
 additional in-pod file or download is needed to obtain the bootstrap itself.
 
-The [evaluation service](../deploy/evaluation-engine/README.md) has a separate
-entry point and derived store. Test-owned evaluation modules are dynamically
-loaded from descriptors; they are not dead code because the raw loop does not
-call them. Backup, layout and SQLite journal tools likewise belong to recovery,
-not the per-cycle submission path. See the
+The [source renderer](../scripts/cval-source.py) produces only the immutable
+code ConfigMap used by validation Jobs. Test-owned plugins provide configuration
+and read-only raw exports. Backup, layout and SQLite journal tools belong to
+evidence recovery, not post-test analysis. See the
 [cleanup review](cleanup-review.md) for approval-only retirement candidates.
 
 ## Raw databases

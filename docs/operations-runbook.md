@@ -76,7 +76,15 @@ pinned revisions; do not replay their removed flags against the new CLI.
 
 The configured source is the internal `msr-central/c-val` repository. Jobs without
 repository credentials can use an approved immutable source ConfigMap rendered
-from the published commit by `deploy/evaluation-engine/render.py`. In the
+from the published commit by [scripts/cval-source.py](../scripts/cval-source.py):
+
+```bash
+python3 scripts/cval-source.py --revision "${CVAL_GIT_REF:?Set an exact published commit}" --namespace gcr-admin --output-dir "${CVAL_SOURCE_DIR:?Set a new local output directory}"
+```
+
+The tool writes only `source-configmap.yaml`, named `cval-source-<commit-prefix>`,
+and reports its archive hash. It needs no dependency wheel or separate service
+manifest. This is local preparation, not a cluster mutation. In the
 operator's effective `[job]` configuration, set `source_configmap` to that
 ConfigMap name and `source_sha256` to the SHA-256 of its `source.tar.gz` bytes.
 Both fields must be supplied together with the exact commit. The runtime checks
@@ -361,11 +369,12 @@ live mutation; these examples are not evidence that a migration has run.
 1. Review `scripts/cval-pvc-layout.py --plan-consolidate` and backup preview with
 	`--exclude-dl-unit-test-evaluation`; avoid whole-root inventory/content audits
 	when the excluded directory must not be inspected. Identify all included writers,
-	including the live loop, validation jobs, evaluator, and interactive clients.
+	including the live loop, validation jobs, interactive clients and any independently
+	deployed legacy consumers. Removing repository code does not stop those processes.
 	A blocked loop or a Kubernetes Ready condition is not proof of quiescence.
-2. Stop writers under separate approval. Retain the exact evaluator Pod spec
-	and ConfigMaps for restart, removing scheduler-assigned `nodeName` from a
-	recreate manifest. Do not force-delete an active writer or start a second one.
+2. Stop writers under separate approval. Retain the exact manifests required for
+	recovery, removing scheduler-assigned `nodeName` from any approved recreation.
+	Do not force-delete an active writer or start a second one.
 3. Inspect capacity, create the complete backup, then verify its manifest:
 
 	```bash
@@ -398,8 +407,8 @@ live mutation; these examples are not evidence that a migration has run.
 	[Exact-commit validation](#exact-commit-validation) on one eligible node, with
 	a real published SHA and separate submission approval. Retain terminal job
 	state, canonical result files, logs and exact-timestamp raw SQLite rows.
-	Verify the evaluator's separate progress and coverage states; do not equate
-	`unclassified` with a failed test.
+	Existing downstream processes are outside this repository's scope and must not
+	be recreated automatically by this procedure.
 
 Rollback, while all writers are stopped and before new evidence changes the
 moved trees, restores only the recorded moves without overwriting newer data:

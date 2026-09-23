@@ -4,25 +4,27 @@ Root: `/data/continuous_validation`. Inspected September 9, 2026.
 Canonical evidence paths remain stable; this is an archive-only cleanup, not a
 raw database migration. The first live move requires separate approval.
 
+This is a dated storage inventory. Retiring downstream code does not authorize
+deletion of any directory or independently running workload described here.
+
 ## Retained Paths
 
 | Directory | Role | Why retained |
 |---|---|---|
 | `metadata/` | Seven authoritative raw SQLite DBs and stable ingestion lock | Configured writer/read paths |
 | `validation_tests/` | Current per-test results, summaries and metric artifacts | Absolute paths in canonical results and DL receipts |
-| `logs/` | Canonical run results, digest markers, events and workload logs | Evidence for raw writes and independent evaluation |
-| `evaluation-engine/` | Derived evaluation DB and persistent worker lock | Active CPU evaluator; pod alias `/evaluation` |
+| `logs/` | Canonical run results, digest markers, events and workload logs | Evidence for raw writes and successful execution |
+| `evaluation-engine/` | Retained data from the removed downstream service | Historical data; not touched by repository cleanup |
 | `deep-learning-unit-test-main/` | Current DL benchmark source dependency | Configured even though its directory timestamp is old |
 | `backups/` | Recovery snapshots and journal-migration manifests | Retained rollback evidence; not scanned in full |
 | `dltest/` | Historical DL artifacts | 1,604 stored run receipts per DL DB still reference it |
 | `nccl/`, `storage/`, `results/` | Historical test artifacts/results | Legacy evidence/recovery paths remain supported |
 
-Do not rename these to `raw_test_results`, `evaluations`, etc. in place:
+Do not rename these directories in place:
 absolute paths are embedded in immutable results and DB provenance. Symlink
 aliases are rejected by canonical-path checks. Renaming active storage needs
 a separately designed evidence migration, not search-and-replace in config.
-See [raw-database-design.md](raw-database-design.md) and
-[evaluation-database-design.md](evaluation-database-design.md).
+See [raw-database-design.md](raw-database-design.md).
 
 ## Archive Allowlist
 
@@ -36,8 +38,6 @@ Only these root entries may move into `archive/YYYYMMDD_HHMMSS_PDT/` (or PST):
 | `old-files/` | `legacy_bundles/` | Previously retired source/result bundles |
 | `test1/` | `legacy_scratch_tests/` | January scratch-test material |
 
-Current thresholds and classifications are tables inside the derived
-`evaluation-engine/evaluation.db`, not the retired `baselines/` tree.
 Moving directories preserves their contents and does not reclaim PVC capacity.
 
 ## Tool and Gates
@@ -71,6 +71,6 @@ It handles partially completed moves, refuses changed/missing sources or
 occupied original names, and retains the manifest. Never remove archive or
 ingestion lock files while participants can run.
 
-No automatic pruning, row edits, raw-path aliases, or evaluator restart is
+No automatic pruning, row edits, raw-path aliases, or workload restart is
 part of this operation. Publish code first; restart cval-live separately at the
 latest approved main commit, retaining its configured Pending timeout/pruning.

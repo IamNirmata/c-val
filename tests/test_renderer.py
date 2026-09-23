@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import base64
 import hashlib
+import importlib.util
 import io
 import os
 import re
+import select
 import subprocess
 import sys
 import tarfile
@@ -557,6 +560,109 @@ timeout_seconds = 30
         if match is None:
             raise AssertionError("CVAL_RUNTIME_ENV_B64 not found in rendered YAML")
         return _decode_runtime_environment(match.group(1))
+
+
+class PvcAccessDeploymentTests(unittest.TestCase):
+    def test_access_pod_has_stable_startup_and_retains_pvc(self):
+        root = Path(__file__).resolve().parents[1]
+        pod = yaml.safe_load((root / "ymls/gcr-admin-pvc-access.yml").read_text())
+        self.assertEqual(pod["kind"], "Pod")
+        self.assertEqual(pod["metadata"]["name"], "gcr-admin-pvc-access")
+        self.assertEqual(pod["metadata"]["namespace"], "gcr-admin")
+        spec = pod["spec"]
+        self.assertNotIn("nodeName", spec)
+        self.assertIn("ccpu", spec["nodeSelector"]["kubernetes.io/hostname"])
+        self.assertFalse(spec["automountServiceAccountToken"])
+        self.assertNotIn("initContainers", spec)
+        container = spec["containers"][0]
+        self.assertEqual(container["name"], "pvcaccess")
+        self.assertIn("@sha256:", container["image"])
+        self.assertNotIn("nvidia.com/gpu", container["resources"]["requests"])
+        self.assertEqual(container["resources"]["limits"]["memory"], "8Gi")
+        mounts = {entry["mountPath"]: entry for entry in container["volumeMounts"]}
+        self.assertEqual(mounts["/data"]["name"], "data")
+        self.assertFalse(mounts["/data"].get("readOnly", False))
+        self.assertEqual(mounts["/root/.vscode-server"]["name"], "vscode-server")
+        claims = [volume["persistentVolumeClaim"] for volume in spec["volumes"] if "persistentVolumeClaim" in volume]
+        self.assertEqual(claims, [{"claimName": "pvc-vast-gcr-admin"}])
+        script = container["args"][0]
+        self.assertNotIn("/data", script)
+        self.assertNotIn("pip", script)
+        self.assertNotIn("git", script)
+        probe = container["readinessProbe"]["exec"]["command"]
+        subprocess.run([sys.executable, *probe[1:]], check=True, capture_output=True, timeout=10)
+        with subprocess.Popen([sys.executable, *container["command"][1:], *container["args"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 10)[0], "access pod did not start")
+                self.assertEqual(process.stdout.readline().strip(), "PVC access ready")
+            finally:
+                process.terminate()
+                _output, error = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, error)
+
+
+class SourceConfigMapTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = Path(__file__).resolve().parents[1] / "scripts/cval-source.py"
+        spec = importlib.util.spec_from_file_location("cval_source", path)
+        cls.source = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.source)
+
+    @staticmethod
+    def bundle(revision: str) -> bytes:
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": revision}) as archive:
+            entry = tarfile.TarInfo("cval/jobs/bootstrap.sh")
+            entry.size = 4
+            archive.addfile(entry, io.BytesIO(b"true"))
+        return output.getvalue()
+
+    def test_source_only_manifest_matches_validation_transport(self) -> None:
+        bundle = self.bundle(COMMIT)
+        source = self.source.source_manifest(COMMIT, bundle, "gcr-admin")
+        self.assertTrue(source["immutable"])
+        self.assertEqual(source["metadata"]["name"], "cval-source-" + COMMIT[:16])
+        self.assertEqual(source["metadata"]["namespace"], "gcr-admin")
+        self.assertEqual(source["metadata"]["annotations"]["cval/source-commit"], COMMIT)
+        digest = hashlib.sha256(bundle).hexdigest()
+        self.assertEqual(source["metadata"]["annotations"]["cval/source-sha256"], digest)
+        self.assertEqual(base64.b64decode(source["binaryData"]["source.tar.gz"], validate=True), bundle)
+        self.assertNotIn("data", source)
+        base = load_config()
+        config = replace(base, job=replace(base.job, source_configmap=source["metadata"]["name"], source_sha256=digest))
+        rendered = render_validation_job(TEMPLATE, "node-a", timestamp=12345, git_ref=COMMIT, cval_config=config)
+        pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
+        self.assertEqual(pod["volumes"][-1]["configMap"]["items"], [{"key": "source.tar.gz", "path": "source.tar.gz"}])
+
+    def test_rejects_invalid_source_identity_namespace_and_size(self) -> None:
+        bundle = self.bundle(COMMIT)
+        for revision in ("main", "a" * 7, "0" * 40, "A" * 40):
+            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "exact nonzero"):
+                self.source.source_manifest(revision, bundle, "gcr-admin")
+        with self.assertRaisesRegex(ValueError, "commit mismatch"):
+            self.source.source_manifest("b" * 40, bundle, "gcr-admin")
+        with self.assertRaisesRegex(ValueError, "ConfigMap limit"):
+            self.source.source_manifest(COMMIT, b"x" * 900001, "gcr-admin")
+        for namespace in ("", "other/namespace", "UPPER", "x" * 64):
+            with self.subTest(namespace=namespace), self.assertRaisesRegex(ValueError, "DNS label"):
+                self.source.source_manifest(COMMIT, bundle, namespace)
+
+    def test_cli_writes_only_source_and_never_overwrites(self) -> None:
+        bundle = self.bundle(COMMIT)
+        with TemporaryDirectory() as directory:
+            arguments = ["cval-source.py", "--revision", COMMIT, "--namespace", "gcr-admin", "--output-dir", directory]
+            responses = [subprocess.CompletedProcess([], 0, COMMIT + "\n", ""), subprocess.CompletedProcess([], 0, bundle, b"")]
+            with patch.object(sys, "argv", arguments), patch.object(self.source.subprocess, "run", side_effect=responses) as commands:
+                self.source.main()
+                self.assertTrue(all(call.kwargs["timeout"] == 30 for call in commands.call_args_list))
+                self.assertNotIn("evaluation_engine", commands.call_args.args[0])
+            output = Path(directory) / "source-configmap.yaml"
+            original = output.read_bytes()
+            self.assertEqual([path.name for path in Path(directory).iterdir()], [output.name])
+            with patch.object(sys, "argv", arguments), patch.object(self.source.subprocess, "run", side_effect=responses), self.assertRaises(FileExistsError):
+                self.source.main()
+            self.assertEqual(output.read_bytes(), original)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,11 @@
 Review date: 2026-09-22. Baseline:
 `7464e4fc55ec88691d015afdb3ec08ffa246f6c1`.
 
+**Scope revision, 2026-09-23:** the framework ends at successful tests, retained
+PVC logs/results, and verified raw DB ingestion. Downstream evaluation code and
+deployment functionality are removed; see finding 6. Historical operating records
+below describe their original revisions, not the scope of the new release.
+
 **Published and accepted on 2026-09-23:** batches A-B, planning finding 1,
 ingestion finding 2, and the CLI settings cleanup shipped in
 `1abde89ff3d615d0d064b33131542315dc4169c6` on internal `main`. One-node
@@ -12,8 +17,8 @@ The 2026-09-23 settings cleanup also removes single-choice format switches,
 legacy TSV, optional validation ZIP export and duplicate public CLI overrides
 for config-owned targets, job settings and policy limits. The
 [remaining control inventory](components_design/cli-design.md#mode-inventory)
-records replacements. TOML settings, raw writers, canonical evidence and the
-independent evaluator are retained.
+records replacements. Validation settings, raw writers and canonical evidence
+are retained.
 
 **Implemented follow-up:** retire batch C's all-files publish wrapper and
 consolidate documentation (finding 5), followed by shared bootstrap extraction
@@ -119,14 +124,11 @@ and divergent receipts still block publication. Retain symlink/identity checks.
 
 **Completed.** The
 [documentation map](architecture.md#documentation-map) assigns current runtime,
-configuration, operations, evidence and evaluator contracts to existing references.
+configuration, operations and evidence contracts to existing references.
 No additional design document was created.
 
-The evaluator design note now contains rationale and deferred decisions, with
-links to its operating procedure and schema reference instead of duplicated
-deployment instructions and fictional schema examples. The database note links
-filesystem permissions to the current Pod contract instead of claiming a
-read-only raw mount.
+The later raw-only scope revision removes the evaluator's design/schema notes
+and deployment procedures rather than retaining an unsupported downstream design.
 
 The runbook owns the candidate JSON contract. The CLI note retains the mode
 inventory and migration guidance, but replaces its stale local-only roadmap and
@@ -135,6 +137,24 @@ The published `1abde89` acceptance is recorded separately from these later
 follow-ups. Dated rollout evidence is not a current-state
 claim. Local link/reference checks and the customization validator cover this
 documentation-only change; retained operational records are not rewritten.
+
+### 6. Remove Downstream Evaluation
+
+**Implemented; separate release acceptance required.** Removed the evaluator
+package, deployment manifests/tools, per-test baseline/classification modules,
+evaluation configuration and evaluator-only tests/docs. The raw registry no
+longer accepts an evaluation policy in test descriptors.
+
+The shared source-bundling capability is retained as
+[scripts/cval-source.py](../scripts/cval-source.py), which produces one immutable
+validation-source ConfigMap from an exact commit. It creates no evaluator Pod or
+dependency ConfigMap. PVC-access coverage remains in the renderer tests.
+
+Discovery, scheduling, supervisor execution, canonical results/logs, raw exports,
+seven-DB ingestion, retries/locking and Job-success verification remain. No raw
+schemas, historical result formats or PVC paths are migrated or deleted. Any
+already deployed downstream workload/data is left untouched; decommissioning it
+requires separate exact commands and approval.
 
 ## Simple Ownership Model
 
@@ -145,7 +165,7 @@ Keep the existing responsibilities; simplify the hand-offs, not the safety model
 | Live controller and existing scheduler/job APIs | Exact source, candidate priority, fresh eligibility, bounded slots, submission/resume state |
 | Supervisor and registered test runner | Descriptor-owned paths, test setup/execution, deadlines, canonical results and events |
 | Test-owned raw writers | Validated metrics first, final status last, unchanged raw schemas and history |
-| Independent consumers and maintenance | Read-only audit/export, separate evaluator, backup and recovery outside the per-cycle path |
+| Evidence inspection and maintenance | Read-only raw audit/export, backup and recovery outside the per-cycle path |
 
 No new orchestration framework, generic persistence layer, or wholesale directory
 reorganization is proposed. A refactor should remove a duplicate implementation
@@ -200,8 +220,8 @@ runners. Removal needs an external-usage decision and retained behavior coverage
 	descriptor/path/symlink protections, immutable result/config checks, locking,
 	status-last publication, and historical result/path readers. Reuse their code
 	where justified; do not remove checks solely to lower line counts.
-- Keep registered tests/plugins, their regression suites, backup/layout/journal
-	recovery, and the supported evaluator. Their independent entry points or
+- Keep registered tests/plugins, their regression suites, and backup/layout/journal
+	recovery. Their independent entry points or
 	dynamic loading do not make them dead files. Splitting services/packages is
 	a separate product decision, not necessary to obtain the reductions above.
 - Protect raw DBs, PVC contents, backups, run logs, active source/runner worktrees,

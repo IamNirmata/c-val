@@ -320,7 +320,6 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
         "settings",
         "artifacts",
         "plugin",
-        "evaluation",
     }
     _reject_unknown(data, allowed_root, str(path))
     schema_version = _strict_str(data.get("schema_version"), "schema_version")

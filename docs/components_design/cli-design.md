@@ -72,8 +72,8 @@ selected-node validation retains its explicit target and evidence verification.
 | `run --allowed-namespace`, `--max-batch-size` | `policy.namespace_allowlist`, `policy.max_batch_size` |
 
 Choose an alternate config with `--config` before the subcommand. The TOML
-sections were not removed: cluster, scheduler, resources, timeouts, retry policy,
-raw paths and the independent evaluator still use them. The config supplied to
+sections for cluster, scheduler, resources, timeouts, retry policy and raw paths
+remain; downstream evaluation settings are removed. The config supplied to
 `run` is passed through to rendering, including the exact source bundle and
 resource settings. Oversized batches still fail policy validation before creation.
 Hidden ingestion hooks retain explicit evidence/DB arguments and authorization.

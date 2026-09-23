@@ -73,7 +73,7 @@ Every DL DB also has:
 - `cval_ingest_metadata`: current generation ID, state, and update time.
 - `cval_ingest_migrations`: completed additive migrations.
 
-## Evaluator Read Contract
+## Raw Audit Read Contract
 
 Use explicit table names, never the first table in a database. Join DL rows by
 `node, cval_timestamp` to `runs.node, runs.timestamp`; read the stored `run_key`
@@ -88,8 +88,8 @@ generation is a publication marker, not a run ID or an ingestion cursor.
 
 Run timestamps identify submissions, not arrival order: a delayed run can
 commit after a newer one. Do not process new results using only `MAX(timestamp)`.
-The DBs do not provide a complete hardware/test-config cohort; verified run
-provenance is needed before pooling measurements across environments.
+Use canonical run provenance to interpret the metrics; this framework does not
+pool measurements into baselines or derived classifications.
 
 ## Lightweight Review (2026-09-08 UTC)
 
@@ -104,19 +104,14 @@ two rows per DL table. No full counts or integrity scans were repeated.
 - DL files were approximately 3.75 / 5.29 / 0.66 / 3.18 GB
   (numerical / compute / collective / overlap).
 - Historical NCCL tables/views, including `NODE_RANKING`, remain present;
-  they are not evaluation inputs. This sampled review is not a full integrity
+  current raw writers do not use them. This sampled review is not a full integrity
   or freshness guarantee for every node.
-
-The proposed independent evaluator is described in
-[evaluation-engine-design.md](evaluation-engine-design.md); it must not update
-these raw databases.
 
 Raw `db-*` CLI ingestion retries complete commands for SQLite BUSY/LOCKED errors
 using `[sqlite_retry]` in the global config (five attempts, two seconds apart).
 The existing per-connection busy timeout remains in force. Digest validation and
 idempotency checks still run on retries; non-lock errors are not retried.
-This does not make cross-host WAL on NFS safe. The independent evaluator rejects
-that source layout. New DL writer connections require DELETE journaling with
+This does not make cross-host WAL on NFS safe. New DL writer connections require DELETE journaling with
 FULL durability and reject preexisting WAL. A separately approved, quiesced
 four-DB migration creates verified SQLite backups before changing journal mode;
 no schema, run identity, or raw metrics are removed.

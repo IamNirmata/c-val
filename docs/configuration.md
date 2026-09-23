@@ -13,16 +13,14 @@ duplicate command-line overrides for those settings have been removed.
 - `[job]`: template, prefix, source repository, fail-closed Git ref;
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
 - `[monitoring]`: polling and timeout values;
-- `[sqlite_retry]`: SQLite lock retry policy used by ingestion and evaluation;
-- `[evaluation]`: settings for the independent CPU evaluation service;
+- `[sqlite_retry]`: SQLite lock retry policy used by raw ingestion;
 - `[storage]`: authoritative raw SQLite paths;
 - `[runtime]`: repository and retained evidence paths;
 - `[tests.<id>]`: `enabled` and descriptor `config_path` only;
 - `[job_template]`: validation pod resources and image.
 
-These sections are retained because current workflows consume them. The raw
-framework does not classify or rank nodes; `[evaluation]` belongs to the separate
-service and is not a reason to add evaluation to the live submission loop.
+These sections support validation and raw evidence only. Evaluation settings
+have been removed; this repository does not classify, score or rank nodes.
 
 ## Scheduling
 
@@ -42,9 +40,8 @@ and the four `dl_*_db_path` values. The raw DL ingestion lock is
 ## Test descriptors
 
 A `cval.test.v1` descriptor may contain `[test]`, `[requirements]`,
-`[settings]`, `[artifacts]`, optional `[plugin]`, and test-owned `[evaluation]`
-policy. Supported raw plugin capabilities are `config` and `export`; export
-is read-only. The separate evaluator loads the evaluation policy.
+`[settings]`, `[artifacts]` and optional `[plugin]`. Supported raw plugin
+capabilities are `config` and `export`; export is read-only.
 
 Inspect effective inputs with:
 

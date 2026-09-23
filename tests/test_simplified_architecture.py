@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tomllib
 from pathlib import Path
 
 from cval.config import config_to_dict, load_config
@@ -9,8 +10,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SimplifiedArchitectureTests(unittest.TestCase):
+    def test_evaluator_source_and_deployment_files_are_absent(self) -> None:
+        for directory in ("evaluation_engine", "deploy/evaluation-engine"):
+            with self.subTest(directory=directory):
+                remaining = [path for path in (REPO_ROOT / directory).rglob("*") if path.is_file() and "__pycache__" not in path.parts]
+                self.assertEqual(remaining, [])
+
     def test_removed_derived_architecture_is_absent(self) -> None:
         for relative in (
+            "ymls/cval-evaluation-engine.yaml",
             "cval/health",
             "cval/evaluator",
             "cval/baselines",
@@ -38,6 +46,8 @@ class SimplifiedArchitectureTests(unittest.TestCase):
 
     def test_config_has_no_alternate_write_or_state_surfaces(self) -> None:
         payload = config_to_dict(load_config())
+        self.assertNotIn("evaluation", payload)
+        self.assertNotIn("evaluation", tomllib.loads((REPO_ROOT / "config/cval.toml").read_text()))
         self.assertNotIn("baseline", payload)
         self.assertNotIn("health_evaluator", payload)
         self.assertNotIn("run_history_enabled", payload["storage"])
@@ -55,6 +65,9 @@ class SimplifiedArchitectureTests(unittest.TestCase):
                 self.assertNotIn("[health]", text)
                 self.assertNotIn('"ingest"', text)
                 self.assertNotIn('"health"', text)
+                self.assertNotIn("evaluation", tomllib.loads(text))
+                self.assertFalse((REPO_ROOT / f"validation-tests/{test_id}/baseline.py").exists())
+                self.assertFalse((REPO_ROOT / f"validation-tests/{test_id}/classification.py").exists())
 
     def test_builtin_plugins_are_config_and_raw_export_only(self) -> None:
         for test_id in ("storage", "nccl", "dltest"):
@@ -77,6 +90,7 @@ class SimplifiedArchitectureTests(unittest.TestCase):
 
         self.assertNotIn("psycopg", metadata)
         self.assertNotIn("cval.nccl_eval", metadata)
+        self.assertNotIn("evaluation_engine", metadata)
 
 
 if __name__ == "__main__":

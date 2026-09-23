@@ -9,10 +9,9 @@ The goal is to expose selected correctness and performance problems that
 Kubernetes readiness alone cannot establish, without running diagnostic GPU
 workloads alongside active user GPU work.
 
-This repository also contains a **separate CPU evaluation service** that reads
-raw evidence, builds compatible baselines and publishes metric/test
-classifications. The **raw c-val framework** does not evaluate, classify, score
-or rank nodes. Neither component automatically cordons, drains or repairs nodes.
+The framework's scope ends with successful Job execution and verified logs,
+results and raw SQLite ingestion on the PVC. It does not build performance
+baselines, classify or score nodes, or run downstream evaluation or remediation.
 
 ## How It Works
 
@@ -25,15 +24,14 @@ flowchart TD
     Tests --> Evidence["Canonical results, configuration identity and logs"]
     Evidence --> Raw["Validated ingestion into raw SQLite stores"]
     Raw --> History
-    Raw -->|Read-only| Evaluator["Separate CPU evaluation service"]
-    Evaluator --> Derived["Derived metric and test results"]
+    Raw --> Verify["Verify terminal Job success and exact-run evidence"]
 ```
 
 1. Check node readiness, schedulability and available GPU, CPU, memory and RDMA resources.
 2. Select never-tested nodes first, then expired nodes, oldest timestamp first.
 3. Render a bounded batch and submit only with explicit authorization and an exact published commit.
 4. Run enabled tests in registry order, retaining configuration identity, progress, results and logs.
-5. Validate canonical evidence before test-owned raw ingestion; evaluate separately.
+5. Validate canonical evidence, complete test-owned raw ingestion, and verify Job success.
 
 ### Enabled Tests
 
@@ -119,9 +117,9 @@ needs a format selector. Status and planning use JSON rather than legacy TSV.
 ## Configuration
 
 [config/cval.toml](config/cval.toml) controls cluster access, scheduling, job
-resources, storage paths, enabled tests and evaluator cadence. Each test owns
-its benchmark settings, artifacts and optional evaluation policy in its
-descriptor. See [docs/configuration.md](docs/configuration.md) for details.
+resources, storage paths and enabled tests. Each test owns its benchmark settings,
+artifacts and raw export adapter in its descriptor.
+See [docs/configuration.md](docs/configuration.md) for details.
 
 | Setting | Checked-in default |
 | --- | --- |
@@ -131,7 +129,6 @@ descriptor. See [docs/configuration.md](docs/configuration.md) for details.
 | Job resources | 8 GPUs, 100 CPU, 1,500 GiB memory, one RDMA allocation; 256 GiB shared-memory volume |
 | Container image | `nvcr.io/nvidia/pytorch:26.05-py3` |
 | Monitoring | 100-minute timeout, 60-second polling, 20-minute pending-start timeout |
-| Evaluator | Enabled in configuration; independently started/deployed, 60-second wake, 20 runs/test/pass |
 
 Defaults can be overridden; a run's effective configuration is the relevant
 reference. The all-zero default `job.git_ref` deliberately prevents accidental
@@ -181,13 +178,13 @@ status inspection. Every submit-capable operational command requires exact
 to match the current remote branch tip; the script re-fetches, rejects stale
 explicit commits and pins the session.
 
-Loop start/restart, pending-job pruning, job deletion, evaluator deployment and
+Loop start/restart, pending-job pruning, job deletion and
 backup/migration each need separate authorization and rollback planning.
 Pruning has its own `CVAL_PRUNE_CONFIRM=delete-pending` gate. Stopping a loop
 does not delete its Kubernetes jobs. Follow
 [docs/operations-runbook.md](docs/operations-runbook.md) for operational procedures.
 
-## Evidence and Evaluation
+## Evidence
 
 ### Authoritative Raw Evidence
 
@@ -211,36 +208,11 @@ Preserve historical databases and artifacts. They are not automatically migrated
 or pruned. SQLite audits use `mode=ro` and `query_only=ON`; unavailable,
 forbidden, stale, empty and incomplete evidence are distinct conditions.
 
-### Separate Evaluation Service
-
-The evaluator builds cohort-specific baselines from compatible observations
-and publishes derived metric/test results to its own database, by default
-`/evaluation/evaluation.db`. Raw sources remain read-only. Missing provenance,
-thresholds or required coverage remain unclassified, not implicitly healthy.
-Peer numerical consensus is not a certified correctness reference.
-
-Validate its local settings without starting the worker or writing results:
-
-```bash
-python -m evaluation_engine --config config/cval.toml --check-config
-```
-
-Derived writes require explicit evaluation confirmation and an exact published
-revision. Deployment also requires storage/locking checks and separate approval.
-See [deploy/evaluation-engine/README.md](deploy/evaluation-engine/README.md) for
-configuration, deployment, recovery and interpretation limits.
-
 ## Progress and Roadmap
 
-| Milestone | Position |
-| --- | --- |
-| C-VAL 2.0 | Offline validation live, with separate metric/test evaluation |
-| C-VAL 3.0 | Automation in development: cordoning, ticketing, vendor handoff and acceptance-gated return |
-| C-VAL 4.0 | Online validation backlog: workload-correlated signals and hybrid verification |
-
-These are capability milestones, not package versions or a fleet-health claim.
 See [docs/cval-progress.md](docs/cval-progress.md) for progress, reliability
-context and next steps. Automatic remediation is not current framework behavior.
+context and next steps within raw validation. Downstream analysis and automatic
+remediation are outside this repository's scope.
 
 ## Development
 
@@ -252,7 +224,7 @@ python -m unittest discover -s tests -p 'test_cli.py'
 
 Local tests do not replace exact-commit cluster acceptance. A new validation
 test registers a repository-local `cval.test.v1` descriptor and owns its setup,
-execution, artifacts and optional persistence/evaluation extensions. Start with
+execution, artifacts and optional raw-export adapters. Start with
 `cval tests describe <test-id>` and
 [docs/result-schema.md](docs/result-schema.md).
 
@@ -260,9 +232,9 @@ execution, artifacts and optional persistence/evaluation extensions. Start with
 
 The [cleanup review](docs/cleanup-review.md) separates obsolete prototypes and
 historical planning material from live dependencies, compatibility interfaces
-and recovery tools. The retired evaluation prototypes and historical planning
-bundle (A and B) have been removed; the remaining candidates require separate
-approval. Keep raw evidence, operational logs and rollback assets.
+and recovery tools. Evaluator code, deployment assets and test-owned baseline/
+classification scripts have been removed. Existing PVC data and live resources
+are not deleted by a source change. Keep raw evidence, logs and rollback assets.
 
 ## Documentation
 
@@ -274,6 +246,5 @@ approval. Keep raw evidence, operational logs and rollback assets.
 | Configuration reference | [docs/configuration.md](docs/configuration.md) |
 | Operations and backups | [docs/operations-runbook.md](docs/operations-runbook.md) |
 | Results, progress and ingestion contracts | [docs/result-schema.md](docs/result-schema.md) |
-| Evaluator deployment and operations | [deploy/evaluation-engine/README.md](deploy/evaluation-engine/README.md) |
 | Cleanup candidates and retention decisions | [docs/cleanup-review.md](docs/cleanup-review.md) |
 | Prioritized framework improvements | [docs/cval-improvement-plan.md](docs/cval-improvement-plan.md) |

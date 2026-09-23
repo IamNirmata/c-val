@@ -1,1 +1,0 @@
-"""Independent derived evaluation; never part of raw validation ingestion."""
