@@ -157,8 +157,8 @@ values or historical formats with a new combined status.
 
 ### Run Result Categories
 
-Proposed display labels, derived from existing Job observations, canonical results
-and exact-run raw records. No new database, persisted status enum or reporting
+Phase 0 reporting contract for later implementation, derived from existing Job
+observations, canonical results and exact-run raw records. No new database, persisted status enum or reporting
 framework is needed. Show the affected tests when a run has mixed progress.
 
 | Category | Meaning | Required Distinction |
@@ -203,6 +203,24 @@ Job observations come from Kubernetes; run/test identity and outcome come from
 canonical results; ingestion completeness comes from matching raw rows/receipts
 and provenance. Progress logs help diagnosis but cannot override any of these.
 Contradictions are reported, not resolved by selecting the most favorable source.
+
+### Phase 0 Decision Rules
+
+1. The reviewed request defines required tests. Disabled/out-of-scope tests stay
+   `Not selected`; silently skipping a required test cannot produce acceptance.
+2. Report per-test progress. For the whole run: any executing required test means
+   `Running`; a terminal run with some required workloads unrun is `Ran incompletely`.
+   Only claim `Not started` when no required workload began and this is observable.
+3. Apply usable-result and DB categories only after execution completeness is known.
+   `none` requires successful exact-run reads proving required writes absent;
+   transport failures remain `Cannot verify`. Keep pending versus failed ingestion visible.
+4. A failed built-in test requires its failure records, not invented passing metric
+   rows. A result-only custom test requires no new DB. Existing built-in final status
+   publication still follows all required metric writes.
+5. All required tests must pass for acceptance. Full evidence for a failed test is
+   retained, not converted to success. These labels do not replace raw `pass/fail/incomplete`.
+6. C3 owns the [retest decisions](discovery-scheduling-major-component.md#phase-0-retest-decisions);
+   C4 owns cooldown, unresolved work and admission. No category alone starts a retry.
 
 ## End-to-End Process
 
@@ -398,15 +416,19 @@ Carry useful current contracts into replacement pages before deleting superseded
 notes. Repair all incoming links. Keep historical observations explicitly dated;
 do not read or modify conversation archives or user-owned untracked files.
 
-## Decisions Before Implementation
+## Phase 0 Decision Record
 
-| Decision | Owner | Blocks |
+Contracts are fixed below; implementing them is Phase 1 onward. Real host/node,
+source/config and mutation commands are bound by each separate operational approval,
+not inferred from this document or the local Git checkout.
+
+| Decision | Owner | Contract / Remaining Gate |
 | --- | --- | --- |
-| Exact workload compatibility inputs and missing-history behavior | C1/C3/C6/C7 | Coverage-policy implementation, not read-only inventory. |
-| Designated host, state durability and ownership-transfer procedure | C4 | Any new admission/reconciliation implementation. |
-| Supported Kubernetes resource-accounting cases | C3 | Eligibility equivalence claims. |
-| Immutable image/DL artifact supply and recorded identity format | C6/C8 | Dependency pinning rollout. |
-| External users and migration window for each retired interface | C2 | Retirement only; fixes can preserve existing commands. |
+| Workload compatibility and unreadable history | C1/C3/C6/C7 | [Retest policy](discovery-scheduling-major-component.md#phase-0-retest-decisions); no fabricated provenance or premature activation of producer-dependent rules. |
+| Admission storage and ownership | C4 | [State contract](job-control-major-component.md#phase-0-state-contract); one approved host/session, serialized creates, v2 for new intent-bearing sessions and preserved v1 history. |
+| Resource-accounting limits | C3 | Accept only supported, observed node/pod resource forms; reject unknown accounting rather than claim scheduler-equivalence. Verify deployed cases during real acceptance. |
+| Dependency identity | C6/C8 | Use pinned image plus immutable DL artifact or verified run-local copy; concrete artifacts and additive provenance fields are Phase 3 release inputs, not retroactive requirements on old runs. |
+| Interface retirement | C2 | [Compatibility inventory](operator-interface-major-component.md#phase-0-compatibility-inventory): no retirement in Phase 1; unknown external callers keep interfaces supported. |
 
 Do not silently choose a new service, database, public plugin capability or
 on-disk schema to resolve these decisions. Record the smallest compatible choice

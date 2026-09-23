@@ -112,6 +112,29 @@ Exact source, run timestamp, deadlines, selection filters and export destination
 remain purposeful inputs. NCCL recovery confirmation, immutable-result arguments
 and rebuild `--only-missing` are safety/data contracts, not cosmetic clutter.
 
+## Phase 0 Compatibility Inventory
+
+Source/caller review at `b79a5e0`; not usage telemetry. Scope: tracked runtime,
+scripts, descriptors/templates, runbook and workspace operational collectors.
+Private external callers are unknown, so Phase 1 preserves every interface below.
+
+| Retained Interface | Observed Caller / Evidence | Compatibility Decision |
+| --- | --- | --- |
+| `nodes`, `status`, `plan`, `run`, `jobs` | [Live loop](../../scripts/cval-live.sh#L775) consumes these commands and JSON. | Keep command/flag names, explicit empty node input and consumed JSON fields; fix decisions behind them. |
+| `validate` | [Targeted workflow](../../cval/orchestrator/validate.py#L351) and operator runbook. | Keep exact node/ref/timestamp, confirmation, watch and report semantics; no automatic cleanup. |
+| `config`, `tests list/describe/validate` | CLI operator interfaces; descriptor inspection is local, not GPU testing. | Keep effective config and catalog access without creating cluster work. |
+| `results` and plugin exports | [CLI export dispatch](../../cval/cli.py#L673) and registered config/export adapters. | Preserve CSV columns/aliases until an explicit migration; no new wrapper JSON envelope. |
+| Four `db-add-*` hooks and `db-rebuild-dltest-metrics` | [Parser](../../cval/cli.py#L287); normal ingestion calls writers directly. External use unknown. | Retain guarded compatibility/maintenance paths; not approved for retirement. |
+| Runner, environment and ingestion entry points | [Supervisor](../../cval/validation/supervisor.py#L495) and [DB launcher](../../validation-tests/db-update.sh). | Preserve child exit/signal behavior and authorized evidence handoff. |
+| Top-level and per-test shell aliases | [Runner alias](../../validation-tests/run-test.sh), storage/NCCL/DL wrappers; descriptors select canonical per-test runners. | Keep aliases while external use is unknown; no new aliases. |
+| Live lifecycle, source and maintenance scripts | Runbook, workspace live-status collector and source-shipping workflow. | Preserve status/start/stop and independent mutation gates; helpers may be consolidated behind stable entry points. |
+
+Decision: no public command, output format, alias or writer hook is removed in
+Phase 1. C2 stays a thin adapter; retain existing implementation until its owner
+can replace it without stranding callers. Unknown external usage blocks retirement,
+not correctness fixes that preserve the interface. Python helpers are internal;
+all repository call sites must move together if an internal signature changes.
+
 ## Removed Settings and Migration
 
 These removals predate the redesign; they are not new implementation work.

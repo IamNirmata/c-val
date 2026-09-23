@@ -1,7 +1,8 @@
 # Redesign Development Plan
 
-Status: proposed; no development task below is marked complete.
-Architecture baseline: `9930c63`; this pass revises the `37a69ca` development plan (2026-09-23).
+Status: Phase 0 contracts complete; Phases 1-6 are not started.
+Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
+acceptance are claimed. Implementation and live mutation approvals remain separate.
 Shared contracts live in [Redesign.md](Redesign.md).
 Component IDs refer to the [major-component overview](major-components-overview.md).
 
@@ -51,26 +52,41 @@ baseline measurements; no runtime changes or new testing framework.
 
 ### Tasks
 
-- [ ] **0.1** Confirm each component's inputs, outputs and mutation boundary; list
+- [x] **0.1** Confirm each component's inputs, outputs and mutation boundary; list
   commands/callers that must keep working. Merge responsibilities where separation
   adds handoffs without independent logic; nine current labels are not nine required modules.
-- [ ] **0.2** Agree the [run result categories](Redesign.md#run-result-categories):
+- [x] **0.2** Agree the [run result categories](Redesign.md#run-result-categories):
   not started, running, incomplete, missing results, results without DB writes,
   partial writes and fully recorded. Keep pass/fail and unknown/conflicting reads separate.
   Apply C3's coverage/retest rules to these facts; a category alone never authorizes rerun.
-- [ ] **0.3** Specify designated-host admission, durable intent/receipt and trusted
+- [x] **0.3** Specify designated-host admission, durable intent/receipt and trusted
   expected identities using existing state/models. Check whether the same Job started
   before retrying a lost confirmation; introduce no general workflow engine.
-- [ ] **0.4** Define one lean real-node validation procedure using existing CLI,
+- [x] **0.4** Define one lean real-node validation procedure using existing CLI,
   logs/results and read-only raw-DB verification. Record exact commit, node, settings,
   expected result category and acceptance evidence; obtain approval before execution.
-- [ ] **0.5** Record exact source, component sizes, subprocess/API counts, startup
+- [x] **0.5** Record exact source, component sizes, subprocess/API counts, startup
   time and bundle size where measurable. Label unavailable measurements explicitly.
 
 **Done when:** Each responsibility has one owner, the categories and failure rules
 are clear, and the real-node procedure plus available baseline measurements are
 recorded. No fake test infrastructure is created; unobserved cases remain unverified.
 **Risk/control:** Low; unresolved caller/freshness decisions block affected changes.
+
+### Phase 0 Completion Evidence
+
+| Task | Recorded Decision / Evidence |
+| --- | --- |
+| 0.1 | [Ownership contract](major-components-overview.md#phase-0-ownership-contract) and [caller inventory](operator-interface-major-component.md#phase-0-compatibility-inventory); preserve existing interfaces, including externally unknown hooks. |
+| 0.2 | [Result decision rules](Redesign.md#phase-0-decision-rules) and [retest decisions](discovery-scheduling-major-component.md#phase-0-retest-decisions); incomplete evidence never becomes pass/fresh coverage. |
+| 0.3 | [State contract](job-control-major-component.md#phase-0-state-contract); use existing session storage, version new intent records, preserve legacy files and reconcile uncertain creates. |
+| 0.4 | [Real-node procedure](../operations-runbook.md#real-node-development-procedure); verified against current CLI/collector flags, not executed as a submission. |
+| 0.5 | [Baseline record](major-components-overview.md#phase-0-baseline-record); exact source/file counts and archive size measured, unmeasured runtime costs explicitly unavailable. |
+
+Evidence belongs to this Phase 0 documentation change and the baseline named above.
+No fake tests, new runtime modules or synthetic DBs were created. External caller
+uncertainty blocks retirement; missing future provenance blocks activation of stricter
+compatibility rules. Neither is treated as a successful validation or silently ignored.
 
 ## Phase 1: Fix Correctness
 
@@ -91,7 +107,9 @@ CLI names and raw schemas remain.
 - [ ] **1.5** Implement outcome-specific exact-run verification against expected
   request identity; bound generation-change retries. Keep evidence and acceptance separate.
 - [ ] **1.6** Implement compatible-coverage reads and exact-run exports; distinguish
-  forbidden/unavailable history from empty or incomplete evidence. Review output compatibility.
+  forbidden/unavailable history from empty or incomplete evidence. Keep the declared
+  legacy age policy until new dependency provenance is produced and its comparison
+  is accepted; review output compatibility before activating stricter coverage rules.
 
 **Done when:** Approved real-node runs and retained real failure evidence demonstrate
 the required eligibility, receipt and exact-run evidence behavior. Document cases

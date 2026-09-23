@@ -144,6 +144,44 @@ persist observation timestamps but use a monotonic clock for elapsed time.
 Restart reads saved records and re-observes reality; it never invents a successful
 submission, empty queue or fresh approval from missing/corrupt state.
 
+## Phase 0 State Contract
+
+Decision for Phase 1 implementation; no session files are changed in Phase 0.
+The [current helper](../../scripts/cval-live-state.py#L16) writes
+`cval.live-state.v1`, a strict eight-column `jobs.csv` and derived summary.
+Use the existing session directory and helpers, not a new database or event engine.
+
+| Record | Required Content |
+| --- | --- |
+| Session identity | Cluster identity without credentials, namespace, canonical validation root, approved control-host identity and session ID. |
+| Pinned inputs | Exact source SHA, immutable effective config snapshot/digest and source artifact identity; recorded once per session. |
+| Per-Job intent | Existing job/run/node/timestamp identity, observed node UID, requested manifest digest and retained approval/rollback reference. |
+| Create observation | Whether create was attempted, known/uncertain outcome, returned/observed Job UID and timestamps; unknown fields stay unknown. |
+| Recovery evidence | Existing submission response and exact-observation artifacts; no regenerated approval or new run ID after a lost reply. |
+
+Use `cval.live-state.v2` for new sessions requiring intent records. Keep `jobs.csv`
+columns and operator summary as compatible projections; v2 intent/receipt data is
+authoritative for admission. Read historical v1 records without rewriting them.
+V1 sessions lacking intent identity need explicit reconciliation before takeover;
+do not pretend a legacy row proves a modern admission check.
+
+One local scope-wide admission lock serializes prepare/check/create/receipt and
+state updates across supported submitters. Keep it separate from the existing
+long-lived loop-owner lock. Persist intent before create, including file and parent
+directory durability; the cooldown helper already demonstrates that write pattern.
+Do not hold the short lock while a workload runs, and do not use an unverified
+shared-PVC lock as cross-host ownership proof.
+
+All submitters bind the same active session. A different host, scope, source or
+effective configuration requires an explicitly reviewed session turnover after
+outstanding work is reconciled; it is not silently merged. Initially this may
+refuse a manual command while an incompatible live session exists. No request
+queue, RPC service or multi-controller failover is introduced.
+
+Rollback never points a v1-only writer at v2 state or rewrites v2 as v1. Preserve
+both records; reconcile tracked Jobs before starting a separately approved compatible
+session. Missing/corrupt state or failed receipt persistence stops new admission.
+
 ## Acceptance and Risk
 
 Use approved real-node runs and retained real session/Job records to verify

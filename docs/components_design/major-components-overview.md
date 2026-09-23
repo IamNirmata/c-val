@@ -51,6 +51,33 @@ without building fake-cluster or synthetic-test infrastructure.
 | C8 | [Source delivery](source-delivery-major-component.md) | Build verified, exact-commit source and self-contained Job startup. | [Source renderer](../../scripts/cval-source.py) |
 | C9 | [Recovery and maintenance](recovery-maintenance-major-component.md) | Inspect, back up and restore evidence under separate approval. | [Backup](../../scripts/cval-backup.py) |
 
+## Phase 0 Ownership Contract
+
+Development decisions, not a claim that all current paths already enforce them.
+Keep existing modules; no new service, directory split or forwarding wrapper is required.
+
+| Owner | Receives | Owns / Returns | Must Not Own |
+| --- | --- | --- | --- |
+| C1 Configuration/catalog | Reviewed config and test descriptors | Frozen settings, selected tests and input identity | Cluster observations or job creation |
+| C2 CLI | Operator arguments and component responses | Parsing, compatible output and exit behavior | A second scheduler, writer or acceptance policy |
+| C3 Selection | Node/pod observations, C1 requirements and C7 history | Eligibility reasons and ordered due candidates | Rendering, reservations or submission |
+| C4 Job control | Candidates, exact request and approval | Slot/node admission, create, receipts, observation and acceptance | Test metric interpretation or raw DB writes |
+| C5 Runtime | Admitted run identity and C6 catalog | Protected evidence paths, process lifecycle and canonical results | Node selection or benchmark-specific metric meaning |
+| C6 Workloads | Settings and runtime-provided paths | Actual tests, measurements and required output definitions | Job creation or framework-wide persistence |
+| C7 Evidence | Canonical results, test-owned outputs and expected identity | Authorized raw writes; read-only exact-run/history reports | Resubmission, node-health verdicts or automatic repair |
+| C8 Delivery | Exact source/config and placement inputs | Verified source artifacts and rendered manifests | Approval or activation decisions |
+| C9 Maintenance | Reviewed scope, identities and approval | Separately gated backup/layout/journal operations | Automatic work in the validation loop |
+
+Keep C2/C8 as adapters to existing functions. C5/C6 share the in-pod execution
+path but retain different responsibilities: process/evidence safety versus test
+meaning. C7 retains explicit per-test writers. Merge duplicate implementations
+inside these owners, not their safety boundaries.
+
+The current [plan handler](../../cval/cli.py#L552) and
+[submission manager](../../cval/jobs/manager.py#L43) demonstrate the planning/create
+split. Their shared caller's supplied node list is not fresh eligibility proof;
+closing that admission gap belongs to Phase 1, not this contract-only phase.
+
 ## Proposed Flow
 
 ```mermaid
@@ -102,6 +129,27 @@ estimates of the future implementation or a reason to discard tests.
 | C8 | 3 | 757 | 3 | 241 | 1 | 669 |
 | C9 | 4 | 2,389 | 1 | 80 | 3 | 1,146 |
 | Total | 70 | 20,721 | 14 | 599 | 33 | 14,077 |
+
+### Phase 0 Baseline Record
+
+Measured at published source `b79a5e04803277a261285556d014b2885e8c1868`.
+All 117 counted code/config/test blobs match the `647848a` inventory byte-for-byte;
+the component table above therefore remains the valid source-size baseline.
+
+| Measure | Baseline | Evidence / Limit |
+| --- | --- | --- |
+| Source bundle | 276,294 compressed bytes | Exact `git archive` paths from the checked-in source renderer; matches its retained immutable manifest. |
+| Bundle SHA-256 | `183165e8876d174d39b15d1385591d5d352ccbfebdfd8bc4ed21336e6050c5ae` | Embedded Git identity matches the full baseline SHA. |
+| Live-loop CLI call sites | 11 | Static source sites across five commands; not calls per executed cycle. |
+| Executed subprocess/API counts | Unavailable | No instrumented real cycle at this exact revision; no synthetic substitute. |
+| Startup/execution/ingestion timings | Unavailable | No newly approved exact-baseline validation was run in Phase 0. |
+
+Read-only context at `2026-09-23T23:45:23Z`: the live-status collector observed a
+running session pinned to `1abde89`, whose saved Job records contained eight
+Completed and one Pending. These are recorded session observations, not a new
+canonical/raw acceptance audit, and not evidence that `b79a5e0` is active.
+The collector output and full measurement JSON are retained locally under run-logs,
+outside the published source. No live Job, source object or controller was changed.
 
 ## Measurement Method
 

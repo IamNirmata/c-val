@@ -93,6 +93,68 @@ checkout directory. It then runs the same descriptor-anchored supervisor.
 Publishing the ConfigMap and submitting the Job remain separate gated operations.
 Do not put personal Git credentials in a ConfigMap, Pod environment, or manifest.
 
+### Real-node development procedure
+
+Phase 0 procedure; the templates below are not approval to execute a mutation.
+Use existing commands only, from the exact published checkout. Retain one local
+record containing source SHA, reviewed config/snapshot digest, node, unused run
+timestamp, selected tests/settings, source/manifest identity, approval and rollback.
+Expected successful category: `Fully recorded`, required tests `pass`.
+
+| Step | Required Action / Evidence | Gate |
+| --- | --- | --- |
+| 1. Prepare | Verify published source, effective config, dependency identities and immutable source object if used. | Source creation needs its own exact approval; preparation is not activation. |
+| 2. Observe | Inspect existing controller/Jobs and the selected node. Require Ready, all GPUs free, CPU/memory/RDMA sufficiency and known ownership. | A drained cordon may be explicitly targeted; unknown/busy state blocks submission. |
+| 3. Submit | Approve the literal command, node, timestamp, inputs and rollback; recheck volatile conditions immediately before create. | One approved real Job, no fake workload or silent retry. |
+| 4. Observe completion | Retain Job/pod UID and assigned node, phase, container exit, CLI output/error/exit status, logs and events. | A timeout or lost reply means reconcile the same identity, not submit again. |
+| 5. Verify evidence | Canonical run/test identity and digests, selected-test outcomes, terminal ingestion and exact-run raw rows/receipts. | Successful terminal Job plus all required evidence; never latest-row substitution. |
+| 6. Record outcome | Use the result categories, keeping test outcome and DB state separate; retain any incomplete/unavailable evidence. | Activation, cancellation and another run each retain separate approval gates. |
+
+Read-only targeted check, with a bounded Kubernetes client:
+
+```bash
+CVAL_KUBECTL_TIMEOUT_SECONDS=120 python3 -m cval.cli \
+	--config "${CVAL_CONFIG:?Set reviewed config}" nodes \
+	--check-node "${CVAL_NODE:?Set reviewed node}" --output json
+```
+
+Only after exact submission approval:
+
+```bash
+python3 -m cval.cli --config "${CVAL_CONFIG:?Set reviewed config}" validate \
+	--node "${CVAL_NODE:?Set reviewed node}" \
+	--git-ref "${CVAL_GIT_REF:?Set exact published commit}" \
+	--timestamp "${CVAL_RUN_TIMESTAMP:?Set unused approved timestamp}" \
+	--submit --confirm submit --output json
+```
+
+`validate` already watches the Job. If observation is interrupted, use the existing
+`jobs --jobs <recorded-name> --watch` command; do not invoke `validate` to inspect it.
+Keep the successful terminal phase requirement even when the watch command exits zero.
+
+In this workspace, reuse the existing read-only raw collector from the workspace
+root (it is workspace tooling, not part of the nested c-val package):
+
+```bash
+python3 .github/skills/cval-node-health-audit/scripts/node-evidence.py \
+	"${CVAL_NODE:?Set exact assigned node}" --timestamp "${CVAL_RUN_TIMESTAMP:?}" \
+	--namespace "${CVAL_NAMESPACE:?Match reviewed config}" \
+	--pvc-pod "${CVAL_PVC_POD:?Match reviewed reader}" \
+	--output "${CVAL_AUDIT_OUTPUT:?Set new JSON path with existing parent}"
+```
+
+This collector checks exact raw rows with read-only/query-only SQLite; it does not
+prove canonical files, result/config digests, event order or Job success. Complete
+those checks using retained PVC artifacts and Job observations. For the full built-in
+profile verify four status rows, storage/NCCL metrics, four DL stores, expected rank
+coverage/receipts and stable completed generations. Expectations come from the
+reviewed profile, not another run. Result-only or disabled tests have different
+requirements as defined in the [result contract](components_design/Redesign.md#run-result-categories).
+
+If the collector or evidence is unavailable, keep acceptance pending and retain the
+reason. Do not replace it with a new audit script, fabricated rows or latest CSVs.
+Do not damage raw data or interrupt unrelated workloads to manufacture a failure case.
+
 ## Quick test workflow
 
 Use this staged smoke test before deeper framework acceptance. It reuses existing

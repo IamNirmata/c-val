@@ -83,7 +83,8 @@ and the Kubernetes/scheduler package initializers. Tests:
 
 ## Coverage Policy
 
-Proposed policy to agree in Phase 0 and verify against real evidence:
+Phase 0 decision for implementation; current scheduling remains unchanged until
+the relevant producer/reader changes pass real-node acceptance.
 
 | Observation | Scheduling Meaning |
 | --- | --- |
@@ -94,10 +95,36 @@ Proposed policy to agree in Phase 0 and verify against real evidence:
 | Readable history without proven compatible evidence | Due with an explicit reason; never invent a compatible identity. |
 | Forbidden/unavailable history | Pause automatic admission; do not reinterpret it as never tested. |
 
-Compare the required test set, descriptor/workload inputs and recorded dependency
-identity, not only the global config digest or latest per-node timestamp. C1/C6
-must specify which inputs affect compatibility. Do not combine unrelated per-test
-runs into a complete run implicitly or rewrite historical rows to add missing identity.
+Use the newest single compatible run that fully exercised every currently required
+test and has complete outcome-appropriate evidence. Do not combine unrelated runs.
+An extra previously selected test does not invalidate coverage of the requested
+subset; a newly required test needs its own coverage in that same run.
+
+### Phase 0 Retest Decisions
+
+| Decision | Rule |
+| --- | --- |
+| Age threshold | Retest when coverage age is strictly greater than configured `days_threshold`; the checked-in default is 7 days. At the boundary it is still fresh. |
+| Full workload reported fail | May refresh coverage, never acceptance, only when summaries prove the intended workload finished; `phase=finished` alone is insufficient. |
+| Incomplete latest attempt | Does not replace an older valid coverage timestamp. Retain the new failure/incomplete outcome separately. |
+| No compatible complete run | Due with a reason; no history differs from readable but incompatible/incomplete history. |
+| Pending/uncertain Job or ingestion | C4 reconciles it before another workload is admitted for that node. A DB problem is not an automatic benchmark retry. |
+| Cooldown | Preserve the configured submission cooldown independently of coverage; checked-in default is 14,400 seconds. |
+| Unknown history access | Pause automatic admission; a read failure is not permission to treat the node as never tested. |
+
+Compatibility inputs are required test IDs, per-test descriptor digest, workload/
+setup/summary code identity, image/dependency identity, and external DL source/plan
+identity where applicable. Global polling/cooldown settings and documentation do
+not affect workload compatibility. Source SHA always remains exact-run provenance;
+it is not a reason by itself to rerun unchanged workload content.
+
+The baseline envelope records Git ref, descriptor digests, image name and framework
+versions, but not a complete immutable external-DL identity. Decision: no backfill,
+invented digest or new compatibility database. Phase 1 can expose coverage/reasons
+from existing evidence; stronger dependency comparisons become active only after
+Phase 3 records their reviewed inputs. Until then retain the declared legacy
+timestamp policy with its provenance limitation, rather than silently claiming
+strict compatibility or causing repeated fleet-wide revalidation.
 
 ## Observation Limits
 
