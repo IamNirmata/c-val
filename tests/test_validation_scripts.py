@@ -47,6 +47,23 @@ class ValidationScriptTests(unittest.TestCase):
             with lock_path.open("r+") as contender:
                 fcntl.lockf(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    def test_dl_metric_lock_context_detects_replacement_and_keeps_original_file(self) -> None:
+        import runpy
+
+        metric_lock = runpy.run_path(str(REPO_ROOT / "scripts/dl-metric-lock.py"))["metric_lock"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path = root / ".dl-metric-ingest.lock"
+            with metric_lock(lock_path) as verify:
+                verify()
+                retained = root / "original.lock"
+                lock_path.rename(retained)
+                lock_path.touch(mode=0o600)
+                with self.assertRaisesRegex(OSError, "identity changed|inode changed"):
+                    verify()
+            self.assertTrue(retained.is_file())
+            self.assertTrue(lock_path.is_file())
+
     def test_nccl_summary_finalizer_parses_hca_samples_and_requires_them(self) -> None:
         self.assertEqual(
             summarize_ibbw(
@@ -273,48 +290,134 @@ printf '%s\n' \
         self.assertIn("test_started", runner)
         self.assertIn("test_finished", runner)
 
+    def test_ingestion_coordinator_validates_identity_and_snapshot_before_writes(self) -> None:
+        from cval.storage.run_ingest import authorize_run, ingest_run
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = load_config()
+            config = replace(
+                base,
+                runtime=replace(base.runtime, validation_root=str(root)),
+                storage=replace(base.storage, **{
+                    name: str(root / "metadata" / Path(value).name)
+                    for name, value in vars(base.storage).items()
+                }),
+            )
+            result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(json.dumps({
+                "schema_version": "cval.results.v1", "node": "node-a", "timestamp": "123",
+                "overall": "incomplete", "tests": {
+                    test: {"enabled": False, "status": "incomplete"}
+                    for test in ("storage", "nccl", "dltest")
+                },
+            }))
+            environment = build_runtime_environment(config) | {
+                "GCRNODE": "node-a", "GCRTIME": "123", "CVAL_RUN_ID": "node-a-123",
+                "CVAL_RESULT_JSON_FILE": str(result_path), "CVAL_REPO_DIR": str(REPO_ROOT),
+                "CVAL_VALIDATION_ROOT": str(root),
+            }
+            authorization = authorize_run(environment)
+            self.assertEqual(authorization.result.node, "node-a")
+            self.assertEqual(authorization.config.storage, config.storage)
+            for name, value in (
+                ("GCRNODE", "other"), ("GCRTIME", "124"), ("CVAL_RUN_ID", "other-123"),
+                ("CVAL_CONFIG_SNAPSHOT_B64", ""), ("CVAL_CONFIG_DIGEST", "changed"),
+                ("CVAL_STORAGE_DB_PATH", str(root / "other.db")),
+                ("CVAL_DL_METRIC_LOCK_FILE", str(root / "other.lock")),
+                ("CVAL_NCCL_ITERATIONS", "999"), ("CVAL_IBBW_ENABLED", "false"),
+            ):
+                with self.subTest(setting=name), self.assertRaises(ValueError):
+                    authorize_run(environment | {name: value})
+            self.assertEqual(list(root.glob("**/*.db")), [])
+            with patch("subprocess.Popen", side_effect=AssertionError("Ingestion must call writers directly")):
+                ingest_run(environment)
+            with closing(sqlite3.connect(config.storage.validation_db_path)) as connection:
+                rows = connection.execute("SELECT test, result FROM runs ORDER BY rowid").fetchall()
+            self.assertEqual(rows, [
+                ("storage", "incomplete"), ("nccl", "incomplete"),
+                ("dltest", "incomplete"), ("all", "incomplete"),
+            ])
+            events = [json.loads(line) for line in (result_path.parent / "events.jsonl").read_text().splitlines()]
+            self.assertEqual([(event["event"], event["status"]) for event in events], [
+                ("ingestion_started", "incomplete"), ("ingestion_finished", "pass"),
+            ])
+
+    def test_coordinator_dl_failure_releases_lock_and_withholds_status(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from cval.storage.run_ingest import ingest_run
+
+        for failure in (ValueError("invalid DL evidence"), SystemExit(143)):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                base = load_config()
+                config = replace(
+                    base,
+                    runtime=replace(base.runtime, validation_root=str(root)),
+                    storage=replace(base.storage, **{
+                        name: str(root / "metadata" / Path(value).name)
+                        for name, value in vars(base.storage).items()
+                    }),
+                )
+                result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
+                result_path.parent.mkdir(parents=True)
+                result_path.write_text(json.dumps({
+                    "schema_version": "cval.results.v1", "node": "node-a", "timestamp": "123",
+                    "overall": "pass", "tests": {
+                        "storage": {"enabled": False, "status": "incomplete"},
+                        "nccl": {"enabled": False, "status": "incomplete"},
+                        "dltest": {"enabled": True, "status": "pass"},
+                    },
+                }))
+                environment = build_runtime_environment(config) | {
+                    "GCRNODE": "node-a", "GCRTIME": "123", "CVAL_RUN_ID": "node-a-123",
+                    "CVAL_RESULT_JSON_FILE": str(result_path), "CVAL_REPO_DIR": str(REPO_ROOT),
+                    "CVAL_VALIDATION_ROOT": str(root),
+                }
+                with (
+                    patch("cval.storage.run_ingest.ingest_dltest_run", side_effect=failure) as dl_writer,
+                    patch("cval.storage.run_ingest.add_validation_run_results") as status_writer,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    with self.assertRaises(type(failure)):
+                        ingest_run(environment)
+                dl_writer.assert_called_once()
+                status_writer.assert_not_called()
+                self.assertFalse(Path(config.storage.validation_db_path).exists())
+                events = [json.loads(line) for line in (result_path.parent / "events.jsonl").read_text().splitlines()]
+                self.assertEqual([(event["event"], event["status"]) for event in events], [
+                    ("ingestion_started", "incomplete"), ("ingestion_finished", "fail"),
+                ])
+                lock_path = root / "metadata/.dl-metric-ingest.lock"
+                self.assertTrue(lock_path.is_file())
+                subprocess.run([
+                    sys.executable, "-c",
+                    "import fcntl,sys; handle=open(sys.argv[1], 'r+'); fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+                    str(lock_path),
+                ], check=True, timeout=5)
+
     def test_db_update_records_current_raw_results_only(self) -> None:
         script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(encoding="utf-8")
-
-        self.assertIn('Loading structured test result state from $CVAL_RESULT_JSON_FILE', script)
-        self.assertIn('from cval.validation.results import load_validation_result', script)
-        self.assertIn('from cval.storage.write_provenance import authorize_result_write', script)
-        self.assertIn('validation_result_to_env_lines', script)
-        self.assertIn('PYTHONPATH="$CVAL_REPO_DIR"', script)
+        self.assertIn('exec python3 -m cval.storage.run_ingest', script)
+        self.assertIn('export PYTHONPATH="$CVAL_REPO_DIR', script)
         self.assertNotIn('source "$CVAL_RESULT_ENV_FILE"', script)
-        self.assertIn('result_projection=$(', script)
-        self.assertIn('Result run_id mismatch', script)
-        self.assertIn('--db-path "$CVAL_VALIDATION_DB_PATH"', script)
-        self.assertIn('--db-path "$CVAL_STORAGE_DB_PATH"', script)
-        self.assertIn('--db-path "$CVAL_NCCL_DB_PATH"', script)
-        self.assertIn('db-add-dltest-run', script)
-        self.assertIn('dltest_ingest_dir=${CVAL_CANONICAL_DLTEST_RUN_DIR:-$DLTEST_RUN_DIR}', script)
-        self.assertIn('"$GCRTIME" "$dltest_ingest_dir"', script)
-        self.assertIn('"$CVAL_DL_METRIC_LOCK_HELPER"', script)
-        self.assertIn('metadata/.dl-metric-ingest.lock', script)
-        self.assertIn('db-add-run-results', script)
-        self.assertIn('--storage-result "$GCRRESULT1"', script)
-        self.assertIn('--overall-result "$overall_result"', script)
-        self.assertIn('RUN_STORAGE) RUN_STORAGE="$value"', script)
-        self.assertIn('RUN_NCCL) RUN_NCCL="$value"', script)
-        self.assertIn('is_enabled "$RUN_STORAGE"', script)
-        self.assertIn('is_enabled "$RUN_NCCL"', script)
-        self.assertIn('--image-name "$CVAL_IMAGE_NAME"', script)
-        self.assertIn('emit_cval_event "ingestion_started"', script)
-        self.assertIn('emit_cval_event "ingestion_finished" "pass"', script)
-        self.assertNotIn('nccl-eval', script)
-        self.assertNotIn('CVAL_NCCL_EVALUATION', script)
-        self.assertNotIn('CVAL_NCCL_OUTBOX', script)
-        self.assertIn('--ibbw-log "$nccl_ibbw_ingest_log"', script)
-        self.assertNotIn('DATABASE_URL', script)
-        self.assertNotIn("CVAL_PER_TEST_INGESTION_ENABLED", script)
-        self.assertNotIn("CVAL_RUN_HISTORY_ENABLED", script)
-        self.assertNotIn("db-ingest-test-results", script)
-        self.assertNotIn("db-upsert-run-history", script)
-        self.assertIn('--result-json "$CVAL_RESULT_JSON_FILE"', script)
-        self.assertNotIn('"all" \\\n    "pass"', script)
+        self.assertNotIn('cval.cli', script)
+        self.assertLessEqual(len(script.splitlines()), 8)
 
-    def test_db_update_ingests_passing_dl_metrics(self) -> None:
+    def test_coordinator_ingests_seven_databases_and_retries_before_status(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from cval.storage import dltest_ingest
+        from cval.storage.retry import RetryPolicy
+        from cval.storage.run_ingest import ingest_run
+
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             metadata = root / "metadata"
@@ -399,6 +502,27 @@ printf '%s\n' \
                 ),
                 encoding="utf-8",
             )
+            storage_dir = root / "logs/validation_tests/storage/runs/node-a/node-a-123/artifacts"
+            storage_dir.mkdir(parents=True)
+            for name in (
+                "iodepth_read_1file", "iodepth_write_1file", "numjobs_read_nfiles",
+                "numjobs_write_nfiles", "randread", "randwrite",
+            ):
+                (storage_dir / f"{name}.json").write_text(json.dumps({
+                    "jobs": [{
+                        "read": {"iops": 10 if "read" in name else 0, "bw": 20 if "read" in name else 0},
+                        "write": {"iops": 30 if "write" in name else 0, "bw": 40 if "write" in name else 0},
+                    }],
+                }))
+            nccl_dir = root / "logs/validation_tests/nccl/runs/node-a/node-a-123"
+            (nccl_dir / "artifacts").mkdir(parents=True)
+            ibbw = nccl_dir / "artifacts/ibbw-node-a-123.log"
+            ibbw.write_text("00:00:01 | mlx5_0: 47.250 GB/s\n")
+            (nccl_dir / "summary.json").write_text(json.dumps({
+                "GCR_BUSBW": 44.0, "GCR_ALGBW": 25.0, "GCR_LATENCY": 600.0,
+                "GCR_DATA_SIZE_GB": 8, "GCR_ITERATIONS": 20,
+                "GCR_IBBW_LOG_FILE": str(ibbw),
+            }))
             result_path = root / "logs/job_logs/node-a/node-a-123/result.json"
             result_path.parent.mkdir(parents=True)
             result_path.write_text(
@@ -409,8 +533,8 @@ printf '%s\n' \
                         "timestamp": "123",
                         "overall": "pass",
                         "tests": {
-                            "storage": {"enabled": False, "status": "incomplete"},
-                            "nccl": {"enabled": False, "status": "incomplete"},
+                            "storage": {"enabled": True, "status": "pass"},
+                            "nccl": {"enabled": True, "status": "pass"},
                             "dltest": {"enabled": True, "status": "pass"},
                         },
                     }
@@ -429,14 +553,31 @@ printf '%s\n' \
                 "DLTEST_RUN_DIR": "/proc/self/fd/999/run",
                 "CVAL_CANONICAL_DLTEST_RUN_DIR": str(run_dir),
             }
-            completed = subprocess.run(
-                ["bash", str(REPO_ROOT / "validation-tests/db-update.sh")],
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
+            generations = []
+            original_finalize = dltest_ingest._finalize_dl_generation
+
+            def finalize(paths, generation):
+                self.assertFalse(Path(config.storage.validation_db_path).exists())
+                self.assertTrue(Path(config.storage.storage_db_path).is_file())
+                self.assertTrue(Path(config.storage.nccl_db_path).is_file())
+                generations.append(generation)
+                if len(generations) == 1:
+                    locked = sqlite3.OperationalError("database is locked")
+                    locked.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                    raise locked
+                return original_finalize(paths, generation)
+
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("subprocess.Popen", side_effect=AssertionError("Ingestion must not spawn writers")),
+                patch("cval.storage.run_ingest.load_retry_policy", return_value=RetryPolicy(attempts=2, delay_seconds=0)),
+                patch.object(dltest_ingest, "_finalize_dl_generation", side_effect=finalize),
+                redirect_stdout(output),
+            ):
+                ingest_run()
+            self.assertEqual(len(generations), 2)
+            self.assertNotEqual(*generations)
 
             counts = {}
             for component in (
@@ -452,11 +593,30 @@ printf '%s\n' \
                         "WHERE node = ? AND cval_timestamp = ?",
                         ("node-a", 123),
                     ).fetchone()[0]
+                    self.assertEqual(connection.execute(
+                        "SELECT run_key, sample_dir FROM cval_ingested_runs"
+                    ).fetchall(), [("node-a-123", str(run_dir))])
+                    self.assertEqual(connection.execute(
+                        "SELECT generation_id, state FROM cval_ingest_metadata WHERE id=1"
+                    ).fetchone(), (generations[-1], "complete"))
             with closing(sqlite3.connect(metadata / "validation.db")) as connection:
-                dl_status = connection.execute(
-                    "SELECT result FROM runs WHERE node = ? AND test = ? AND timestamp = ?",
-                    ("node-a", "dltest", 123),
-                ).fetchone()
+                statuses = connection.execute(
+                    "SELECT test, result FROM runs WHERE node=? AND timestamp=? ORDER BY test",
+                    ("node-a", 123),
+                ).fetchall()
+            with closing(sqlite3.connect(config.storage.storage_db_path)) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT node, timestamp, randread_iops, randwrite_iops FROM storage_performance"
+                ).fetchall(), [("node-a", 123, 10.0, 30.0)])
+            with closing(sqlite3.connect(config.storage.nccl_db_path)) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT Node, timestamp, BUS_BW, LATENCY, mlx5_0 FROM IB_HEALTH"
+                ).fetchall(), [("node-a", 123, 44.0, 600.0, 47.25)])
+            self.assertEqual(len(list(metadata.glob("*.db"))), 7)
+            events = [json.loads(line) for line in (result_path.parent / "events.jsonl").read_text().splitlines()]
+            self.assertEqual([(event["event"], event["status"]) for event in events], [
+                ("ingestion_started", "incomplete"), ("ingestion_finished", "pass"),
+            ])
 
         self.assertEqual(
             counts,
@@ -467,8 +627,10 @@ printf '%s\n' \
                 "overlap_performance": 4,
             },
         )
-        self.assertEqual(dl_status, ("pass",))
-        self.assertIn("DL metric DB update completed.", completed.stdout)
+        self.assertEqual(statuses, [(test, "pass") for test in ("all", "dltest", "nccl", "storage")])
+        self.assertIn("DL metric DB update completed.", output.getvalue())
+        self.assertLess(output.getvalue().index("Storage DB update completed."), output.getvalue().index("NCCL IB_HEALTH DB update completed."))
+        self.assertLess(output.getvalue().index("DL metric DB update completed."), output.getvalue().index("Main DB update completed."))
 
     def test_db_update_rejects_passing_dl_run_without_rank_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1043,20 +1205,16 @@ JSON
         self.assertIn("unsafe test plan", completed.stderr)
 
     def test_db_update_ingests_consolidated_ib_health(self) -> None:
-        script = (REPO_ROOT / "validation-tests" / "db-update.sh").read_text(
+        coordinator = (REPO_ROOT / "cval/storage/run_ingest.py").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn(
-            "${CVAL_CANONICAL_STORAGE_OUTPUT_DIR:-$STORAGE_OUTPUT_DIR}",
-            script,
-        )
-        self.assertIn('"$storage_ingest_dir"', script)
-        self.assertIn("db-add-nccl-health", script)
-        self.assertIn('"$NCCL_SUMMARY_FILE"', script)
-        self.assertIn('--iterations "$CVAL_NCCL_ITERATIONS"', script)
-        self.assertIn('--cuda-version "$CVAL_CUDA_VERSION"', script)
-        self.assertIn('--pytorch-version "$CVAL_PYTORCH_VERSION"', script)
+        self.assertIn("CVAL_CANONICAL_STORAGE_OUTPUT_DIR", coordinator)
+        self.assertIn("add_nccl_health_from_summary(", coordinator)
+        self.assertIn("CVAL_CANONICAL_NCCL_SUMMARY_FILE", coordinator)
+        self.assertIn('iterations=settings["iterations"]', coordinator)
+        self.assertIn("cuda_version=result.cuda_version", coordinator)
+        self.assertIn("pytorch_version=result.pytorch_version", coordinator)
 
     def test_structured_validation_result_schema(self) -> None:
         payload = {
@@ -1388,10 +1546,18 @@ bash "$1/db-update.sh"
                 stderr=subprocess.PIPE,
                 check=False,
             )
+            events = [
+                json.loads(line)
+                for line in (result_path.parent / "events.jsonl").read_text().splitlines()
+            ]
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("missing required summary", completed.stderr)
         self.assertFalse((root / "validation.db").exists())
+        self.assertEqual([(event["event"], event["status"]) for event in events], [
+            ("ingestion_started", "incomplete"), ("ingestion_finished", "fail"),
+        ])
+        self.assertIn("missing required summary", events[-1]["message"])
 
     def test_v2_missing_snapshot_writes_no_database(self) -> None:
         from tests.test_results_v2 import payload

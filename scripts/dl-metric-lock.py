@@ -11,6 +11,8 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 
@@ -138,42 +140,19 @@ def _terminate_process_group(
         raise RuntimeError("command process leader was not reaped") from exc
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) < 4 or argv[2] != "--":
-        print("usage: dl-metric-lock.py LOCK_FILE -- COMMAND [ARG ...]", file=sys.stderr)
-        return 2
-    if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")):
-        print(
-            "dl-metric-lock: O_NOFOLLOW/O_DIRECTORY unavailable; refusing work",
-            file=sys.stderr,
-        )
-        return 1
+@contextmanager
+def metric_lock(marker_path: Path) -> Iterator[Callable[[], None]]:
+    """Hold the stable POSIX lock and expose its identity check to the caller."""
 
-    marker_path = Path(argv[1]).expanduser()
+    if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")):
+        raise OSError("O_NOFOLLOW/O_DIRECTORY unavailable; refusing work")
+    marker_path = marker_path.expanduser()
     if not marker_path.is_absolute():
         marker_path = Path.cwd() / marker_path
     marker_path = Path(*marker_path.parts)
     lock_directory = marker_path.parent
-    command = argv[3:]
     fd = -1
     lock_fd = -1
-    process: subprocess.Popen[bytes] | None = None
-    process_group_id: int | None = None
-    group_reaped = False
-    received_signal: int | None = None
-    forwarded_signal = False
-    previous_signal_handlers: dict[int, signal.Handlers] = {}
-
-    def forward_signal(signal_number: int, _frame: object) -> None:
-        nonlocal forwarded_signal, received_signal
-        if received_signal is None:
-            received_signal = signal_number
-        if process_group_id is not None:
-            forwarded_signal = (
-                _signal_process_group(process_group_id, signal_number)
-                or forwarded_signal
-            )
-
     try:
         canonical_directory = lock_directory.resolve(strict=True)
         if canonical_directory != lock_directory:
@@ -203,6 +182,45 @@ def main(argv: list[str]) -> int:
         _assert_path_identity(canonical_directory, identity)
         _assert_lock_identity(marker_path, lock_identity)
         print(f"acquired DL metric lock (POSIX): {marker_path}", flush=True)
+
+        def verify() -> None:
+            _assert_path_identity(canonical_directory, identity)
+            _assert_lock_identity(marker_path, lock_identity)
+
+        yield verify
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if fd >= 0:
+            os.close(fd)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 4 or argv[2] != "--":
+        print("usage: dl-metric-lock.py LOCK_FILE -- COMMAND [ARG ...]", file=sys.stderr)
+        return 2
+
+    command = argv[3:]
+    locks = ExitStack()
+    process: subprocess.Popen[bytes] | None = None
+    process_group_id: int | None = None
+    group_reaped = False
+    received_signal: int | None = None
+    forwarded_signal = False
+    previous_signal_handlers: dict[int, signal.Handlers] = {}
+
+    def forward_signal(signal_number: int, _frame: object) -> None:
+        nonlocal forwarded_signal, received_signal
+        if received_signal is None:
+            received_signal = signal_number
+        if process_group_id is not None:
+            forwarded_signal = (
+                _signal_process_group(process_group_id, signal_number)
+                or forwarded_signal
+            )
+
+    try:
+        verify_lock = locks.enter_context(metric_lock(Path(argv[1])))
         _enable_child_subreaper()
         for signal_number in (signal.SIGINT, signal.SIGTERM):
             previous_signal_handlers[signal_number] = signal.getsignal(signal_number)
@@ -235,8 +253,7 @@ def main(argv: list[str]) -> int:
                 return_code = process.wait(timeout=_POLL_SECONDS)
                 break
             except subprocess.TimeoutExpired:
-                _assert_path_identity(canonical_directory, identity)
-                _assert_lock_identity(marker_path, lock_identity)
+                verify_lock()
         if received_signal is not None:
             _terminate_process_group(
                 process,
@@ -245,8 +262,7 @@ def main(argv: list[str]) -> int:
             )
             group_reaped = True
             return 128 + received_signal
-        _assert_path_identity(canonical_directory, identity)
-        _assert_lock_identity(marker_path, lock_identity)
+        verify_lock()
         if _process_group_exists(process_group_id):
             _terminate_process_group(process, process_group_id)
             group_reaped = True
@@ -274,10 +290,7 @@ def main(argv: list[str]) -> int:
             _terminate_process_group(process, process_group_id)
         for signal_number, handler in previous_signal_handlers.items():
             signal.signal(signal_number, handler)
-        if lock_fd >= 0:
-            os.close(lock_fd)
-        if fd >= 0:
-            os.close(fd)
+        locks.close()
 
 
 if __name__ == "__main__":

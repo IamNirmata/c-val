@@ -13,13 +13,9 @@ cluster through a `KubectlClient`.
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import re
 import time
-import zipfile
-from pathlib import Path
 from typing import Any, Callable
 
 from cval.config import CvalConfig, is_exact_commit, load_config
@@ -30,7 +26,7 @@ from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
 from cval.models import PlannedJob, QueueCandidate, WorkflowPlan
 from cval.policy import ExecutionPolicy, PolicyViolation
-from cval.storage.status import get_latest_status_rows, resolve_status_pod
+from cval.storage.status import get_latest_status_rows
 from cval.validation.builtins import (
     BUILTIN_DB_UPDATE_DONE_MARKER,
     BUILTIN_DONE_MARKERS,
@@ -293,14 +289,6 @@ def render_validation_report(report: dict[str, Any]) -> str:
         for note in report["notes"]:
             lines.append(f"! {note}")
 
-    download = report.get("download")
-    if isinstance(download, dict) and download.get("path"):
-        lines.append("-" * 72)
-        lines.append(
-            f"Artifacts: {download['path']} "
-            f"({download.get('files', 0)} file(s), {download.get('bytes', 0)} bytes)"
-        )
-
     lines.append("=" * 72)
     return "\n".join(lines)
 
@@ -311,141 +299,6 @@ def render_validation_report(report: dict[str, Any]) -> str:
 def _first_line(text: str) -> str:
     text = (text or "").strip()
     return text.splitlines()[0] if text else ""
-
-
-# Pod-side collector: zips this run's logs/summaries/result files from the PVC
-# and prints the archive as base64 on stdout (diagnostics go to stderr). Run via
-# `python3 - <node> <timestamp> <validation_root>` over kubectl exec stdin.
-_DOWNLOAD_SCRIPT = r"""
-import base64, glob, io, os, sys, zipfile
-
-node, ts, root = sys.argv[1], sys.argv[2], sys.argv[3]
-max_bytes = 25 * 1024 * 1024
-run_id = node + "-" + ts
-candidates = sorted(glob.glob(root + "/logs/*/" + node + "/" + run_id))
-candidates += sorted(
-    glob.glob(root + "/logs/validation_tests/*/runs/" + node + "/" + run_id)
-)
-candidates += sorted(
-    glob.glob(root + "/validation_tests/*/runs/" + node + "/" + run_id)
-)
-candidates += [
-    # Legacy v1 paths remain as read-only fallbacks during migration.
-    root + "/storage/" + node + "/storage-" + node + "-" + ts,
-    root + "/nccl/" + node + "/nccl-" + node + "-" + ts,
-    root + "/dltest/" + node + "/dltest-" + node + "-" + ts,
-    root + "/results/" + node + "/cval-results-" + node + "-" + ts + ".json",
-    root + "/results/" + node + "/cval-results-" + node + "-" + ts + ".env",
-    root + "/logs/storage/" + node + "/storage-" + node + "-" + ts,
-    root + "/logs/nccl/" + node + "/nccl-" + node + "-" + ts,
-    root + "/logs/dltest/" + node + "/dltest-" + node + "-" + ts,
-    root + "/logs/results/" + node + "/cval-results-" + node + "-" + ts + ".json",
-    root + "/logs/results/" + node + "/cval-results-" + node + "-" + ts + ".env",
-]
-
-def add_file(zf, path):
-    try:
-        if os.path.getsize(path) > max_bytes:
-            sys.stderr.write("skip (too large): " + path + "\n")
-            return 0
-        zf.write(path, os.path.relpath(path, root))
-        return 1
-    except OSError as exc:
-        sys.stderr.write("skip (" + str(exc) + "): " + path + "\n")
-        return 0
-
-buf = io.BytesIO()
-count = 0
-with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-    for path in candidates:
-        if os.path.isdir(path):
-            for dirpath, _dirs, files in os.walk(path):
-                for name in files:
-                    count += add_file(zf, os.path.join(dirpath, name))
-        elif os.path.isfile(path):
-            count += add_file(zf, path)
-data = buf.getvalue()
-sys.stderr.write("archived " + str(count) + " file(s), " + str(len(data)) + " bytes\n")
-sys.stdout.write(base64.b64encode(data).decode("ascii"))
-"""
-
-
-def finalize_download_zip(
-    pod_zip_b64: str,
-    report: dict[str, Any],
-    output_path: Path,
-) -> dict[str, Any]:
-    """Decode the pod archive, add the raw validation report, and save it.
-
-    The pod streams a base64 zip of the run's logs/summaries/result files; this
-    writes it locally and appends ``report.json`` (structured raw evidence) and
-    ``report.txt`` (the rendered operator report) so the bundle is self-contained.
-    """
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    raw = base64.b64decode((pod_zip_b64 or "").strip() or _empty_zip_b64())
-    output_path.write_bytes(raw)
-    with zipfile.ZipFile(output_path, "a", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
-        archive.writestr("report.txt", render_validation_report(report))
-    with zipfile.ZipFile(output_path) as archive:
-        names = archive.namelist()
-    return {
-        "path": str(output_path),
-        "files": len(names),
-        "bytes": output_path.stat().st_size,
-    }
-
-
-def _empty_zip_b64() -> str:
-    """Return a base64 empty-zip so a run with no artifacts still packages cleanly."""
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w"):
-        pass
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-def download_validation_artifacts(
-    node: str,
-    timestamp: int,
-    report: dict[str, Any],
-    *,
-    kubectl: KubectlClient,
-    namespace: str,
-    pod: str,
-    validation_root: str,
-    output_dir: str | Path,
-    timeout: float = 180.0,
-) -> dict[str, Any]:
-    """Collect this run's artifacts from the PVC pod and save a local zip."""
-
-    pvc_pod = resolve_status_pod(kubectl, namespace, pod)
-    result = kubectl.run(
-        [
-            "exec",
-            "-i",
-            "-n",
-            namespace,
-            pvc_pod,
-            "--",
-            "python3",
-            "-",
-            node,
-            str(timestamp),
-            validation_root,
-        ],
-        input_text=_DOWNLOAD_SCRIPT,
-        check=False,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"artifact collection failed on {pvc_pod}: {_first_line(result.stderr) or 'unknown error'}"
-        )
-    output_path = Path(output_dir).expanduser().resolve() / f"cval-{node}-{timestamp}.zip"
-    return finalize_download_zip(result.stdout, report, output_path)
 
 
 def _build_single_node_plan(
@@ -507,11 +360,8 @@ def run_node_validation(
     poll_interval: float = 3.0,
     overall_timeout: float | None = None,
     pending_timeout: float = 600.0,
-    pod: str | None = None,
     submit: bool = False,
     confirmation: str | None = None,
-    download: bool = False,
-    download_dir: str | Path = ".",
     verbose: bool = True,
     printer: Callable[[str], None] = print,
     clock: Callable[[], float] = time.monotonic,
@@ -741,30 +591,6 @@ def run_node_validation(
         fresh_status_complete=fresh_rows_complete and fresh_rows_match,
         notes=notes,
     )
-
-    # 8. Optionally package logs, results, and the raw report as a zip.
-    if download:
-        try:
-            info = download_validation_artifacts(
-                node,
-                timestamp,
-                report,
-                kubectl=kubectl,
-                namespace=namespace,
-                pod=pod or config.cluster.pvc_access_pod,
-                validation_root=config.runtime.validation_root,
-                output_dir=download_dir,
-            )
-            report["download"] = info
-            emit(
-                f"downloaded artifacts -> {info['path']} "
-                f"({info['files']} file(s), {info['bytes']} bytes)"
-            )
-        except Exception as exc:  # noqa: BLE001 - download is best-effort
-            note = f"artifact download failed: {_first_line(str(exc))}"
-            notes.append(note)
-            report["notes"] = list(notes)
-            emit(f"  {note}")
 
     if verbose:
         printer("")

@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cval.cli import main
+from cval.jobs.renderer import render_validation_job_from_file
+from cval.k8s.client import CommandResult
 from cval.k8s.discovery import NodeStatus
 from cval.models import LatestStatusRow
 from cval.validation.plugins import ExportRows
@@ -111,7 +113,7 @@ class CliTests(unittest.TestCase):
             "{config,tests,nodes,validate,status,plan,run,jobs,results}",
             help_text,
         )
-        self.assertNotIn("prioritize", help_text)
+        self.assertNotIn("    prioritize ", help_text)
         self.assertNotIn("run-batch", help_text)
         self.assertNotIn("db-add-result", help_text)
         for removed in ("history", "compatibility", "health", "evaluator-preflight"):
@@ -135,8 +137,6 @@ class CliTests(unittest.TestCase):
                             "results",
                             "--test",
                             "overall",
-                            "--type",
-                            "csv",
                             "--output-dir",
                             tmpdir,
                             "--no-metrics",
@@ -227,6 +227,123 @@ class CliTests(unittest.TestCase):
             config["tests"]["nccl"]["config_path"],
             "validation-tests/nccl/test_config.toml",
         )
+
+    def test_single_choice_format_flags_are_removed(self) -> None:
+        for arguments in (
+            ["config", "--output", "json"],
+            ["results", "--test", "overall", "--type", "csv"],
+        ):
+            with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    main(arguments)
+                self.assertEqual(error.exception.code, 2)
+
+    def test_removed_operator_overrides_and_tsv_are_rejected(self) -> None:
+        cases = (
+            (["status"], ("--pod=other", "--namespace=other", "--db-path=/other.db", "--output=tsv")),
+            (["plan"], ("--db-status-tsv=old.tsv", "--status-pod=other", "--status-namespace=other", "--status-db-path=/other.db")),
+            (["run"], ("--db-status-tsv=old.tsv", "--template=other.yml", "--job-prefix=other", "--git-repo=other", "--namespace=other", "--allowed-namespace=other", "--max-batch-size=99")),
+            (["results", "--test", "overall"], ("--pod=other", "--namespace=other", "--db-path=/other.db", "--nccl-db-path=/other.db", "--storage-db-path=/other.db")),
+            (["jobs", "--jobs", "job-a"], ("--namespace=other",)),
+            (["validate", "--node", "node-a", "--git-ref", "a" * 40], ("--namespace=other", "--pvc-pod=other", "--download", "--download-dir=/tmp/unused")),
+        )
+        for command, flags in cases:
+            for flag in flags:
+                with self.subTest(command=command, flag=flag), redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        main([*command, flag])
+                    self.assertEqual(error.exception.code, 2)
+
+    def test_reviewed_config_owns_submission_and_status_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "cval.toml"
+            config_path.write_text(
+                '[cluster]\nnamespace = "reviewed"\npvc_access_pod = "reviewed-reader"\n'
+                '[storage]\nvalidation_db_path = "/reviewed/status.db"\n'
+                '[job]\njob_prefix = "reviewed"\ngit_repo = "https://example.invalid/c-val.git"\n'
+                '[job_template]\nnamespace = "reviewed"\ncpu = "101"\n'
+                '[policy]\nnamespace_allowlist = ["reviewed"]\nmax_batch_size = 1\n'
+            )
+            prefix = ["--config", str(config_path)]
+            with patch("cval.cli.get_latest_status_rows", return_value=[]) as status, redirect_stdout(io.StringIO()):
+                self.assertEqual(main([*prefix, "status", "--output", "json"]), 0)
+                config = status.call_args.kwargs["config"]
+                self.assertEqual(config.cluster.namespace, "reviewed")
+                self.assertEqual(config.cluster.pvc_access_pod, "reviewed-reader")
+                self.assertEqual(config.storage.validation_db_path, "/reviewed/status.db")
+                self.assertEqual(main([*prefix, "plan", "--free-nodes", "node-a", "--live-status", "--git-ref", "a" * 40]), 0)
+                self.assertEqual(status.call_args.kwargs["config"].cluster.namespace, "reviewed")
+            with (
+                patch("cval.orchestrator.workflow.render_validation_job_from_file", wraps=render_validation_job_from_file) as render,
+                patch("cval.k8s.client.KubectlClient.run", return_value=CommandResult([], "created", "", 0)) as kubectl,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main([*prefix, "run", "--free-nodes", "node-a", "--batch-size", "1", "--git-ref", "a" * 40, "--submit", "--confirm", "submit"]), 0)
+                self.assertEqual(kubectl.call_args.args[0], ["create", "-n", "reviewed", "-f", "-"])
+                self.assertEqual(render.call_args.kwargs["job_prefix"], "reviewed")
+                self.assertEqual(render.call_args.kwargs["git_repo"], "https://example.invalid/c-val.git")
+                self.assertEqual(render.call_args.kwargs["job_template_config"].cpu, "101")
+                kubectl.reset_mock()
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(main([*prefix, "run", "--free-nodes", "node-a,node-b", "--batch-size", "2", "--git-ref", "a" * 40, "--submit", "--confirm", "submit"]), 2)
+                kubectl.assert_not_called()
+
+    def test_reviewed_config_owns_validation_monitoring_and_export_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "cval.toml"
+            config_path.write_text(
+                '[cluster]\nnamespace = "reviewed"\npvc_access_pod = "reviewed-reader"\n'
+                '[storage]\nvalidation_db_path = "/reviewed/status.db"\n'
+                'nccl_db_path = "/reviewed/nccl.db"\n'
+                'storage_db_path = "/reviewed/storage.db"\n'
+            )
+            prefix = ["--config", str(config_path)]
+            with (
+                patch("cval.orchestrator.validate.run_node_validation", return_value={"ok": True}) as validate,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main([
+                    *prefix, "validate", "--node", "node-a", "--git-ref", "a" * 40,
+                    "--submit", "--confirm", "submit", "--output", "json",
+                ]), 0)
+                self.assertEqual(validate.call_args.args, ("node-a",))
+                settings = validate.call_args.kwargs["config"]
+                self.assertEqual(settings.cluster.namespace, "reviewed")
+                self.assertEqual(settings.cluster.pvc_access_pod, "reviewed-reader")
+                self.assertEqual(settings.storage.validation_db_path, "/reviewed/status.db")
+                self.assertTrue(validate.call_args.kwargs["submit"])
+                self.assertEqual(validate.call_args.kwargs["confirmation"], "submit")
+            with (
+                patch("cval.cli.get_job_phases", return_value=[]) as snapshot,
+                patch("cval.cli.monitor_jobs_until_terminal", return_value=[]) as watch,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main([*prefix, "jobs", "--jobs", "job-a"]), 0)
+                self.assertEqual(main([*prefix, "jobs", "--jobs", "job-a", "--watch"]), 0)
+                self.assertEqual(snapshot.call_args.kwargs["namespace"], "reviewed")
+                self.assertEqual(watch.call_args.kwargs["namespace"], "reviewed")
+            with (
+                patch("cval.cli.get_latest_status_rows", return_value=[]) as status,
+                patch("cval.storage.metrics.get_latest_nccl_metrics", return_value={}) as nccl,
+                patch("cval.storage.metrics.get_latest_storage_metrics", return_value={}) as storage,
+                patch("cval.validation.operations.export_result_rows", return_value=ExportRows(("node",), ())) as export,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main([
+                    *prefix, "results", "--test", "overall", "--output-dir", directory,
+                ]), 0)
+                self.assertEqual(status.call_args.kwargs["config"].storage.validation_db_path, "/reviewed/status.db")
+                self.assertEqual(nccl.call_args.kwargs["config"].storage.nccl_db_path, "/reviewed/nccl.db")
+                self.assertEqual(storage.call_args.kwargs["config"].storage.storage_db_path, "/reviewed/storage.db")
+                self.assertEqual(main([
+                    *prefix, "results", "--test", "nccl", "--output-dir", directory,
+                ]), 0)
+                context = export.call_args.args[2]
+                self.assertEqual(context.namespace, "reviewed")
+                self.assertEqual(context.pod, "reviewed-reader")
+                self.assertEqual(dict(context.source_db_paths), {
+                    "nccl": "/reviewed/nccl.db", "storage": "/reviewed/storage.db",
+                })
 
     def test_tests_list_command_prints_registry_json(self) -> None:
         output = io.StringIO()
@@ -372,8 +489,6 @@ job_prefix = "custom"
                         "plan",
                         "--free-nodes",
                         "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
-                        "--timestamp",
-                        "12345",
                         "--git-ref",
                         "a" * 40,
                         "--output",
@@ -383,11 +498,9 @@ job_prefix = "custom"
 
         self.assertEqual(exit_code, 0)
         result = json.loads(output.getvalue())
-        self.assertEqual(len(result["planned_jobs"]), 1)
-        self.assertEqual(
-            result["planned_jobs"][0]["job_name"],
-            "custom-slc01-cl02-hgx-0001-pytorch-26-05-py3-12345",
-        )
+        self.assertEqual(result["batch_size"], 1)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["node"], "slc01-cl02-hgx-0001")
 
     def test_removed_commands_are_not_parseable(self) -> None:
         for command in (
@@ -405,6 +518,147 @@ job_prefix = "custom"
                     main([command])
                 self.assertEqual(exc.exception.code, 2)
 
+    def test_plan_preserves_priority_and_limit_without_rendering(self) -> None:
+        output = io.StringIO()
+        with (
+            patch("cval.orchestrator.workflow.render_validation_job_from_file") as render,
+            patch("cval.cli.submit_workflow_plan") as submit,
+            patch("cval.cli.discover_free_nodes") as discover,
+            patch(
+                "cval.cli.get_latest_status_rows",
+                return_value=[LatestStatusRow("node-a", "all", 100, "pass")],
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = main([
+                "plan", "--free-nodes", "node-c,node-a,node-b",
+                "--live-status", "--batch-size", "1", "--git-ref", "a" * 40,
+                "--output", "json",
+            ])
+
+        self.assertEqual(exit_code, 0)
+        render.assert_not_called()
+        submit.assert_not_called()
+        discover.assert_not_called()
+        payload = json.loads(output.getvalue())
+        self.assertEqual(set(payload), {
+            "batch_size", "days_threshold", "free_nodes_count", "queue_count",
+            "git_ref", "candidates",
+        })
+        self.assertEqual(payload["git_ref"], "a" * 40)
+        self.assertEqual(payload["batch_size"], 1)
+        self.assertEqual(payload["free_nodes_count"], 3)
+        self.assertEqual(payload["queue_count"], 3)
+        self.assertEqual(payload["candidates"], [{
+            "node": "node-b", "priority": 1, "last_tested_timestamp": 0,
+            "age_days": None, "reason": "never-tested",
+        }])
+
+    def test_candidate_inspection_then_submission_renders_only_selected_node(self) -> None:
+        output = io.StringIO()
+        with (
+            patch(
+                "cval.orchestrator.workflow.render_validation_job_from_file",
+                wraps=render_validation_job_from_file,
+            ) as render,
+            patch(
+                "cval.k8s.client.KubectlClient.run",
+                return_value=CommandResult([], "created", "", 0),
+            ) as kubectl,
+        ):
+            with redirect_stdout(output):
+                exit_code = main([
+                    "plan", "--free-nodes", "node-a,node-b",
+                    "--batch-size", "2", "--git-ref", "a" * 40, "--output", "json",
+                ])
+            self.assertEqual(exit_code, 0)
+            candidates = json.loads(output.getvalue())["candidates"]
+            render.assert_not_called()
+            kubectl.assert_not_called()
+
+            selected_node = candidates[1]["node"]
+            with redirect_stdout(io.StringIO()):
+                exit_code = main([
+                    "run", "--free-nodes", selected_node, "--batch-size", "1",
+                    "--timestamp", "12345", "--git-ref", "a" * 40,
+                    "--submit", "--confirm", "submit", "--output", "json",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        render.assert_called_once()
+        self.assertEqual(render.call_args.kwargs["node_name"], "node-b")
+        kubectl.assert_called_once()
+        self.assertEqual(kubectl.call_args.args[0], ["create", "-n", "gcr-admin", "-f", "-"])
+        self.assertIn('kubernetes.io/hostname: "node-b"', kubectl.call_args.kwargs["input_text"])
+
+    def test_candidate_inspection_does_not_bypass_submission_template_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing_template = str(Path(directory) / "missing-job.yml")
+            config_path = Path(directory) / "cval.toml"
+            config_path.write_text(f'[job]\ntemplate_path = "{missing_template}"\n')
+            prefix = ["--config", str(config_path)]
+            shared = [
+                "--free-nodes", "node-a", "--git-ref", "a" * 40,
+            ]
+            with patch("cval.cli.submit_workflow_plan") as submit, redirect_stdout(io.StringIO()):
+                self.assertEqual(main([*prefix, "plan", *shared]), 0)
+                with self.assertRaises(FileNotFoundError):
+                    main([*prefix, "run", *shared, "--submit", "--confirm", "submit"])
+            submit.assert_not_called()
+
+    def test_plan_empty_snapshot_and_table(self) -> None:
+        for nodes in ("", "node-a"):
+            for output_format in ("json", "table"):
+                with self.subTest(nodes=nodes, output=output_format):
+                    output = io.StringIO()
+                    with (
+                        patch("cval.cli.discover_free_nodes") as discover,
+                        patch("cval.orchestrator.workflow.render_validation_job_from_file") as render,
+                        redirect_stdout(output),
+                    ):
+                        exit_code = main([
+                            "plan", "--free-nodes", nodes,
+                            "--git-ref", "a" * 40, "--output", output_format,
+                        ])
+                    self.assertEqual(exit_code, 0)
+                    discover.assert_not_called()
+                    render.assert_not_called()
+                    if output_format == "json":
+                        payload = json.loads(output.getvalue())
+                        self.assertEqual(payload["queue_count"], int(bool(nodes)))
+                        self.assertEqual(len(payload["candidates"]), int(bool(nodes)))
+                    else:
+                        self.assertIn("jobs not rendered", output.getvalue())
+                        if nodes:
+                            self.assertIn(nodes, output.getvalue())
+
+    def test_plan_requires_exact_ref_before_inputs(self) -> None:
+        for revision in ("main", "0" * 40):
+            with (
+                self.subTest(revision=revision),
+                patch("cval.cli._load_plan_inputs") as inputs,
+                redirect_stderr(io.StringIO()) as errors,
+            ):
+                exit_code = main(["plan", "--git-ref", revision])
+                self.assertEqual(exit_code, 2)
+                self.assertIn("exact lowercase 40-hex commit", errors.getvalue())
+                inputs.assert_not_called()
+
+    def test_plan_rejects_retired_rendering_modes(self) -> None:
+        for flag in (
+            "--candidates-only", "--include-yaml", "--timestamp=12345",
+            "--template=unused.yml", "--job-prefix=unused", "--git-repo=unused",
+        ):
+            with self.subTest(flag=flag), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                main(["plan", flag])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_plan_rejects_invalid_limit_before_loading_inputs(self) -> None:
+        with patch("cval.cli._load_plan_inputs") as inputs:
+            with self.assertRaisesRegex(ValueError, "batch_size must be >= 1"):
+                main(["plan", "--batch-size", "0", "--git-ref", "a" * 40])
+        inputs.assert_not_called()
+
     def test_plan_command_uses_provided_free_nodes(self) -> None:
         output = io.StringIO()
 
@@ -416,8 +670,6 @@ job_prefix = "custom"
                     "slc01-cl02-hgx-0001,slc01-cl02-hgx-0002",
                     "--batch-size",
                     "1",
-                    "--timestamp",
-                    "12345",
                     "--git-ref",
                     "a" * 40,
                     "--output",
@@ -434,12 +686,13 @@ job_prefix = "custom"
                 "days_threshold",
                 "free_nodes_count",
                 "queue_count",
-                "planned_jobs",
+                "git_ref",
+                "candidates",
             },
         )
         self.assertEqual(plan["free_nodes_count"], 2)
         self.assertEqual(plan["queue_count"], 2)
-        self.assertEqual(len(plan["planned_jobs"]), 1)
+        self.assertEqual(len(plan["candidates"]), 1)
 
     def test_plan_command_treats_explicit_empty_free_nodes_as_an_empty_snapshot(self) -> None:
         output = io.StringIO()
@@ -453,8 +706,6 @@ job_prefix = "custom"
                         "",
                         "--batch-size",
                         "1",
-                        "--timestamp",
-                        "12345",
                         "--git-ref",
                         "a" * 40,
                         "--output",
@@ -467,7 +718,7 @@ job_prefix = "custom"
         plan = json.loads(output.getvalue())
         self.assertEqual(plan["free_nodes_count"], 0)
         self.assertEqual(plan["queue_count"], 0)
-        self.assertEqual(plan["planned_jobs"], [])
+        self.assertEqual(plan["candidates"], [])
 
     def test_plan_command_can_use_live_status(self) -> None:
         output = io.StringIO()
@@ -485,8 +736,6 @@ job_prefix = "custom"
                         "--live-status",
                         "--batch-size",
                         "2",
-                        "--timestamp",
-                        "12345",
                         "--git-ref",
                         "a" * 40,
                         "--output",
@@ -497,8 +746,8 @@ job_prefix = "custom"
         self.assertEqual(exit_code, 0)
         plan = json.loads(output.getvalue())
         self.assertEqual(plan["queue_count"], 2)
-        self.assertEqual(plan["planned_jobs"][0]["node"], "slc01-cl02-hgx-0002")
-        self.assertEqual(plan["planned_jobs"][0]["reason"], "never-tested")
+        self.assertEqual(plan["candidates"][0]["node"], "slc01-cl02-hgx-0002")
+        self.assertEqual(plan["candidates"][0]["reason"], "never-tested")
 
     def test_plan_rejects_fail_closed_default_commit(self) -> None:
         stderr = io.StringIO()

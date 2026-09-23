@@ -23,10 +23,19 @@ rewriting them.
 - four `metadata/dltest_*.db` files: raw component metrics from passing rank
   evidence.
 
-`validation-tests/db-update.sh` validates result/config provenance and exact
-database targets before writes. Required metric writes happen before the
-atomic built-in status set. DL writes are serialized by the metadata-directory
-lock.
+[validation-tests/db-update.sh](../validation-tests/db-update.sh) launches
+[cval.storage.run_ingest](../cval/storage/run_ingest.py). It authorizes structured
+result/config provenance before calling test-specific writers; the writers
+independently revalidate each write. A current run's ingestion digest remains
+bound to its canonical directory through the supervisor's retained descriptor.
+Required metric writes precede the atomic built-in status set. DL writes and
+their retries share the persistent metadata-directory POSIX record lock.
+
+The coordinator emits `ingestion_started` and a terminal `ingestion_finished`
+event through the existing logger. A metric-stage failure cannot publish final
+status. Historical v1/v2 JSON remains readable, but environment-only result
+files are not accepted as write authorization. Existing result.env outputs,
+raw rows, receipts and evidence files are not rewritten by this refactor.
 
 These schemas contain test outcomes and measurements only. They do not contain
 framework-generated health classes, comparative verdicts, scores, or rankings.

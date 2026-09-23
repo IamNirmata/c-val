@@ -89,25 +89,32 @@ cval status --output json
 ```
 
 Set `CVAL_GIT_REF` to an exact published lowercase 40-hex commit from the
-configured repository, then preview the queue and rendered jobs:
+configured repository, then inspect the priority queue:
 
 ```bash
 cval plan --live-status --git-ref "${CVAL_GIT_REF:?Set an exact published commit}"
 ```
 
-`plan` does not submit work. Include `--live-status` to use existing validation
-history; without a history input, candidates are treated as never tested.
+`plan` only returns ordered candidates; it never renders or submits Jobs.
+Include `--live-status` to use existing validation history; without a history
+input, candidates are treated as never tested. Add `--output json` for automation.
+The live loop checks candidate eligibility, then renders only the selected node
+at confirmed submission. There is no alternate planning mode. See the
+[CLI mode inventory](docs/components_design/cli-design.md#mode-inventory) for
+remaining options and proposed retirements.
 
 Inspect known job names or export raw results:
 
 ```bash
 cval jobs --jobs "${CVAL_JOB_NAMES:?Set comma-separated job names}" --watch
-cval results --test overall --type csv --output-dir ./exports
-cval results --test nccl --type csv --output-dir ./exports
+cval results --test overall --output-dir ./exports
+cval results --test nccl --output-dir ./exports
 ```
 
 These commands do not change Kubernetes or source databases. `results` writes
 local CSV files; its output is raw evidence, not derived health classifications.
+Configuration output is always JSON and result exports are always CSV; neither
+needs a format selector. Status and planning use JSON rather than legacy TSV.
 
 ## Configuration
 
@@ -236,6 +243,14 @@ execution, artifacts and optional persistence/evaluation extensions. Start with
 `cval tests describe <test-id>` and
 [docs/result-schema.md](docs/result-schema.md).
 
+### Repository Maintenance
+
+The [cleanup review](docs/cleanup-review.md) separates obsolete prototypes and
+historical planning material from live dependencies, compatibility interfaces
+and recovery tools. The retired evaluation prototypes and historical planning
+bundle (A and B) have been removed; the remaining candidates require separate
+approval. Keep raw evidence, operational logs and rollback assets.
+
 ## Documentation
 
 | Topic | Document |
@@ -247,3 +262,4 @@ execution, artifacts and optional persistence/evaluation extensions. Start with
 | Operations and backups | [docs/operations-runbook.md](docs/operations-runbook.md) |
 | Results, progress and ingestion contracts | [docs/result-schema.md](docs/result-schema.md) |
 | Evaluator deployment and operations | [deploy/evaluation-engine/README.md](deploy/evaluation-engine/README.md) |
+| Cleanup candidates and retention decisions | [docs/cleanup-review.md](docs/cleanup-review.md) |

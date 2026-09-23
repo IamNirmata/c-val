@@ -39,8 +39,6 @@ from cval.policy import ExecutionPolicy, PolicyViolation
 from cval.storage.status import (
     get_latest_status_rows,
     latest_status_rows_to_node_map,
-    latest_status_rows_to_tsv,
-    parse_latest_status_tsv,
 )
 from cval.storage.ingest import (
     add_nccl_health_from_summary,
@@ -140,7 +138,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     )
 
     show_config = subparsers.add_parser("config", help="Print the effective c-val config")
-    show_config.add_argument("--output", choices=["json"], default="json")
     show_config.set_defaults(handler=handle_config)
 
     tests_command = subparsers.add_parser(
@@ -192,7 +189,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Run a confirmed real-cluster validation for one node",
     )
     validate.add_argument("--node", required=True, help="Target node name to validate")
-    validate.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     validate.add_argument(
         "--git-ref",
         required=True,
@@ -222,22 +218,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         default=600.0,
         help="Warn if the job is still Pending after N seconds (it stays queued)",
     )
-    validate.add_argument(
-        "--pvc-pod",
-        default=active_config.cluster.pvc_access_pod,
-        help="PVC access pod used to verify fresh raw status",
-    )
-    validate.add_argument(
-        "--download",
-        action="store_true",
-        help="Save this run's logs, results, and raw report as a local zip",
-    )
-    validate.add_argument(
-        "--download-dir",
-        type=Path,
-        default=Path.cwd(),
-        help="Directory to write the artifact zip into (default: current directory)",
-    )
     validate.add_argument("--output", choices=["table", "json"], default="table")
     validate.set_defaults(handler=handle_validate)
 
@@ -245,21 +225,13 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "status",
         help="Read latest validation status from the PVC access pod",
     )
-    status.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
-    status.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    status.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    status.add_argument("--output", choices=["table", "json", "tsv"], default="table")
+    status.add_argument("--output", choices=["table", "json"], default="table")
     status.set_defaults(handler=handle_status)
 
     plan = subparsers.add_parser(
-        "plan", help="Inspect the detailed queue and rendered job plan"
+        "plan", help="Inspect prioritized candidates without rendering jobs"
     )
     _add_plan_inputs(plan, active_config)
-    plan.add_argument(
-        "--include-yaml",
-        action="store_true",
-        help="Include rendered YAML in JSON output",
-    )
     plan.add_argument("--output", choices=["table", "json"], default="table")
     plan.set_defaults(handler=handle_plan)
 
@@ -268,9 +240,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Submit a validation batch after exact confirmation",
     )
     _add_plan_inputs(run, active_config)
-    run.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    run.add_argument("--allowed-namespace", action="append")
-    run.add_argument("--max-batch-size", type=int, default=active_config.policy.max_batch_size)
+    run.add_argument("--timestamp", type=int)
     run.add_argument("--submit", action="store_true")
     run.add_argument("--confirm")
     run.add_argument("--output", choices=["table", "json"], default="table")
@@ -278,7 +248,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     jobs = subparsers.add_parser("jobs", help="Read or watch Volcano job phases")
     jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
-    jobs.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
     jobs.add_argument("--watch", action="store_true", help="Poll until terminal or timeout")
     jobs.add_argument(
         "--timeout-seconds",
@@ -306,21 +275,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         ],
         required=True,
     )
-    results.add_argument("--type", choices=["csv"], default="csv", dest="result_type")
     results.add_argument("--output-dir", type=Path, default=Path.cwd())
-    results.add_argument("--pod", default=active_config.cluster.pvc_access_pod)
-    results.add_argument("--namespace", "-n", default=active_config.cluster.namespace)
-    results.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    results.add_argument(
-        "--nccl-db-path",
-        default=active_config.storage.nccl_db_path,
-        help="Override path to test-nccl.db on the PVC pod",
-    )
-    results.add_argument(
-        "--storage-db-path",
-        default=active_config.storage.storage_db_path,
-        help="Override path to test-storage.db on the PVC pod",
-    )
     results.add_argument(
         "--no-metrics",
         action="store_true",
@@ -580,20 +535,10 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
 def handle_status(args: argparse.Namespace) -> int:
     """Read latest validation status without mutating SQLite metadata."""
 
-    rows = get_latest_status_rows(
-        pod=args.pod,
-        namespace=args.namespace,
-        db_path=args.db_path,
-        config=args.cval_config,
-    )
+    rows = get_latest_status_rows(config=args.cval_config)
     if args.output == "json":
         print(json.dumps([asdict(row) for row in rows], indent=2))
         return 0
-    if args.output == "tsv":
-        # TSV keeps compatibility with older status/parsing workflows.
-        print(latest_status_rows_to_tsv(rows))
-        return 0
-
     node_map = latest_status_rows_to_node_map(rows)
     print(f"Latest validation status rows: {len(rows)} | nodes: {len(node_map)}")
     print(f"{'NODE':<32} {'TEST':<18} {'TIMESTAMP':>12} RESULT")
@@ -605,9 +550,9 @@ def handle_status(args: argparse.Namespace) -> int:
 
 
 def handle_plan(args: argparse.Namespace) -> int:
-    """Build and print a nonmutating workflow plan."""
+    """Inspect prioritized candidates without rendering or submitting jobs."""
 
-    from cval.orchestrator.workflow import workflow_plan_to_dict
+    from cval.scheduler.priority import build_priority_queue
 
     if not is_exact_commit(args.git_ref):
         raise PolicyViolation(
@@ -615,29 +560,38 @@ def handle_plan(args: argparse.Namespace) -> int:
             "40-hex commit"
         )
 
-    plan = _build_plan_from_args(args)
-
+    if args.batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    free_nodes, db_status = _load_plan_inputs(args)
+    queue = build_priority_queue(
+        free_nodes, db_status, days_threshold=args.threshold_days
+    )
+    candidates = queue[:args.batch_size]
     if args.output == "json":
         print(
             json.dumps(
-                workflow_plan_to_dict(plan, include_yaml=args.include_yaml),
+                {
+                    "batch_size": args.batch_size,
+                    "days_threshold": args.threshold_days,
+                    "free_nodes_count": len(free_nodes),
+                    "queue_count": len(queue),
+                    "git_ref": args.git_ref,
+                    "candidates": [asdict(candidate) for candidate in candidates],
+                },
                 indent=2,
             )
         )
         return 0
 
-    print("Validation workflow plan (read-only)")
+    print("Validation candidates (read-only; jobs not rendered)")
     print(
-        f"Free nodes: {len(plan.free_nodes)} | Queue: {len(plan.queue)} | "
-        f"Batch: {len(plan.planned_jobs)}"
+        f"Input nodes: {len(free_nodes)} | Queue: {len(queue)} | "
+        f"Candidates: {len(candidates)}"
     )
-    print(f"Threshold days: {plan.days_threshold} | Batch size: {plan.batch_size}")
-    print(f"{'PRI':>3} {'NODE':<32} {'REASON':<13} JOB")
-    for planned in plan.planned_jobs:
-        print(
-            f"{planned.candidate.priority:>3} {planned.candidate.node:<32} "
-            f"{planned.candidate.reason:<13} {planned.rendered_job.job_name}"
-        )
+    print(f"Threshold days: {args.threshold_days} | Batch size: {args.batch_size}")
+    print(f"{'PRI':>3} {'NODE':<32} REASON")
+    for candidate in candidates:
+        print(f"{candidate.priority:>3} {candidate.node:<32} {candidate.reason}")
     return 0
 
 
@@ -658,13 +612,13 @@ def handle_run(args: argparse.Namespace) -> int:
     plan = _build_plan_from_args(args)
     config: CvalConfig = args.cval_config
     policy = ExecutionPolicy(
-        namespace_allowlist=tuple(args.allowed_namespace or config.policy.namespace_allowlist),
-        max_batch_size=args.max_batch_size,
+        namespace_allowlist=tuple(config.policy.namespace_allowlist),
+        max_batch_size=config.policy.max_batch_size,
         confirmation_phrase=config.policy.confirmation_phrase,
     )
     result = submit_workflow_plan(
         plan,
-        namespace=args.namespace,
+        namespace=config.cluster.namespace,
         policy=policy,
         submit=args.submit,
         confirmation=args.confirm,
@@ -687,7 +641,7 @@ def handle_jobs(args: argparse.Namespace) -> int:
     if args.watch:
         jobs = monitor_jobs_until_terminal(
             _parse_csv(args.jobs),
-            namespace=args.namespace,
+            namespace=args.cval_config.cluster.namespace,
             timeout_seconds=args.timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
         )
@@ -703,7 +657,9 @@ def handle_jobs(args: argparse.Namespace) -> int:
             )
         return 0
 
-    phases = get_job_phases(_parse_csv(args.jobs), namespace=args.namespace)
+    phases = get_job_phases(
+        _parse_csv(args.jobs), namespace=args.cval_config.cluster.namespace
+    )
     if args.output == "json":
         print(json.dumps([asdict(phase) for phase in phases], indent=2))
         return 0
@@ -727,16 +683,9 @@ def handle_results(args: argparse.Namespace) -> int:
     )
     from cval.validation.plugins import ExportContext
 
-    if args.result_type != "csv":
-        raise ValueError("Only --type csv is currently supported")
-
+    config: CvalConfig = args.cval_config
     test = args.test.lower()
-    rows = get_latest_status_rows(
-        pod=args.pod,
-        namespace=args.namespace,
-        db_path=args.db_path,
-        config=args.cval_config,
-    )
+    rows = get_latest_status_rows(config=config)
 
     if test in {"overall", "all"}:
         from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
@@ -744,18 +693,8 @@ def handle_results(args: argparse.Namespace) -> int:
         nccl_metrics = None
         storage_metrics = None
         if not args.no_metrics:
-            nccl_metrics = get_latest_nccl_metrics(
-                pod=args.pod,
-                namespace=args.namespace,
-                db_path=args.nccl_db_path,
-                config=args.cval_config,
-            )
-            storage_metrics = get_latest_storage_metrics(
-                pod=args.pod,
-                namespace=args.namespace,
-                db_path=args.storage_db_path,
-                config=args.cval_config,
-            )
+            nccl_metrics = get_latest_nccl_metrics(config=config)
+            storage_metrics = get_latest_storage_metrics(config=config)
         selected = latest_result_rows(rows, args.test)
         output_path = write_latest_results_csv(
             rows,
@@ -773,11 +712,11 @@ def handle_results(args: argparse.Namespace) -> int:
             definition=registered.definition,
             config=args.cval_config,
             status_rows=tuple(rows),
-            pod=args.pod,
-            namespace=args.namespace,
+            pod=config.cluster.pvc_access_pod,
+            namespace=config.cluster.namespace,
             source_db_paths=(
-                ("nccl", args.nccl_db_path),
-                ("storage", args.storage_db_path),
+                ("nccl", config.storage.nccl_db_path),
+                ("storage", config.storage.storage_db_path),
             ),
             include_metrics=not args.no_metrics,
         )
@@ -810,17 +749,13 @@ def handle_validate(args: argparse.Namespace) -> int:
     report = run_node_validation(
         args.node,
         config=args.cval_config,
-        namespace=args.namespace,
         git_ref=args.git_ref,
         timestamp=args.timestamp,
         poll_interval=args.poll_interval,
         overall_timeout=args.timeout_seconds,
         pending_timeout=args.pending_timeout,
-        pod=args.pvc_pod,
         submit=args.submit,
         confirmation=args.confirm,
-        download=args.download,
-        download_dir=args.download_dir,
         verbose=(args.output == "table"),
     )
     if args.output == "json":
@@ -1045,10 +980,8 @@ def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_plan_from_args(args: argparse.Namespace):
-    """Resolve status inputs, discover nodes if needed, and build a workflow plan."""
-
-    from cval.orchestrator.workflow import build_workflow_plan
+def _load_plan_inputs(args: argparse.Namespace) -> tuple[list[str], dict[str, int]]:
+    """Load validation history and the node input shared by plan and run."""
 
     db_status = _load_db_status(args)
     if args.free_nodes is not None:
@@ -1059,16 +992,23 @@ def _build_plan_from_args(args: argparse.Namespace):
         nodes, _ = discover_free_nodes(node_name_filter=args.node_filter)
         free_nodes = fully_free_node_names(nodes)
 
+    return free_nodes, db_status
+
+
+def _build_plan_from_args(args: argparse.Namespace):
+    """Render the submission batch from the resolved node and history inputs."""
+
+    from cval.orchestrator.workflow import build_workflow_plan
+
+    free_nodes, db_status = _load_plan_inputs(args)
     return build_workflow_plan(
         free_nodes,
         db_status,
         days_threshold=args.threshold_days,
         batch_size=args.batch_size,
-        template_path=args.template,
         timestamp=args.timestamp,
-        job_prefix=args.job_prefix,
-        git_repo=args.git_repo,
         git_ref=args.git_ref,
+        config=args.cval_config,
     )
 
 
@@ -1081,24 +1021,12 @@ def _add_plan_inputs(parser: argparse.ArgumentParser, config: CvalConfig) -> Non
     )
     parser.add_argument("--db-status-json", type=Path, help="JSON object mapping node to timestamp")
     parser.add_argument(
-        "--db-status-tsv",
-        type=Path,
-        help="TSV output from existing latest-status command",
-    )
-    parser.add_argument(
         "--live-status",
         action="store_true",
         help="Read latest status from the PVC access pod in read-only mode",
     )
-    parser.add_argument("--status-pod", default=config.cluster.pvc_access_pod)
-    parser.add_argument("--status-namespace", default=config.cluster.namespace)
-    parser.add_argument("--status-db-path", default=config.storage.validation_db_path)
     parser.add_argument("--threshold-days", type=float, default=config.scheduling.days_threshold)
     parser.add_argument("--batch-size", type=int, default=config.scheduling.batch_size)
-    parser.add_argument("--timestamp", type=int)
-    parser.add_argument("--template", type=Path, default=config.job.template_path)
-    parser.add_argument("--job-prefix", default=config.job.job_prefix)
-    parser.add_argument("--git-repo", default=config.job.git_repo)
     parser.add_argument("--git-ref", default=config.job.git_ref)
     parser.add_argument("--node-filter", default=config.cluster.node_filter, help="Live discovery substring filter")
 
@@ -1111,23 +1039,18 @@ def _parse_csv(value: str) -> list[str]:
 
 
 def _load_db_status(args: argparse.Namespace) -> dict[str, int]:
-    """Load validation history from JSON, TSV, live status, or empty defaults."""
+    """Load validation history from JSON, live status, or empty defaults."""
 
-    selected = sum(1 for source in (args.db_status_json, args.db_status_tsv, args.live_status) if source)
+    selected = sum(1 for source in (args.db_status_json, args.live_status) if source)
     if selected > 1:
-        raise ValueError("Use only one of --db-status-json, --db-status-tsv, or --live-status")
+        raise ValueError("Use only one of --db-status-json or --live-status")
     if args.live_status:
         # Live status is read-only, but still reaches the cluster through the PVC access pod.
         return latest_status_rows_to_node_map(
             get_latest_status_rows(
-                pod=args.status_pod,
-                namespace=args.status_namespace,
-                db_path=args.status_db_path,
                 config=args.cval_config,
             )
         )
-    if args.db_status_tsv:
-        return parse_latest_status_tsv(args.db_status_tsv.read_text(encoding="utf-8"))
     if args.db_status_json is None:
         # Missing history makes every free node appear never-tested.
         return {}

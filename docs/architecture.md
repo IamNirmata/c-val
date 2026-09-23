@@ -5,17 +5,38 @@
 1. Discover matching GPU nodes.
 2. Read each node's latest raw validation timestamp from
    `metadata/validation.db`.
-3. Prioritize never-tested and stale nodes, applying submission cooldown.
+3. Prioritize never-tested and stale nodes, applying submission cooldown,
+   without rendering Jobs during candidate inspection.
 4. Check prioritized nodes for current GPU, CPU, memory, RDMA, readiness, and
    scheduling eligibility.
-5. Render and submit Volcano jobs from an exact published commit after explicit
-   confirmation.
+5. Render the selected eligible nodes' Volcano jobs from an exact published
+   commit and submit after explicit confirmation.
 6. Run enabled registry tests through the descriptor-anchored supervisor and
    generic runner.
 7. Validate canonical artifacts and write raw status and metric databases.
 8. Retain result JSON, logs, events, and test artifacts.
 
 No step derives a node-health verdict, class, score, or ranking.
+
+## Repository Boundaries
+
+The [live loop](../scripts/cval-live.sh) uses its
+[session-state helper](../scripts/cval-live-state.py),
+[cooldown helper](../scripts/cval-node-cooldown.py), CLI and configured
+[pinned Job template](../ymls/specific-node-job.yml). That template launches the
+supervisor, which runs the Python test runner and then sources
+[0-env.sh](../validation-tests/0-env.sh) before
+[db-update.sh](../validation-tests/db-update.sh). That thin launcher executes
+[the Python ingestion coordinator](../cval/storage/run_ingest.py); it no longer
+projects JSON into shell variables or invokes a CLI process for each writer.
+The launcher and environment script remain live dependencies.
+
+The [evaluation service](../deploy/evaluation-engine/README.md) has a separate
+entry point and derived store. Test-owned evaluation modules are dynamically
+loaded from descriptors; they are not dead code because the raw loop does not
+call them. Backup, layout and SQLite journal tools likewise belong to recovery,
+not the per-cycle submission path. See the
+[cleanup review](cleanup-review.md) for approval-only retirement candidates.
 
 ## Raw databases
 
@@ -38,14 +59,18 @@ summary name, and optional config/raw-export plugin methods.
 
 The supervisor reserves canonical evidence paths through retained file
 descriptors. The runner writes `cval.results` transitions and invokes tests in
-registry order. `validation-tests/db-update.sh` verifies result identity,
-configuration snapshot, digest, evidence paths, and database targets before
-writing.
+registry order. The ingestion coordinator loads the immutable configuration,
+authorizes the structured result, binds its ingestion digest and calls the
+existing raw writers directly. Each writer still revalidates result identity,
+configuration, evidence paths and targets at the write boundary.
 
 Passing DL runs serialize raw metric ingestion through
 `metadata/.dl-metric-ingest.lock`. Storage and NCCL metrics are written only
 for passing phases. The aggregate `all` row is committed after required metric
-writes succeed.
+writes succeed. The order remains storage, NCCL, locked DL, then the atomic
+built-in status set. SQLite lock retries repeat a writer operation, not the
+whole sequence. DL retries hold the same persistent POSIX lock; failures or
+interruption release it without unlinking its file and emit a failure event.
 
 ## Safety boundaries
 

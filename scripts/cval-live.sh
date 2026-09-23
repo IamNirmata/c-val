@@ -623,12 +623,12 @@ PY
 }
 
 json_plan_summary_tsv() {
-    python - "$1" "$2" "$3" <<'PY'
+    python - "$1" "$2" "$3" "$4" <<'PY'
 import json
 import math
 import sys
 
-plan_path, expected_free_text, expected_batch_text = sys.argv[1:]
+plan_path, expected_free_text, expected_batch_text, expected_git_ref = sys.argv[1:]
 with open(plan_path, encoding="utf-8") as handle:
     data = json.load(handle)
 if not isinstance(data, dict):
@@ -638,7 +638,8 @@ expected_keys = {
     "days_threshold",
     "free_nodes_count",
     "queue_count",
-    "planned_jobs",
+    "git_ref",
+    "candidates",
 }
 if set(data) != expected_keys:
     raise ValueError("plan JSON has an unexpected top-level shape")
@@ -659,6 +660,15 @@ if batch_size != int(expected_batch_text):
     raise ValueError("plan JSON batch_size does not match the requested plan limit")
 if free_nodes_count != int(expected_free_text):
     raise ValueError("plan JSON free_nodes_count does not match the discovery snapshot")
+git_ref = data["git_ref"]
+if (
+    not isinstance(git_ref, str)
+    or len(git_ref) != 40
+    or any(character not in "0123456789abcdef" for character in git_ref)
+    or git_ref == "0" * 40
+    or git_ref != expected_git_ref
+):
+    raise ValueError("plan JSON git_ref must match the requested exact commit")
 days_threshold = data["days_threshold"]
 if (
     isinstance(days_threshold, bool)
@@ -667,60 +677,43 @@ if (
     or days_threshold < 0
 ):
     raise ValueError("plan JSON days_threshold must be a non-negative number")
-planned_jobs = data["planned_jobs"]
-if not isinstance(planned_jobs, list):
-    raise ValueError("plan JSON planned_jobs must be a list")
+candidates = data["candidates"]
+if not isinstance(candidates, list):
+    raise ValueError("plan JSON candidates must be a list")
 if queue_count > free_nodes_count:
     raise ValueError("plan JSON queue_count cannot exceed free_nodes_count")
-if len(planned_jobs) != min(batch_size, queue_count):
-    raise ValueError("plan JSON planned job count is inconsistent with batch_size and queue_count")
+if len(candidates) != min(batch_size, queue_count):
+    raise ValueError("plan JSON candidate count is inconsistent with batch_size and queue_count")
 nodes = []
-job_names = []
-expected_job_keys = {
+expected_candidate_keys = {
     "priority",
     "node",
     "reason",
     "last_tested_timestamp",
     "age_days",
-    "job_name",
-    "git_ref",
 }
-for job in planned_jobs:
-    if not isinstance(job, dict) or set(job) != expected_job_keys:
-        raise ValueError("plan JSON contains a planned job with an unexpected shape")
-    node = job["node"]
-    job_name = job["job_name"]
-    git_ref = job["git_ref"]
+for candidate in candidates:
+    if not isinstance(candidate, dict) or set(candidate) != expected_candidate_keys:
+        raise ValueError("plan JSON contains a candidate with an unexpected shape")
+    node = candidate["node"]
     if not isinstance(node, str) or not node.strip():
-        raise ValueError("plan JSON contains an invalid planned job node")
-    if not isinstance(job_name, str) or not job_name.strip():
-        raise ValueError("plan JSON contains an invalid planned job name")
-    if (
-        not isinstance(git_ref, str)
-        or len(git_ref) != 40
-        or any(character not in "0123456789abcdef" for character in git_ref)
-        or git_ref == "0" * 40
-    ):
-        raise ValueError("plan JSON contains an invalid exact git_ref")
-    positive_int("planned job priority", job["priority"])
-    if not isinstance(job["reason"], str) or not job["reason"].strip():
-        raise ValueError("plan JSON contains an invalid planned job reason")
-    nonnegative_int("planned job last_tested_timestamp", job["last_tested_timestamp"])
-    age_days = job["age_days"]
+        raise ValueError("plan JSON contains an invalid candidate node")
+    positive_int("candidate priority", candidate["priority"])
+    if not isinstance(candidate["reason"], str) or not candidate["reason"].strip():
+        raise ValueError("plan JSON contains an invalid candidate reason")
+    nonnegative_int("candidate last_tested_timestamp", candidate["last_tested_timestamp"])
+    age_days = candidate["age_days"]
     if age_days is not None and (
         isinstance(age_days, bool)
         or not isinstance(age_days, (int, float))
         or not math.isfinite(age_days)
         or age_days < 0
     ):
-        raise ValueError("plan JSON contains an invalid planned job age_days")
+        raise ValueError("plan JSON contains an invalid candidate age_days")
     nodes.append(node)
-    job_names.append(job_name)
 if len(set(nodes)) != len(nodes):
-    raise ValueError("plan JSON planned job nodes must be unique")
-if len(set(job_names)) != len(job_names):
-    raise ValueError("plan JSON planned job names must be unique")
-print(f"{free_nodes_count}\t{queue_count}\t{len(planned_jobs)}\t{','.join(nodes)}")
+    raise ValueError("plan JSON candidate nodes must be unique")
+print(f"{free_nodes_count}\t{queue_count}\t{len(candidates)}")
 PY
 }
 
@@ -897,8 +890,8 @@ path = sys.argv[1]
 excluded = set(sys.argv[2:])
 with open(path, encoding="utf-8") as handle:
     payload = json.load(handle)
-for job in payload.get("planned_jobs", []):
-    node = job.get("node")
+for candidate in payload["candidates"]:
+    node = candidate["node"]
     if isinstance(node, str) and node and node not in excluded:
         print(node)
 PY
@@ -1403,7 +1396,6 @@ run_submit_cycle() {
         --db-status-json "$PLAN_STATUS_MAP" \
         --threshold-days "$DAYS_THRESHOLD" \
         --batch-size "$PLAN_LIMIT" \
-        --timestamp "$(date +%s)" \
         --git-ref "$git_ref" \
         --output json >"$preflight_plan" 2>"$preflight_error" || preflight_rc=$?
     assert_runner_worktree "submit-preflight-plan-after" "$git_ref" || {
@@ -1418,15 +1410,15 @@ run_submit_cycle() {
     fi
     local preflight_summary
     local preflight_parse_rc=0
-    preflight_summary=$(json_plan_summary_tsv "$preflight_plan" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT") || preflight_parse_rc=$?
+    preflight_summary=$(json_plan_summary_tsv "$preflight_plan" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT" "$git_ref") || preflight_parse_rc=$?
     if (( preflight_parse_rc != 0 )); then
         log "submit component=preflight-plan status=invalid-json exit_code=$preflight_parse_rc artifact=$preflight_plan"
         leave_runner_worktree "submit" "$preflight_parse_rc" || return "$?"
         return "$preflight_parse_rc"
     fi
-    local preflight_free preflight_queue preflight_planned preflight_nodes
-    IFS=$'\t' read -r preflight_free preflight_queue preflight_planned preflight_nodes <<<"$preflight_summary"
-    log "submit component=preflight-plan status=ok candidate_node_count=$preflight_free queue_count=$preflight_queue planned_count=$preflight_planned"
+    local preflight_free preflight_queue preflight_candidate_count
+    IFS=$'\t' read -r preflight_free preflight_queue preflight_candidate_count <<<"$preflight_summary"
+    log "submit component=preflight-plan status=ok candidate_node_count=$preflight_free queue_count=$preflight_queue candidate_count=$preflight_candidate_count"
     if (( preflight_queue == 0 )); then
         log "submit state=no-due-candidates; preflight succeeded and no jobs will be submitted"
         leave_runner_worktree "submit" 0 || return "$?"
@@ -1559,7 +1551,6 @@ run_submit_cycle() {
                 --db-status-json "$PLAN_STATUS_MAP" \
                 --threshold-days "$DAYS_THRESHOLD" \
                 --batch-size "$PLAN_LIMIT" \
-                --timestamp "$(date +%s)" \
                 --git-ref "$git_ref" \
                 --output json > "$plan_file" 2>&1 || plan_rc=$?
             assert_runner_worktree "submit-slot-plan-after" "$git_ref" || {
@@ -1579,15 +1570,15 @@ run_submit_cycle() {
             fi
             local plan_summary
             local parse_rc=0
-            plan_summary=$(json_plan_summary_tsv "$plan_file" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT") || parse_rc=$?
+            plan_summary=$(json_plan_summary_tsv "$plan_file" "$PLAN_FREE_NODE_COUNT" "$PLAN_LIMIT" "$git_ref") || parse_rc=$?
             if (( parse_rc != 0 )); then
                 log "submit component=plan status=invalid-json exit_code=$parse_rc artifact=$plan_file"
                 leave_runner_worktree "submit" "$parse_rc" || return "$?"
                 return "$parse_rc"
             fi
-            local candidate_nodes_count queue_count planned_count planned_nodes
-            IFS=$'\t' read -r candidate_nodes_count queue_count planned_count planned_nodes <<<"$plan_summary"
-            log "submit component=plan status=ok candidate_node_count=$candidate_nodes_count queue_count=$queue_count planned_count=$planned_count"
+            local candidate_nodes_count queue_count candidate_count
+            IFS=$'\t' read -r candidate_nodes_count queue_count candidate_count <<<"$plan_summary"
+            log "submit component=plan status=ok candidate_node_count=$candidate_nodes_count queue_count=$queue_count candidate_count=$candidate_count"
 
             local exclude_args=()
             IFS=',' read -r -a submitted_array <<< "$submitted_nodes"
@@ -1677,8 +1668,8 @@ run_submit_cycle() {
                     log "submit state=no-due-candidates; no additional eligible nodes for open slots"
                     break
                 elif (( queue_count > 0 )); then
-                    if (( planned_count < queue_count && planned_count > 0 )); then
-                        log "submit state=priority-page-busy; rebuilding without $planned_count checked node(s) to continue the queue"
+                    if (( candidate_count < queue_count && candidate_count > 0 )); then
+                        log "submit state=priority-page-busy; rebuilding without $candidate_count checked node(s) to continue the queue"
                         continue
                     fi
                     log "submit state=no-currently-available-prioritized-node; checked priority order without finding a free node"

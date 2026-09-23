@@ -6,31 +6,12 @@ agents can inspect validation history without mutating DB tables or views.
 
 from __future__ import annotations
 
-import datetime
 import json
 
 from cval.config import load_config
 from cval.k8s.client import KubectlClient
 from cval.models import LatestStatusRow
 from cval.storage.sqlite_uri import sqlite_readonly_script_prelude
-
-
-def parse_latest_status_tsv(output: str) -> dict[str, int]:
-    """Parse legacy TSV latest-status output into node -> newest timestamp."""
-
-    latest_by_node: dict[str, int] = {}
-    for raw_line in output.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("node\ttest\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        node_name = parts[0]
-        timestamp_text = parts[2]
-        timestamp = int(timestamp_text) if timestamp_text.isdigit() else 0
-        latest_by_node[node_name] = max(latest_by_node.get(node_name, 0), timestamp)
-    return latest_by_node
 
 
 def parse_latest_status_rows_json(output: str) -> list[LatestStatusRow]:
@@ -63,18 +44,6 @@ def latest_status_rows_to_node_map(rows: list[LatestStatusRow]) -> dict[str, int
         timestamp = row.latest_timestamp or 0
         latest_by_node[row.node] = max(latest_by_node.get(row.node, 0), timestamp)
     return latest_by_node
-
-
-def latest_status_rows_to_tsv(rows: list[LatestStatusRow]) -> str:
-    """Format latest-status rows as the TSV shape used by older scripts."""
-
-    lines = ["node\ttest\tlatest_timestamp_num\tlatest_timestamp\tresult"]
-    for row in rows:
-        timestamp = row.latest_timestamp
-        timestamp_text = "" if timestamp is None else str(timestamp)
-        timestamp_iso = "" if timestamp is None else _timestamp_to_iso(timestamp)
-        lines.append(f"{row.node}\t{row.test}\t{timestamp_text}\t{timestamp_iso}\t{row.result}")
-    return "\n".join(lines)
 
 
 def get_latest_status_rows(
@@ -180,14 +149,3 @@ def _running_pod_for_selector(
         if item.get("status", {}).get("phase") == "Running":
             return str(item.get("metadata", {}).get("name", ""))
     return ""
-
-
-def _timestamp_to_iso(timestamp: int) -> str:
-    """Render an epoch timestamp as UTC ISO-8601 with `Z` suffix."""
-
-    return (
-        datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )

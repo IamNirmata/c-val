@@ -186,26 +186,33 @@ if [[ " $* " == *" -m cval.cli "* ]]; then
                 printf 'plan failed\n' >&2
                 exit 33
             fi
+            if [[ " $* " == *" --candidates-only "* || " $* " == *" --include-yaml "* ]]; then
+                printf 'live planning must use the default candidate behavior\n' >&2
+                exit 36
+            fi
             if [[ -n "$FAKE_PLAN_JSON" ]]; then
                 printf '%s\n' "$FAKE_PLAN_JSON"
                 exit 0
             fi
             free_nodes_arg=""
+            batch_size=""
+            git_ref=""
             args=("$@")
             for ((index=0; index<${#args[@]}; index++)); do
-                if [[ "${args[$index]}" == "--free-nodes" ]]; then
-                    free_nodes_arg="${args[$((index + 1))]}"
-                    break
-                fi
+                case "${args[$index]}" in
+                    --free-nodes) free_nodes_arg="${args[$((index + 1))]}" ;;
+                    --batch-size) batch_size="${args[$((index + 1))]}" ;;
+                    --git-ref) git_ref="${args[$((index + 1))]}" ;;
+                esac
             done
             if [[ -z "$free_nodes_arg" ]]; then
-                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":0,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
+                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":0,"queue_count":0,"git_ref":"%s","candidates":[]}\n' "$batch_size" "$git_ref"
                 exit 0
             fi
             if [[ "$FAKE_PLAN_DUE" == "1" ]]; then
-                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"planned_jobs":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null,"job_name":"cval-%s-123","git_ref":"%s"}]}\n' "$CVAL_PLAN_LIMIT" "$FAKE_NODE" "$FAKE_NODE" "$FAKE_ORIGIN_SHA"
+                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":1,"git_ref":"%s","candidates":[{"priority":1,"node":"%s","reason":"never-tested","last_tested_timestamp":0,"age_days":null}]}\n' "$batch_size" "$git_ref" "$FAKE_NODE"
             else
-                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":0,"planned_jobs":[]}\n' "$CVAL_PLAN_LIMIT"
+                printf '{"batch_size":%s,"days_threshold":7,"free_nodes_count":1,"queue_count":0,"git_ref":"%s","candidates":[]}\n' "$batch_size" "$git_ref"
             fi
             ;;
         run)
@@ -424,15 +431,14 @@ class CvalLiveTests(unittest.TestCase):
                     "days_threshold": 7,
                     "free_nodes_count": 2,
                     "queue_count": 2,
-                    "planned_jobs": [
+                    "git_ref": ORIGIN_SHA,
+                    "candidates": [
                         {
                             "priority": 1,
                             "node": NODE,
                             "reason": "never-tested",
                             "last_tested_timestamp": 0,
                             "age_days": None,
-                            "job_name": f"cval-{NODE}-123",
-                            "git_ref": ORIGIN_SHA,
                         },
                         {
                             "priority": 2,
@@ -440,8 +446,6 @@ class CvalLiveTests(unittest.TestCase):
                             "reason": "expired",
                             "last_tested_timestamp": 100,
                             "age_days": 10.0,
-                            "job_name": f"cval-{env['FAKE_NODE_2']}-123",
-                            "git_ref": ORIGIN_SHA,
                         },
                     ],
                 }
@@ -453,6 +457,8 @@ class CvalLiveTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         plan_calls = [line for line in calls if " plan " in f" {line} "]
         self.assertTrue(any(" --batch-size 2 " in f" {line} " for line in plan_calls))
+        self.assertFalse(any(" --candidates-only " in f" {line} " for line in plan_calls))
+        self.assertFalse(any(" --timestamp " in f" {line} " for line in plan_calls))
         self.assertIn("candidate_node_count=2 plan_limit=2", completed.stdout)
         self.assertIn("batch_size=1 plan_limit=all", completed.stdout)
 
@@ -571,15 +577,14 @@ class CvalLiveTests(unittest.TestCase):
                     "days_threshold": 7,
                     "free_nodes_count": 2,
                     "queue_count": 2,
-                    "planned_jobs": [
+                    "git_ref": ORIGIN_SHA,
+                    "candidates": [
                         {
                             "priority": 1,
                             "node": NODE,
                             "reason": "never-tested",
                             "last_tested_timestamp": 0,
                             "age_days": None,
-                            "job_name": f"cval-{NODE}-123",
-                            "git_ref": ORIGIN_SHA,
                         },
                         {
                             "priority": 2,
@@ -587,8 +592,6 @@ class CvalLiveTests(unittest.TestCase):
                             "reason": "expired",
                             "last_tested_timestamp": 100,
                             "age_days": 10.0,
-                            "job_name": f"cval-{env['FAKE_NODE_2']}-123",
-                            "git_ref": ORIGIN_SHA,
                         },
                     ],
                 }
@@ -671,15 +674,14 @@ class CvalLiveTests(unittest.TestCase):
                     "days_threshold": 7,
                     "free_nodes_count": 1,
                     "queue_count": 1,
-                    "planned_jobs": [
+                    "git_ref": ORIGIN_SHA,
+                    "candidates": [
                         {
                             "priority": 1,
                             "node": NODE,
                             "reason": "never-tested",
                             "last_tested_timestamp": 0,
                             "age_days": None,
-                            "job_name": f"cval-{NODE}-123",
-                            "git_ref": ORIGIN_SHA,
                         }
                     ],
                 }
@@ -1099,7 +1101,7 @@ class CvalLiveTests(unittest.TestCase):
             completed = self._run(env)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("state=no-due-candidates", completed.stdout)
-        self.assertIn("queue_count=0 planned_count=0", completed.stdout)
+        self.assertIn("queue_count=0 candidate_count=0", completed.stdout)
 
         for component, diagnostic in (
             ("nodes", "component=gpu-inventory status=failed exit_code=31"),
@@ -1113,21 +1115,20 @@ class CvalLiveTests(unittest.TestCase):
             self.assertNotIn("state=no-due-candidates", failed.stdout)
 
     def test_malformed_preflight_plan_json_fails_before_submission(self) -> None:
-        valid_job = {
+        valid_candidate = {
             "priority": 1,
             "node": NODE,
             "reason": "never-tested",
             "last_tested_timestamp": 0,
             "age_days": None,
-            "job_name": f"cval-{NODE}-123",
-            "git_ref": ORIGIN_SHA,
         }
         valid_plan = {
             "batch_size": 9,
             "days_threshold": 7,
             "free_nodes_count": 1,
             "queue_count": 1,
-            "planned_jobs": [valid_job],
+            "git_ref": ORIGIN_SHA,
+            "candidates": [valid_candidate],
         }
         malformed: list[tuple[str, object]] = [
             ("not-object", []),
@@ -1143,16 +1144,17 @@ class CvalLiveTests(unittest.TestCase):
             ("negative-days", valid_plan | {"days_threshold": -1}),
             ("bool-days", valid_plan | {"days_threshold": True}),
             ("queue-exceeds-free", valid_plan | {"queue_count": 2}),
-            ("count-mismatch", valid_plan | {"planned_jobs": []}),
-            ("jobs-not-list", valid_plan | {"planned_jobs": {}}),
-            ("blank-node", valid_plan | {"planned_jobs": [valid_job | {"node": ""}]}),
-            ("blank-job-name", valid_plan | {"planned_jobs": [valid_job | {"job_name": " "}]}),
-            ("missing-git-ref", valid_plan | {"planned_jobs": [{key: value for key, value in valid_job.items() if key != "git_ref"}]}),
-            ("moving-git-ref", valid_plan | {"planned_jobs": [valid_job | {"git_ref": "main"}]}),
-            ("uppercase-git-ref", valid_plan | {"planned_jobs": [valid_job | {"git_ref": "A" * 40}]}),
-            ("zero-git-ref", valid_plan | {"planned_jobs": [valid_job | {"git_ref": "0" * 40}]}),
-            ("bool-priority", valid_plan | {"planned_jobs": [valid_job | {"priority": True}]}),
-            ("submitted-field", valid_plan | {"planned_jobs": [valid_job | {"submitted": False}]}),
+            ("count-mismatch", valid_plan | {"candidates": []}),
+            ("candidates-not-list", valid_plan | {"candidates": {}}),
+            ("blank-node", valid_plan | {"candidates": [valid_candidate | {"node": ""}]}),
+            ("job-field", valid_plan | {"candidates": [valid_candidate | {"job_name": "job-a"}]}),
+            ("missing-git-ref", {key: value for key, value in valid_plan.items() if key != "git_ref"}),
+            ("moving-git-ref", valid_plan | {"git_ref": "main"}),
+            ("uppercase-git-ref", valid_plan | {"git_ref": "A" * 40}),
+            ("zero-git-ref", valid_plan | {"git_ref": "0" * 40}),
+            ("different-git-ref", valid_plan | {"git_ref": EXPLICIT_SHA}),
+            ("bool-priority", valid_plan | {"candidates": [valid_candidate | {"priority": True}]}),
+            ("submitted-field", valid_plan | {"candidates": [valid_candidate | {"submitted": False}]}),
             (
                 "duplicate-node",
                 valid_plan
@@ -1160,24 +1162,14 @@ class CvalLiveTests(unittest.TestCase):
                     "batch_size": 9,
                     "free_nodes_count": 2,
                     "queue_count": 2,
-                    "planned_jobs": [valid_job, valid_job | {"job_name": "other"}],
-                },
-            ),
-            (
-                "duplicate-job-name",
-                valid_plan
-                | {
-                    "batch_size": 9,
-                    "free_nodes_count": 2,
-                    "queue_count": 2,
-                    "planned_jobs": [valid_job, valid_job | {"node": "other"}],
+                    "candidates": [valid_candidate, valid_candidate | {"priority": 2}],
                 },
             ),
         ]
         for name, payload in malformed:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
                 env = self._environment(Path(tmpdir))
-                if name in {"duplicate-node", "duplicate-job-name"}:
+                if name == "duplicate-node":
                     env["FAKE_TWO_NODES"] = "1"
                 env["FAKE_PLAN_JSON"] = json.dumps(payload)
                 failed = self._run(env)

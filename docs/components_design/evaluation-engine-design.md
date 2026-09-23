@@ -32,17 +32,18 @@ an exact source ConfigMap and offline dependency. No raw mode is changed by the
 evaluator itself. The block-PVC architecture below remains the preferred target
 when storage provisioning is available.
 
-## Inputs and Draft Review
+## Inputs and Retired Draft Lessons
 
 Inputs: the seven databases in [raw-database-design.md](raw-database-design.md).
 PVC spot checks found matching status/metric samples and consistent completed
 DL generations. Large datasets were not scanned.
 
-The local drafts, `../evals/threshold.py` and `../evals/classify.py`, are research
-inputs, not production code. Keep their periodic refresh, median/percentile
-idea, and per-rank explanations; change these behaviors before adoption:
+The research prototypes were removed after review; the separate evaluator above
+is the supported implementation. This comparison retains the rationale for
+periodic refresh, compatible cohorts and per-rank explanations without
+maintaining a second executable path.
 
-| Draft behavior | Proposed correction |
+| Retired draft behavior | Replacement approach |
 |---|---|
 | First-table discovery; constructed `dltest-` keys | Explicit adapters; exact node/timestamp join; stored run keys |
 | Hard-coded B200; mixed plans; global fallback | Verified cohort and full metric key; no cross-cohort fallback |

@@ -5,12 +5,15 @@
 ```text
 cval nodes --output json
 cval status --output json
-cval results --test overall --type csv
-cval results --test storage --type csv
-cval results --test nccl --type csv
+cval results --test overall
+cval results --test storage
+cval results --test nccl
 ```
 
 These commands do not mutate Kubernetes or SQLite.
+Use `--config <reviewed-file>` before the command to select namespace, PVC
+reader and database paths. Result exports are always CSV; configuration output
+is always JSON. Status supports table/JSON, not TSV.
 
 ## Continuous validation loop
 
@@ -23,6 +26,23 @@ Use the script's `start`, `status`, and `stop` commands for the persistent tmux
 the session does not delete Kubernetes jobs, and pending-job pruning requires
 the separate exact `CVAL_PRUNE_CONFIRM=delete-pending` gate.
 
+Preflight and per-slot inspections use plain `plan`: inventory,
+history and cooldowns produce an ordered candidate list without rendering Jobs.
+The loop checks candidates in that order and renders one selected eligible node
+through the existing confirmed `run` path. Input failures still stop the cycle;
+an empty due queue is distinct from unavailable or malformed evidence.
+
+Retained `preflight-plan.json` and `plan-slot-*.json` now contain `candidates`
+and a top-level exact `git_ref`, not `planned_jobs`. The plan log field is
+`candidate_count`, not `planned_count`. Historical files are not rewritten.
+Template/bootstrap validation still runs before creation of the selected Job,
+but is not part of queue inspection. `plan --candidates-only` and
+`plan --include-yaml` are removed, as are rendering-only `plan` arguments
+`--timestamp`, `--template`, `--job-prefix` and `--git-repo`. `run` retains the
+timestamp; template, prefix and repository now come only from the reviewed
+configuration. Update callers that expected `planned_jobs` or YAML;
+see the [CLI contract and mode inventory](components_design/cli-design.md).
+
 ## Exact-commit validation
 
 The validation command requires an eligible node, exact published commit,
@@ -33,6 +53,14 @@ assignment follows ingestion.
 
 The continuous loop uses these same exact-commit submission gates for every
 job.
+
+Selected-node validation remains `cval validate --node <node>` with an exact
+commit and explicit submission confirmation. Namespace, reader and evidence
+paths come from the configuration. Optional ZIP downloading has been removed;
+the command still reports results and verifies fresh status/ingestion, while
+canonical logs, summaries, JSON and raw databases remain on the PVC. Existing
+downloaded archives are not deleted. Older retained runbooks describe their
+pinned revisions; do not replay their removed flags against the new CLI.
 
 The configured source is the internal `msr-central/c-val` repository. Jobs without
 repository credentials can use an approved immutable source ConfigMap rendered
@@ -214,8 +242,8 @@ live mutation; these examples are not evidence that a migration has run.
 	for rollback; it does not authorize continuing with a partial layout.
 5. Audit all planned destinations and unchanged included raw DB evidence. Do not
 	inspect or fingerprint the excluded directory. Historical receipts/result JSON retain original
-	absolute paths; the explicit evidence resolver and artifact downloader
-	recognize relocated paths without rewriting those records.
+	absolute paths; the explicit evidence resolver recognizes relocated paths
+	without rewriting those records.
 6. Restart only the reviewed exact-commit writers with separate approval. Follow
 	[Exact-commit validation](#exact-commit-validation) on one eligible node, with
 	a real published SHA and separate submission approval. Retain terminal job

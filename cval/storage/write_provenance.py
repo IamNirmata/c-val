@@ -185,6 +185,52 @@ def authorize_result_write(
     )
 
 
+def bind_ingestion_digest(authorization: ResultWriteAuthorization) -> None:
+    """Reserve or verify the current run's immutable ingestion digest marker."""
+
+    auth = require_result_write_authorization(authorization)
+    _revalidate_authorized_result(auth)
+    if not isinstance(auth.result, ValidationResultV2):
+        return
+    binding = _secure_result_binding(
+        auth.result_path, config=auth.config, result_digest=auth.result_digest
+    )
+    directory_fd = (
+        binding.run_dir_fd
+        if binding is not None
+        else os.open(auth.result_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    )
+    digest = auth.result_digest + "\n"
+    try:
+        marker = ".ingestion-result-digest"
+        try:
+            descriptor = os.open(
+                marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o600, dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            descriptor = os.open(
+                marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory_fd,
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                metadata = os.fstat(handle.fileno())
+                _require_private_regular_file(metadata, "ingestion digest marker")
+                if metadata.st_size != len(digest) or handle.read() != digest:
+                    raise ValueError("Run was already ingested with a different result digest")
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(digest)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.fsync(directory_fd)
+        _revalidate_authorized_result(auth)
+    finally:
+        if binding is None:
+            os.close(directory_fd)
+
+
 def _validate_result_path(
     path: Path,
     expected_path: Path,
