@@ -1,75 +1,22 @@
 # c-val Improvement Plan
 
-Review: 2026-09-23, source `fe4d405`. Proposed order; implement one item at a time.
-Keep raw history, test-owned DBs, separate evaluation and explicit mutation gates.
+Review: 2026-09-23, source `fe4d405`. Proposals, not implemented; work one row at a time.
+Preserve raw history, test-owned databases, separate evaluation and explicit mutation approvals.
 
-1. [ ] **P0 | Configuration and discovery.**
-   [Bulk discovery](../cval/k8s/discovery.py) reloads defaults and omits explicit
-   readiness. Pass one effective config; derive eligibility from structured data.
-   **Done:** custom resources/tolerations apply; missing/false readiness blocks.
+P0 = first; P1 = next; P2 = later. Risk = implementation risk, not task size.
 
-2. [ ] **P0 | Submission.**
-   Recheck eligibility at the [create boundary](../cval/jobs/manager.py) for every
-   caller. Retain partial-batch receipts; reconcile uncertain creates before retry.
-   **Done:** busy nodes block; second-create failure preserves the first receipt.
-
-3. [ ] **P0 | Results and acceptance.**
-   Bind [exports](../cval/storage/results_export.py) to exact runs or show metric age.
-   Make [acceptance](../cval/orchestrator/validate.py) require canonical results and
-   metric receipts. **Done:** stale/missing evidence cannot appear current or pass.
-
-4. [ ] **P1 | Live controller and monitoring.**
-   Merge duplicated resume/active observation in [the loop](../scripts/cval-live.sh)
-   into existing Python orchestration; batch reads and share deadlines.
-   **Done:** unchanged cooldown/resume/prune behavior, distinct forbidden/unavailable/missing
-   states, fewer subprocesses measured per cycle.
-
-5. [ ] **P1 | Runner and registry.**
-   Consolidate [dual evidence-setup paths](../cval/validation/runner.py) around
-   supervisor reservation and one compatibility-environment mapping.
-   **Done:** dynamic tests, signal handling, historical readers, duplicate-run
-   refusal and write-boundary/path protections remain intact.
-
-6. [ ] **P1 | Raw ingestion.**
-   Finish the [deferred DL transaction cleanup](cleanup-review.md#4-share-dl-transaction-bookkeeping):
-   share receipt/transaction mechanics, keeping fixed schemas explicit.
-   **Done:** unchanged seven-store rows, receipts, generations, locking and
-   status-last publication under retry/failure injection; no generic per-test DB.
-
-7. [ ] **P1 | Test workloads.**
-   Preinstall FIO instead of [installing during GPU allocation](../validation-tests/storage/setup.sh).
-   Pin image digest and [external DL source/plan](../validation-tests/dltest/run-test.sh).
-   **Done:** changed dependencies change recorded identity; startup cost measured.
-
-8. [ ] **P1 | Evaluator.**
-   Improve [history pagination and repeated reads](../evaluation_engine/runtime.py):
-   indexed incremental selection, generation-aware per-pass reuse, bounded replay.
-   **Done:** fewer reads, identical results, late-arrival recovery, policy
-   invalidation and unchanged raw databases.
-
-9. [ ] **P2 | CLI compatibility.**
-   Check external use before retiring [writer hooks or aliases](components_design/cli-design.md).
-   **Done:** approved migration notes and behavior tests; inspection stays separate
-   from mutation. Cosmetic file splitting is not simplification.
-
-10. [ ] **P2 | Recovery tools.**
-    Extend [existing recovery tests](../tests/test_pvc_layout.py) through journal
-    migration and restore. Keep backup/layout/journal tools outside the controller.
-    **Done:** restored rows/artifacts/metadata verified; failed preconditions preserve evidence.
-
-11. [ ] **P2 | Delivery.**
-    Separate runtime and host-test contents in the [source bundle](../deploy/evaluation-engine/render.py).
-    Retain source-checkout installation, bootstrap, descriptors and required helpers.
-    **Done:** smaller bundle, offline startup, exact commit/hash verification,
-    preserved rollback bundles.
-
-12. [ ] **P2 | Tests and CI.**
-    Gate CI on offline unittest, shell syntax and documentation checks; reuse
-    table-driven fixtures. **Done:** reproducible checks without duplicated fake
-    scripts; separately approved exact-commit cluster acceptance remains required.
-
-13. [ ] **P2 | Documentation.**
-    Enforce the [existing ownership map](architecture.md#documentation-map).
-    Replace repeated current contracts in overview/progress with links; retain
-    dated research/history. **Done:** one home per contract, checked CLI/config
-    examples, this plan as the active improvement backlog.
+| Topic | Major Component(s) | Summary | Current Situation + Issue | Proposed Solution / Change | Simple Words | Priority + Risk |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1. Use One Configuration | Configuration; [node discovery](../cval/k8s/discovery.py#L189) | Consistent eligibility decisions. | Bulk discovery reloads defaults and does not explicitly require Ready. | Pass effective config throughout; test custom resources, tolerations and missing/false readiness. | Every check uses the same settings and rejects unready nodes. | P0; Medium: changes node selection. |
+| 2. Guard Every Submission | CLI; [job manager](../cval/jobs/manager.py#L43) | Safe starts and recoverable failures. | Explicit node lists bypass discovery; later failures discard batch receipts. | Recheck before create; retain partial/uncertain outcomes; reconcile before retry, never auto-delete. | Check before starting; remember what started if something fails. | P0; High: duplicate or unsafe jobs. |
+| 3. Match Evidence to Runs | [Exports](../cval/storage/results_export.py#L131); [acceptance](../cval/orchestrator/validate.py#L539) | Trustworthy reports and acceptance. | Exports mix timestamps; acceptance relies on logs and status rows. | Join exact runs or label metric age; require canonical results and metric receipts. | Old numbers must not look like results from today's test. | P0; Medium: CSV compatibility. |
+| 4. Simplify the Live Loop | [Live controller](../scripts/cval-live.sh#L1140); monitoring | Less duplication and overhead. | Resume and active loops repeat monitoring, pruning and data conversion. | Share Python orchestration, batched reads and deadlines; preserve cooldown/resume/prune gates and distinct error states; measure calls. | Maintain one monitoring path and make fewer external calls. | P1; High: resume or pruning mistakes. |
+| 5. Unify Evidence Setup | [Runner](../cval/validation/runner.py#L49); supervisor; registry | One secure setup path. | Standalone and supervised runs prepare evidence differently. | Reuse supervisor reservation and compatibility mapping; preserve dynamic tests, signals, historical readers, duplicate-run refusal and path/write guards. | Create test folders and logs safely in one place. | P1; High: evidence-path safety. |
+| 6. Share Writer Bookkeeping | DL writers; [raw ingestion](cleanup-review.md#4-share-dl-transaction-bookkeeping) | Remove repeated transaction logic. | Standard and overlap writers repeat receipts, replacement and commits. | Share private transaction helper; retain seven stores, schemas, locks, generations and status-last writes; test retries/failures. | Share saving steps without merging databases or losing records. | P1; High: partial metric writes. |
+| 7. Pin Test Dependencies | [Workload setup](../validation-tests/storage/setup.sh#L27); images; [external DL](../validation-tests/dltest/run-test.sh#L110) | Repeatable tests; shorter startup. | FIO may install after GPU allocation; shared DL code is outside the pinned commit. | Preinstall FIO; pin image/source/plan identities; record dependency changes and measure setup time. | Prepare tools beforehand and record exactly what ran. | P1; Medium: benchmark comparability. |
+| 8. Reduce Evaluator Reads | [Evaluator](../evaluation_engine/runtime.py#L58); raw queries | Less repeated database work. | Pagination groups history; tests repeat provenance and metric reads. | Use indexed selection and generation-aware per-pass reuse; preserve bounded replay, late arrivals, policy invalidation and raw immutability. | Read less without overlooking new or changed results. | P1; Medium: missed reevaluation. |
+| 9. Retire Unused Interfaces | [CLI](components_design/cli-design.md#mode-inventory); compatibility scripts | Fewer supported entry points. | Hidden writer hooks and aliases remain; external usage is unknown. | Check callers; approve retirements with migration notes/tests; keep inspection separate from mutation. | Remove old commands only after confirming who uses them. | P2; Medium: external callers. |
+| 10. Exercise Recovery Together | Backup; layout; SQLite journal; [tests](../tests/test_pvc_layout.py#L21) | Prove end-to-end restoration. | Recovery tools have separate backup, layout and journal tests. | Add combined migration/restore fixtures; verify rows, artifacts, metadata and rejection of unsafe preconditions. | Practise recovering data before depending on it. | P2; Low: offline test additions. |
+| 11. Trim Runtime Bundles | [Source renderer](../deploy/evaluation-engine/render.py#L35); packaging | Ship only runtime dependencies. | Source archives also include the host test suite. | Separate host tests; retain startup helpers, descriptors and rollback; verify size, offline startup and commit/hash identity. | Stop sending development-only files to every job. | P2; Medium: missing runtime files. |
+| 12. Standardize Offline Checks | Tests; CI; shell scripts | Repeatable regression checks. | Offline suites exist, but lack a repository CI gate; fake scripts repeat fixtures. | Automate unittest, shell-syntax and link checks; share fixtures; retain approved exact-commit cluster acceptance. | Catch mistakes automatically before approved cluster testing. | P2; Low: noisy CI checks. |
+| 13. Explain Each Contract Once | [Documentation](architecture.md#documentation-map); README; progress | Compact, comprehensive references. | Overview/progress repeat current behavior despite an existing ownership map. | Replace repetition with links; check CLI/config examples; retain dated history and this backlog. | Explain each rule once, then link to it. | P2; Low: broken links. |
