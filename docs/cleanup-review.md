@@ -3,31 +3,36 @@
 Review date: 2026-09-22. Baseline:
 `7464e4fc55ec88691d015afdb3ec08ffa246f6c1`.
 
-**Batches A and B were approved and removed on 2026-09-22.** Batches C-D remain
-pending separate approval; E is consolidation guidance. **Planning finding 1
-and ingestion finding 2 were approved and implemented locally on 2026-09-23.** No commit, push or
-deployment was performed. Absence from the continuous loop alone is not proof
-that a file is unused.
+**Published and accepted on 2026-09-23:** batches A-B, planning finding 1,
+ingestion finding 2, and the CLI settings cleanup shipped in
+`1abde89ff3d615d0d064b33131542315dc4169c6` on internal `main`. One-node
+acceptance passed before the live loop was restarted at that commit.
 
 The 2026-09-23 settings cleanup also removes single-choice format switches,
 legacy TSV, optional validation ZIP export and duplicate public CLI overrides
 for config-owned targets, job settings and policy limits. The
 [remaining control inventory](components_design/cli-design.md#mode-inventory)
 records replacements. TOML settings, raw writers, canonical evidence and the
-independent evaluator are retained; the live loop has not been restarted.
+independent evaluator are retained.
+
+**Implemented follow-up:** retire batch C's all-files publish wrapper and
+consolidate documentation (finding 5), followed by shared bootstrap extraction
+(finding 3). The bootstrap refactor still requires its own exact-commit cluster
+acceptance before deployment. Finding 4 and compatibility-alias retirement remain deferred. Absence
+from the continuous loop alone is not proof of non-use.
 
 ## Maintainability Re-audit
 
 The A-B removals reduce stale material, not active framework complexity. The
 next goal is fewer places to understand or change one behavior, not merely fewer
-files. Findings 1-2 are implemented locally; findings 3-5 remain proposals, not
-approved runtime refactors or deletions.
+files. Findings 1-2 are implemented and accepted; finding 3 is implemented,
+and finding 4 remains a proposal.
 The earlier retain inventory protected responsibilities and evidence; it did
 not mean every current implementation or abstraction should remain unchanged.
 
 ### 1. Separate Candidate Selection From Job Rendering
 
-**Implemented locally; cluster acceptance pending.** Previously the loop rendered
+**Published and accepted in `1abde89`.** Previously the loop rendered
 every due candidate before selecting an available node, then rendered its Job
 again at submission. Preflight repeated that rendering as well.
 
@@ -44,13 +49,14 @@ priority order, one render for selected-node submission, and failure before
 creation for invalid templates. Existing preflight, fresh eligibility, cooldown,
 resume, pruning and worktree/source guards remain. Malformed candidate JSON and
 a returned commit differing from the requested commit fail closed. See the
-[CLI contract](components_design/cli-design.md) for the default candidate JSON
-shape and remaining mode inventory. Callers must migrate from `planned_jobs`
+[planning contract](operations-runbook.md#candidate-inspection) for the default
+candidate JSON shape and the [CLI inventory](components_design/cli-design.md#mode-inventory)
+for retained controls. Callers must migrate from `planned_jobs`
 to `candidates`; this is an intentional planning-interface change.
 
 ### 2. Give Ingestion One Orchestration Path
 
-**Implemented locally; cluster acceptance pending.** The former 537-line
+**Published and accepted in `1abde89`.** The former 537-line
 [db-update.sh](../validation-tests/db-update.sh) is now a six-line launcher for
 [one Python coordinator](../cval/storage/run_ingest.py). JSON-to-shell projection,
 argument reconstruction and separate writer CLI processes are gone. The existing
@@ -68,27 +74,33 @@ after a lock retry, suppressed status on missing evidence, failure/interruption
 events, released locks and descriptor-bound supervisor ingestion. Historical
 structured v1/v2 readers remain; environment-only results cannot authorize writes.
 Individual CLI writer/rebuild hooks remain compatibility/maintenance interfaces,
-not part of normal orchestration. No live job or raw evidence was modified.
+not part of normal orchestration. Exact-commit cluster acceptance also verified
+canonical evidence and matching rows in all seven raw databases; see below.
 
 ### 3. Maintain One Job Bootstrap Program
 
-**Medium impact, bounded change.** The pinned and scheduler-selected Job
-templates contain the same 34 nonblank, noncomment bootstrap lines. A source
-transport or supervisor-startup change must currently be maintained twice;
-[renderer validation](../cval/jobs/renderer.py#L213) also depends on their shape.
+**Implemented; exact-commit cluster acceptance pending.** Both Job
+templates now contain one `runtime-bootstrap-placeholder` in the server's Bash
+args block. The [renderer](../cval/jobs/renderer.py) embeds the packaged
+[shared shell payload](../cval/jobs/bootstrap.sh) before its existing semantic,
+duplicate-key and executable-order validation. No template engine, CLI mode,
+configuration switch or extra pod dependency was added.
 
-Keep both requested YAML entry points and their placement differences. Have the
-renderer insert one reviewed bootstrap payload into both, without introducing a
-template engine or weakening semantic/duplicate-key validation. Rendered output
-must remain self-contained: a bootstrap cannot rely on source not fetched yet.
+The rendered Job remains self-contained: it does not need to fetch source before
+obtaining its bootstrap. Node-specific placement and scheduler-selected placement
+remain separate and unchanged, as do resource and environment fields. Valid
+existing inline bootstrap templates still pass the same safety checks; malformed,
+mixed or duplicate shared markers are rejected.
 
-Gate: [placement and bootstrap parity](../tests/test_renderer.py#L34), exact
-commit/hash rejection, shell syntax, and the existing hostile-template tests.
-This is consolidation of shared code, not removal of scheduler-selected tests.
+The 38 focused renderer/workflow/job-manager tests pass, including both source
+transports, archive commit/hash rejection, shell syntax and hostile-template
+regressions. A structured comparison with `1abde89` verified unchanged placement,
+resources and environment, and identical executable bootstrap lines. This local
+verification does not replace exact-commit cluster acceptance for the refactor.
 
 ### 4. Share DL Transaction Bookkeeping
 
-**Medium impact, narrow implementation.**
+**Deferred proposal; not implemented.**
 [write_standard_db](../cval/storage/dltest_ingest.py#L738) and
 [write_overlap_db](../cval/storage/dltest_ingest.py#L804) occupy 64 and 67 lines.
 They repeat receipt setup, scoped replacement, insertion, generation writes and
@@ -105,23 +117,24 @@ and divergent receipts still block publication. Retain symlink/identity checks.
 
 ### 5. Give Current Behavior One Documentation Home
 
-**Low runtime risk, direct readability benefit.** The
-[evaluator design note](components_design/evaluation-engine-design.md#L55)
-still places a future Deployment/block-PVC/WAL design below the implemented
-fixed-Pod/shared-storage/DELETE description. It is labeled as a proposal, but
-readers must continually separate the two. Do not treat its target as deployed.
+**Completed.** The
+[documentation map](architecture.md#documentation-map) assigns current runtime,
+configuration, operations, evidence and evaluator contracts to existing references.
+No additional design document was created.
 
-Use [architecture](architecture.md) for the runtime map,
-[configuration](configuration.md) for settings, [operations](operations-runbook.md)
-for procedures, and [result schema](result-schema.md) for evidence contracts.
-Keep evaluator operations in its [deployment README](../deploy/evaluation-engine/README.md).
-Shorten design notes to rationale and explicitly deferred decisions; link to
-current contracts instead of repeating them. Keep research/roadmap separate.
-This review itself is consolidated rather than adding another design document.
+The evaluator design note now contains rationale and deferred decisions, with
+links to its operating procedure and schema reference instead of duplicated
+deployment instructions and fictional schema examples. The database note links
+filesystem permissions to the current Pod contract instead of claiming a
+read-only raw mount.
 
-Gate: link/reference checks and comparison with effective code/config. Do not
-refresh dated operating claims without fresh evidence. This is the previous
-batch E guidance, not approval to delete current reference documentation.
+The runbook owns the candidate JSON contract. The CLI note retains the mode
+inventory and migration guidance, but replaces its stale local-only roadmap and
+speculative line-count targets with explicitly unapproved interface decisions.
+The published `1abde89` acceptance is recorded separately from these later
+follow-ups. Dated rollout evidence is not a current-state
+claim. Local link/reference checks and the customization validator cover this
+documentation-only change; retained operational records are not rewritten.
 
 ## Simple Ownership Model
 
@@ -142,9 +155,9 @@ or conversion path, not just rename, relocate or compress it.
 
 | Batch | Status | Baseline reduction |
 | --- | --- | --- |
-| A: retired evaluation prototypes | Approved and removed locally | 3 files, 554 text lines, 23,924 bytes |
-| B: historical planning bundle | Approved and removed locally | 7 files, 427 text lines plus PNG, 147,067 bytes |
-| C: all-files publish wrapper | Pending approval | 1 file, 61 lines, 1,422 bytes |
+| A: retired evaluation prototypes | Published in `1abde89` | 3 files, 554 text lines, 23,924 bytes |
+| B: historical planning bundle | Published in `1abde89` | 7 files, 427 text lines plus PNG, 147,067 bytes |
+| C: all-files publish wrapper | Approved and removed in this follow-up | 1 file, 61 lines, 1,422 bytes |
 | D: shell compatibility aliases | Deferred unless explicitly retired | 4 files, only 26 lines total |
 
 A-B total: 10 files, 981 text lines plus one PNG, 170,991 bytes. Gross source
@@ -164,11 +177,11 @@ docs/project_managemnt_docs/cval3.0.md
 docs/project_managemnt_docs/image.png
 ```
 
-C is [push.sh](../push.sh): it stages everything and pushes the current branch
-to origin, not an isolated reviewed change to an explicitly chosen target.
-Retirement must also update the workspace shipping-skill warning; do not create
-another wrapper solely to replace it. C is useful safety cleanup, not the main
-runtime simplification.
+C retired the all-files publish wrapper: it staged everything and pushed the
+current branch to origin, not an isolated reviewed change to an explicitly
+chosen target. The workspace shipping skill now requires explicit reviewed
+paths, staged-diff inspection and destination verification. No replacement
+wrapper was added. C is safety cleanup, not the main runtime simplification.
 
 D's exact paths remain:
 
@@ -195,21 +208,27 @@ runners. Removal needs an external-usage decision and retained behavior coverage
 	governance and user-owned untracked files. Conversation archives and the
 	protected `dl_unit_test_evaluation` directory were not read.
 
-## Verification and Next Approval
+## Verification and Remaining Scope
 
-This re-audit uses current code, direct call sites, descriptors and neighboring
-tests. Logical line counts include a final unterminated line; they identify
-review surfaces, not promised deletion amounts.
-Static references do not prove external non-use. This is not a comprehensive
-security review or a fresh live-state audit. No live commands or additional
-source deletions were performed for the re-audit.
+The runtime changes were accepted on `slc01-cl02-hgx-0250`, run timestamp
+`1790132796`, using the published exact commit. The Job completed with exit 0
+and no container restarts. Storage, NCCL and DL passed; ingestion finished with
+`pass` in 37.395 seconds. The audit verified 38 canonical evidence files,
+result/config digests, four passing status rows, one storage row, one NCCL row,
+and 7,128 DL metrics across eight ranks with complete generations and receipts.
 
-Findings 1-2 have local regression coverage for planning, ingestion and evidence
-safety. Bootstrap and DL transaction consolidation remain separate proposals;
-their baseline tests do not mean those refactors are implemented. The active
-loop has not been restarted with the local changes.
+The live loop restarted at `2026-09-23T03:35:34Z`. Its first cycle verified
+candidate-only plans and checked 282 due candidates, all ineligible. The
+`03:41:06Z` observation showed a running, idle loop; two fresh automated runs
+were still unverified for lack of eligible capacity. This is dated rollout
+evidence, not a claim about the current live state. The detailed acceptance
+and restart record is retained locally under the release run logs.
 
-Next: publish an isolated exact commit, then perform separately approved one-node
-acceptance before runtime rollout. Keep public APIs and evidence formats stable unless
-explicitly approved otherwise. Source cleanup never authorizes live deletion or
-evidence removal.
+The documentation/wrapper follow-up uses link/reference checks and the workspace
+customization validator. The later approved bootstrap extraction has focused
+renderer/caller regressions; no live mutation was performed for either change.
+Publication alone does not deploy the shared bootstrap. Its exact published
+commit still needs separately approved cluster acceptance before rollout.
+DL transaction consolidation remains a proposal, and tested shell aliases remain
+supported. A future runtime refactor still needs its own approval and acceptance.
+Source cleanup never authorizes live deletion or evidence removal.

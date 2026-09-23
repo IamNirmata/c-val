@@ -1,4 +1,4 @@
-# CLI Design and Trim Plan
+# CLI Interface Decisions
 
 ## Scope
 
@@ -7,51 +7,24 @@ three audiences:
 
 1. operators reading cluster/raw state;
 2. confirmed job submission workflows;
-3. in-pod raw SQLite ingestion.
+3. individual raw-writer compatibility and maintenance hooks.
 
 The CLI must preserve exact-commit submission, node eligibility checks,
 read-only planning/monitoring, raw result export, immutable write provenance,
 and fail-closed behavior.
 
-## Current Surface
+The planning, CLI and ingestion simplifications were published in `1abde89`
+and passed exact-commit cluster acceptance on 2026-09-23. See the
+[cleanup review](../cleanup-review.md) for release evidence and remaining scope.
+This note owns interface-retention decisions and migration guidance, not live
+procedures or an approved redesign roadmap.
 
-| Command | Mutation | Owner/purpose |
-|---|---|---|
-| `config` | no | Print effective configuration |
-| `tests list/describe/validate` | no | Inspect registry and adapters |
-| `nodes` | no | Inventory or check one node's eligibility |
-| `status` | no | Read latest `validation.db` rows |
-| `plan` | no | Inspect prioritized candidates; never render or submit Jobs |
-| `jobs` | no | Read/watch Volcano phases |
-| `results` | local CSV | Export latest raw statuses/metrics |
-| `run` | creates jobs | Submit a confirmed planned batch |
-| `validate` | creates one job | Submit, watch, and verify one exact run |
+## Default Planning
 
-### Default Planning
-
-Plain `plan` uses the existing priority queue without rendering Jobs.
-Its JSON has `batch_size`, `days_threshold`, `free_nodes_count`, `queue_count`,
-`git_ref`, and `candidates`. Each candidate has `node`, `priority`, `reason`,
-`last_tested_timestamp`, and `age_days`; there is no Job name or YAML.
-`queue_count` covers all due candidates; `--batch-size` limits the returned list.
-With explicit `--free-nodes`, the input list is not proof of current eligibility.
-
-Planning requires an exact commit. It does not validate a Job template or
-authorize submission. The live loop keeps its targeted eligibility and
-exact-source checks, then uses confirmed `run` to render and create only the
-selected node's Job.
-
-Removed: `plan --candidates-only`, `plan --include-yaml`, and plan-only uses of
-`--timestamp`, `--template`, `--job-prefix`, `--git-repo`. `run` retains the
-timestamp; job settings now come from the reviewed config. The `planned_jobs`
-JSON shape is replaced by `candidates`, not kept as
-an alternative. There is no internal `render_jobs` switch or rendered-plan
-serialization path for inspection.
-
-Old loop: rank -> render candidate Jobs -> check availability -> render selected
-Job again -> submit. New loop: rank -> check availability -> render selected
-Job once -> submit. Benefits are fewer manifest builds, smaller inspection
-output and one planning contract; no measured end-to-end speedup is claimed.
+The [runbook's candidate-inspection contract](../operations-runbook.md#candidate-inspection)
+defines `plan` output and its boundary with submission. Removing candidate-wide
+rendering avoids building Jobs twice without introducing a mode selector or
+another scheduler. No measured end-to-end speedup is claimed.
 
 ## Mode Inventory
 
@@ -89,6 +62,8 @@ selected-node validation retains its explicit target and evidence verification.
 | --- | --- |
 | `config --output json`, `results --type csv` | Fixed JSON and CSV output respectively |
 | `status --output tsv`, `plan/run --db-status-tsv` | JSON output and `--db-status-json`, or `--live-status` |
+| `plan --candidates-only`, `--include-yaml` | Candidate inspection is the only default; `candidates` replaces `planned_jobs` |
+| `plan --timestamp`, `--template`, `--job-prefix`, `--git-repo` | No rendering during inspection; use `run --timestamp` and reviewed job configuration for submission |
 | `validate --download`, `--download-dir` | Retained canonical PVC evidence; no automatic ZIP export |
 | `validate --pvc-pod`, `status/results --pod`, `plan/run --status-pod` | `cluster.pvc_access_pod` |
 | Public `--namespace`/`-n`, `plan/run --status-namespace` | `cluster.namespace` in the reviewed config |
@@ -121,118 +96,31 @@ provenance/data parameters. They are not candidates for silent removal.
 Five hidden commands share the same parser: `db-add-run-results`,
 `db-add-storage-result`, `db-add-nccl-health`, `db-add-dltest-run`, and
 `db-rebuild-dltest-metrics`. They remain compatibility/maintenance interfaces;
-normal ingestion no longer calls them. The thin
-[validation-tests/db-update.sh](../../validation-tests/db-update.sh) launcher
-executes [cval.storage.run_ingest](../../cval/storage/run_ingest.py), which uses
-the same authorized raw-writer functions directly. Retiring individual hooks
-or moving rebuild tooling is a separate interface decision.
-
-```mermaid
-flowchart LR
-    Operator --> CLI[cval.cli]
-    Live[cval-live.sh] --> CLI
-    CLI --> Read[discovery / status / plan / jobs / results]
-    CLI --> Submit[policy-gated job creation]
-    Pod[db-update.sh] --> Ingest[one Python ingestion coordinator]
-    Ingest --> Writers[test-specific authorized writers]
-    Writers --> Raw[seven raw SQLite DBs]
-```
-
-## Design Assessment
-
-The command boundaries are mostly sound: `plan` is visibly read-only, while
-`run` and `validate` require `--submit --confirm submit`. Removing duplicate
-flags reduces parser combinations without adding another configuration layer.
-
-Additional CLI-adjacent weight includes:
-
-- [orchestrator/validate.py](../../cval/orchestrator/validate.py): retained
-  progress parsing, selected-node orchestration and reports; ZIP support removed.
-- [validation-tests/db-update.sh](../../validation-tests/db-update.sh): thin
-  entry point; ingestion ordering now lives in one Python coordinator.
-- Dynamic result-export routing across `results_export.py`,
-  `operational_targets.py`, `operations.py`, and plugin adapters.
+normal ingestion no longer calls them. See the
+[runtime ownership map](../architecture.md#repository-boundaries) and
+[raw evidence contract](../result-schema.md) for the direct coordinator/writer
+path. Retiring individual hooks or moving rebuild tooling is a separate
+interface decision.
 
 Splitting `cli.py` into more files would improve navigation but not reduce the
 codebase. Reduction requires deleting duplicate paths or optional behavior.
 
-## Minimal Target
+## Deferred Decisions
 
-The following redesign remains a proposal. In the trim sequence below, only
-items explicitly marked completed locally have been implemented; other items
-do not authorize removing remaining commands.
+These are unapproved interface proposals, not current behavior or scheduled
+cleanup work:
 
-Keep six operator commands:
+- Merge `validate` into `run` with explicit single-node watch/verify behavior.
+  Preserve the existing acceptance contract before retiring any command.
+- Reduce config/registry inspection commands or human output formats only
+  after deciding which operator interfaces remain supported.
+- Retire individual hidden writer hooks only after checking external usage;
+  keep rebuild/recovery capabilities explicitly owned.
+- Replace plugin-defined CSV export with fixed built-in exports only if
+  third-party exporters are no longer a supported contract.
 
-```text
-nodes   plan   run   status   jobs   results
-```
-
-Recommended semantics:
-
-- `run --node NODE --watch --verify` replaces `validate` for single-node
-  acceptance; batch `run` remains available to cval-live.
-- Configuration and registry validation occur automatically at startup.
-  Development-only inspection can be a small repository script, not installed
-  production CLI surface.
-- In-pod ingestion now uses `python -m cval.storage.run_ingest`; retirement of
-  the individual hidden compatibility hooks remains a separate proposal.
-- JSON is the automation contract. Human tables may remain only where they
-  materially help (`nodes`, `jobs`, `plan`).
-
-```mermaid
-flowchart LR
-    Operator --> Public[small operator CLI]
-    Live[cval-live] --> API[Python orchestration APIs]
-    Public --> API
-    Pod[supervisor] --> Ingest[one ingest_run process]
-    Ingest --> Raw[raw SQLite writers]
-```
-
-## Trim Sequence
-
-### 1. Consolidate ingestion (completed locally)
-
-One Python coordinator replaces the shell projections and four `db-add-*`
-subprocesses. It loads the config snapshot once, creates shared authorization,
-and calls the existing storage, NCCL, DL and final-status writers in order.
-Every writer retains its own provenance checks and transaction boundaries.
-The shared DL lock implementation is reused in-process and by its existing
-standalone wrapper; generation/receipt logic and database schemas are unchanged.
-
-Local tests cover all seven stores, a recoverable SQLite lock error before
-finalization, no status publication on metric failure, interrupted lock release,
-and real descriptor-bound supervisor ingestion. Exact-commit cluster acceptance
-is still required before rollout. DL rebuild and hidden compatibility commands
-were not removed as part of this change.
-
-### 2. Remove optional ZIP export (completed locally)
-
-Removed `validate --download`, ZIP/base64 collection and archive-only helpers.
-Canonical PVC artifacts, ordinary text/JSON acceptance reports, progress and
-fresh-status verification remain. Existing archives were not modified.
-
-### 3. Merge `validate` into `run` (medium risk)
-
-Add single-node watch/verify mode to the existing submission service, then
-remove the duplicate single-node command/parser path. Drive progress from
-structured events/result JSON and exact DB rows rather than legacy log regexes.
-Expected reduction: about 250-450 lines after tests and shared helpers settle.
-
-### 4. Remove redundant inputs (completed locally)
-
-Removed TSV compatibility, one-choice format selectors and duplicate public
-config-owned overrides listed above. Free nodes, JSON snapshots, threshold,
-batch size, timestamp and exact Git SHA remain for the live loop. Validation,
-monitoring and exports use the same reviewed target configuration.
-
-### 5. Simplify result export only if extension is not required (optional)
-
-The registry-driven test runner is core; dynamic plugin-defined CSV export is
-not necessarily core. If only built-in exports are required, replace the
-operational-target/plugin routing with fixed status, storage, NCCL, and DL raw
-export functions. Potential reduction: 150-300 lines. Do not take this step if
-third-party test exporters are a supported contract.
+No line-count target justifies removing a supported behavior. See the
+[cleanup review](../cleanup-review.md) for the bounded approved work instead.
 
 ## Do Not Trim
 
@@ -242,10 +130,3 @@ third-party test exporters are a supported contract.
 - `jobs`, `status`, and exact-timestamp acceptance evidence.
 - Immutable config/result authorization and canonical evidence validation.
 - Registry-driven execution, secure supervisor descriptors, or raw DB writers.
-
-## Expected Outcome
-
-A realistic target is `cval/cli.py` at 250-350 lines and a net reduction of
-roughly 600-1,000 lines across CLI, acceptance, and ingestion code. Measure net
-repository lines after each phase; moving code between modules does not count
-as trimming.

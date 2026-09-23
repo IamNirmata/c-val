@@ -8,12 +8,15 @@ import re
 import subprocess
 import sys
 import tarfile
+import textwrap
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from cval.config import load_config
 from cval.jobs.renderer import (
+    _RUNTIME_BOOTSTRAP,
     default_template_path,
     render_validation_job,
     render_validation_job_from_file,
@@ -31,6 +34,65 @@ SCHEDULER_TEMPLATE = (Path(__file__).resolve().parents[1] / "ymls/test-job.yml")
 
 
 class RendererTests(unittest.TestCase):
+    def test_shared_bootstrap_is_embedded_in_both_source_transports(self) -> None:
+        base = load_config()
+        for offline in (False, True):
+            config = replace(
+                base,
+                job=replace(
+                    base.job,
+                    source_configmap="cval-exact-source" if offline else "",
+                    source_sha256="b" * 64 if offline else "",
+                ),
+            )
+            for template, node in ((TEMPLATE, "node-a"), (SCHEDULER_TEMPLATE, None)):
+                with self.subTest(offline=offline, node=node):
+                    rendered = render_validation_job(
+                        template, node, timestamp=12345, git_ref=COMMIT, cval_config=config
+                    )
+                    pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
+                    self.assertEqual(pod["containers"][0]["args"], [_RUNTIME_BOOTSTRAP])
+                    self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
+                    subprocess.run(["bash", "-n"], input=_RUNTIME_BOOTSTRAP, text=True, check=True)
+
+    def test_shared_bootstrap_rejects_mixed_misplaced_or_duplicate_markers(self) -> None:
+        marker = "runtime-bootstrap-placeholder"
+        variants = (
+            TEMPLATE.replace(marker, "echo missing-bootstrap"),
+            TEMPLATE.replace(marker, f"# {marker}"),
+            TEMPLATE.replace(marker, f"{marker}\n                  echo unexpected"),
+            TEMPLATE.replace(marker, f"{marker}\n                  {marker}"),
+            TEMPLATE.replace(
+                "  namespace: namespace-placeholder",
+                f"  namespace: namespace-placeholder\n  annotations:\n    bootstrap: {marker}",
+            ),
+            TEMPLATE.replace(f"- |\n                  {marker}", f'- "{marker}"'),
+        )
+        for unsafe in variants:
+            with self.subTest(template=unsafe), self.assertRaisesRegex(ValueError, "bootstrap|args"):
+                render_validation_job(unsafe, "node-a", timestamp=12345, git_ref=COMMIT)
+
+    def test_expanded_bootstrap_still_requires_executable_safety_contract(self) -> None:
+        for original, replacement in (
+            ('cd "$CVAL_REPO_DIR"', 'cd "$CVAL_REPO_DIR"+'),
+            ("source /tmp/cval-runtime.env", "# source /tmp/cval-runtime.env"),
+            ("exec python3 -m cval.validation.supervisor", "exec python3 -m cval.validation.path_preflight"),
+        ):
+            with self.subTest(line=original), patch(
+                "cval.jobs.renderer._RUNTIME_BOOTSTRAP",
+                _RUNTIME_BOOTSTRAP.replace(original, replacement),
+            ), self.assertRaisesRegex(ValueError, "runtime contract|bootstrap"):
+                render_validation_job(TEMPLATE, "node-a", timestamp=12345, git_ref=COMMIT)
+
+    def test_valid_inline_bootstrap_templates_remain_supported(self) -> None:
+        inline = TEMPLATE.replace(
+            "                  runtime-bootstrap-placeholder",
+            textwrap.indent(_RUNTIME_BOOTSTRAP.rstrip("\n"), "                  "),
+        )
+        shared = render_validation_job(TEMPLATE, "node-a", timestamp=12345, git_ref=COMMIT)
+        rendered = render_validation_job(inline, "node-a", timestamp=12345, git_ref=COMMIT)
+        self.assertEqual(rendered.yaml_text, shared.yaml_text)
+
     def test_scheduler_selected_template_uses_assigned_node_and_standard_runner(self) -> None:
         config = load_config()
         config = replace(config, job=replace(config.job, source_configmap="cval-exact-source", source_sha256="b" * 64))
@@ -418,12 +480,16 @@ enabled = true
         self.assertNotIn("test-nccl-", template)
         self.assertNotIn("test-dltest-", template)
         self.assertIn("runtime-environment-b64-placeholder", template)
-        self.assertIn("set -euo pipefail", template)
-        self.assertIn("cval.validation.supervisor", template)
-        self.assertNotIn("cval.validation.path_preflight", template)
-        self.assertNotIn("mkdir -p", template)
-        self.assertNotIn("tee -a", template)
-        self.assertNotIn("set -o noclobber", template)
+        self.assertIn("runtime-bootstrap-placeholder", template)
+        self.assertNotIn("git init", template)
+        self.assertNotIn("cval.validation.supervisor", template)
+        rendered = render_validation_job(template, "node-a", timestamp=12345, git_ref=COMMIT)
+        self.assertIn("set -euo pipefail", rendered.yaml_text)
+        self.assertIn("cval.validation.supervisor", rendered.yaml_text)
+        self.assertNotIn("cval.validation.path_preflight", rendered.yaml_text)
+        self.assertNotIn("mkdir -p", rendered.yaml_text)
+        self.assertNotIn("tee -a", rendered.yaml_text)
+        self.assertNotIn("set -o noclobber", rendered.yaml_text)
         for environment_name in (
             "RUN_STORAGE",
             "RUN_NCCL",

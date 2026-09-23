@@ -1,18 +1,18 @@
 # Evaluation Database Design
 
-Implemented schema at `3c04160` (2026-09-08), not the broader
-[evaluation-engine-design.md](evaluation-engine-design.md) proposal.
 Source of truth: [evaluation_engine/database.py](../../evaluation_engine/database.py).
+This is the schema reference; [design rationale and deferred decisions](evaluation-engine-design.md)
+are separate from implemented tables and deployment instructions.
 
 ## Ownership and Storage
 
 - The independent `evaluation_engine` owns derived thresholds and comparisons.
   c-val still owns the seven [raw databases](raw-database-design.md).
 - Config: `[evaluation].output_db` in [config/cval.toml](../../config/cval.toml).
-- Pod path: `/evaluation/evaluation.db`; PVC path:
-  `/data/continuous_validation/evaluation-engine/evaluation.db`.
-- The pod mounts raw `/data` read-only and the isolated output subdirectory
-  writable. No derived result changes raw rows or triggers Kubernetes actions.
+- Output paths and filesystem permissions belong to the
+  [Pod contract](../../deploy/evaluation-engine/README.md#pod). Raw SQLite reads
+  are read-only; that does not imply the raw filesystem mount is read-only.
+  No derived result changes raw rows or triggers Kubernetes actions.
 - SQLite uses DELETE journaling, foreign-key enforcement and short
   `BEGIN IMMEDIATE` transactions. One persistent POSIX worker lock excludes
   other writers; BUSY/LOCKED operations receive bounded retries.

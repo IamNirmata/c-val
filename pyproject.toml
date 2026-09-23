@@ -16,6 +16,9 @@ cval = "cval.cli:main"
 [tool.setuptools.packages.find]
 include = ["cval*", "evaluation_engine*"]
 
+[tool.setuptools.package-data]
+"cval.jobs" = ["bootstrap.sh"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

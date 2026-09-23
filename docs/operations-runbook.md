@@ -15,6 +15,24 @@ Use `--config <reviewed-file>` before the command to select namespace, PVC
 reader and database paths. Result exports are always CSV; configuration output
 is always JSON. Status supports table/JSON, not TSV.
 
+## Candidate inspection
+
+Plain `plan` uses the existing priority queue without rendering Jobs.
+Its JSON has `batch_size`, `days_threshold`, `free_nodes_count`, `queue_count`,
+`git_ref`, and `candidates`. Each candidate has `node`, `priority`, `reason`,
+`last_tested_timestamp`, and `age_days`; there is no Job name or YAML.
+`queue_count` covers all due candidates; `--batch-size` limits the returned list.
+With explicit `--free-nodes`, the input list is not proof of current eligibility.
+
+Planning requires an exact commit. It does not validate a Job template or
+authorize submission. Fresh eligibility, template/bootstrap validation and
+exact-source checks still run before creating the selected Job through the
+confirmed `run` path.
+
+`candidates` replaces the former `planned_jobs` output; there is no rendered-plan
+inspection mode. See the [CLI migration inventory](components_design/cli-design.md#removed-settings-and-migration)
+for retired flags and their replacements.
+
 ## Continuous validation loop
 
 Every operational `scripts/cval-live.sh` cycle is submit-capable and requires
@@ -22,6 +40,7 @@ exact `CVAL_LIVE_CONFIRM=submit`. Each submission also passes the CLI's
 independent `--submit --confirm submit` gate with an exact published commit.
 
 Use the script's `start`, `status`, and `stop` commands for the persistent tmux
+session.
 `run-once` and `run-loop` require the same environment confirmation. Stopping
 the session does not delete Kubernetes jobs, and pending-job pruning requires
 the separate exact `CVAL_PRUNE_CONFIRM=delete-pending` gate.
@@ -35,13 +54,6 @@ an empty due queue is distinct from unavailable or malformed evidence.
 Retained `preflight-plan.json` and `plan-slot-*.json` now contain `candidates`
 and a top-level exact `git_ref`, not `planned_jobs`. The plan log field is
 `candidate_count`, not `planned_count`. Historical files are not rewritten.
-Template/bootstrap validation still runs before creation of the selected Job,
-but is not part of queue inspection. `plan --candidates-only` and
-`plan --include-yaml` are removed, as are rendering-only `plan` arguments
-`--timestamp`, `--template`, `--job-prefix` and `--git-repo`. `run` retains the
-timestamp; template, prefix and repository now come only from the reviewed
-configuration. Update callers that expected `planned_jobs` or YAML;
-see the [CLI contract and mode inventory](components_design/cli-design.md).
 
 ## Exact-commit validation
 
@@ -84,8 +96,11 @@ canonical run ID. The job name uses `scheduled`, not a claimed target node.
 
 Render explicitly with `node_name=None`; the ordinary node-specific workflow
 does not accept this template. Both templates use the same exact-source
-bootstrap, runtime configuration and descriptor-anchored supervisor. This is a
-template, not a directly deployable file. Set `CVAL_GIT_REF` to a published
+bootstrap, runtime configuration and descriptor-anchored supervisor. The renderer
+replaces `runtime-bootstrap-placeholder` with the packaged
+[bootstrap script](../cval/jobs/bootstrap.sh) before validating the manifest.
+The generated YAML is self-contained; the raw template is not directly deployable.
+Set `CVAL_GIT_REF` to a published
 40-hex commit and `CVAL_CONFIG` to the reviewed operator configuration, including
 `job.source_configmap` and `job.source_sha256` when using the internal repository
 without in-pod credentials. Render to stdout for review:

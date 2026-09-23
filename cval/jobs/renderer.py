@@ -8,7 +8,9 @@ returns the rendered manifest for inspection or policy-gated submission.
 from __future__ import annotations
 
 import re
+import textwrap
 import time
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,8 @@ from cval.validation.runtime import build_runtime_environment, encode_runtime_en
 NODE_NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 MAX_VOLCANO_NAME_PART_LENGTH = 63
 VOLCANO_TASK_POD_SUFFIX = "-server-0"
+
+_RUNTIME_BOOTSTRAP = files("cval.jobs").joinpath("bootstrap.sh").read_text(encoding="utf-8")
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -137,6 +141,7 @@ def render_validation_job(
     ]
     if missing:
         raise ValueError(f"Template is missing placeholder(s): {', '.join(missing)}")
+    template_text = _expand_runtime_bootstrap(template_text)
     _validate_runtime_bootstrap(template_text)
     if node_name is None:
         if not is_exact_commit(resolved_git_ref):
@@ -208,6 +213,27 @@ def render_validation_job(
         git_ref=resolved_git_ref,
         yaml_text=yaml_text,
     )
+
+
+def _expand_runtime_bootstrap(template_text: str) -> str:
+    """Embed the shared payload without changing template structure or placement."""
+
+    placeholder = "runtime-bootstrap-placeholder"
+    if placeholder not in template_text:
+        return template_text
+    container = _validate_semantic_runtime_manifest(template_text)
+    if container["args"][0].strip() != placeholder:
+        raise ValueError("Shared runtime bootstrap must occupy the entire server args block")
+    if template_text.count(placeholder) != 1:
+        raise ValueError("Template must contain exactly one runtime bootstrap placeholder")
+    expanded, count = re.subn(
+        rf"(?m)^( +){placeholder}[ \t]*$",
+        lambda match: textwrap.indent(_RUNTIME_BOOTSTRAP.rstrip("\n"), match.group(1)),
+        template_text,
+    )
+    if count != 1:
+        raise ValueError("Runtime bootstrap placeholder must be on its own indented line")
+    return expanded
 
 
 def _validate_runtime_bootstrap(template_text: str) -> None:
@@ -442,7 +468,7 @@ def _validate_semantic_runtime_manifest(
     template_text: str,
     *,
     expected_runtime_environment: str = "runtime-environment-b64-placeholder",
-) -> None:
+) -> dict[str, Any]:
     """Validate decoded YAML keys and the actual Volcano workload structure."""
 
     try:
@@ -516,6 +542,7 @@ def _validate_semantic_runtime_manifest(
         or not args[0].strip()
     ):
         raise ValueError("Template must contain one executable Bash args block")
+    return container
 
 
 def render_validation_job_from_file(

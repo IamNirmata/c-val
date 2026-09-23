@@ -1,5 +1,24 @@
 # Architecture
 
+## Documentation Map
+
+Keep current contracts in the following references; design notes explain
+rationale and label deferred proposals rather than repeating operating steps.
+
+| Reference | Responsibility |
+| --- | --- |
+| This architecture page | Runtime flow and ownership boundaries |
+| [Configuration](configuration.md) | Effective settings and configuration sources |
+| [Operations runbook](operations-runbook.md) | Planning contract and reviewed operational procedures |
+| [Result schema](result-schema.md) | Canonical evidence and raw database contracts |
+| [Evaluator deployment](../deploy/evaluation-engine/README.md) | Independent evaluator's current Pod and operating procedure |
+| [Evaluation database](components_design/evaluation-database-design.md) | Derived evaluator schema and raw-to-derived mapping |
+| [CLI interface decisions](components_design/cli-design.md) | Retained interfaces, removed flags and deferred decisions |
+| [Cleanup review](cleanup-review.md) | Approved cleanup, recorded acceptance and remaining scope |
+
+Code and effective configuration define behavior. Dated acceptance and rollout
+records describe the observed revision, not an assertion of present live state.
+
 ## Runtime flow
 
 1. Discover matching GPU nodes.
@@ -30,6 +49,12 @@ supervisor, which runs the Python test runner and then sources
 [the Python ingestion coordinator](../cval/storage/run_ingest.py); it no longer
 projects JSON into shell variables or invokes a CLI process for each writer.
 The launcher and environment script remain live dependencies.
+
+Both the pinned and scheduler-selected templates use one packaged
+[bootstrap payload](../cval/jobs/bootstrap.sh). The
+[renderer](../cval/jobs/renderer.py) embeds it before validating the executable
+runtime contract. Each generated Job contains its full startup script; no
+additional in-pod file or download is needed to obtain the bootstrap itself.
 
 The [evaluation service](../deploy/evaluation-engine/README.md) has a separate
 entry point and derived store. Test-owned evaluation modules are dynamically
