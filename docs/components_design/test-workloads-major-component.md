@@ -123,9 +123,10 @@ owned run directory; cleanup must never target another run's retained artifacts.
 
 ## Acceptance and Risk
 
-Compare summaries, rank coverage and raw metrics on fixed fixtures, then use
-separately approved exact-commit GPU acceptance. Exercise missing tools, changed
-DL source/plan, partial ranks and failed subprocesses. Measure startup overhead;
-test source changes between preflight and launch and a result-only custom test.
-Do not claim benchmark speedups from packaging alone.
+Run the actual selected workloads on approved eligible nodes at the exact published
+commit. Compare summaries, rank coverage, raw metrics and dependency identity using
+equivalent settings; include real failure records when available. Do not add a
+dummy workload or fabricated rank output to replace GPU acceptance. Measure startup
+overhead and disclose missing cases under the [real-node policy](Redesign.md#real-node-validation-policy).
+Packaging alone does not establish benchmark speedups.
 Priority P1; medium risk to reproducibility and benchmark comparability.

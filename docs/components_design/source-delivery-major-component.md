@@ -74,8 +74,8 @@ The PVC access template is C9; global configuration is C1.
 ## Proposed Design
 
 1. Keep the current source renderer, immutable ConfigMap transport and shared
-   bootstrap. Maintain a small explicit runtime file allowlist; test it from an
-   unpacked bundle with no access to the source checkout.
+   bootstrap. Maintain a small explicit runtime file allowlist; validate it in a
+   real Job using the prepared bundle, without the host source checkout.
 2. Retain repository-local installation as the supported model initially. Do not
    add a wheel-distribution project solely to move files.
 3. Bind source SHA, archive hash, manifest hash and effective config digest in one
@@ -107,17 +107,18 @@ test cannot prove a prechecked target node or c-val priority selection; it is no
 a substitute for targeted release acceptance. Record its actual assigned node.
 
 Runtime bundle trimming must prove both successful startup and the failure paths
-for ingestion, locking and recovery helpers used in-pod. Test without the host
-checkout or undeclared network access. Declare interpreter/dependencies through
+for ingestion, locking and recovery helpers used in-pod where safely observable.
+Validate real Jobs without the host checkout or undeclared network access; label
+unexercised paths. Declare interpreter/dependencies through
 the reviewed image; do not quietly add downloads to recover missing bundle files.
 Retain both supported source transports until an explicit caller/operations decision.
 
 ## Acceptance and Risk
 
-Require clean offline startup from the exact archive, valid placement/resources
-for both templates, rejection of unsafe YAML/bootstrap variants and mismatched
-archive identity/hash. Measure compressed runtime size before/after exclusions.
-Test missing helpers, unexpected admission-time manifest changes and a ConfigMap
-created successfully while the active controller still uses its previous source.
-Validate the published exact commit on a fully free Ready node only after approval.
+Check archive/manifest identity locally, then require actual startup, placement,
+resources and exact-run evidence on an approved fully free Ready node. Each source
+transport/placement workflow is a separate real validation scope; do not submit
+malformed Jobs or use a local boot simulation as acceptance. Verify active source
+separately from object creation and measure bundle size under the
+[real-node policy](Redesign.md#real-node-validation-policy).
 Priority P2 for size reduction; medium startup/release risk.

@@ -74,8 +74,9 @@ utilities are counted once under C5/C7.
 
 Keep the separate tools and approval gates. Standardize only shared identity,
 plan-hash and verification fields that reduce real duplication; do not create
-a universal destructive-operation engine. Add offline end-to-end backup,
-journal migration and restore fixtures alongside the current tests.
+a universal destructive-operation engine. Use the existing tools and retained
+real manifests. Any new backup, migration or isolated restore verification needs
+its own exact approval; do not create synthetic recovery fixtures or a new harness.
 
 Give every operation an explicit staged state and durable receipt. Resume or
 rollback must validate the recorded identities, backup manifest and destination
@@ -160,9 +161,9 @@ four-DB generation and backups before changing journal mode. DB audits use
 
 ## Acceptance and Risk
 
-Verify restored raw rows, receipts, artifacts, metadata and identities. Exercise
-insufficient capacity, active writers, tampered backups, partial moves, missing
-sources and occupied rollback destinations. Record bounded/partial coverage.
-Include a valid backup whose restored absolute paths are unusable, an apparently
-stopped controller with another writer active, and interruption before manifest publication.
-Priority P2; low risk for offline test additions, high risk for any live mutation.
+Inspect real backups/manifests read-only; an approved isolated restore must verify
+rows, receipts, artifacts, metadata and path-sensitive reads without overwriting
+authoritative data. Check actual capacity/writer state and retain partial-failure
+evidence. Do not manufacture tampering, full disks or broken raw stores to test a
+guard. Report unexercised cases under the [real-node policy](Redesign.md#real-node-validation-policy).
+Priority P2; low risk for documented review, high risk for real recovery mutations.

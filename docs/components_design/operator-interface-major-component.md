@@ -127,8 +127,10 @@ These removals predate the redesign; they are not new implementation work.
 ## Acceptance and Risk
 
 Preserve tested command/help/output contracts or publish a deliberate migration.
-Reject invalid source and missing approval before mutation; make fake second-create
-failure return prior receipts. Add empty-versus-unavailable and failed-test-versus-
-failed-command cases, including machine-readable stderr/stdout separation.
+Verify existing commands against real node/Job/evidence observations and approved
+submissions. Record partial receipts from real failures when available; do not
+manufacture a second-create failure with a fake client. Keep empty/unavailable and
+failed-test/failed-command distinctions under the
+[real-node policy](Redesign.md#real-node-validation-policy). Unobserved cases remain explicit.
 Priority P1 for interface cleanup, P0 for bypass
 closure; medium risk to external callers. No command retirement is authorized here.

@@ -75,9 +75,9 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
 ## Proposed Design
 
 1. All production execution enters through the supervisor. Reuse its reservation
-   primitive for standalone tests/callers through an explicit adapter before
-   retiring alternate path creation. Share the secure implementation, not a forced
-   supervisor subprocess for every unit test; retain pure testable execution helpers.
+   primitive for supported standalone callers before retiring alternate path creation.
+   Share existing secure/execution helpers; do not introduce a new adapter layer
+   unless it removes a real duplicate implementation.
 2. Define one run context containing immutable identity, checked catalog and owned
    evidence handles. Map legacy child environment at one boundary.
 3. Keep phase and outcome separate. Preserve existing phases such as finished,
@@ -110,9 +110,10 @@ benchmark code running with the same container privileges.
 
 ## Acceptance and Risk
 
-Replay dynamic test ordering, timeouts, termination, setup failures and disabled
-tests. Reuse [hostile-path/descriptor tests](../../tests/test_secure_supervisor.py)
-for symlink swaps, run reuse, file identity changes and interruption. Compare
-canonical schemas/events and retained files before/after the refactor. Test signal
-arrival before binding, result mutation after binding and ingestion-only retry.
+Compare registry order, canonical schemas/events, logs and ingestion on approved
+real-node runs. Use actual failure records for setup, timeout and interruption
+analysis. An ingestion-only retry or signal exercise needs its own approval;
+never mutate a canonical result or another run's paths to demonstrate rejection.
+Retain descriptor/path safeguards and record unverified cases under the
+[real-node policy](Redesign.md#real-node-validation-policy).
 Priority P1; high risk because mistakes undermine evidence integrity.

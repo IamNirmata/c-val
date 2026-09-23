@@ -7,33 +7,36 @@ Component IDs refer to the [major-component overview](major-components-overview.
 
 ## In Simple Terms
 
-First make the safety rules and expected results testable. Then replace one
-implementation at a time, compare it with the old behavior and retire the old
-path only after verification. Writing these tasks does not complete or approve them.
+First agree who owns each job and how to describe its results. Then make one small
+change, validate the exact published commit with real tests on real nodes, and
+remove replaced code after verification. Keep the framework and its tooling small.
 
 ## Working Rules
 
 - Use phase numbers as the preferred rollout order; the map lists actual
-  prerequisites. Independent fixtures/design work may start earlier, not bypass gates.
+  prerequisites. Independent design work may start earlier, not bypass gates.
 - Preserve public commands, canonical results and raw stores unless a migration is
   reviewed. No one-release rewrite, evaluator, generic per-test DB or new service.
 - Retain raw history, test-owned persistence and explicit mutation approvals.
-- Check off reviewed, published tasks with focused tests, updated docs and evidence links.
+- Check off reviewed, published tasks with the required real-run evidence and concise docs.
 - Track **published**, **cluster-accepted** and **active** separately. Task completion
   never authorizes creation, restart, deletion or migration.
-- Start automated offline checks in Phase 0. Never defer regression protection
-  until the later packaging phase or combine an image upgrade with a large refactor.
+- Use real workloads on eligible real nodes through existing commands. Do not
+  build fake-node/job fixtures, simulation harnesses or new test-wrapper scripts.
+- Local syntax/link checks can validate documents, not runtime behavior. Existing
+  tests are not automatically deleted; a new synthetic suite is not a phase gate.
+- Keep one owner per decision; add helpers only when they remove duplicate logic.
 
 ## Phase Map
 
 | Phase | What It Delivers | Components | Depends On | Main Risk |
 | --- | --- | --- | --- | --- |
-| 0. Agree Contracts | Fixed boundaries, callers and acceptance cases | All | Existing design | Unclear compatibility requirements |
+| 0. Agree Contracts | Clear boundaries, result categories and real-node check plan | All | Existing design | Unclear compatibility requirements |
 | 1. Fix Correctness | Consistent eligibility, recoverable submission, exact-run evidence | C1-C4, C7 | Phase 0 | Unsafe jobs or misleading acceptance |
 | 2. Consolidate Control | One lifecycle implementation for manual and continuous runs | C2-C4 | Phase 1 | Lost resume/cooldown state |
 | 3. Simplify Runtime | One secure evidence setup and reproducible workloads | C1, C5-C6 | Phase 1; stable run-definition contract | Evidence integrity or changed measurements |
 | 4. Simplify Persistence | Shared writer mechanics with unchanged raw contracts | C6-C7 | Phase 1; fixed writer/evidence contract | Partial or divergent writes |
-| 5. Harden Delivery | Smaller verified bundles, recovery exercises and complete CI matrix | C8-C9; cross-cutting tests | Phases 3-4 for final bundle/integration checks | Missing dependencies or incomplete recovery |
+| 5. Harden Delivery | Smaller verified bundles and approved real-environment recovery checks | C8-C9 | Phases 3-4 for final bundle/integration checks | Missing dependencies or incomplete recovery |
 | 6. Retire Redundancy | Approved interface removals and compact current documentation | C2; all documentation | Phases 2-5 and caller migration | Breaking external users |
 
 Controller consolidation is not a prerequisite for a private writer-helper change.
@@ -43,24 +46,30 @@ integrate and accept each exact commit separately before combining deployed chan
 ## Phase 0: Agree Contracts
 
 **What it does:** Fix the implementation contract before changing behavior.
-**Changes:** Decisions, fixtures and measurements; no runtime or storage changes.
+**Changes:** Boundaries, result categories, real-node validation procedure and
+baseline measurements; no runtime changes or new testing framework.
 
 ### Tasks
 
 - [ ] **0.1** Confirm each component's inputs, outputs and mutation boundary; list
-  public commands, hidden writer hooks and external callers that must keep working.
-- [ ] **0.2** Pin the coverage policy and outcome/evidence truth table in fixtures:
-  full failure versus setup failure, disabled/result-only tests, changed workload
-  inputs and unreadable history. Do not equate complete records with passing tests.
+  commands/callers that must keep working. Merge responsibilities where separation
+  adds handoffs without independent logic; nine current labels are not nine required modules.
+- [ ] **0.2** Agree the [run result categories](Redesign.md#run-result-categories):
+  not started, running, incomplete, missing results, results without DB writes,
+  partial writes and fully recorded. Keep pass/fail and unknown/conflicting reads separate.
+  Apply C3's coverage/retest rules to these facts; a category alone never authorizes rerun.
 - [ ] **0.3** Specify designated-host admission, durable intent/receipt and trusted
-  expected identities using existing state/models; define state-version migration.
-- [ ] **0.4** Add fake node/job and temporary-store fixtures to existing suites;
-  establish initial CI gates for offline tests, shell syntax and documentation links.
+  expected identities using existing state/models. Check whether the same Job started
+  before retrying a lost confirmation; introduce no general workflow engine.
+- [ ] **0.4** Define one lean real-node validation procedure using existing CLI,
+  logs/results and read-only raw-DB verification. Record exact commit, node, settings,
+  expected result category and acceptance evidence; obtain approval before execution.
 - [ ] **0.5** Record exact source, component sizes, subprocess/API counts, startup
   time and bundle size where measurable. Label unavailable measurements explicitly.
 
-**Done when:** Contracts and failure checks are documented, baseline fixtures are
-reproducible, and initial offline CI checks run without cluster mutation.
+**Done when:** Each responsibility has one owner, the categories and failure rules
+are clear, and the real-node procedure plus available baseline measurements are
+recorded. No fake test infrastructure is created; unobserved cases remain unverified.
 **Risk/control:** Low; unresolved caller/freshness decisions block affected changes.
 
 ## Phase 1: Fix Correctness
@@ -84,10 +93,10 @@ CLI names and raw schemas remain.
 - [ ] **1.6** Implement compatible-coverage reads and exact-run exports; distinguish
   forbidden/unavailable history from empty or incomplete evidence. Review output compatibility.
 
-**Done when:** Fixtures reject busy/unknown nodes, retain earlier receipts after a
-second-create failure, reconcile lost responses, and reject stale/missing evidence.
-Existing CLI/discovery/submission/ingestion/export regressions pass. Complete the
-[release gate](#release-gate) before activating these runtime changes.
+**Done when:** Approved real-node runs and retained real failure evidence demonstrate
+the required eligibility, receipt and exact-run evidence behavior. Document cases
+not safely exercised; never claim they passed. Complete the [release gate](#release-gate)
+before activation; inspecting busy nodes does not authorize submitting to them.
 **Risk/control:** High; isolate eligibility, receipts and verification in separate
 commits with compatibility checks.
 
@@ -100,7 +109,7 @@ session records and cooldown semantics.
 ### Tasks
 
 - [ ] **2.1** Extract one bounded lifecycle transition function into existing Python
-  orchestration; inject clock and Kubernetes adapter for deterministic tests.
+  orchestration; reuse the existing clock/Kubernetes helpers without new test abstractions.
 - [ ] **2.2** Share resume/active monitoring; preserve receipts, cooldown repair and
   occupied slots for uncertain submissions or pending verification. Block unknown ownership.
 - [ ] **2.3** Route `run` and `validate` through shared submission/reconciliation;
@@ -108,11 +117,12 @@ session records and cooldown semantics.
 - [ ] **2.4** Batch observation reads and propagate one remaining deadline. Retain
   fresh per-create checks; never cache eligibility across submissions.
 - [ ] **2.5** Keep shell for launch/session duties; remove duplicated conversions
-  after replaying old/new paths on identical fake observations.
+  after comparing behavior on equivalent approved real runs, never duplicate submits.
 
 **Done when:** Crash/restart, uncertain create, missing Job, unavailable API,
-cooldown and separately gated pruning tests agree with the retained contract.
-Comparable fixtures show fewer subprocesses/API calls without lost safeguards.
+cooldown and separately gated pruning observations agree with the retained contract
+where verified. Comparable real runs show fewer subprocesses/API calls; missing
+failure coverage remains explicit rather than replaced by a simulator.
 **Risk/control:** High; migrate one path at a time, reconcile outstanding Jobs and
 verify a single active controller before any separately approved activation.
 
@@ -125,7 +135,7 @@ dependency preparation. Historical results and test-specific behavior remain rea
 ### Tasks
 
 - [ ] **3.1** Share secure reservation for production and supported standalone
-  callers; keep pure unit-test helpers and an adapter before retiring old path setup.
+  callers; reuse existing helpers before retiring old path setup, not a new compatibility layer.
 - [ ] **3.2** Derive child environment and compatibility aliases from one immutable
   run definition. Reject disagreements rather than applying hidden overrides.
 - [ ] **3.3** Preserve separate phase/outcome values and bounded child cleanup;
@@ -133,11 +143,11 @@ dependency preparation. Historical results and test-specific behavior remain rea
 - [ ] **3.4** Preinstall FIO and use a pinned image plus immutable DL artifact/run-local
   copy and plan. Test mutation between preflight and launch; never backfill old identities.
 - [ ] **3.5** Record setup, execution and ingestion timings separately; compare
-  outcomes, artifacts and resource use against fixed workload fixtures.
+  outcomes, artifacts and resource use across real runs with equivalent workload inputs.
 
-**Done when:** Dynamic tests, disabled-test handling, signals, run reuse, symlink
-swaps and descriptor-identity regressions pass; dependency changes alter recorded
-identity. Approved exact-commit GPU acceptance confirms unchanged intended coverage.
+**Done when:** Approved exact-commit real-node validation confirms intended coverage,
+retained artifacts and dependency identity. Check safe rejection cases without
+altering canonical evidence; separately approve any signal/failure exercise.
 **Risk/control:** High for evidence handling; separate runtime refactoring from
 dependency upgrades so changed benchmark measurements have an attributable cause.
 
@@ -155,38 +165,40 @@ on Phase 1's verifier. Keep all seven raw stores and their public writer contrac
   idempotent retries and final status publication only after required metrics.
 - [ ] **4.3** Optimize the shared readers after measuring query plans; scheduling
   must not scan every rank's metrics each cycle. Preserve exact-run verification semantics.
-- [ ] **4.4** Compare temporary stores before/after the change; inject lock contention,
-  interruption, divergent receipts, failure between commits and lost acknowledgement
-  after final commit. Preserve committed rows in every failure report.
+- [ ] **4.4** Compare exact-run rows/receipts and publication behavior from approved
+  real runs. Inspect retained real failures read-only; any controlled interruption
+  needs separate approval. Do not corrupt records to manufacture test cases.
 
 **Done when:** Rows, schemas, receipts and complete-generation semantics match the
-baseline; partial writes cannot publish final status. Historical readers still work.
+contract on real-run evidence and historical readers work. Unobserved failure paths
+remain unverified; do not replace missing proof with synthetic DBs or live corruption.
 **Risk/control:** High; never shadow-write live data with both implementations,
 delete partial raw rows, or use a generic transaction abstraction across stores.
 
 ## Phase 5: Harden Delivery
 
 **What it does:** Make lean packaging, regression checks and recovery repeatable.
-**Changes:** Runtime archive selection, extended offline CI and combined recovery fixtures;
+**Changes:** Runtime archive selection and approved real-environment verification;
 no automatic backup, migration or deployment.
 
 ### Tasks
 
 - [ ] **5.1** Identify runtime dependency closure, including dynamically loaded helpers;
   exclude host-only tests/files from bundles only after proving they are not required.
-- [ ] **5.2** Test unpacked offline startup for both placement templates, exact commit,
-  archive hash, descriptor availability and required helpers; measure bundle reduction.
-- [ ] **5.3** Exercise backup, journal migration and isolated restore, including
-  absolute-path consumers, partial failures and detection of other active writers.
+- [ ] **5.2** Verify archive identity/hash locally, then validate startup and required
+  helpers in real Jobs. Approve each placement workflow separately; measure bundle reduction.
+- [ ] **5.3** Review recovery using existing tools and retained real manifests. Any
+  backup, journal migration or isolated restore needs exact scope/rollback approval;
+  use verified real evidence, never fabricated data or overwrite of authoritative stores.
 - [ ] **5.4** Standardize shared maintenance identity/plan/verification fields only
   where duplication is real; retain explicit action-specific gates and manifests.
-- [ ] **5.5** Extend Phase 0's CI gates with unpacked-bundle and end-to-end recovery
-  checks; reuse fixtures and record the tested source/config identities.
+- [ ] **5.5** Keep the real-run verification procedure in the existing runbook and
+  retain source/config/evidence references. Do not add a parallel CI simulation suite.
 
-**Done when:** A smaller measured bundle starts offline without the source checkout;
-restore exercises verify preserved evidence; CI checks are reproducible.
+**Done when:** A smaller bundle runs on a real node without undeclared dependencies;
+approved recovery checks verify preserved evidence, or their remaining gate is explicit.
 **Risk/control:** Medium delivery risk; high risk for live recovery operations,
-which remain separately approved and are not required for local fixture testing.
+which remain separately approved and never run merely to complete a checklist.
 
 ## Phase 6: Retire Redundancy
 
@@ -199,7 +211,7 @@ explanations. Do not remove safety checks or historical readers to meet a size t
 - [ ] **6.1** Recheck Phase 0's caller inventory; obtain explicit retirement decisions
   and publish replacements before removing any supported command or alias.
 - [ ] **6.2** Delete replaced implementations only after callers and regression tests
-  use the retained owner; preserve inspection versus mutation boundaries.
+  have been reviewed and real runs use the retained owner; preserve inspection versus mutation.
 - [ ] **6.3** Update current architecture, config, runbook and schema references to
   implemented behavior; retain dated acceptance records and repair links.
 - [ ] **6.4** Remeasure source/config/test sizes and operating costs with the baseline
@@ -207,8 +219,8 @@ explanations. Do not remove safety checks or historical readers to meet a size t
 - [ ] **6.5** Reconcile the improvement table and component proposals with completed
   work; list remaining decisions and acceptance/activation status explicitly.
 
-**Done when:** No known caller or operational contract is stranded; tests and links
-pass; the measured result and remaining backlog are recorded.
+**Done when:** No known caller or operational contract is stranded; required real-run
+evidence and links verify; measurements and remaining backlog are recorded.
 **Risk/control:** Medium compatibility risk; retain rollback source and defer
 retirement when external usage is unknown.
 
@@ -217,7 +229,8 @@ retirement when external usage is unknown.
 Gate each runtime change, not just phase completion. Documentation-only changes
 need content/link checks and publication, not GPU jobs.
 
-1. Run focused local checks; review only task changes and publish an isolated exact commit.
+1. Review only task changes; use lightweight syntax/content checks as needed and
+  publish an isolated exact commit. Runtime acceptance always uses real-node tests.
 2. Render the exact source ConfigMap offline; verify archive identity/hash and
    source/config/manifest references against trusted expectations. Retain previous artifacts.
 3. Obtain exact create/rollback approval; create and read back the immutable source
@@ -238,7 +251,7 @@ writes or second controller against unresolved work.
 ## Review Before Closing a Task
 
 1. Name the behavior being preserved or deliberately changed, and its owning component.
-2. Show the counterexample now rejected, not only a happy-path test result.
+2. Link real-run evidence for the behavior; label failure cases not safely exercised.
 3. Compare public outputs, raw schemas/rows and historical readability where affected.
 4. Record exact commit/config, focused checks and remaining acceptance/activation gates.
 5. Delete the old path only after caller migration; a file move or added wrapper

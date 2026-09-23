@@ -106,9 +106,9 @@ reviewed version/compatibility decision.
 
 ## Acceptance and Risk
 
-Custom resources and tolerations must reach every consumer. Snapshot round trips,
-descriptor tampering, disabled tests, adapter failures and resource mismatches
-must retain fail-closed behavior. Test config-file changes during a session and
-retries after a newer config is installed. Reuse [config tests](../../tests/test_config.py)
-and [runtime tests](../../tests/test_validation_runtime.py).
+In approved real runs, compare the submitted snapshot with observed resources,
+test selection and retained config identity. Inspect invalid configurations without
+submission; controlled change/failure exercises need separate approval. Keep the
+session/retry snapshot rules and record cases not observed. Follow the
+[real-node policy](Redesign.md#real-node-validation-policy); do not add mock config consumers.
 Priority P0; medium implementation risk because configuration reaches all components.

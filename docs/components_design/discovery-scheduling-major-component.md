@@ -63,7 +63,7 @@ and the Kubernetes/scheduler package initializers. Tests:
    explicitly test Ready. Targeted validation uses a stricter path.
 2. Node capacity tables and JSON are separate reads; their snapshots can differ.
 3. GPU/resource quantities and pod requests are calculated in multiple helpers.
-   Supported Kubernetes request cases need explicit fixtures, not silent guesses.
+   Supported Kubernetes request cases need verified real-cluster evidence, not guesses.
 4. [Scheduling history](../../cval/storage/status.py#L40) takes the newest timestamp
    across tests. A partial or disabled-test run can obscure missing coverage.
 
@@ -83,7 +83,7 @@ and the Kubernetes/scheduler package initializers. Tests:
 
 ## Coverage Policy
 
-Proposed policy to pin in Phase 0 fixtures, separate from admission and acceptance:
+Proposed policy to agree in Phase 0 and verify against real evidence:
 
 | Observation | Scheduling Meaning |
 | --- | --- |
@@ -103,8 +103,8 @@ runs into a complete run implicitly or rewrite historical rows to add missing id
 
 Node and pod reads are not an atomic reservation. Use structured responses,
 validate node identity and reject unsupported resource-accounting cases as unknown.
-Add deployed-version fixtures for init containers, overhead and supported quantity
-forms before claiming scheduler-equivalent accounting. Keep Kubernetes resource
+Check deployed-version pod/node observations for init containers, overhead and
+quantity forms before claiming scheduler-equivalent accounting. Keep Kubernetes resource
 requests and node placement constraints as the final scheduling protection.
 
 Keep automatic and targeted policies distinct: a drained cordon exception is not
@@ -112,10 +112,11 @@ a bypass for quarantine taints, resource shortage or unknown workload state.
 
 ## Acceptance and Risk
 
-Use fixtures for custom config, missing/false Ready, busy GPUs, partial CPU/memory/
-RDMA, allowed cordon versus quarantine taints, malformed quantities, API failures
-and stale/changed coverage. Include complete-failure versus setup-failure fixtures,
-node-name reuse with a different UID and unreadable history. Preserve stable queue
-order and zero renders during planning.
-Measure Kubernetes calls per candidate pass before claiming efficiency gains.
+Verify real discovery and approved real-node runs using current commands. Observe
+busy/unready/quarantined nodes read-only; never submit to them to prove rejection.
+Check coverage and resource calculations against retained real evidence, including
+failure or changed-UID cases when available. Mark unsupported/unobserved cases
+unknown. Preserve stable queue order and zero renders during planning; measure
+calls per real cycle before claiming savings. Follow the
+[real-node policy](Redesign.md#real-node-validation-policy); no new fixtures or simulators.
 Priority P0; medium risk because a false positive permits unsafe work.

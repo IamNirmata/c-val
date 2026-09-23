@@ -201,11 +201,10 @@ bp_cpu_time 0.062, collective cpu_time 0.102 and overlap coll_mean 6.581.
 
 ## Acceptance and Risk
 
-Compare all seven stores, schemas, receipts and generations on fixtures before
-and after consolidation. Inject lock contention, divergent receipts, partial
-ingestion, stale exports, unavailable readers and corrupt provenance. Reuse
-[ingest](../../tests/test_ingest.py), [DL](../../tests/test_dltest_ingest.py) and
-[export](../../tests/test_operational_export_compatibility.py) tests.
-Add concurrent newer ingestion during an old-run read, disabled/result-only tests,
-complete failed runs, forged self-consistent identities and bounded read exhaustion.
+Verify required stores, schemas, exact-run rows, receipts and generations after
+approved real-node runs. Inspect retained partial/failed runs read-only and report
+them using the [run result categories](Redesign.md#run-result-categories).
+No synthetic DBs, fabricated receipts or corruption of raw provenance for testing.
+Controlled writer interruption or a real ingestion retry needs separate approval;
+cases not observed remain unverified under the [real-node policy](Redesign.md#real-node-validation-policy).
 Priority P0 for read correctness, P1 for simplification; high integrity risk.

@@ -2,7 +2,8 @@
 
 Status: design proposal, not implemented or approved for live mutation.
 Baseline: `647848a6279d992d4327aecadece3a4aaf3e7b7e`, 2026-09-23.
-Second-pass review: `37a69ca`; source-size baseline unchanged.
+Direction update after `301d109`: minimal component boundaries and real-node
+runtime validation; source-size baseline unchanged.
 Start with the [major-component map](major-components-overview.md); it owns the
 component inventory, measured sizes and individual design links.
 
@@ -21,6 +22,11 @@ and test-owned raw rows were retained correctly. Redesign ownership from first
 principles, but migrate working behavior incrementally rather than replacing
 the deployed framework in one rewrite.
 
+The primary goal is clear ownership with less code: one decision in one place,
+few handoffs and no duplicate execution paths. The nine component labels are a
+working responsibility map, not a required module count. Merge a boundary that
+only forwards data; keep separation where authority, lifecycle or data ownership differs.
+
 The endpoint is verified raw evidence. There is no post-processing engine,
 baseline service, health classification, ranking, remediation, automatic cordon
 or automatic cleanup. Historical data from removed services stays untouched.
@@ -29,7 +35,7 @@ or automatic cleanup. Historical data from removed services stays untouched.
 
 | Decision | Reason |
 | --- | --- |
-| One Python package; nine logical components | Separate responsibilities without nine services or new deployment overhead. |
+| One Python package; logical ownership boundaries | Reuse functions/modules; component names do not require new classes, wrappers or services. |
 | One designated control host with serialized submitters | Controller, `run` and `validate` share admission state/locking; no automatic cross-host failover. |
 | One supervisor and registry-driven runner per Job | Preserve secure evidence ownership and test isolation. |
 | Kubernetes/Volcano, kubectl and shared PVC remain | Reuse the current platform; do not add an operator, broker or scheduler backend. |
@@ -149,13 +155,40 @@ values or historical formats with a new combined status.
 | Evidence | Are the records expected for that outcome present and consistent? | complete, incomplete, conflicting, forbidden, unavailable |
 | Acceptance | Is this requested validation proven successful? | Accepted only when the nonempty requested test set and every positive check are satisfied |
 
-| Example | Evidence Result | Acceptance |
+### Run Result Categories
+
+Proposed display labels, derived from existing Job observations, canonical results
+and exact-run raw records. No new database, persisted status enum or reporting
+framework is needed. Show the affected tests when a run has mixed progress.
+
+| Category | Meaning | Required Distinction |
 | --- | --- | --- |
-| Successful terminal Job, selected tests pass, exact records match | Complete | Accepted |
-| Successful terminal Job, a test fails, failure records are complete | Complete | Not accepted; retain the valid failure observation |
-| Successful terminal Job, logs say pass, raw reads fail | Unavailable | Unverified; never infer pass |
-| Failed/aborted Job with preserved diagnostic records | May be complete for the failure | Not accepted |
-| Requested test was disabled or required output is missing | Incomplete requested coverage | Not accepted |
+| Not selected | The test was disabled or outside the reviewed request. | Not a pass; an unexpectedly omitted required test blocks acceptance. |
+| Not started | No workload execution is confirmed, and available evidence establishes it has not run. | Show waiting/queued versus rejected, setup-failed or cancelled-before-start; missing logs alone prove neither. |
+| Running | A selected workload is currently executing. | Results and DB writes are not yet expected to be complete. |
+| Ran incompletely | Execution started but the requested workload did not finish. | Record timeout, interruption or remaining unrun tests; retained diagnostics may still be complete. |
+| Finished without usable results | Execution finished, but its required canonical result or outputs are absent/unusable. | Process exit alone is not a valid test result. |
+| Results produced; DB not updated | Usable results exist, but none of the required raw writes are confirmed. | With successful reads, distinguish pending/in-progress ingestion from an ended/failed ingestion. |
+| Results produced; DB partly updated | Some required writes exist, but the exact-run metric/status publication is incomplete. | Keep partial rows; never call this complete or blindly rerun the workload. |
+| Fully recorded | Execution finished, required results/logs are valid, and all required raw writes match. | Show test pass/fail separately; a fully recorded failed test is still failed. |
+
+Do not force uncertainty into a progress category:
+
+| Observation State | Meaning | Action |
+| --- | --- | --- |
+| Cannot verify | A necessary read is forbidden, unavailable or stale. | Preserve the specific cause and last known facts; do not infer not-run or no-DB-update. |
+| Conflicting evidence | Observed identities, outcomes, digests or records disagree. | Show the conflict; do not choose whichever source looks successful. |
+
+Choose the first unmet stage: selection, execution, usable results, then required
+DB publication. Incomplete execution stays incomplete even when its diagnostic
+records were fully saved. Always retain the independent test outcome and DB state
+(`not required`, `pending`, `none`, `partial`, `complete`, or `unverified`).
+A result-only test uses `not required`, not a false DB-write failure. A transient
+pending/partial write while ingestion is active is progress, not yet a failed write.
+
+Acceptance requires a successful terminal Job, a nonempty satisfied request,
+passing required tests and complete verified evidence. Fully recorded failure,
+incomplete execution and unverifiable results are not accepted.
 
 Expected evidence depends on the immutable selected test set and each outcome.
 Passing built-ins require their metric evidence; failed tests do not require
@@ -293,25 +326,30 @@ the direct Python ingestion coordinator and the pure priority function. Avoid
 rebuilding them. Reduce duplicated transitions and format conversions, not line
 counts through dense code, moved files or deleted safety tests.
 
+Before adding code, name the owner and the duplicate behavior being removed.
+Selecting a node (C3), authorizing/creating its Job (C4), executing its tests
+(C5/C6), and publishing its raw records (C7) remain distinct authorities.
+Configuration, CLI and release tools support this path; they must not duplicate it.
+
 ## Implementation Strategy
 
 The [redesign development plan](redesign-development-plan.md) owns the ordered
 phases, task checklists, changes, dependencies and completion criteria. Agree
 contracts first, close correctness gaps, then consolidate control, runtime and
 persistence before delivery hardening and approved compatibility retirement.
-The plan distinguishes preferred rollout order from actual prerequisites. Offline
-regression checks start in Phase 0; they are not deferred until packaging work.
+The plan distinguishes preferred rollout order from actual prerequisites. Phase 0
+defines real-node checks through existing tools, not a new automated-test framework.
 
 Each change is independently reviewable, not permission for a live action.
 Runtime changes must publish an isolated exact commit and pass the plan's
 [release gate](redesign-development-plan.md#release-gate) before activation.
 Do not run old and new writers in parallel.
 
-Before each phase: use the narrowest existing tests and record baseline behavior.
-For controller refactors, replay saved/fake observations without submitting Jobs.
-For writers, compare temporary stores and failure cases, never shadow-write live
-raw data. After acceptance, activate only the reviewed source/config; verify a
-fresh run independently of push or ConfigMap creation.
+Before each phase, record known behavior and the exact real-node verification needed.
+Use retained real evidence for read-only comparisons. New execution, controlled
+failures, DB writes and maintenance need their exact approvals; never run duplicate
+writers or corrupt evidence for a check. After acceptance, activate only the
+reviewed source/config and verify fresh execution independently of publication.
 
 Rollback is explicit, not automatic: stop only the approved controller, reconcile
 its outstanding Jobs and choose a reviewed compatible source. Never downgrade a
@@ -322,16 +360,27 @@ writer after an incompatible storage change or restore raw DBs over newer writes
 | Measure | Evidence | Constraint |
 | --- | --- | --- |
 | Component size | Exact-commit physical counts in the overview | Source, config and tests separate; no arbitrary reduction quota. |
-| Controller overhead | CLI subprocesses/API calls and duration per fixture/pass | No stale cached eligibility at create. |
+| Controller overhead | CLI subprocesses/API calls and duration per real cycle/run | No stale cached eligibility at create. |
 | Startup cost | Setup seconds and GPU reservation time | Same benchmark settings and dependency identities. |
 | Evidence correctness | Canonical digests, exact rows, receipts and generations | No mismatched timestamps or lost historical readers. |
-| Bundle size | Compressed bytes and unpacked offline startup | Keep all runtime dependencies and prior rollback artifacts. |
+| Bundle size | Compressed bytes and successful startup in the real Job | Keep all runtime dependencies and prior rollback artifacts. |
 | Recovery | Restored identities, rows, artifacts and metadata | Capacity/quiescence gates remain mandatory. |
 
-CI should run offline unittest, shell syntax, descriptor validation and documentation
-link checks. Reuse fixtures for pure state-machine and error-contract testing.
-Local success is not deployed acceptance; no throughput or cost improvement is
-claimed before measurement on a comparable workload.
+### Real-Node Validation Policy
+
+Runtime validation uses real workloads on fully free eligible real nodes at the
+exact published commit. Reuse current submission, observation and read-only
+evidence commands; no fake nodes/Jobs, fabricated results, simulation harnesses
+or new wrapper scripts. Keep the procedure in the existing runbook.
+
+Local syntax, manifest and documentation checks are useful content checks, not
+runtime acceptance. Existing test code is not automatically deleted, but adding
+synthetic coverage or a separate CI test project is not redesign work.
+
+Record what was actually exercised. Retained real failures can support analysis;
+unsafe or absent failure cases stay unverified. Do not fault a busy node, damage
+raw data or weaken acceptance to complete a checklist. No live mutation is
+authorized by this policy; use the exact approval and rollback gates each time.
 
 ## Documentation Strategy
 

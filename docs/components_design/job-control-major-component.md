@@ -146,10 +146,11 @@ submission, empty queue or fresh approval from missing/corrupt state.
 
 ## Acceptance and Risk
 
-Test crashes before/after create and receipt persistence, second-create failure,
-lost responses, UID conflict, unknown state, missing Jobs, clock/deadline limits,
-cooldown repair and restart. Add concurrent `run`/`validate`, intent-write failure,
-receipt-write failure, node-UID change and unknown ownership transfer cases.
-Preserve [live-loop regressions](../../tests/test_cval_live.py).
-Measure subprocess/API counts without caching eligibility across creates.
+Use approved real-node runs and retained real session/Job records to verify
+admission, receipts, cooldown and resume. Real lost responses or partial batches
+must keep their original identities. Deliberate interruption, concurrency or
+ownership-transfer exercises require exact approval; do not disrupt active work
+to create a failure. Mark unobserved crash/write/UID-conflict cases unverified.
+Measure calls per real run under the [real-node policy](Redesign.md#real-node-validation-policy),
+without new fake clients or cached eligibility across creates.
 Priority P0 for correctness, P1 for consolidation; high mutation/restart risk.

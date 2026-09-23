@@ -15,8 +15,9 @@ c-val discovers eligible capacity, runs registered tests and verifies retained
 logs, results and test-owned raw ingestion. It does not classify, rank, score,
 repair or automatically cordon nodes. Post-processing is outside this framework.
 
-Nine logical components are proposed below. They share one Python package and
-bounded command-line adapters; they are not nine services or new frameworks.
+Nine logical responsibilities are mapped below, not nine mandatory modules.
+They share one Python package and existing command-line entry points. Phase 0
+can merge forwarding-only boundaries; no new service or abstraction is implied.
 
 Read [Redesign.md](Redesign.md) for architecture and contracts, and the
 [development plan](redesign-development-plan.md) for phases and task checklists.
@@ -31,6 +32,12 @@ Component pages describe the baseline first, then proposed changes.
 
 "Current" refers to the source baseline, not a live-cluster claim. "Proposed"
 requires implementation and verification. The task list is not rollout approval.
+
+The main goal is one clear owner for each decision with minimal code. Prefer
+existing functions to new classes, layers or wrappers; remove duplicated logic
+before moving files. Preserve safety/data boundaries, not a fixed component count.
+Runtime changes use [real-node validation](Redesign.md#real-node-validation-policy),
+without building fake-cluster or synthetic-test infrastructure.
 
 | ID | Major Component | Purpose | Current Anchor |
 | --- | --- | --- | --- |
