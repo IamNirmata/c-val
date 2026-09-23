@@ -85,6 +85,115 @@ checkout directory. It then runs the same descriptor-anchored supervisor.
 Publishing the ConfigMap and submitting the Job remain separate gated operations.
 Do not put personal Git credentials in a ConfigMap, Pod environment, or manifest.
 
+## Quick test workflow
+
+Use this staged smoke test before deeper framework acceptance. It reuses existing
+commands and the scheduler-selected template, without a new CLI mode or reduced
+benchmark profile. "Quick" avoids pinning a busy node; it does not guarantee quick
+scheduling. Volcano can still queue the Job for capacity or queue-policy reasons,
+and the full configured storage, NCCL and DL tests still take their normal time.
+
+| Stage | Required evidence | Mutation |
+| --- | --- | --- |
+| Discovery | Inventory and current resource discovery JSON | None |
+| Preparation | Exact-source scheduler-selected manifest and run identity | Local files only |
+| Validation | Assigned node, terminal success, canonical logs/results and exact-run raw rows | One separately approved Job and normal ingestion |
+| Deeper acceptance | Targeted validation and first two fresh live-loop runs | Separate approvals |
+
+### 1. Test discovery without submission
+
+Run from the exact published checkout. Set `CVAL_CONFIG` to the reviewed operator
+TOML and `CVAL_GIT_REF` to the published lowercase 40-hex SHA. Verify remote source
+identity and effective config first. Retain a fresh local evidence directory:
+
+```bash
+set -euo pipefail
+: "${CVAL_CONFIG:?Set the reviewed config path}"
+: "${CVAL_GIT_REF:?Set the exact published commit}"
+export PYTHONDONTWRITEBYTECODE=1
+export CVAL_QUICK_TIMESTAMP="$(date +%s)"
+export CVAL_QUICK_DIR="$PWD/run-logs/quick-test-${CVAL_QUICK_TIMESTAMP}"
+mkdir -p "$PWD/run-logs"
+mkdir "$CVAL_QUICK_DIR"
+timeout --foreground 150s env CVAL_KUBECTL_TIMEOUT_SECONDS=120 python3 -m cval.cli --config "$CVAL_CONFIG" nodes --inventory-only --output json > "$CVAL_QUICK_DIR/inventory.json" 2> "$CVAL_QUICK_DIR/inventory.stderr"
+timeout --foreground 390s env CVAL_KUBECTL_TIMEOUT_SECONDS=120 python3 -m cval.cli --config "$CVAL_CONFIG" nodes --output json > "$CVAL_QUICK_DIR/discovery.json" 2> "$CVAL_QUICK_DIR/discovery.stderr"
+```
+
+Both commands are read-only. Require successful exit codes and valid JSON before
+continuing. Inventory alone does not test pod/resource discovery. Zero eligible
+capacity is a valid observation, not a failed read or a capacity reservation.
+Forbidden access, timeouts and malformed output leave discovery **unverified**;
+retain stderr and stop the combined workflow. An independently approved
+scheduler-only diagnostic must not be reported as a full quick-test pass.
+
+### 2. Prepare and approve one Job
+
+Use the [scheduler-selected rendering step](#scheduler-selected-test-job) below
+to create `job.yaml` and `identity.json` locally. Keep the image, resources,
+enabled tests and test settings identical to the intended live configuration.
+Do not change the main loop's configured node-specific template.
+
+Review the rendered namespace, queue, resources, mounts, source identity and lack
+of node pinning. Require an unused Job name/timestamp and a responsive evidence
+reader. If using a source ConfigMap, its creation and hash/embedded-commit
+verification are separate prerequisites; rendering does not create it.
+
+Inspect the existing loop and active Jobs before proposing live operations.
+Record the literal manifest path, Job name, namespace and exact commit in a
+release-specific approval document, with separate exact create and conditional
+graceful-cancellation commands. Direct Kubernetes creation does not pass through
+the CLI's submission policy checks, so explicitly review namespace/resource
+policy too. Do not submit the unrendered YAML, delete another Job, or pause/restart
+the loop based solely on this workflow. Approval of the workflow is not approval
+of a particular cluster mutation.
+
+### 3. Observe and verify the quick test
+
+After the separately approved creation, use the existing `jobs` watcher on the
+recorded Job name, with a bounded deadline. Inspect the Job and pod during the
+watch and retain their state and server logs. Get the actual node from the pod's
+`spec.nodeName`, not from the Job name, which contains `scheduled`. An unassigned
+pod has no validated node identity yet. Do not invoke targeted validation on the
+assigned node as an inspection step: that would create another Job.
+
+The quick test passes only when **all** checks below pass:
+
+- Inventory and resource discovery succeeded; inaccessible, empty and unavailable
+	states remained distinct. This verifies reads, not the live scheduler's decisions.
+- The Job is Completed/Succeeded and the server container exited 0. A watch exit
+	code or `terminal=true` alone is insufficient: Failed, Aborted and Missing are
+	terminal too. Pending, timeout and unknown state are not passes.
+- Canonical `logs/job_logs/<node>/<node>-<timestamp>/result.json` has the exact
+	node, timestamp, source SHA and effective config identity, with all enabled tests
+	passing. Global/per-test logs, events, summaries and artifacts are readable.
+	Require `ingestion_finished=pass` after test completion and a matching result
+	digest; a passing test result before ingestion is not completion.
+- Strict read-only audit connections (`mode=ro`, `PRAGMA query_only=ON`) confirm
+	exact-run rows in all seven raw DBs for the full built-in profile: four passing
+	status rows, storage/NCCL metrics, and complete DL metrics/ranks, receipts and
+	consistent generations. Expected metric counts come from the reviewed profile;
+	older latest-status rows or disabled tests cannot substitute for fresh evidence.
+
+Retain the audit locally without modifying canonical evidence. On failure or
+timeout, stop promotion and preserve logs/results. Watching stops tracking, not
+the Job. Only the separately approved exact cancellation may remove that Job;
+never force-delete, change finalizers or clean up raw evidence. Use a new timestamp
+for a subsequent attempt.
+
+### 4. Promote to deeper acceptance
+
+A quick pass covers discovery reads and scheduler-selected execution/ingestion,
+not priority selection, targeted eligibility, cooldowns, slots or resume behavior.
+Keep the [targeted exact-commit acceptance](#exact-commit-validation) gate, then
+separately approve live-loop start/restart at the current published branch tip.
+If source or effective test settings change, do not reuse the previous acceptance.
+
+Review the first two fresh loop-submitted runs: priority/eligibility decisions,
+worker source, canonical logs/results and exact-run raw ingestion. Historical
+resumed Jobs do not count. No eligible capacity leaves deeper run verification
+open; do not weaken resource/placement checks. Nothing here automatically starts
+or restarts cval-live.
+
 ## Scheduler-selected test job
 
 [ymls/test-job.yml](../ymls/test-job.yml) exercises Volcano submission, validation
@@ -100,35 +209,61 @@ bootstrap, runtime configuration and descriptor-anchored supervisor. The rendere
 replaces `runtime-bootstrap-placeholder` with the packaged
 [bootstrap script](../cval/jobs/bootstrap.sh) before validating the manifest.
 The generated YAML is self-contained; the raw template is not directly deployable.
-Set `CVAL_GIT_REF` to a published
-40-hex commit and `CVAL_CONFIG` to the reviewed operator configuration, including
+Use the [quick test preparation](#quick-test-workflow) to set the exact published
+commit, reviewed config, fresh timestamp and local evidence directory. Configure
 `job.source_configmap` and `job.source_sha256` when using the internal repository
-without in-pod credentials. Render to stdout for review:
+without in-pod credentials. This step only writes local files for review:
 
 ```bash
 python3 - <<'PY'
+import json
 import os
 from pathlib import Path
-from cval.config import load_config
+
+import yaml
+from cval.config import is_exact_commit, load_config
 from cval.jobs.renderer import render_validation_job_from_file
 
-config = load_config(os.environ.get("CVAL_CONFIG"))
+revision = os.environ["CVAL_GIT_REF"]
+if not is_exact_commit(revision):
+	raise ValueError("An exact nonzero published commit is required")
+directory = Path(os.environ["CVAL_QUICK_DIR"])
+inventory = json.loads((directory / "inventory.json").read_text())
+discovery = json.loads((directory / "discovery.json").read_text())
+if not isinstance(inventory.get("nodes"), list) or not isinstance(discovery.get("nodes"), list) or not isinstance(discovery.get("totals"), dict):
+	raise ValueError("Successful inventory and resource discovery evidence required")
+config = load_config(os.environ["CVAL_CONFIG"])
 job = render_validation_job_from_file(
 	Path("ymls/test-job.yml"),
 	node_name=None,
-	git_ref=os.environ["CVAL_GIT_REF"],
+	timestamp=int(os.environ["CVAL_QUICK_TIMESTAMP"]),
+	git_ref=revision,
 	cval_config=config,
 	job_template_config=config.job_template,
 )
-print(job.yaml_text, end="")
+manifest = yaml.safe_load(job.yaml_text)
+if manifest["metadata"]["namespace"] != config.cluster.namespace:
+	raise ValueError("Rendered namespace differs from the reviewed cluster namespace")
+identity = {
+	"job": job.job_name,
+	"pod": job.job_name + "-server-0",
+	"namespace": config.cluster.namespace,
+	"timestamp": job.timestamp,
+	"git_ref": job.git_ref,
+	"source_configmap": config.job.source_configmap,
+	"source_sha256": config.job.source_sha256,
+	"submitted": False,
+}
+with (directory / "job.yaml").open("x", encoding="utf-8") as handle:
+	handle.write(job.yaml_text)
+with (directory / "identity.json").open("x", encoding="utf-8") as handle:
+	json.dump(identity, handle, indent=2)
+print(json.dumps(identity, indent=2))
 PY
 ```
 
-Review and separately approve the exact rendered create and cancellation
-commands. Use a fresh job timestamp for each run, and discover the assigned node
-from its pod before auditing that exact `(node,timestamp)` in canonical results
-and the seven raw databases. A successful quick test does not certify discovery,
-prioritization, or the live loop; keep the specific-node acceptance gate for those.
+Continue through the quick workflow's approval and evidence gates. Scheduler
+selection does not replace targeted eligibility or prioritization in the main loop.
 
 ## PVC-access pod
 

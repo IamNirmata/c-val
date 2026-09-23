@@ -160,6 +160,19 @@ canonical results, matching exact-timestamp raw rows and retained logs. A
 Completed Job alone is not proof of successful validation. Disabled tests are
 not passes; incomplete evidence must remain visible.
 
+### Quick Test Workflow
+
+The [quick test workflow](docs/operations-runbook.md#quick-test-workflow) first
+exercises discovery without submission, then prepares a separately approved
+[scheduler-selected Job](ymls/test-job.yml). Volcano chooses the node; the same
+tests, canonical evidence and raw DB ingestion still run. It can remain Pending
+when capacity is unavailable; this is not a shortened benchmark or a promise of
+immediate scheduling.
+
+Require discovery, terminal execution, logs/results and exact-run ingestion to
+pass before deeper acceptance. The workflow does not automatically start the live
+loop or replace targeted acceptance and fresh live-run verification.
+
 ### Continuous Loop
 
 [scripts/cval-live.sh](scripts/cval-live.sh) supports persistent operation and
