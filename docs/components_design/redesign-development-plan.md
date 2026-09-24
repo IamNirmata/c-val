@@ -2,7 +2,7 @@
 
 Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemented.
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-Phase 3.1 and 3.3 cleanup source is implemented; remaining Phase 3 tasks are pending.
+Phase 3.1-3.3 cleanup source is implemented; remaining Phase 3 tasks are pending.
 The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
@@ -356,6 +356,16 @@ FIO packaging and additional timing fields are deferred unless separately justif
   [reservation ownership and limits](validation-runtime-major-component.md#phase-31-shared-reservation).
 - [ ] **3.2** Reuse the existing config snapshot and secure layout to derive child
   environment and compatibility aliases once. Reject disagreements; add no new context layer.
+  Source implemented: one evidence projection in the existing runtime module is
+  shared by supervisor and runner, using the existing built-in alias table and
+  selected descriptor filenames. The ingestion shell validates supplied paths
+  instead of reconstructing them. Conflicting run/test/global aliases fail closed;
+  matching canonical paths can be replaced with their reserved descriptor paths.
+  Five focused filesystem/environment checks passed, including the real shell
+  handoff; configuration projection, workloads, results and raw writers are unchanged.
+  Image/CUDA/PyTorch/iterations remain variable. No new setting, module or script.
+  Fresh in-pod execution/ingestion acceptance remains pending. See
+  [projection ownership and limits](validation-runtime-major-component.md#phase-32-environment-projection).
 - [ ] **3.3** Preserve separate phase/outcome values and bounded child cleanup;
   freeze the finalized result before ingestion and test interruption at each boundary.
   Cleanup source implemented first: supervisor reuses the existing process-group

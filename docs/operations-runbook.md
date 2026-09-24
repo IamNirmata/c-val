@@ -295,6 +295,15 @@ Existing result/DB contracts and variable image/CUDA/PyTorch/iteration inputs ar
 unchanged. See [reservation ownership](components_design/validation-runtime-major-component.md#phase-31-shared-reservation).
 Workload execution and raw writes still require the normal exact approvals.
 
+Phase 3.2 also checks environment aliases at the owner handoff. Matching canonical
+paths may transition to the reserved descriptor paths; conflicting node/timestamp,
+global result or per-test evidence aliases are rejected instead of overridden.
+The ingestion `0-env.sh` entry validates the supplied paths and no longer creates
+path defaults. Use supervisor/runner projections, not independent shell path setup.
+Version detection and existing database recording stay unchanged; varying image,
+CUDA, PyTorch and iterations remains supported. See
+[environment projection](components_design/validation-runtime-major-component.md#phase-32-environment-projection).
+
 ### Real-node development procedure
 
 Phase 0 procedure; the templates below are not approval to execute a mutation.

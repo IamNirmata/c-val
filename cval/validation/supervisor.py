@@ -23,7 +23,7 @@ from cval.validation.results import (
     load_validation_result,
     validation_result_digest,
 )
-from cval.validation.runtime import build_runtime_environment, effective_config_digest
+from cval.validation.runtime import build_runtime_environment, effective_config_digest, test_evidence_environment
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(
@@ -127,6 +127,8 @@ class SecureRunLayout:
             "CVAL_RESULT_DIR": anchored_run,
             "CVAL_RESULT_JSON_FILE": f"{anchored_run}/result.json",
             "CVAL_RESULT_ENV_FILE": f"{anchored_run}/result.env",
+            "CVAL_CANONICAL_JOB_LOG_DIR": str(self.canonical_root / "logs/job_logs" / self.node / self.run_id),
+            "CVAL_CANONICAL_RESULT_JSON_FILE": str(self.canonical_root / "logs/job_logs" / self.node / self.run_id / "result.json"),
         }
         for test_id, (_log_fd, run_fd, artifacts_fd) in self.test_fds.items():
             prefix = test_id.upper().replace("-", "_")
@@ -480,6 +482,8 @@ def supervise_validation_run(
             raise ValueError(f"{name} disagrees with the immutable config snapshot")
     if str(validation_tests_dir) != config.runtime.validation_tests_dir:
         raise ValueError("Validation test directory disagrees with the config snapshot")
+    if runtime_env.get("CVAL_NODE", runtime_env["GCRNODE"]) != runtime_env["GCRNODE"] or runtime_env.get("CVAL_TIMESTAMP", runtime_env["GCRTIME"]) != runtime_env["GCRTIME"]:
+        raise ValueError("Runtime node/timestamp aliases disagree")
     layout = reserve_secure_run_layout(
         runtime_env["CVAL_VALIDATION_ROOT"],
         runtime_env["GCRNODE"],
@@ -493,11 +497,12 @@ def supervise_validation_run(
         / runtime_env["GCRNODE"]
         / runtime_env["CVAL_RUN_ID"]
     )
-    runtime_env.update(layout.environment())
-    runtime_env["CVAL_CANONICAL_JOB_LOG_DIR"] = str(canonical_run)
-    runtime_env["CVAL_CANONICAL_RESULT_JSON_FILE"] = str(
-        canonical_run / "result.json"
-    )
+    try:
+        _add_builtin_compatibility_paths(runtime_env, layout, config)
+        runtime_env.update(layout.environment())
+    except BaseException:
+        layout.close()
+        raise
     repo_dir = runtime_env.get("CVAL_REPO_DIR")
     if repo_dir:
         existing_pythonpath = runtime_env.get("PYTHONPATH", "")
@@ -506,7 +511,6 @@ def supervise_validation_run(
             if not existing_pythonpath
             else f"{repo_dir}{os.pathsep}{existing_pythonpath}"
         )
-    _add_builtin_compatibility_paths(runtime_env, layout, config)
     stdout = stdout or sys.stdout.buffer
     stderr = stderr or sys.stderr.buffer
     previous_handlers: dict[signal.Signals, object] = {}
@@ -800,35 +804,32 @@ def _add_builtin_compatibility_paths(
     node = environment["GCRNODE"]
     run_id = environment["CVAL_RUN_ID"]
     canonical_root = layout.canonical_root
+    canonical_run = canonical_root / "logs/job_logs" / node / run_id
+    values = {name: value for name, value in layout.environment().items()
+              if name in {"CVAL_JOB_LOG_DIR", "CVAL_RESULT_DIR", "CVAL_RESULT_JSON_FILE", "CVAL_RESULT_ENV_FILE",
+                          "CVAL_CANONICAL_JOB_LOG_DIR", "CVAL_CANONICAL_RESULT_JSON_FILE"}}
+    canonical_values = {"CVAL_JOB_LOG_DIR": str(canonical_run), "CVAL_RESULT_DIR": str(canonical_run),
+                        "CVAL_RESULT_JSON_FILE": str(canonical_run / "result.json"),
+                        "CVAL_RESULT_ENV_FILE": str(canonical_run / "result.env")}
     for test_id, (log_fd, run_fd, artifacts_fd) in layout.test_fds.items():
         if test_id not in BUILTIN_TEST_IDS:
             continue
-        prefix = test_id.upper()
-        summary_name = config.tests.registry.require(test_id).definition.artifacts.summary_filename
+        test = config.tests.registry.require(test_id)
         canonical_run = canonical_root / "logs/validation_tests" / test_id / "runs" / node / run_id
-        environment[f"{prefix}_RUN_DIR"] = _fd_path(run_fd)
-        environment[f"{prefix}_OUTPUT_DIR"] = _fd_path(artifacts_fd)
-        environment[f"CVAL_CANONICAL_{prefix}_RUN_DIR"] = str(canonical_run)
-        environment[f"CVAL_CANONICAL_{prefix}_OUTPUT_DIR"] = str(canonical_run / "artifacts")
-        if test_id == "storage":
-            environment["STORAGE_LOG_FILE"] = f"{_fd_path(log_fd)}/stdout.log"
-            environment["STORAGE_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/{summary_name}"
-        elif test_id == "nccl":
-            environment["NCCL_LOG_FILE"] = f"{_fd_path(log_fd)}/workload.log"
-            environment["NCCL_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/{summary_name}"
-            environment["CVAL_CANONICAL_NCCL_SUMMARY_FILE"] = str(
-                canonical_run / summary_name
-            )
-            timestamp = environment["GCRTIME"]
-            environment["NCCL_IBBW_LOG_FILE"] = (
-                f"{_fd_path(artifacts_fd)}/ibbw-{node}-{timestamp}.log"
-            )
-            environment["CVAL_CANONICAL_NCCL_IBBW_LOG_FILE"] = str(
-                canonical_run / "artifacts" / f"ibbw-{node}-{timestamp}.log"
-            )
-        else:
-            environment["DLTEST_LOG_FILE"] = f"{_fd_path(log_fd)}/workload.log"
-            environment["DLTEST_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/{summary_name}"
+        values.update(test_evidence_environment(
+            test, log_dir=Path(_fd_path(log_fd)), run_dir=Path(_fd_path(run_fd)),
+            artifacts=Path(_fd_path(artifacts_fd)), node=node, timestamp=int(environment["GCRTIME"]),
+            validation_root=canonical_root, run_id=run_id,
+        ))
+        canonical_values.update(test_evidence_environment(
+            test, log_dir=canonical_root / "logs" / test_id / node / run_id, run_dir=canonical_run,
+            artifacts=canonical_run / "artifacts", node=node, timestamp=int(environment["GCRTIME"]),
+            validation_root=canonical_root, run_id=run_id,
+        ))
+    for name, value in values.items():
+        if name in environment and environment[name] not in {value, canonical_values.get(name, value)}:
+            raise ValueError(f"{name} disagrees with the reserved run evidence")
+    environment.update(values)
 
 
 def _run_child(

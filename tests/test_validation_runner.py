@@ -14,12 +14,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from cval.config import load_config
-from cval.validation.execution import TestPaths
+from cval.validation.builtins import BUILTIN_TEST_EVIDENCE_ENV
 from cval.validation.registry import load_test_registry
 from cval.validation.results import ValidationResultV2, load_validation_result
-from cval.validation.runner import _test_environment, run_validation_tests
+from cval.validation.runner import _load_secure_layout, _secure_test_paths, _test_environment, run_validation_tests
 from cval.validation.runtime import build_runtime_environment
-from cval.validation.supervisor import reserve_secure_run_layout
+from cval.validation.supervisor import _add_builtin_compatibility_paths, reserve_secure_run_layout
 
 
 class RunnerReservationTests(unittest.TestCase):
@@ -103,36 +103,68 @@ class RunnerReservationTests(unittest.TestCase):
             self.assertEqual(set(os.listdir("/proc/self/fd")), before)
 
 
+    def test_projection_matches_reserved_paths_and_rejects_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, environment, _run_dir = self._inputs(root)
+            layout = reserve_secure_run_layout(
+                root, environment["GCRNODE"], environment["CVAL_RUN_ID"],
+                registry_json=environment["CVAL_TEST_REGISTRY_JSON"],
+            )
+            try:
+                _add_builtin_compatibility_paths(environment, layout, config)
+                environment.update(layout.environment())
+                secure = _load_secure_layout(environment, root, config.tests.registry)
+                for test in config.tests.registry.enabled:
+                    paths = _secure_test_paths(secure, test)
+                    arguments = dict(registered_test=test, test_paths=paths, validation_root=root,
+                                     node=layout.node, timestamp=int(environment["GCRTIME"]), run_id=layout.run_id)
+                    child = _test_environment(environment, **arguments)
+                    aliases = BUILTIN_TEST_EVIDENCE_ENV[test.id]
+                    self.assertEqual(child["CVAL_TEST_SUMMARY_FILE"], child[aliases["summary"]])
+                    for name in aliases.values():
+                        self.assertEqual(child[name], environment[name])
+                        changed = environment | {name: str(root / "conflicting-path")}
+                        before = dict(changed)
+                        with self.assertRaisesRegex(ValueError, "reserved test evidence"):
+                            _test_environment(changed, **arguments)
+                        with self.assertRaisesRegex(ValueError, "reserved run evidence"):
+                            _add_builtin_compatibility_paths(changed, layout, config)
+                        self.assertEqual(changed, before)
+                canonical = environment | {"NCCL_SUMMARY_FILE": environment["CVAL_CANONICAL_NCCL_SUMMARY_FILE"]}
+                _add_builtin_compatibility_paths(canonical, layout, config)
+                self.assertEqual(canonical, environment)
+                with self.assertRaisesRegex(ValueError, "reserved run evidence"):
+                    _add_builtin_compatibility_paths(environment | {"CVAL_RESULT_JSON_FILE": str(root / "wrong")}, layout, config)
+                script = Path(__file__).resolve().parents[1] / "validation-tests/0-env.sh"
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1" && printf "%s\\n" "$NCCL_SUMMARY_FILE"', "check", str(script)],
+                    env=dict(os.environ) | environment, pass_fds=layout.inherited_fds,
+                    text=True, capture_output=True, check=True, timeout=30,
+                )
+                self.assertEqual(result.stdout.strip(), environment["NCCL_SUMMARY_FILE"])
+                missing = dict(os.environ) | environment
+                del missing["NCCL_SUMMARY_FILE"]
+                result = subprocess.run(["bash", "-c", 'source "$1"', "check", str(script)],
+                                        env=missing, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Missing projected evidence path", result.stderr)
+                layout.verify()
+            finally:
+                layout.close()
+
+    def test_conflicting_identity_aliases_fail_before_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, environment, _run_dir = self._inputs(root)
+            for name, value in (("CVAL_NODE", environment["GCRNODE"] + "-other"),
+                                ("CVAL_TIMESTAMP", str(int(environment["GCRTIME"]) + 1))):
+                with self.assertRaisesRegex(ValueError, "node/timestamp aliases disagree"):
+                    run_validation_tests(config=config, environ=environment | {name: value})
+                self.assertEqual(list(root.iterdir()), [])
+
+
 class ValidationRunnerTests(unittest.TestCase):
-    def test_preserves_supervisor_supplied_nccl_ibbw_path(self) -> None:
-        root = Path("/validation")
-        run_dir = root / "logs/validation_tests/nccl/runs/node-a/node-a-123"
-        log_dir = root / "logs/nccl/node-a/node-a-123"
-        test_paths = TestPaths(
-            log_dir=log_dir,
-            stdout=log_dir / "stdout.log",
-            stderr=log_dir / "stderr.log",
-            events=log_dir / "events.jsonl",
-            run_dir=run_dir,
-            result=run_dir / "result.json",
-            summary=run_dir / "summary.json",
-            artifacts=run_dir / "artifacts",
-            workload_log=log_dir / "workload.log",
-        )
-        inherited = "/proc/self/fd/26/ibbw-node-a-123.log"
-
-        environment = _test_environment(
-            {"NCCL_IBBW_LOG_FILE": inherited},
-            registered_test=load_config().tests.registry.require("nccl"),
-            test_paths=test_paths,
-            validation_root=root,
-            node="node-a",
-            timestamp=123,
-            run_id="node-a-123",
-        )
-
-        self.assertEqual(environment["NCCL_IBBW_LOG_FILE"], inherited)
-
     def test_runs_dynamic_tests_in_order_and_preserves_canonical_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

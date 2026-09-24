@@ -12,15 +12,18 @@ import hashlib
 import json
 import re
 import shlex
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cval.config import REPO_ROOT, config_to_dict, encode_config_snapshot
 from cval.validation.builtins import (
     BUILTIN_ENABLE_ENV,
+    BUILTIN_TEST_EVIDENCE_ENV,
 )
 
 if TYPE_CHECKING:
     from cval.config import CvalConfig
+    from cval.validation.registry import RegisteredValidationTest
 
 
 ENVIRONMENT_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -95,6 +98,29 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
     if storage is not None:
         values["CVAL_STORAGE_SETTINGS_JSON"] = json.dumps(storage.to_dict()["settings"], sort_keys=True, separators=(",", ":"))
     _validate_environment(values)
+    return values
+
+
+def test_evidence_environment(test: RegisteredValidationTest, *, log_dir: Path, run_dir: Path,
+                              artifacts: Path, node: str, timestamp: int,
+                              validation_root: Path, run_id: str) -> dict[str, str]:
+    aliases = BUILTIN_TEST_EVIDENCE_ENV.get(test.id)
+    if aliases is None:
+        return {}
+    values = {
+        aliases["run_dir"]: str(run_dir),
+        aliases["artifacts"]: str(artifacts),
+        aliases["summary"]: str(run_dir / test.definition.artifacts.summary_filename),
+        aliases["log"]: str(log_dir / ("stdout.log" if test.id == "storage" else "workload.log")),
+    }
+    if "ibbw_log" in aliases:
+        values[aliases["ibbw_log"]] = str(artifacts / f"ibbw-{node}-{timestamp}.log")
+    canonical_run = validation_root / "logs/validation_tests" / test.id / "runs" / node / run_id
+    values[f"CVAL_CANONICAL_{aliases['run_dir']}"] = str(canonical_run)
+    values[f"CVAL_CANONICAL_{aliases['artifacts']}"] = str(canonical_run / "artifacts")
+    if test.id == "nccl":
+        values[f"CVAL_CANONICAL_{aliases['summary']}"] = str(canonical_run / test.definition.artifacts.summary_filename)
+        values[f"CVAL_CANONICAL_{aliases['ibbw_log']}"] = str(canonical_run / "artifacts" / f"ibbw-{node}-{timestamp}.log")
     return values
 
 

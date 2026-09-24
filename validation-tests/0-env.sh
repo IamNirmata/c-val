@@ -1,12 +1,11 @@
-# Set up per-run artifact directories and environment variables.
-# This file is sourced inside the validation pod before tests start. Every path
-# includes node and timestamp so concurrent or repeated runs do not collide.
+# Validate the supervisor-projected environment before raw ingestion.
 
 for setting in CVAL_CONFIG_SNAPSHOT_B64 CVAL_VALIDATION_ROOT CVAL_REPO_DIR \
 	CVAL_VALIDATION_TESTS_DIR CVAL_DL_UNIT_TEST_DIR CVAL_VALIDATION_DB_PATH \
 	CVAL_STORAGE_DB_PATH CVAL_NCCL_DB_PATH CVAL_DL_NUMERICAL_DB_PATH \
 	CVAL_DL_COMPUTE_DB_PATH CVAL_DL_COLLECTIVE_DB_PATH CVAL_DL_OVERLAP_DB_PATH \
-	CVAL_RUN_ID GCRNODE GCRTIME RUN_STORAGE RUN_NCCL RUN_DLTEST; do
+	CVAL_RUN_ID GCRNODE GCRTIME RUN_STORAGE RUN_NCCL RUN_DLTEST \
+	CVAL_JOB_LOG_DIR CVAL_RESULT_DIR CVAL_RESULT_JSON_FILE CVAL_RESULT_ENV_FILE; do
 	if [[ ! -v "$setting" || -z "${!setting}" ]]; then
 		echo "Missing configured runtime value: $setting" >&2
 		return 2
@@ -28,37 +27,21 @@ CVAL_CUDA_VERSION=${CVAL_CUDA_VERSION:-$(python3 -c 'import torch; print(torch.v
 export CVAL_PYTORCH_VERSION CVAL_CUDA_VERSION
 
 
-# Canonical global logs and per-test run roots on the shared validation PVC.
-CVAL_JOB_LOG_DIR=${CVAL_JOB_LOG_DIR:-$CVAL_VALIDATION_ROOT/logs/job_logs/$GCRNODE/$CVAL_RUN_ID}
-STORAGE_RUN_DIR=${STORAGE_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID}
-NCCL_RUN_DIR=${NCCL_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID}
-DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-$CVAL_VALIDATION_ROOT/logs/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}
-export CVAL_JOB_LOG_DIR STORAGE_RUN_DIR NCCL_RUN_DIR DLTEST_RUN_DIR
-
-# Legacy output variable names now point at each canonical artifacts directory.
-STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$STORAGE_RUN_DIR/artifacts}
-NCCL_OUTPUT_DIR=${NCCL_OUTPUT_DIR:-$NCCL_RUN_DIR/artifacts}
-DLTEST_OUTPUT_DIR=${DLTEST_OUTPUT_DIR:-$DLTEST_RUN_DIR/artifacts}
-export STORAGE_OUTPUT_DIR NCCL_OUTPUT_DIR DLTEST_OUTPUT_DIR
-
-# Structured result artifacts bridge child shell test outcomes to db-update.sh.
-CVAL_RESULT_DIR=${CVAL_RESULT_DIR:-$CVAL_JOB_LOG_DIR}
-CVAL_RESULT_ENV_FILE=${CVAL_RESULT_ENV_FILE:-$CVAL_JOB_LOG_DIR/result.env}
-CVAL_RESULT_JSON_FILE=${CVAL_RESULT_JSON_FILE:-$CVAL_JOB_LOG_DIR/result.json}
-export CVAL_RESULT_DIR CVAL_RESULT_ENV_FILE CVAL_RESULT_JSON_FILE
-
-# Log files capture raw command output for each validation phase.
-STORAGE_LOG_FILE=${STORAGE_LOG_FILE:-$CVAL_VALIDATION_ROOT/logs/storage/$GCRNODE/$CVAL_RUN_ID/stdout.log}
-NCCL_LOG_FILE=${NCCL_LOG_FILE:-$CVAL_VALIDATION_ROOT/logs/nccl/$GCRNODE/$CVAL_RUN_ID/workload.log}
-NCCL_IBBW_LOG_FILE=${NCCL_IBBW_LOG_FILE:-$NCCL_OUTPUT_DIR/ibbw-$GCRNODE-$GCRTIME.log}
-DLTEST_LOG_FILE=${DLTEST_LOG_FILE:-$CVAL_VALIDATION_ROOT/logs/dltest/$GCRNODE/$CVAL_RUN_ID/workload.log}
-export STORAGE_LOG_FILE NCCL_LOG_FILE NCCL_IBBW_LOG_FILE DLTEST_LOG_FILE
-
-# Summary files contain compact machine- or human-readable phase results.
-NCCL_SUMMARY_FILE=${NCCL_SUMMARY_FILE:-$NCCL_RUN_DIR/summary.json}
-STORAGE_SUMMARY_FILE=${STORAGE_SUMMARY_FILE:-$STORAGE_RUN_DIR/summary.txt}
-DLTEST_SUMMARY_FILE=${DLTEST_SUMMARY_FILE:-$DLTEST_RUN_DIR/summary.json}
-export NCCL_SUMMARY_FILE STORAGE_SUMMARY_FILE DLTEST_SUMMARY_FILE
+for test in STORAGE NCCL DLTEST; do
+	enabled="RUN_$test"
+	[[ "${!enabled}" == "true" ]] || continue
+	for suffix in RUN_DIR OUTPUT_DIR LOG_FILE SUMMARY_FILE; do
+		setting="${test}_$suffix"
+		if [[ ! -v "$setting" || -z "${!setting}" ]]; then
+			echo "Missing projected evidence path: $setting" >&2
+			return 2
+		fi
+	done
+done
+if [[ "$RUN_NCCL" == "true" && -z "${NCCL_IBBW_LOG_FILE:-}" ]]; then
+	echo "Missing projected evidence path: NCCL_IBBW_LOG_FILE" >&2
+	return 2
+fi
 
 # Default every phase to fail; tests must opt into pass after successful completion.
 export GCRRESULT1=fail

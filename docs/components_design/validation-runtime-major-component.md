@@ -1,8 +1,7 @@
 # C5: Validation Runtime
 
-Status: Phase 2.1 logging, Phase 3.3 child cleanup and Phase 3.1 shared reservation
-source implemented; new-source pod acceptance pending. Environment consolidation
-remains proposed. Baseline/counting:
+Status: Phase 2.1 logging and Phase 3.1-3.3 reservation/environment/cleanup source
+implemented; new-source pod acceptance pending. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -68,8 +67,8 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
 
 1. [The runner](../../cval/validation/runner.py) now shares descriptor reservation
    for supervised and standalone entry; fresh workload equivalence remains unverified.
-2. Built-in environment aliases are reconstructed in multiple layers; canonical
-   and descriptor-backed paths must not diverge.
+2. Phase 3.2 shares built-in evidence alias construction and rejects disagreements;
+   full in-pod runner-to-ingestion acceptance remains pending.
 3. Runtime success, test outcome and ingestion completion are different signals.
    A child exiting zero or a Completed Job cannot alone establish acceptance.
 4. Redundant result writes and legacy messages increase transitions to reason about;
@@ -197,6 +196,48 @@ binding are unchanged. Phase 3.2 still owns further environment consolidation.
 Fresh successful standalone/supervised execution and in-pod interruption remain
 unverified; local filesystem checks do not substitute for approved real-node
 acceptance. No source object, live session, Job or raw DB was changed by these checks.
+
+## Phase 3.2 Environment Projection
+
+The existing runtime module now owns `test_evidence_environment`, using the existing
+built-in alias table and registered summary filenames. Supervisor/standalone path
+setup and the runner's per-test environment use this same projection. It preserves
+storage stdout, NCCL/DL workload logs and `ibbw-<node>-<timestamp>.log`; the runner's
+different `ibbw.log` fallback is removed. Custom tests retain their generic
+`CVAL_TEST_*` paths without acquiring built-in aliases or a new persistence contract.
+
+The existing secure layout supplies global descriptor/canonical paths. At the
+reservation boundary, matching canonical paths may become the corresponding
+descriptor paths; other supplied aliases are rejected before any environment update.
+Supervisor rejection closes newly owned descriptors while retaining partial evidence.
+Borrowed runner global paths must match its layout. Per-test generic and built-in
+values are checked rather than silently replaced, including canonical aliases.
+Disagreeing node/timestamp alias pairs fail before reservation.
+
+The ingestion shell `0-env.sh` now checks required projected paths instead of
+constructing another set of defaults. Enabled tests require their run/output/log/
+summary aliases, including NCCL's bandwidth log; disabled tests need no reserved
+paths. The existing shell entry point, software-version detection and legacy result
+initialization remain. Callers must receive owner-projected paths; sourcing this
+file alone is no longer a way to invent evidence locations.
+
+No configuration, test descriptor, image, CUDA/PyTorch, iteration, raw schema or
+writer changed. The existing config projection/digest and canonical result/workload
+functions are unchanged. Environment versions remain selectable and recorded by
+the existing machinery; no new context framework, module, script or setting.
+
+Five focused tests in the existing runner test class passed using real local
+directories/descriptors and shell execution, with no benchmark or ingestion launched.
+They include existing ownership/reuse/symlink checks, projection consistency and
+atomic conflict rejection, missing shell paths, and identity rejection before
+reservation. Additional checks compared aliases with the published supervisor,
+preserved actual historical software-version values through the shell, and verified
+supervisor descriptor cleanup on entry rejection. Evidence is indexed in
+`run-logs/phase32-operations-20260924.md`.
+
+Fresh in-pod execution/ingestion and custom-test acceptance remain unverified.
+Local handoff checks are not deployed acceptance. The live loop remains paused;
+source creation, workloads and activation retain separate exact approval gates.
 
 ## Phase 3.3 Child Cleanup
 

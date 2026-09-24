@@ -26,7 +26,6 @@ from cval.validation.builtins import (
     RESULT_PROJECTION_KEYS,
     BUILTIN_RUNNING_MARKERS,
     BUILTIN_SKIPPED_MARKERS,
-    BUILTIN_TEST_EVIDENCE_ENV,
     BUILTIN_TEST_IDS,
 )
 from cval.validation.execution import RunLogger, RunPaths, TestPaths, utc_now
@@ -36,7 +35,7 @@ from cval.validation.registry import (
     validation_test_config_digest,
 )
 from cval.validation.results import parse_validation_result_v2
-from cval.validation.runtime import build_runtime_environment, effective_config_digest
+from cval.validation.runtime import build_runtime_environment, effective_config_digest, test_evidence_environment
 from cval.validation.supervisor import _add_builtin_compatibility_paths, reserve_secure_run_layout
 
 
@@ -80,6 +79,8 @@ def run_validation_tests(
         runtime_env.get("CVAL_RUN_ID") or f"{node}-{timestamp}",
         "run_id",
     )
+    if runtime_env.get("GCRNODE", node) != node or _runtime_timestamp(runtime_env.get("GCRTIME", str(timestamp))) != timestamp:
+        raise ValueError("Runtime node/timestamp aliases disagree")
     if runtime_env.get("CVAL_VALIDATION_ROOT", config.runtime.validation_root) != config.runtime.validation_root:
         raise ValueError("CVAL_VALIDATION_ROOT disagrees with the config snapshot")
     validation_root = Path(config.runtime.validation_root)
@@ -102,23 +103,20 @@ def run_validation_tests(
                 validation_root, node, run_id, registry_json=runtime_env["CVAL_TEST_REGISTRY_JSON"],
             )
             resources.callback(owned_layout.close)
-            runtime_env.update(owned_layout.environment())
-            runtime_env.update(CVAL_NODE=node, CVAL_RUN_ID=run_id, GCRNODE=node, GCRTIME=str(timestamp),
-                               CVAL_EXTERNAL_GLOBAL_LOGGING="false")
+            runtime_env.update(CVAL_NODE=node, CVAL_RUN_ID=run_id, GCRNODE=node, GCRTIME=str(timestamp))
             _add_builtin_compatibility_paths(runtime_env, owned_layout, config)
+            runtime_env.update(owned_layout.environment())
+            runtime_env["CVAL_EXTERNAL_GLOBAL_LOGGING"] = "false"
             secure_layout = _load_secure_layout(runtime_env, validation_root, registry)
         elif not external_logging or not marker_preacquired:
             raise ValueError("Inherited secure layout requires supervisor-owned marker and logging")
         secure_pass_fds = _secure_pass_fds(runtime_env)
         _validate_secure_pass_fds(secure_layout, secure_pass_fds)
         run_paths = _secure_run_paths(secure_layout)
-        runtime_env.update(
-            {
-                "CVAL_JOB_LOG_DIR": str(run_paths.log_dir),
-                "CVAL_RESULT_JSON_FILE": str(run_paths.result),
-                "CVAL_RESULT_ENV_FILE": str(run_paths.legacy_env),
-            }
-        )
+        for name, path in (("CVAL_JOB_LOG_DIR", run_paths.log_dir), ("CVAL_RESULT_DIR", run_paths.log_dir),
+                           ("CVAL_RESULT_JSON_FILE", run_paths.result), ("CVAL_RESULT_ENV_FILE", run_paths.legacy_env)):
+            if runtime_env.get(name) != str(path):
+                raise ValueError(f"{name} disagrees with the secure run layout")
         _prepare_run_paths(run_paths)
         logger = RunLogger(
             run_paths,
@@ -599,36 +597,30 @@ def _test_environment(
     timestamp: int,
     run_id: str,
 ) -> dict[str, str]:
-    environment = dict(runtime_env)
-    environment.update(
-        {
-            "CVAL_RUN_ID": run_id,
-            "CVAL_TEST_ID": registered_test.id,
-            "CVAL_NODE": node,
-            "CVAL_TIMESTAMP": str(timestamp),
-            "GCRNODE": node,
-            "GCRTIME": str(timestamp),
-            "CVAL_TEST_DIR": str(registered_test.test_dir),
-            "CVAL_TEST_CONFIG": str(registered_test.resolved_config_path),
-            "CVAL_VALIDATION_ROOT": str(validation_root),
-            "CVAL_TEST_OUTPUT_DIR": str(test_paths.artifacts),
-            "CVAL_TEST_LOG_DIR": str(test_paths.log_dir),
-            "CVAL_TEST_SUMMARY_FILE": str(test_paths.summary),
-        }
+    values = {
+        "CVAL_RUN_ID": run_id,
+        "CVAL_TEST_ID": registered_test.id,
+        "CVAL_NODE": node,
+        "CVAL_TIMESTAMP": str(timestamp),
+        "GCRNODE": node,
+        "GCRTIME": str(timestamp),
+        "CVAL_TEST_DIR": str(registered_test.test_dir),
+        "CVAL_TEST_CONFIG": str(registered_test.resolved_config_path),
+        "CVAL_VALIDATION_ROOT": str(validation_root),
+        "CVAL_TEST_OUTPUT_DIR": str(test_paths.artifacts),
+        "CVAL_TEST_LOG_DIR": str(test_paths.log_dir),
+        "CVAL_TEST_SUMMARY_FILE": str(test_paths.summary),
+    }
+    aliases = test_evidence_environment(
+        registered_test, log_dir=test_paths.log_dir, run_dir=test_paths.run_dir,
+        artifacts=test_paths.artifacts, node=node, timestamp=timestamp,
+        validation_root=validation_root, run_id=run_id,
     )
-    aliases = BUILTIN_TEST_EVIDENCE_ENV.get(registered_test.id)
-    if aliases is not None:
-        environment[aliases["artifacts"]] = str(test_paths.artifacts)
-        environment[aliases["summary"]] = str(test_paths.summary)
-        environment[aliases["log"]] = str(
-            test_paths.stdout
-            if registered_test.id == "storage"
-            else test_paths.workload_log
-        )
-        ibbw_alias = aliases.get("ibbw_log")
-        if ibbw_alias:
-            environment.setdefault(ibbw_alias, str(test_paths.artifacts / "ibbw.log"))
-    return environment
+    values.update(aliases)
+    for name, expected in values.items():
+        if name in runtime_env and runtime_env[name] != expected:
+            raise ValueError(f"{name} disagrees with the reserved test evidence")
+    return dict(runtime_env) | values
 
 
 def _test_paths(
