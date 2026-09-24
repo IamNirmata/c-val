@@ -140,13 +140,27 @@ crash records for explicit reconciliation rather than assuming nothing happened.
 A successful state write followed by a failed CSV write is still retained evidence;
 the next append loads that on-disk state before rebuilding the projection. Missing
 or corrupt authoritative state never becomes an empty session. Attempted
-intents retain reservations until identity-bound terminal evidence verification
-permits release. Actual lost replies, concurrent live submission
+intents retain reservations until identity-bound terminal tracking permits release.
+Tracking release is not evidence acceptance. Actual lost replies, concurrent live submission
 and partial live batches remain unverified; this is not exactly-once delivery.
 
 ### Exact Evidence and Release
 
-Targeted validation and terminal intent reconciliation share a read-only verifier.
+Ordinary active/resumed/targeted tracking shares one bounded Job/pod/log observer.
+It verifies the submitted Job and owned pod/container, retains test/ingestion
+progress and separates terminal execution from confirmed runtime completion.
+A verified terminal Job with no live owned pod can release its execution slot even
+when logs or ingestion remain unconfirmed. Missing Jobs, unavailable status/inventory
+or conflicting identity cannot release it or authorize another create. A log read
+failure is retained separately from Kubernetes execution state. Same-run reuse and
+cooldown checks still apply. No routine raw-store scan is required.
+
+Runtime completion additionally requires terminal success, zero container exit and
+restarts, selected passing tests, retained logs/finalized result and matching
+digest-bound ingestion/supervisor acknowledgements. Old/generic completion strings
+are insufficient. See [shared tracking](components_design/job-control-major-component.md#phase-23-implementation).
+
+Targeted validation retains a once-only read-only acceptance verifier after polling.
 It uses the retained request and submitted snapshot, not the observed result, for
 expected identity. It checks the owned terminal Job/pod, canonical files and digests,
 event order, exact status rows and outcome-required metric values/receipts. Historical
@@ -155,8 +169,10 @@ or newer latest-status rows never substitute for the requested timestamp.
 Reports include `verification.state`, `complete`, `accepted`, `release`, per-source
 states and artifact hashes. Successful execution alone is insufficient. Complete
 evidence of a failed test is still a failure. A bounded incomplete/conflicting
-terminal evidence report may release tracking without acceptance; inaccessible
-sources, changing generations or Job/pod identity conflicts keep the reservation.
+terminal evidence report may release legacy verification-based tracking without
+acceptance. Inaccessible sources or changing generations block audit acceptance,
+but do not undo a separately verified terminal tracking decision. Job/pod identity
+conflicts remain blocking, never an accepted run.
 No verification step deletes Jobs, edits raw rows or retries the workload.
 
 The reader executes in memory in the configured PVC-access pod, opens SQLite with
@@ -382,8 +398,8 @@ The quick test passes only when **all** checks below pass:
 - Inventory and resource discovery succeeded; inaccessible, empty and unavailable
 	states remained distinct. This verifies reads, not the live scheduler's decisions.
 - The Job is Completed/Succeeded and the server container exited 0. A watch exit
-	code or `terminal=true` alone is insufficient: Failed, Aborted and Missing are
-	terminal too. Pending, timeout and unknown state are not passes.
+	code or `terminal=true` alone is insufficient: Failed and Aborted are
+	terminal failures; Missing retains uncertain tracking. Pending, timeout and unknown state are not passes.
 - Canonical `logs/job_logs/<node>/<node>-<timestamp>/result.json` has the exact
 	node, timestamp, source SHA and effective config identity, with all enabled tests
 	passing. Global/per-test logs, events, summaries and artifacts are readable.

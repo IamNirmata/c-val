@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from cval.config import CvalConfig, is_exact_commit, load_config
 from cval.jobs.manager import admission_lock, read_admission_session, retain_submission_event, submit_workflow_plan
-from cval.jobs.monitor import TERMINAL_PHASES, get_job_phase
+from cval.jobs.monitor import TERMINAL_PHASES, observe_validation_job, structured_progress_events
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
@@ -42,7 +42,6 @@ _FINAL_RESULT_RE = re.compile(
     re.escape(BUILTIN_FINAL_RESULT_PREFIX)
     + "".join(rf"\s*{re.escape(test_id)}=(\w+)" for test_id in BUILTIN_TEST_IDS)
 )
-_CVAL_EVENT_RE = re.compile(r"^CVAL_EVENT\s+(\{.*\})$", re.MULTILINE)
 
 SUCCESS_PHASES = frozenset({"Completed", "Succeeded"})
 
@@ -150,15 +149,7 @@ def raw_results_from_log(
 def _structured_progress_events(log_text: str) -> list[dict[str, Any]]:
     """Return valid structured c-val event objects in log order."""
 
-    events: list[dict[str, Any]] = []
-    for match in _CVAL_EVENT_RE.finditer(log_text or ""):
-        try:
-            event = json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and event.get("schema_version") == "cval.event.v1":
-            events.append(event)
-    return events
+    return structured_progress_events(log_text or "")
 
 
 def log_signals_db_updated(log_text: str) -> bool:
@@ -351,22 +342,6 @@ def _build_single_node_plan(
     return plan, rendered
 
 
-def _pod_logs(
-    kubectl: KubectlClient,
-    namespace: str,
-    pod_name: str,
-    *,
-    tail_lines: int,
-    timeout: float | None = None,
-) -> str:
-    result = kubectl.run(
-        ["logs", "-n", namespace, pod_name, f"--tail={tail_lines}"],
-        check=False,
-        timeout=timeout,
-    )
-    return result.stdout if result.returncode == 0 else ""
-
-
 def run_node_validation(
     node: str,
     *,
@@ -468,7 +443,6 @@ def run_node_validation(
         node, timestamp, config, resolved_git_ref
     )
     job_name = rendered.job_name
-    pod_name = f"{job_name}-server-0"
 
     # 3. Submit only after the operator supplied the exact confirmation.
     policy = ExecutionPolicy(
@@ -488,15 +462,18 @@ def run_node_validation(
     )
     record = submission.records[0]
     emit(f"queued job {record.job_name} for node {node} (timestamp {timestamp})")
+    expected_config = replace(config, job=replace(config.job, git_ref=resolved_git_ref))
+    with admission_lock(expected_config):
+        session_dir, state = read_admission_session(expected_config)
+        intent = state["intents"][job_name]
 
-    # 4. Live tracking: poll phase + parse logs for per-test progress.
     start = clock()
     deadline = start + overall_timeout
     last_status_line = ""
     seen_progress: dict[str, str] = {}
     phase = "Unknown"
     interrupted = False
-    logs = ""
+    observation: dict[str, Any] = {}
     try:
         while True:
             remaining = deadline - clock()
@@ -506,28 +483,11 @@ def run_node_validation(
                 )
                 emit(f"[{overall_timeout:5.0f}s] overall timeout reached; stopping live tracking")
                 break
-            phase = get_job_phase(
-                job_name,
-                config=config,
-                namespace=namespace,
-                client=kubectl,
-                timeout=remaining,
-            ).phase
-            remaining = deadline - clock()
-            if remaining <= 0:
-                notes.append(
-                    f"overall timeout ({overall_timeout:.0f}s) reached before log fetch"
-                )
-                break
-            logs = _pod_logs(
-                kubectl,
-                namespace,
-                pod_name,
-                tail_lines=config.monitoring.log_tail_lines,
-                timeout=remaining,
-            )
+            observation = observe_validation_job(intent, config=expected_config, client=kubectl, timeout=remaining)
+            phase = observation["phase"]
+            intent = {**intent, "events": [*intent["events"], observation]}
             elapsed = clock() - start
-            progress = parse_test_progress(logs)
+            progress = observation["runtime"].get("progress", {})
             seen_progress.update(progress)
 
             status_line = render_test_progress_line(
@@ -536,12 +496,16 @@ def run_node_validation(
                 enabled_test_order,
                 seen_progress,
             )
+            status_line += f" logs={observation['log_state']} ingestion={observation['runtime'].get('ingestion_outcome', 'unconfirmed')}"
             if status_line != last_status_line:
                 emit(status_line)
                 last_status_line = status_line
 
-            if phase in TERMINAL_PHASES:
+            if observation["tracking_complete"]:
                 emit(f"[{elapsed:5.0f}s] job reached terminal phase: {phase}")
+                break
+            if observation["state"] in {"conflict", "uncertain"}:
+                notes.append(f"Job observation is {observation['observation']}: {observation.get('reason', '')}")
                 break
             if phase == "Pending" and elapsed >= pending_timeout and not seen_progress:
                 emit(
@@ -557,10 +521,16 @@ def run_node_validation(
         notes.append("interrupted by operator; job left running")
         emit("\ninterrupted; the validation job is still running and was left untouched.")
 
-    raw_results = raw_results_from_log(logs, enabled_tests=enabled_tests)
-    expected_config = replace(config, job=replace(config.job, git_ref=resolved_git_ref))
+    raw_results = {name: status for name, status in seen_progress.items() if status in {"pass", "fail", "incomplete"}}
+    overall = observation.get("runtime", {}).get("tests_outcome")
+    if overall in {"pass", "fail", "incomplete"}:
+        raw_results["all"] = overall
     verification = {"state": "unavailable", "accepted": False, "complete": False, "release": False, "sources": {}}
     try:
+        if observation:
+            with admission_lock(expected_config):
+                session_dir, state = read_admission_session(expected_config)
+                state = retain_submission_event(session_dir, state, job_name, observation)
         if interrupted or deadline <= clock():
             raise TimeoutError("No remaining verification budget; retain pending evidence")
         with admission_lock(expected_config):
@@ -571,8 +541,10 @@ def run_node_validation(
         raw_results = verification.get("raw_results", raw_results)
         with admission_lock(expected_config):
             session_dir, state = read_admission_session(expected_config)
-            event = {"state": "verification_finished", "phase": verification.get("job_phase", phase), "verification": verification}
+            event = {**observation, "state": observation.get("state", "verification_finished"), "verification": verification}
             if verification.get("identity_verified"):
+                if event.get("uid") not in {None, verification["request"]["job_uid"]}:
+                    raise ValueError("Job identity changed between tracking and acceptance verification")
                 event["uid"] = verification["request"]["job_uid"]
             retain_submission_event(session_dir, state, job_name, event)
     except Exception as exc:
@@ -595,6 +567,7 @@ def run_node_validation(
         verification=verification,
         notes=notes,
     )
+    report["tracking"] = observation
 
     if verbose:
         printer("")

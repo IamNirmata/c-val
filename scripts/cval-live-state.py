@@ -17,12 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cval.jobs.manager import (
     SESSION_SCHEMA as STATE_SCHEMA,
     atomic_session_text as _atomic_text,
-    observe_submission,
     project_submission_jobs,
     retain_submission_event,
     reconcile_submission_intents,
     intent_finished,
-    verify_terminal_submission,
     write_session_jobs as _write_jobs,
     admission_lock,
     admission_scope,
@@ -31,6 +29,7 @@ from cval.jobs.manager import (
     read_session_jobs as _read_jobs,
     read_session_state as _read_state,
 )
+from cval.jobs.monitor import observe_validation_job
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -151,8 +150,7 @@ def _job(args: argparse.Namespace) -> None:
     config = load_config_snapshot(state["config_snapshot_b64"])
     client = KubectlClient(config=config)
     check_admission_cluster(config, client)
-    event = observe_submission(intent, client, config.cluster.namespace)
-    event = verify_terminal_submission(intent, event, config, client)
+    event = observe_validation_job(intent, config=config, client=client)
     event.update(reported_phase=args.phase, reported_at=args.observed_at, deleted_at=args.deleted_at)
     state = retain_submission_event(args.session_dir, state, args.job_name, event)
     _render(args.session_dir)
@@ -172,7 +170,7 @@ def _receipt(args: argparse.Namespace) -> None:
         intent = state["intents"].get(job_name)
         if not intent or item.get("node") != intent["node_name"] or item.get("git_ref") != intent["git_ref"]:
             raise ValueError("Submitted identity lacks a matching durable intent")
-        if intent["events"][-1]["state"] not in {"submitted", "observed", "verification_finished"}:
+        if intent["events"][-1]["state"] not in {"submitted", "observed", "verification_finished", "tracking_finished"}:
             raise ValueError("Submission receipt has not been durably verified")
     _render(args.session_dir)
 

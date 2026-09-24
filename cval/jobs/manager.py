@@ -27,7 +27,7 @@ import time
 import yaml
 
 from cval.config import CvalConfig, encode_config_snapshot, is_exact_commit, load_config
-from cval.jobs.monitor import TERMINAL_PHASES
+from cval.jobs.monitor import TERMINAL_PHASES, observe_validation_job
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
@@ -210,11 +210,7 @@ def reconcile_submission_intents(session_dir: Path, state: dict, client: Kubectl
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise PolicyViolation("Reconciliation deadline expired; reservations retained")
-        event = observe_submission(intent, client, config.cluster.namespace, timeout=min(remaining, config.cluster.kubectl_timeout_seconds))
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise PolicyViolation("Reconciliation deadline expired; reservations retained")
-        event = verify_terminal_submission(intent, event, config, client, timeout=remaining)
+        event = observe_validation_job(intent, config=config, client=client, timeout=remaining)
         state = retain_submission_event(session_dir, state, name, event)
         if event["state"] != "observed" and not intent_finished(state["intents"][name]):
             raise PolicyViolation(f"Intent {name!r} is {event['state']}; node and slot remain reserved")
@@ -263,16 +259,25 @@ def intent_finished(intent: dict) -> bool:
     last = intent["events"][-1]
     return last["state"] == "not_created" or (
         last["state"] == "verification_finished" and verification_releases(intent, last["verification"])
+    ) or (
+        last["state"] == "tracking_finished" and tracking_releases(intent, last)
     )
 
 
-def verify_terminal_submission(intent: dict, event: dict, config: CvalConfig, client: KubectlClient, *, timeout: float | None = None) -> dict:
-    if event["state"] != "observed" or event.get("phase") not in _TERMINAL_PHASES:
-        return event
-    from cval.storage.verification import verify_run_evidence
+def tracking_releases(intent: dict, observation: dict) -> bool:
+    """Release terminal execution, retaining unconfirmed logs/ingestion as evidence."""
 
-    report = verify_run_evidence(intent, config, client, timeout=timeout)
-    return {**event, "state": "verification_finished", "verification": report}
+    known_uids = {event["uid"] for event in intent["events"] if event.get("uid")}
+    return (
+        observation.get("state") == "tracking_finished" and observation.get("observation") == "queried"
+        and observation.get("tracking_complete") is True and observation.get("phase") in _TERMINAL_PHASES
+        and bool(observation.get("uid")) and known_uids == {observation["uid"]}
+        and all(observation.get(key) == intent[key] for key in (
+            "job_name", "node_name", "run_id", "timestamp", "git_ref", "config_digest", "manifest_sha256",
+        ))
+        and isinstance(observation.get("pods"), list)
+        and all(pod.get("phase") in {"Succeeded", "Failed"} and pod.get("uid") for pod in observation["pods"])
+    )
 
 
 def admission_scope(config: CvalConfig) -> dict[str, str]:
@@ -354,7 +359,7 @@ def read_session_state(session_dir: Path) -> dict[str, object]:
             if not isinstance(intent["manifest"], str) or hashlib.sha256(intent["manifest"].encode()).hexdigest() != intent["manifest_sha256"]:
                 raise PolicyViolation("Retained intent manifest digest mismatch")
             for event in intent["events"]:
-                if not isinstance(event, dict) or event.get("state") not in {"prepared", "submitting", "not_created", "submitted", "observed", "uncertain", "conflict", "verification_finished"} or not event.get("observed_at"):
+                if not isinstance(event, dict) or event.get("state") not in {"prepared", "submitting", "not_created", "submitted", "observed", "uncertain", "conflict", "verification_finished", "tracking_finished"} or not event.get("observed_at"):
                     raise PolicyViolation("Invalid retained create outcome")
                 if event["state"] == "verification_finished" and not isinstance(event.get("verification"), dict):
                     raise PolicyViolation("Missing retained evidence-verification report")

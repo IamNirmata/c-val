@@ -1,7 +1,8 @@
 # Redesign Development Plan
 
-Status: Phase 0 contracts complete; Phase 1.1 source implementation is under verification.
-Real-node execution/ingestion acceptance and activation remain pending; later tasks are not started.
+Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.3 source implemented.
+Fresh exact-commit execution/ingestion acceptance and activation remain pending;
+tasks 2.4 onward are not complete. The live loop was paused on 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
 Shared contracts live in [Redesign.md](Redesign.md).
@@ -255,12 +256,25 @@ activation; no status rows are suppressed or deleted to force retesting.
   Both templates/source transports and strict snapshots passed local checks using
   retained real run inputs; an actual legacy Job with default retries was rejected.
   Installed controller Deployment/CRD reads were forbidden, so version/admission
-  verification and real single-attempt acceptance remain pending. Existing Jobs,
-  pods, controller and source objects were not altered. See
+  verification and real single-attempt acceptance remain pending. The approved
+  `cval-source-20fe5537c3a34d24` ConfigMap was created and verified on 2026-09-24 UTC;
+  the separately requested controller pause did not cancel Jobs or change the session.
+  No new source was activated. See
   [configuration and upstream semantics](../configuration.md#single-attempt-validation).
 - [ ] **2.3** Share one bounded status/log observation step between active, resumed
   and targeted tracking. Reuse Phase 1 submission/intent safeguards; do not rebuild
   them. `run` submits, `validate` also watches/reports, and `plan` stays read-only.
+  Source implemented in the existing monitor, manager, targeted validator and state
+  helper. Each observation verifies the submitted Job and owned pod/container, reads
+  bounded logs under one deadline, and separates terminal tracking from confirmed
+  runtime completion. Routine active/resumed tracking no longer scans raw stores;
+  targeted validation retains its once-only exact-run audit outside polling.
+  Real historical observations covered a retained successful pod and a terminal Job
+  whose pod is gone. Neither old log history was promoted to new-runtime acceptance.
+  Missing Jobs, unavailable status and identity conflicts retain reservations. See
+  [implementation and verification limits](job-control-major-component.md#phase-23-implementation).
+  Fresh new-source completion, failure, and live resume/state transitions remain
+  separately approval-gated; the checkbox stays open until acceptance.
 - [ ] **2.4** Batch Job/pod reads, bind logs to the expected pod/container and run,
   and propagate one remaining deadline. Read bounded incremental logs and require
   an explicit ingestion success event, never a generic "Completed" substring.

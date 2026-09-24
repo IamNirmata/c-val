@@ -1,8 +1,8 @@
 # C4: Job Control
 
-Status: Phase 1.3 admission, Phase 1.4 durable intents and Phase 1.5 verification
-source implemented; deployment acceptance pending. Control consolidation below
-remains proposed. Baseline/counting:
+Status: Phase 1 admission/intents/verification and Phase 2.3 shared tracking are
+source implemented; fresh deployment acceptance is pending. Remaining shell
+consolidation and batching are proposed. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -19,7 +19,7 @@ request exact-run verification. Run one active controller per configured scope.
 
 ## Phase 2 Tracking Contract
 
-Reviewed proposal (2026-09-24), not the deployed Phase 1 behavior: keep everyday
+Reviewed direction (2026-09-24), implemented in Phase 2.3 but not activated: keep everyday
 tracking to Kubernetes Job/pod status and bounded container-log observations. The
 shared tracker answers: has execution started, is it running or terminal, did the
 tests pass/fail, and did the runtime explicitly finish retaining evidence and
@@ -42,8 +42,8 @@ work; it must not restart its Jobs. Lost create replies, missing identity or API
 failure still require bounded read-only reconciliation, never blind resubmission.
 
 This deliberately changes Phase 1's coupling of routine tracking to full C7
-verification. During implementation, separate an execution slot from a retained
-unresolved evidence report; do not simply erase the report or mark it accepted.
+verification. An execution slot is separate from the retained unresolved evidence
+report; missing evidence is neither erased nor marked accepted.
 C7 exact-run audits remain available for release acceptance, incidents and explicit
 operator inspection. Any rollout still needs the existing exact approvals.
 
@@ -108,8 +108,8 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 
 1. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
    subprocesses reload config and translate the same state through JSON/TSV/CSV.
-2. Targeted validation and the regular monitor have different deadline and evidence
-   handling. Job phase alone is not proof of a complete successful run.
+2. Phase 2.3 shares one observation deadline and identity/log handling. Multi-Job
+   batching and incremental log reads remain open; phase alone is not success.
 3. New-source submission, crash recovery and evidence-release transitions still
    need separately approved live acceptance. Do not activate an incomplete Phase 1 stack.
 
@@ -179,7 +179,8 @@ equivalence claim is made from the current historical observation.
 Missing or unavailable observations remain `uncertain`; mismatches become
 `conflict`. Neither frees the node/slot or triggers another create. Prepared-only
 crash records and conflicts require explicit reconciliation. A terminal matching
-Job retains its reservation until the Phase 1.5 evidence decision described below. The
+Job originally retained its reservation until the Phase 1.5 evidence decision below;
+Phase 2.3 now separates terminal tracking release from acceptance. The
 existing state-helper `job` operation can retain a bounded exact observation under
 the same lock; a supplied phase alone cannot establish identity. No new retry mode,
 service, test script or raw DB was introduced.
@@ -207,7 +208,7 @@ Live session turnover/activation is deferred until Phase 1 is finished.
 
 ## Phase 1.5 Integration
 
-Terminal reconciliation and the existing state-helper `job` operation invoke the
+In the Phase 1 implementation, terminal reconciliation and the state-helper `job` operation invoked the
 [C7 exact-run verifier](raw-evidence-major-component.md#phase-15-implementation).
 The resulting `verification_finished` event retains the report in v2 intent history.
 The shared release predicate checks the original node/run/source/config/manifest
@@ -224,6 +225,53 @@ It checks exact evidence, retains the decision under the existing admission lock
 and reports per-source state. Historical read-only evidence validated the consumer
 and release predicates, but no live state was released in development. Actual
 turnover and fresh execution remain deferred until Phase 1 is finished.
+
+## Phase 2.3 Implementation
+
+The existing monitor's `observe_validation_job` is the shared read-only step for
+manager reconciliation, active/resumed state-helper observations and targeted
+`validate` polling. It checks the exact requested Job/UID, pod owner/node/UID,
+container command/image and every requested environment entry. Controller-added
+environment entries are allowed; changes to requested entries are not. Multiple
+pods or a changed retained pod UID fail closed. Log reads pin the container and
+recheck pod UID afterward, with configured line/byte limits and one remaining
+deadline across calls. No PVC read or workload mutation occurs in this step.
+
+`tracking_finished` records a verified terminal Job with no nonterminal owned pod.
+Its identity-bound release predicate preserves same-run collision checks and
+cooldown. A terminal Job with no retained pod, or unavailable logs, can free an
+execution slot while retaining an explicit unconfirmed evidence outcome. Missing
+Jobs, unreadable Job/pod inventory or identity conflicts cannot release it.
+The existing eight-column jobs CSV and old verification histories remain readable.
+
+Routine success additionally requires a successful Job/pod, zero container exit
+and restarts, selected passing test summaries, retained logs/finalized result, and
+matching digest-bound ingestion/supervisor store acknowledgements. The shared
+`cval.event.v1` parser filters the exact run; generic completion strings cannot
+confirm ingestion. Old logs can still show test progress without proving this new
+completion contract. Failure ingestion and test failure remain separate facts.
+
+Targeted validation retains the observation and performs the detailed C7 audit
+once after watching, not within polling. Audit results remain separate from terminal
+tracking and do not overwrite its identity. `run` only submits; `plan` stays read-only.
+Two superseded fetch/audit helpers were removed; no script, service, raw store or
+configuration setting was added. Batch reads, incremental logs and shell-loop
+retirement remain tasks 2.4-2.5; retest freshness is unchanged.
+
+Read-only checks on 2026-09-24 UTC observed the real `0359` run `1790277187` with
+one Succeeded pod, no restart, exit zero and readable logs. Its older source lacked
+the new final acknowledgement, so completion stayed unconfirmed while tracking
+released in a local predicate check. Historical `0192` run `1790178532` remained
+Completed without a retained pod; missing logs were not fabricated. Retained real
+events preserved parser compatibility. No raw DB was read by ordinary observation,
+and no live intent or Jobs were changed by these checks. Details are retained in
+`run-logs/phase23-operations-20260924.md` and the linked JSON evidence.
+
+Fresh producer success/failure, live durable transitions, changed pod identity and
+controller resume remain unexercised. No fake runtime client or synthetic DB was
+used as acceptance. The approved Phase 2.2 source object was created separately;
+the requested loop pause was verified by absent tmux/processes and a free loop
+lock. No workload was cancelled and no source/session was activated.
 
 ## Proposed Design
 
