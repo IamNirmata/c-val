@@ -1,6 +1,8 @@
 # C5: Validation Runtime
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 2.1 compact logging source implemented; new-source pod acceptance
+pending. Broader runtime redesign below remains proposed. Baseline/counting:
+[overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -91,10 +93,11 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
 
 ## Phase 2 Compact Runtime Logs
 
-Reviewed proposal (2026-09-24): operators and the normal Job tracker should be able
+Reviewed direction (2026-09-24): operators and the normal Job tracker should be able
 to understand one run from Kubernetes status plus `kubectl logs` on its owned pod
 and container. Improve the existing log producer, not an external interpretation
-framework. This contract is planned, not a claim about current emitted fields.
+framework. Phase 2.1 source now implements these producer milestones; the deployed
+controller/pods have not been changed or accepted for this source.
 
 | Owner | What It Reports |
 | --- | --- |
@@ -131,6 +134,27 @@ Current `restartPolicy: Never` prevents container restart but is not sufficient
 evidence of disabled Volcano Job/task retries. Verify and explicitly configure
 those independently. Keep approved bounded SQLite lock retries distinct from a
 benchmark or Job restart; no ingestion replay after terminal failure is introduced.
+
+### Phase 2.1 Verification
+
+The [event reference](../result-schema.md#compact-runtime-events) describes the
+implemented additions. Existing source files own all changes: supervisor, runner,
+shared event logger and ingestion coordinator. No new runtime modules, log files,
+test scripts, raw schemas or operational settings were introduced.
+
+Local OS pipe checks verified that a child's flushed line reached the supervisor's
+console before child exit, and that retained logs matched it after termination.
+Existing real historical events/results were read from the PVC, then replayed only
+in temporary local files to check append safety, old parser compatibility and the
+new acknowledgement contract. The replay is not a new writer execution or a pod
+validation. Retained evidence is under `run-logs/phase21-*-20260924.*`.
+
+New-source GPU execution, per-store commit/failure milestones and the complete
+supervisor path remain unverified until a separately approved real-node run.
+No synthetic benchmark/DB fixtures or fake Kubernetes clients were used. No Job,
+pod, controller, source ConfigMap or raw DB was changed during development.
+Tasks 2.2-2.5, including scheduler retry policy, tracking and retest freshness,
+remain unimplemented by this logging-only slice.
 
 ## Evidence Lifecycle
 

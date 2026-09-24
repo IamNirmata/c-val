@@ -14,6 +14,51 @@ The runner atomically replaces the envelope at each transition. Readers still
 accept historical `cval.results.v1` and `cval.results.v2` files without
 rewriting them.
 
+## Compact runtime events
+
+Phase 2.1 adds milestones to the existing `cval.event.v1`/`CVAL_EVENT` stream.
+Every record remains one JSON line, flushed to container stdout and retained in
+`events.jsonl`; supervisor-owned events also use the reserved global log descriptors.
+No new result schema, database or tracking service is introduced.
+
+| Event | Producer and Meaning |
+| --- | --- |
+| `supervisor_started` | Supervisor: node/run, source/config identity, selected tests and canonical evidence paths. |
+| `run_started`, test milestones, `run_finished` | Runner: test execution only; producer/node fields and elapsed times augment existing events. |
+| `result_finalized` | Supervisor: canonical result is bound to its immutable digest before ingestion. |
+| `ingestion_started` | Ingestion coordinator: required stores are pending; nonpassing/disabled metric stores are not required. |
+| `ingestion_store_finished` | Ingestion coordinator: the writer returned successfully, or the store was not required. Includes destination and known row/rank/generation details. |
+| `ingestion_finished` | Ingestion coordinator: final ingestion outcome, result/config digests, per-store state and elapsed time. |
+| `supervisor_stage_finished` | Supervisor: runner/ingestion child exit and elapsed time, not a test verdict. |
+| `supervisor_finished` | Supervisor: one final summary with test outcomes, result/log retention, ingestion outcome, store states and process exit. |
+
+Store outcomes are `pending`, `committed`, `not_required` and `unconfirmed`.
+`committed` means the authorized writer returned (possibly after matching an
+existing identical row), not that a new row was necessarily inserted. Four DL
+stores are acknowledged only after the writer completes generation finalization.
+A failed DL write can have partial commits; its unconfirmed stores are not labeled
+absent or rolled back. The large DL summary dump is replaced by compact milestones;
+legacy completion messages and raw workload output remain available.
+
+The supervisor requires the ingestion producer's acknowledgement for the same
+node/run/result/config and the expected required stores. Exit zero alone does not
+confirm ingestion. A final `status=pass` requires passing tests, no result errors,
+successful infrastructure and confirmed ingestion. Test failure with successful
+failure-evidence ingestion remains `status=fail`, `tests_outcome=fail`,
+`ingestion_outcome=pass`; existing process-exit semantics are unchanged in this task.
+Skipped ingestion is `not_requested`, never pass. Interrupted or failed log capture
+is `logs_state=unconfirmed`. Missing final output after OOM/SIGKILL, failed reservation
+or broken logging is unconfirmed and must be interpreted with Kubernetes status.
+
+The supervisor forwards flushed child output without waiting for a 64 KiB buffered
+read or EOF, and drains streams before normal finalization. Successful summary
+publication follows canonical log fsync. A logging failure still fails the process;
+no synthetic successful summary is supplied when evidence cannot be verified.
+
+These are source changes pending separately approved exact-commit pod acceptance.
+Historical event/result readers remain compatible, but old undigested ingestion
+acknowledgements cannot authorize a new supervisor's success.
+
 ## Raw databases
 
 - `metadata/validation.db`: `runs` and `latest_status`;
@@ -31,8 +76,8 @@ bound to its canonical directory through the supervisor's retained descriptor.
 Required metric writes precede the atomic built-in status set. DL writes and
 their retries share the persistent metadata-directory POSIX record lock.
 
-The coordinator emits `ingestion_started` and a terminal `ingestion_finished`
-event through the existing logger. A metric-stage failure cannot publish final
+The coordinator emits `ingestion_started`, per-store milestones and a terminal
+`ingestion_finished` event through the existing logger. A metric-stage failure cannot publish final
 status. Historical v1/v2 JSON remains readable, but environment-only result
 files are not accepted as write authorization. Existing result.env outputs,
 raw rows, receipts and evidence files are not rewritten by this refactor.

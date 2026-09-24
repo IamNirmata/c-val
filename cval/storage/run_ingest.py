@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import json
 import os
 from pathlib import Path
 import runpy
 import signal
 import sys
+import time
 
 from cval.config import load_config_snapshot
 from cval.storage.dltest_ingest import ingest_dltest_run
@@ -127,9 +127,32 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
     policy = config.sqlite_retry
     logger = RunLogger(paths, run_id, stdout=sys.stdout, stderr=sys.stderr, write_global_files=False)
     statuses = project_builtin_statuses(validation_result_to_env(result))
-    logger.emit("ingestion_started", status="incomplete")
+    identity = {"producer": "ingestion", "node_name": result.node,
+                "result_digest": authorization.result_digest, "config_digest": effective_config_digest(config)}
+    dl_paths = {
+        "numerical_correctness": config.storage.dl_numerical_db_path,
+        "compute_performance": config.storage.dl_compute_db_path,
+        "collective_performance": config.storage.dl_collective_db_path,
+        "overlap_performance": config.storage.dl_overlap_db_path,
+    }
+    destinations = {"storage": config.storage.storage_db_path, "nccl": config.storage.nccl_db_path,
+                    **dl_paths, "validation": config.storage.validation_db_path}
+    stores = {name: "pending" if name == "validation" or statuses["dltest" if name in dl_paths else name] == "pass"
+              else "not_required" for name in destinations}
+    started = time.monotonic()
+    current_stores: tuple[str, ...] = ()
+
+    def store_finished(name: str, **details) -> None:
+        logger.emit("ingestion_store_finished", status="pass" if stores[name] == "committed" else "incomplete",
+                    store=name, outcome=stores[name], db_path=destinations[name], **identity, **details)
+
+    logger.emit("ingestion_started", status="incomplete", stores=stores, **identity)
     try:
+        for name, outcome in stores.items():
+            if outcome == "not_required":
+                store_finished(name)
         if statuses["storage"] == "pass":
+            current_stores = ("storage",)
             test = result.tests["storage"]
             artifacts = (
                 test.artifacts if isinstance(result, ValidationResultV2)
@@ -142,9 +165,12 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
                 image_name=result.image_name, immutable=True,
                 db_path=config.storage.storage_db_path, _authorization=authorization,
             ), policy)
+            stores["storage"] = "committed"
+            store_finished("storage", rows=1)
             print("Storage DB update completed.", flush=True)
 
         if statuses["nccl"] == "pass":
+            current_stores = ("nccl",)
             test = result.tests["nccl"]
             run_dir = root / "logs/validation_tests/nccl/runs" / result.node / run_id
             summary = (
@@ -169,9 +195,12 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
                 immutable=True, ibbw_log_path=ibbw, require_hca_samples=bool(settings["ibbw_enabled"]),
                 db_path=config.storage.nccl_db_path, _authorization=authorization,
             ), policy)
+            stores["nccl"] = "committed"
+            store_finished("nccl", rows=1)
             print("NCCL IB_HEALTH DB update completed.", flush=True)
 
         if statuses["dltest"] == "pass":
+            current_stores = tuple(dl_paths)
             run_dir = root / "logs/validation_tests/dltest/runs" / result.node / run_id
             helper = Path(__file__).resolve().parents[2] / "scripts/dl-metric-lock.py"
             lock = runpy.run_path(str(helper))["metric_lock"]
@@ -188,23 +217,36 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
                     return summary
 
                 summary = retry_sqlite(write_dl, policy)
-            print(json.dumps(summary, indent=2), flush=True)
+            for name in dl_paths:
+                stores[name] = "committed"
+            for name in dl_paths:
+                store_finished(name, rows=summary[f"{name}_rows"], ranks=summary["rank_files"],
+                               generation_id=summary["generation_id"])
             print("DL metric DB update completed.", flush=True)
 
+        current_stores = ("validation",)
         retry_sqlite(lambda: add_validation_run_results(
             result.node, result.timestamp, statuses,
             image_name=result.image_name, pytorch_version=result.pytorch_version,
             cuda_version=result.cuda_version, db_path=config.storage.validation_db_path,
             _authorization=authorization,
         ), policy)
+        stores["validation"] = "committed"
+        store_finished("validation", rows=len(statuses))
         print("Main DB update completed.", flush=True)
     except BaseException as error:
+        for name in current_stores:
+            if stores[name] == "pending":
+                stores[name] = "unconfirmed"
         try:
-            logger.emit("ingestion_finished", status="fail", message=f"Raw ingestion failed: {error}")
+            logger.emit("ingestion_finished", status="fail", message=f"Raw ingestion failed: {error}",
+                        stores=stores, current_stores=list(current_stores),
+                        duration_ms=max(0, int((time.monotonic() - started) * 1000)), **identity)
         except Exception as event_error:
             print(f"Could not record ingestion failure: {event_error}", file=sys.stderr)
         raise
-    logger.emit("ingestion_finished", status="pass")
+    logger.emit("ingestion_finished", status="pass", stores=stores,
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)), **identity)
 
 
 def main() -> int:

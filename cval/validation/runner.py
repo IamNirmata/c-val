@@ -137,10 +137,15 @@ def run_validation_tests(
         validation_root=validation_root,
     )
     _write_state(result, run_paths)
+    started_clock = time.monotonic()
     logger.emit(
         "run_started",
         status="incomplete",
         tests=[test.id for test in registry.enabled],
+        producer="runner",
+        node_name=node,
+        git_ref=result["git_ref"],
+        config_digest=result["global_config_digest"],
     )
 
     previous_handlers = _install_signal_handlers(logger)
@@ -162,6 +167,9 @@ def run_validation_tests(
             "run_interrupted",
             status="incomplete",
             message="received termination signal",
+            producer="runner",
+            node_name=node,
+            duration_ms=max(0, int((time.monotonic() - started_clock) * 1000)),
         )
         _write_state(result, run_paths)
         raise
@@ -175,6 +183,9 @@ def run_validation_tests(
         "run_finished",
         status=result["overall"],
         overall=result["overall"],
+        producer="runner",
+        node_name=node,
+        duration_ms=max(0, int((time.monotonic() - started_clock) * 1000)),
     )
     logger.message(_legacy_final_line(result))
     _write_state(result, run_paths)
@@ -477,6 +488,8 @@ def _finish_test(
         phase=phase,
         exit_code=exit_code,
         duration_ms=state["duration_ms"],
+        producer="runner",
+        node_name=result["node"],
     )
     _legacy_completion_message(logger, test_id, status, test_paths, state)
 

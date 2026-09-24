@@ -16,6 +16,7 @@ from typing import BinaryIO, Callable, Mapping, Sequence
 
 from cval.config import CvalConfig, load_config_snapshot
 from cval.validation.builtins import BUILTIN_TEST_IDS
+from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload
 from cval.validation.path_preflight import SAFE_SEGMENT, _registry_test_ids
 from cval.validation.results import (
     ValidationResultV2,
@@ -373,6 +374,72 @@ def reserve_secure_run_layout(
         raise
 
 
+def _emit_supervisor_event(layout: SecureRunLayout, console: BinaryIO, event: str, **fields) -> None:
+    """Append between child lifetimes through the reserved evidence descriptors."""
+
+    layout.verify()
+    payload = event_payload(layout.run_id, event, node_name=layout.node, **fields)
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    line = f"CVAL_EVENT {serialized}\n".encode()
+    for name in ("events.jsonl", "stdout.log", "job.log"):
+        descriptor = layout.global_file_fds[name]
+        _require_private_regular_file(os.fstat(descriptor), name)
+        named = os.stat(name, dir_fd=layout.run_dir_fd, follow_symlinks=False)
+        _require_stat_identity(named, os.fstat(descriptor), name)
+        os.lseek(descriptor, 0, os.SEEK_END)
+        _write_all(descriptor, (serialized + "\n").encode() if name == "events.jsonl" else line)
+        os.fsync(descriptor)
+    console.write(line)
+    console.flush()
+
+
+def _ingestion_acknowledgement(layout: SecureRunLayout, config: CvalConfig, result: ValidationResultV2) -> dict | None:
+    """Read the ingestion owner's last acknowledgement, never infer it from exit zero."""
+
+    descriptor = os.open("events.jsonl", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=layout.run_dir_fd)
+    with os.fdopen(descriptor, "rb") as handle:
+        _require_private_regular_file(os.fstat(handle.fileno()), "events.jsonl")
+        _require_stat_identity(os.fstat(handle.fileno()), os.fstat(layout.global_file_fds["events.jsonl"]), "events.jsonl")
+        max_bytes = config.monitoring.verification_max_bytes
+        if os.fstat(handle.fileno()).st_size > max_bytes:
+            raise ValueError("Ingestion acknowledgement exceeds configured evidence read limit")
+        content = handle.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError("Ingestion acknowledgement exceeds configured evidence read limit")
+    acknowledgement = None
+    for line in content.splitlines():
+        record = json.loads(line)
+        if record.get("schema_version") != EVENT_SCHEMA_VERSION or record.get("run_id") != layout.run_id:
+            raise ValueError("Ingestion event identity mismatch")
+        if record.get("event") == "ingestion_started":
+            acknowledgement = None
+        elif record.get("event") == "ingestion_finished":
+            if record.get("producer") != "ingestion" or record.get("node_name") != layout.node or record.get("result_digest") != layout.result_digest or record.get("config_digest") != layout.config_digest:
+                raise ValueError("Ingestion acknowledgement digest mismatch")
+            stores = record.get("stores")
+            owners = {"storage": "storage", "nccl": "nccl", "numerical_correctness": "dltest",
+                      "compute_performance": "dltest", "collective_performance": "dltest", "overlap_performance": "dltest"}
+            if not isinstance(stores, dict) or set(stores) != set(owners) | {"validation"} or record.get("status") not in {"pass", "fail"}:
+                raise ValueError("Incomplete ingestion acknowledgement")
+            if any(value not in {"pending", "not_required", "committed", "unconfirmed"} for value in stores.values()):
+                raise ValueError("Unknown ingestion store outcome")
+            if record["status"] == "pass":
+                expected = {name: "committed" if owner in result.tests and result.tests[owner].enabled and result.tests[owner].selected and result.tests[owner].status == "pass"
+                            else "not_required" for name, owner in owners.items()} | {"validation": "committed"}
+                if stores != expected:
+                    raise ValueError("Ingestion success lacks required store acknowledgements")
+            acknowledgement = record
+    return acknowledgement
+
+
+def _supervised_outcome(result: ValidationResultV2 | None, exit_code: int, ingestion: str) -> str:
+    if exit_code != 0 or (result is not None and result.overall == "fail") or ingestion == "fail":
+        return "fail"
+    if result is not None and not result.errors and result.overall == "pass" and ingestion == "pass":
+        return "pass"
+    return "incomplete"
+
+
 def supervise_validation_run(
     *,
     environment: Mapping[str, str],
@@ -444,6 +511,16 @@ def supervise_validation_run(
     stderr = stderr or sys.stderr.buffer
     previous_handlers: dict[signal.Signals, object] = {}
     active: list[subprocess.Popen[bytes] | None] = [None]
+    started = time.monotonic()
+    stage = "startup"
+    result: ValidationResultV2 | None = None
+    runner_exit: int | None = None
+    ingestion_exit: int | None = None
+    acknowledgement: dict | None = None
+    ingestion = "not_started" if db_update_command is not None else "not_requested"
+    log_capture_complete = True
+    exit_code = 1
+    message = ""
 
     def handle_signal(signum: int, _frame: object) -> None:
         process = active[0]
@@ -456,12 +533,17 @@ def supervise_validation_run(
             previous_handlers[signal_name] = signal.getsignal(signal_name)
             signal.signal(signal_name, handle_signal)
     try:
+        _emit_supervisor_event(layout, stdout, "supervisor_started", status="incomplete", producer="supervisor",
+                               git_ref=config.job.git_ref, config_digest=effective_config_digest(config),
+                               tests=[test.id for test in config.tests.registry.enabled],
+                               log_dir=str(canonical_run), result_path=str(canonical_run / "result.json"))
         _write_all(layout.global_file_fds["stdout.log"], b"test started.\n")
         _write_all(layout.global_file_fds["job.log"], b"test started.\n")
         for index, command in enumerate((runner_command, db_update_command)):
             if command is None:
                 continue
             if index == 1:
+                stage = "result_finalization"
                 repo_root_value = runtime_env.get("CVAL_TEST_REPO_ROOT") or repo_dir
                 layout.bind_result(
                     config_snapshot_b64=runtime_env.get(
@@ -473,7 +555,15 @@ def supervise_validation_run(
                     ),
                 )
                 runtime_env.update(layout.environment())
+                result = load_validation_result(Path(f"/proc/self/fd/{layout.result_file_fd}"))
+                _emit_supervisor_event(layout, stdout, "result_finalized", status=result.overall, producer="supervisor",
+                                       result_path=str(canonical_run / "result.json"), result_digest=layout.result_digest)
             layout.verify()
+            stage = "runner" if index == 0 else "ingestion"
+            child_started = time.monotonic()
+            if index == 1:
+                ingestion = "unconfirmed"
+            log_capture_complete = False
             return_code = _run_child(
                 command,
                 cwd=Path(validation_tests_dir),
@@ -486,19 +576,59 @@ def supervise_validation_run(
                 job_log_fd=layout.global_file_fds["job.log"],
                 active=active,
             )
+            log_capture_complete = True
+            if index == 0:
+                runner_exit = return_code
+            else:
+                ingestion_exit = return_code
             layout.verify()
+            if index == 1:
+                acknowledgement = _ingestion_acknowledgement(layout, config, result)
+                if acknowledgement is not None:
+                    ingestion = acknowledgement["status"]
+            _emit_supervisor_event(layout, stdout, "supervisor_stage_finished", producer="supervisor", stage=stage,
+                                   status="pass" if return_code == 0 else "fail", exit_code=return_code,
+                                   duration_ms=max(0, int((time.monotonic() - child_started) * 1000)))
             if return_code != 0:
-                return return_code
+                exit_code = return_code
+                message = f"{stage} child exited with code {return_code}"
+                return exit_code
+            if index == 1 and ingestion != "pass":
+                raise RuntimeError("Ingestion child exited zero without a matching successful acknowledgement")
+        stage = "log_finalization"
         _write_all(layout.global_file_fds["stdout.log"], b"Completed.\n")
         _write_all(layout.global_file_fds["job.log"], b"Completed.\n")
         layout.release_marker()
+        stage = "finished"
+        exit_code = 0
         return 0
     except KeyboardInterrupt:
-        return 143
+        exit_code = 143
+        message = "Supervisor interrupted; available evidence retained"
+        return exit_code
+    except Exception as error:
+        message = str(error).splitlines()[0] if str(error) else type(error).__name__
+        raise
     finally:
         for signal_name, handler in previous_handlers.items():
             signal.signal(signal_name, handler)
-        layout.close()
+        try:
+            layout.verify()
+            for name in ("stdout.log", "stderr.log", "job.log", "events.jsonl"):
+                os.fsync(layout.global_file_fds[name])
+            _emit_supervisor_event(layout, stdout, "supervisor_finished", producer="supervisor",
+                                   status=_supervised_outcome(result, exit_code, ingestion), message=message, stage=stage,
+                                   duration_ms=max(0, int((time.monotonic() - started) * 1000)), exit_code=exit_code,
+                                   runner_exit_code=runner_exit, ingestion_exit_code=ingestion_exit,
+                                   tests_outcome=result.overall if result is not None else "unconfirmed",
+                                   tests={name: {"status": test.status, "phase": test.phase} for name, test in result.tests.items()} if result is not None else {},
+                                   result_state="finalized" if result is not None else "unconfirmed",
+                                   result_path=str(canonical_run / "result.json"), result_digest=layout.result_digest,
+                                   logs_state="retained" if log_capture_complete else "unconfirmed",
+                                   log_dir=str(canonical_run), ingestion_outcome=ingestion,
+                                   stores=acknowledgement["stores"] if acknowledgement is not None else {})
+        finally:
+            layout.close()
 
 
 def main() -> int:
@@ -730,7 +860,7 @@ def _run_child(
     def pump(source: BinaryIO, console: BinaryIO, destination_fd: int) -> None:
         try:
             while True:
-                chunk = source.read(65536)
+                chunk = os.read(source.fileno(), 65536)
                 if not chunk:
                     return
                 with lock:
@@ -762,14 +892,14 @@ def _run_child(
         raise
     finally:
         active[0] = None
-    for thread in threads:
-        thread.join(timeout=5.0)
-    process.stdout.close()
-    process.stderr.close()
-    if any(thread.is_alive() for thread in threads):
-        raise RuntimeError("supervised child log streams did not close")
-    if errors:
-        raise RuntimeError(f"supervised child log capture failed: {errors[0]}")
+        for thread in threads:
+            thread.join(timeout=5.0)
+        process.stdout.close()
+        process.stderr.close()
+        if any(thread.is_alive() for thread in threads):
+            raise RuntimeError("supervised child log streams did not close")
+        if errors:
+            raise RuntimeError(f"supervised child log capture failed: {errors[0]}")
     return return_code
 
 

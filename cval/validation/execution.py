@@ -18,6 +18,14 @@ from typing import Any, Mapping, TextIO
 EVENT_SCHEMA_VERSION = "cval.event.v1"
 
 
+def event_payload(run_id: str, event: str, *, test_id: str | None = None,
+          status: str | None = None, message: str = "", **fields: Any) -> dict[str, Any]:
+    """Build the common record for runner, ingestion and supervisor milestones."""
+
+    return {"schema_version": EVENT_SCHEMA_VERSION, "event": event, "run_id": run_id,
+        "test": test_id, "timestamp": utc_now(), "status": status, "message": message, **fields}
+
+
 @dataclass(frozen=True)
 class RunPaths:
     """Canonical framework-owned files for one node validation run."""
@@ -93,16 +101,7 @@ class RunLogger:
     ) -> dict[str, Any]:
         """Persist and print one ``cval.event.v1`` object."""
 
-        payload: dict[str, Any] = {
-            "schema_version": EVENT_SCHEMA_VERSION,
-            "event": event,
-            "run_id": self.run_id,
-            "test": test_id,
-            "timestamp": utc_now(),
-            "status": status,
-            "message": message,
-            **fields,
-        }
+        payload = event_payload(self.run_id, event, test_id=test_id, status=status, message=message, **fields)
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         line = f"CVAL_EVENT {serialized}\n"
         with self._lock:

@@ -234,6 +234,15 @@ activation; no status rows are suppressed or deleted to force retesting.
 - [ ] **2.1** Define and produce compact run/test/ingestion milestones and one final
   summary through existing runtime logging. Only the component completing an action
   may acknowledge it; keep test outcome and ingestion outcome separate.
+  Source implemented: existing events gain identity/timing, ingestion emits per-store
+  acknowledgements, and the supervisor emits one digest-bound final summary after
+  child log capture. Unconfirmed ingestion/log capture never becomes success.
+  Local pipe/descriptor checks and retained real-event compatibility checks passed;
+  new-source real-pod execution and writer failure paths remain unverified. See
+  [runtime verification](validation-runtime-major-component.md#phase-21-verification).
+  This task does not change Job retries, process test-failure exit semantics,
+  tracking, coverage policy or active cluster resources. The checkbox stays open
+  until its exact-commit acceptance gate is met.
 - [ ] **2.2** Make validation single-attempt at container, Job and task levels. Verify
   the installed Volcano retry/restart behavior, including failure policies; do not
   assume `restartPolicy: Never` alone covers it. Settings belong in TOML and must
