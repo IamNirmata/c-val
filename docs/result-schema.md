@@ -94,8 +94,9 @@ for this stage-level inspection.
 - four `metadata/dltest_*.db` files: raw component metrics from passing rank
   evidence.
 
-[validation-tests/db-update.sh](../validation-tests/db-update.sh) launches
-[cval.storage.run_ingest](../cval/storage/run_ingest.py). It authorizes structured
+The supervisor directly starts [cval.storage.run_ingest](../cval/storage/run_ingest.py);
+[validation-tests/db-update.sh](../validation-tests/db-update.sh) remains a
+compatibility launcher for the same coordinator. The coordinator authorizes structured
 result/config provenance before calling test-specific writers; the writers
 independently revalidate each write. A current run's ingestion digest remains
 bound to its canonical directory through the supervisor's retained descriptor.

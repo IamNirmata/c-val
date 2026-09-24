@@ -298,10 +298,12 @@ Workload execution and raw writes still require the normal exact approvals.
 Phase 3.2 also checks environment aliases at the owner handoff. Matching canonical
 paths may transition to the reserved descriptor paths; conflicting node/timestamp,
 global result or per-test evidence aliases are rejected instead of overridden.
-The ingestion `0-env.sh` entry validates the supplied paths and no longer creates
-path defaults. Use supervisor/runner projections, not independent shell path setup.
-Version detection and existing database recording stay unchanged; varying image,
-CUDA, PyTorch and iterations remains supported. See
+The compatibility `0-env.sh` entry validates supplied paths instead of creating
+path defaults. Production supervision now starts the Python ingestion coordinator
+directly; it authorizes the finalized result and uses its recorded software versions
+without a second detection pass. Use supervisor/runner projections, not independent
+shell path setup. Existing database recording and variable image/CUDA/PyTorch/
+iteration inputs remain supported. See
 [environment projection](components_design/validation-runtime-major-component.md#phase-32-environment-projection).
 
 ### DL Execution Source

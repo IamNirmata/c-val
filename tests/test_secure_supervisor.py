@@ -80,6 +80,17 @@ class SupervisorChildLifecycleTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5.0)
         self.assertEqual(self.output.getvalue(), b"ready\n")
 
+    def test_direct_ingestion_requires_authorization_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "-m", "cval.storage.run_ingest"], cwd=directory,
+                env={"PYTHONPATH": str(REPO_ROOT), "PYTHONDONTWRITEBYTECODE": "1"},
+                text=True, capture_output=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("CVAL_RESULT_JSON_FILE is required", result.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     @unittest.skipUnless(sys.platform == "linux", "Linux subreaper required to reap owned descendants")
     def test_descendants_terminate_after_leader_exit_or_timeout(self) -> None:
         library = ctypes.CDLL(None, use_errno=True)

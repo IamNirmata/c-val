@@ -85,7 +85,7 @@ def parse_test_progress(log_text: str) -> dict[str, str]:
             }
         )
 
-    for event in _structured_progress_events(log_text):
+    for event in structured_progress_events(log_text):
         test = event.get("test")
         if not isinstance(test, str) or not test:
             continue
@@ -110,7 +110,7 @@ def raw_results_from_log(
     for test, skipped_marker in BUILTIN_SKIPPED_MARKERS.items():
         if skipped_marker in (log_text or ""):
             results[test] = "incomplete"
-    for event in _structured_progress_events(log_text or ""):
+    for event in structured_progress_events(log_text or ""):
         test = event.get("test")
         event_name = event.get("event")
         if isinstance(test, str) and event_name in {
@@ -146,18 +146,12 @@ def raw_results_from_log(
     return results
 
 
-def _structured_progress_events(log_text: str) -> list[dict[str, Any]]:
-    """Return valid structured c-val event objects in log order."""
-
-    return structured_progress_events(log_text or "")
-
-
 def log_signals_db_updated(log_text: str) -> bool:
     """Return True once the in-pod DB ingestion has finished."""
 
     ingestion_events = [
         event
-        for event in _structured_progress_events(log_text or "")
+        for event in structured_progress_events(log_text or "")
         if event.get("event") == "ingestion_finished"
     ]
     if ingestion_events:

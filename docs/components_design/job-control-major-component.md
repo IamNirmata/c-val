@@ -373,40 +373,15 @@ report boundary, not fresh source execution or live controller acceptance.
 
 ### Phase 1 Integration Completion
 
-Shared admission now applies the existing cooldown helper to retained table entries
-and confirmed creation times in durable intents, covering manual commands as well
-as the loop. Uncertain attempts never invent a submission time. The existing state
-helper's `update --reconcile` lets resume recover from authoritative v2 intents even
-if CLI receipt output was lost. Missing derived CSV is rebuilt after reconciliation;
-missing or corrupt authoritative state is never recreated. All intent observations
-in one reconciliation pass share the configured deadline.
-
-The live-loop resume path uses this state before selecting work; it does not infer
-an empty queue from missing or malformed receipt output. Existing receipt-reader
-helpers remain for historical interface compatibility, not as active admission
-authority. No new service or runtime module was added for these changes. Actual
-lost replies, concurrent creates and new-source live turnover still need approved
-acceptance; local checks used the real cooldown table and retained real identities.
+Implemented by the manager and state helper: one cooldown contract, retained v2
+intents and bounded reconciliation. Missing derived CSV can be rebuilt; missing
+authoritative state cannot. See the protocol below rather than a second roadmap.
 
 ### Remaining Design
 
-1. Keep shell only for process/session launch. Move one bounded lifecycle pass into
-   existing Python orchestration and share it between continuous and targeted runs.
-2. Before create, durably retain intent in existing session storage: job name,
-   node/run identity, source SHA, configuration and requested-manifest digests.
-   Version changes need compatible readers; keep old records. This is operational
-   state, not a new raw history database.
-3. Recheck C3 eligibility at the create boundary. Preserve full-node resource
-   isolation; a read is not a Kubernetes reservation and cannot eliminate races.
-4. Record each result immediately. On timeout, reconcile exact name and identity;
-   a match becomes an observed receipt, a conflict blocks, an unavailable read
-   keeps the slot occupied. Never promise exactly-once Kubernetes delivery.
-5. One state transition function handles both resume and active observation. Pass
-   a shared deadline to calls; batch named-job reads without converting API errors
-   into missing jobs. Retain UID once observed to detect replacements.
-6. Request C7 verification after terminal execution. Apply the
-   [outcome and evidence contract](Redesign.md#outcome-and-evidence-contract): a
-   complete failure record is reportable but not accepted. Preserve jobs/evidence.
+Shared observation and shell consolidation are source-implemented, not future
+features. Remaining work is approved end-to-end acceptance, not another control
+framework. Detailed C7 verification stays outside routine polling.
 
 ## Admission and Recovery Protocol
 
@@ -444,12 +419,12 @@ because its name happens to match.
 | Single NotFound after uncertain create | Not proof that creation never happened; no new identity or blind retry. |
 | Matching Job observed | Retain receipt and derive cooldown from confirmed submission, not from a planning attempt. |
 | Ownership conflict, state corruption or unavailable observation | Stop admission; retain unresolved work for explicit reconciliation. |
-| Terminal execution, evidence read still unavailable | Retain pending verification in the existing inflight budget; do not resubmit the run. |
-| Terminal run with complete failure evidence | Report failure and release its tracked slot; preserve normal cooldown. |
+| Verified terminal execution, logs/ingestion unconfirmed | Release the execution slot; retain the unconfirmed evidence outcome and block same-run reuse. |
+| Verified terminal failure | Report failure and release its tracked slot even without successful ingestion; preserve normal cooldown. |
 
-Once a bounded check proves evidence incomplete/conflicting rather than unreadable,
-retain that report and release terminal execution tracking. Block same-run reuse;
-any recovery or later validation has its own policy/approval and cooldown checks.
+Terminal tracking requires matching Job identity and no nonterminal owned pod.
+Unreadable Job/pod inventory or identity conflict still blocks release. Exact-run
+acceptance remains separate; later validation has its own approval and cooldown.
 
 Use one deadline per bounded operation, including API reads and verification;
 persist observation timestamps but use a monotonic clock for elapsed time.

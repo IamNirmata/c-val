@@ -173,30 +173,6 @@ def verify_submission_identity(intent: dict, observed: dict, namespace: str) -> 
     return uid
 
 
-def observe_submission(intent: dict, client: KubectlClient, namespace: str, *, timeout: float | None = None) -> dict:
-    """Observe the exact retained name once; absence never authorizes a retry."""
-
-    evidence = {}
-    try:
-        result = client.run([
-            "get", "vcjob", intent["job_name"], "-n", namespace, "--ignore-not-found", "-o", "json",
-        ], check=False, timeout=timeout)
-        evidence = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
-        if result.returncode != 0 or not result.stdout.strip():
-            return {"state": "uncertain", "observation": "unavailable" if result.returncode else "absent", **evidence}
-        observed = json.loads(result.stdout)
-        uid = verify_submission_identity(intent, observed, namespace)
-        phase = observed.get("status", {}).get("state", {}).get("phase", "Unknown")
-        if any(event.get("uid") for event in intent["events"]):
-            evidence["response_sha256"] = hashlib.sha256(evidence.pop("stdout").encode()).hexdigest()
-        return {"state": "observed", "uid": uid, "phase": phase,
-            "created_at": observed["metadata"]["creationTimestamp"], **evidence}
-    except (PolicyViolation, KeyError, TypeError, ValueError) as exc:
-        return {"state": "conflict", "error": str(exc), **evidence}
-    except Exception as exc:
-        return {"state": "uncertain", "observation": "unavailable", "error": str(exc)}
-
-
 def reconcile_submission_intents(session_dir: Path, state: dict, client: KubectlClient, config: CvalConfig) -> dict:
     """Recover receipts, never create; preserve reservations for unknown outcomes."""
 

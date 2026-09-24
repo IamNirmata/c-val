@@ -52,16 +52,17 @@ integer string for a bounded `live.plan_limit`. Operational CLI tuning flags mus
 agree with TOML; the read-only plan's candidate count remains an inspection limit.
 
 `scheduling.coverage_max_runs_per_node` is explicitly 100 in the main TOML.
-Coverage scans newest runs first and stops at the first complete requested-test
+Coverage scans newest runs first and stops at the first complete passing requested-test
 run. Exhausting the bound without a decision is unavailable history, never an
 empty node. Artifact byte/file limits and the configured Kubernetes deadline also
 bound this read. Old snapshots lacking the new field remain with their pinned
 source and need approved turnover; no missing-setting defaults are supplied.
 
-Coverage retains the declared legacy age policy, labeled in `status --coverage`.
-It does not activate dependency-digest comparisons before Phase 3 produces that
-identity. A failed test needs full completion evidence to refresh coverage. Ordinary
-`status` remains a latest-outcome view, not a scheduling coverage calculation.
+Coverage uses `successful_complete_run`, with a labeled legacy passing-status
+fallback. Failed/incomplete attempts never refresh successful coverage; an older
+qualifying pass remains usable. Dependency comparisons are not silently activated,
+and historical identities are not backfilled. Ordinary `status` remains a
+latest-outcome view, not a scheduling coverage calculation.
 
 The shared admission manager enforces `node_cooldown_seconds` for manual and loop
 submitters using the existing table and confirmed creation times retained in intents.
@@ -102,7 +103,7 @@ already Failed/Succeeded pods. It may terminate remaining live pods of that Job;
 it cannot preserve a pod already evicted/deleted externally. Neither c-val nor this
 policy recreates the failed attempt. A later scheduled test is a new approved run
 after the normal checks. This does not change SQLite lock retries, test-failure
-process exit semantics, tracking logic or the still-planned retest-freshness change.
+process exit semantics or the separately implemented successful-coverage policy.
 
 Source references: Volcano v1.15.2
 [defaulting](https://github.com/volcano-sh/volcano/blob/v1.15.2/pkg/webhooks/admission/jobs/mutate/mutate_job.go),

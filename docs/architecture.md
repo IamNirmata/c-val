@@ -45,12 +45,13 @@ The [live loop](../scripts/cval-live.sh) uses its
 [session-state helper](../scripts/cval-live-state.py),
 [cooldown helper](../scripts/cval-node-cooldown.py), CLI and configured
 [pinned Job template](../ymls/specific-node-job.yml). That template launches the
-supervisor, which runs the Python test runner and then sources
-[0-env.sh](../validation-tests/0-env.sh) before
-[db-update.sh](../validation-tests/db-update.sh). That thin launcher executes
-[the Python ingestion coordinator](../cval/storage/run_ingest.py); it no longer
-projects JSON into shell variables or invokes a CLI process for each writer.
-The launcher and environment script remain live dependencies.
+supervisor, which runs the Python test runner and then directly starts
+[the Python ingestion coordinator](../cval/storage/run_ingest.py). Both children
+use the same interpreter; ingestion takes recorded software versions from the
+finalized result and independently authorizes all writes. The
+[environment script](../validation-tests/0-env.sh) and
+[DB launcher](../validation-tests/db-update.sh) remain compatibility entry points,
+not additional stages in the production supervisor path.
 
 Both the pinned and scheduler-selected templates use one packaged
 [bootstrap payload](../cval/jobs/bootstrap.sh). The

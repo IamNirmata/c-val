@@ -954,13 +954,6 @@ PY
     fi
 }
 
-latest_cycle_dir_with_submits() {
-    find "$LOG_DIR" -type f \( -name 'submit.json' -o -name 'submit-*.json' \) -printf '%T@ %h\n' 2>/dev/null \
-        | sort -nr \
-        | head -1 \
-        | cut -d' ' -f2-
-}
-
 json_tracking_rows() {
     python - "$1" "$2" <<'PY'
 import csv

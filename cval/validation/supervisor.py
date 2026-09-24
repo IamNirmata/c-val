@@ -646,11 +646,7 @@ def main() -> int:
         return supervise_validation_run(
             environment=environment,
             runner_command=(sys.executable, "-m", "cval.validation.runner"),
-            db_update_command=(
-                "/bin/bash",
-                "-c",
-                "source ./0-env.sh && exec /bin/bash ./db-update.sh",
-            ),
+            db_update_command=(sys.executable, "-m", "cval.storage.run_ingest"),
             validation_tests_dir=validation_tests_dir,
         )
     except Exception as exc:  # noqa: BLE001 - top-level pod boundary

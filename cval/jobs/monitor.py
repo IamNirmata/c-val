@@ -351,41 +351,6 @@ def get_job_phases(
         return unknown
 
 
-def list_job_phases(
-    namespace: str | None = None,
-    prefix: str | None = None,
-    client: KubectlClient | None = None,
-    config: CvalConfig | None = None,
-) -> list[JobPhase]:
-    """List phases for all Volcano jobs in a namespace, optionally by name prefix.
-
-    Read-only: a single `kubectl get vcjob -o json`. Returns an empty list on
-    any API or parse failure so callers (e.g. the overview) degrade gracefully.
-    """
-
-    active_config = config or load_config()
-    kubectl = client or KubectlClient(config=active_config)
-    resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
-    result = kubectl.run(
-        ["get", "vcjob", "-n", resolved_namespace, "-o", "json"], check=False
-    )
-    if result.returncode != 0:
-        return []
-    try:
-        payload = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return []
-
-    phases: list[JobPhase] = []
-    for item in payload.get("items", []):
-        name = item.get("metadata", {}).get("name", "")
-        if not name or (prefix and not name.startswith(f"{prefix}-")):
-            continue
-        phase = item.get("status", {}).get("state", {}).get("phase", "") or "Unknown"
-        phases.append(JobPhase(job_name=name, phase=phase))
-    return phases
-
-
 def monitor_jobs_until_terminal(
     job_names: Sequence[str],
     namespace: str | None = None,

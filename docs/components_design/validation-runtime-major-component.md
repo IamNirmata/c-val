@@ -215,12 +215,17 @@ Borrowed runner global paths must match its layout. Per-test generic and built-i
 values are checked rather than silently replaced, including canonical aliases.
 Disagreeing node/timestamp alias pairs fail before reservation.
 
-The ingestion shell `0-env.sh` now checks required projected paths instead of
+The compatibility shell `0-env.sh` checks required projected paths instead of
 constructing another set of defaults. Enabled tests require their run/output/log/
 summary aliases, including NCCL's bandwidth log; disabled tests need no reserved
 paths. The existing shell entry point, software-version detection and legacy result
 initialization remain. Callers must receive owner-projected paths; sourcing this
 file alone is no longer a way to invent evidence locations.
+
+The Phase 1–3 retrospective removed this shell hop from production supervision:
+the supervisor directly launches the existing Python ingestion coordinator with
+the same interpreter. Result/snapshot and per-writer authorization remain mandatory;
+DB software-version values come from the finalized result, not repeated detection.
 
 No configuration, test descriptor, image, CUDA/PyTorch, iteration, raw schema or
 writer changed. The existing config projection/digest and canonical result/workload

@@ -5,8 +5,8 @@ Fresh exact-commit execution/ingestion acceptance and activation remain pending;
 Phase 3.1-3.4 cleanup source is implemented; Phase 3.5 evidence review is complete,
 but fresh accepted-run comparisons remain pending.
 The live loop remains paused since 2026-09-24 UTC.
-Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
-acceptance are claimed. Implementation and live mutation approvals remain separate.
+Phase 0 source baseline: `b79a5e0` (2026-09-23). The implementation and acceptance
+states above are separate; publication does not authorize live mutations.
 Shared contracts live in [Redesign.md](Redesign.md).
 Component IDs refer to the [major-component overview](major-components-overview.md).
 
@@ -105,89 +105,33 @@ boxes below include real-cluster acceptance and must not be interpreted as accep
 deployment. Read-only real-history and isolated local OS checks are recorded; no
 new-source benchmark or controller turnover has occurred.
 
-The final implementation also closes shared cooldown and lost-reply resume paths:
-all submitters use the existing cooldown contract, resume reconciles durable intents
-without depending on CLI receipts, derived CSVs can be rebuilt from intact state,
-and multi-intent reconciliation shares a bounded deadline. Phase 2 consolidation,
-Phase 3 dependency provenance, and cross-host fencing are not included.
-
-Activation remains separately gated. Next: approve the final exact source object,
-review session turnover with retained outstanding work, then perform approved
-fresh execution/ingestion and recovery acceptance. Completing source is not
-permission to stop, restart, cancel or submit live work.
+Current behavior belongs to the linked component contracts. Detailed release and
+validation histories remain in Git and the retained `run-logs/phase*` records;
+do not duplicate them in each task. Phase 2 supersedes routine full-store audits
+and complete-failure coverage, without removing exact-run acceptance checks.
 
 ### Tasks
 
 - [ ] **1.1** Freeze effective config per command/controller session and pass it
   through callers; require complete main/per-test TOMLs with no setting defaults.
-  Source published at `45b4d5eb23a218868038189d1055b1d96f561979`; the approved
-  source ConfigMap was created. The approved validation on `slc01-cl02-hgx-0052`
-  stopped before submission because all eight GPUs were occupied. Execution,
-  ingestion and session-turnover acceptance remain pending. See
-  the [strict config contract](../configuration.md#strict-two-level-contract).
+  See the [strict config contract](../configuration.md#strict-two-level-contract).
 - [ ] **1.2** Share a structured eligibility function. Require explicit Ready and
   complete resource evidence; permit cordon only for approved targeted validation.
-  Source implemented; bulk/targeted decisions matched on one retained real
-  snapshot of 500 nodes and 12,592 pods (2026-09-24 UTC), including restartable
-  init containers and two NotReady nodes. Automatic cordon exclusion, NoExecute
-  blocking and per-node unverified diagnostics are explicit. See
-  [implementation and verification](discovery-scheduling-major-component.md#phase-12-implementation).
-  Source published at `c3524b67163561dc558d2f7ee1eedf41bbf080f7`; its approved
-  ConfigMap was created and verified. The approved `0307` validation stopped before
-  submission because all eight GPUs were busy and free CPU was insufficient.
-  Execution/ingestion acceptance remains pending; no validation Job was submitted.
+  See [eligibility and verification](discovery-scheduling-major-component.md#phase-12-implementation).
 - [ ] **1.3** Serialize all supported submitters through C4's shared admission state;
   recheck eligibility for `node_name` immediately before create. Retain source/policy gates.
-  Source implemented in the existing manager/state helper. Explicit host/cluster
-  scope, an absolute shared state root, session/config binding, outstanding-work
-  checks and the short nonblocking lock cover both submitters and state writers.
-  Real read-only checks rejected busy `0307`, pending validation on `0262`, and the
-  legacy active session; real local processes verified lock exclusion/release.
   See [implementation and limits](job-control-major-component.md#phase-13-implementation).
-  Source published at `8a9953e1b18663c1d876d85a6c532767ad577f68`; its approved
-  immutable source ConfigMap was created and verified on 2026-09-24 UTC.
-  No new live session, validation Job or controller activation was performed.
-  Live turnover is deferred until Phase 1 is finished, as requested. Successful
-  Job creation and exact-run acceptance remain pending.
 - [ ] **1.4** Persist intent before create and retain every outcome. Test lost replies,
   intent/receipt write failures, concurrent submitters and a misleading single NotFound.
-  Source implemented with v2 session intents, retained approval/manifest identities,
-  durable create observations and partial batch responses. Same-identity read-only
-  reconciliation never retries create; missing/conflicting/unavailable observations
-  retain reservations. Real Job/NotFound reads and isolated real filesystem failures
-  were checked without synthetic Kubernetes clients or live session changes. See
-  [implementation and verification limits](job-control-major-component.md#phase-14-implementation).
-  Source published at `31023001db1010780c4d35eefb25ce064627a24e`; its approved
-  immutable ConfigMap was created and verified on 2026-09-24 UTC.
-  Real create reply loss, partial batches and concurrent submitters remain unverified;
-  live-loop activation stays deferred until Phase 1 is complete.
+  See [intent recovery](job-control-major-component.md#phase-14-implementation).
 - [ ] **1.5** Implement outcome-specific exact-run verification against expected
   request identity; bound generation-change retries. Keep evidence and acceptance separate.
-  Source implemented with one read-only C7 verifier shared by targeted validation
-  and terminal intent reconciliation. Canonical identity/digests/events, exact status
-  rows, storage/NCCL values, DL ranks/rows/receipts and generation stability are checked
-  against submitted context. The historical `0192` run at `1790178532` verified fully;
-  a failed historical Job without a retained pod remained unavailable, and the absent
-  approved `0307` run remained incomplete. No synthetic DBs or new validation Jobs
-  were used. See [verification and limits](raw-evidence-major-component.md#phase-15-implementation).
-  Source published at `f0cdff9dbb603823adc5cfa956a17b21484d8554`; its approved
-  immutable ConfigMap was created and verified on 2026-09-24 UTC.
-  Fresh exact-commit execution, live release transitions and generation-change retry
-  acceptance remain pending; activation stays deferred until Phase 1 is finished.
+  See [exact-run verification](raw-evidence-major-component.md#phase-15-implementation).
 - [ ] **1.6** Implement compatible-coverage reads and exact-run exports; distinguish
   forbidden/unavailable history from empty or incomplete evidence. Keep the declared
   legacy age policy until new dependency provenance is produced and its comparison
   is accepted; review output compatibility before activating stricter coverage rules.
-  Implemented `status --coverage`, shared complete-run history for CLI/live planning,
-  labeled legacy passing coverage, exact `results --node --timestamp` selection,
-  timestamp-matched metric joins and fail-closed status/metric reads. CSV columns
-  remain unchanged; missing exact status produces no CSV. A real 478-node scan found
-  379 canonical, 97 legacy passing and two unproven coverage records. All four
-  built-in historical exports passed. See
-  [coverage behavior](discovery-scheduling-major-component.md#phase-16-implementation).
-  Complete failed-run coverage, unavailable/forbidden live failures and new-source
-  controller behavior remain unexercised. Strict dependency compatibility is still
-  deferred until its producer exists; no provenance was fabricated or backfilled.
+  See [coverage and exports](discovery-scheduling-major-component.md#phase-16-implementation).
 
 **Done when:** Approved real-node runs and retained real failure evidence demonstrate
 the required eligibility, receipt and exact-run evidence behavior. Document cases
@@ -237,80 +181,29 @@ activation; no status rows are suppressed or deleted to force retesting.
 - [ ] **2.1** Define and produce compact run/test/ingestion milestones and one final
   summary through existing runtime logging. Only the component completing an action
   may acknowledge it; keep test outcome and ingestion outcome separate.
-  Source implemented: existing events gain identity/timing, ingestion emits per-store
-  acknowledgements, and the supervisor emits one digest-bound final summary after
-  child log capture. Unconfirmed ingestion/log capture never becomes success.
-  Local pipe/descriptor checks and retained real-event compatibility checks passed;
-  new-source real-pod execution and writer failure paths remain unverified. See
-  [runtime verification](validation-runtime-major-component.md#phase-21-verification).
-  This task does not change Job retries, process test-failure exit semantics,
-  tracking, coverage policy or active cluster resources. The checkbox stays open
-  until its exact-commit acceptance gate is met.
+  See [runtime verification](validation-runtime-major-component.md#phase-21-verification).
 - [ ] **2.2** Make validation single-attempt at container, Job and task levels. Verify
   the installed Volcano retry/restart behavior, including failure policies; do not
   assume `restartPolicy: Never` alone covers it. Settings belong in TOML and must
   be validated by rendering. Preserve failed Jobs/pods and their evidence.
-  Source implemented in the existing config, renderer and both validation templates:
-  `Never`, explicit Job/task `maxRetry=1`, and inherited `TerminateJob` policies for
-  PodFailed/PodEvicted/TaskFailed/JobUnknown. Zero is rejected because inspected
-  upstream admission replaces it with three. Conflicting policies, container restart
-  overrides, replica changes and automatic TTL cleanup are rejected by rendering.
-  Both templates/source transports and strict snapshots passed local checks using
-  retained real run inputs; an actual legacy Job with default retries was rejected.
-  Installed controller Deployment/CRD reads were forbidden, so version/admission
-  verification and real single-attempt acceptance remain pending. The approved
-  `cval-source-20fe5537c3a34d24` ConfigMap was created and verified on 2026-09-24 UTC;
-  the separately requested controller pause did not cancel Jobs or change the session.
-  No new source was activated. See
-  [configuration and upstream semantics](../configuration.md#single-attempt-validation).
+  Installed-controller/CRD inspection was RBAC-forbidden; live compatibility is
+  unverified. See [single-attempt settings](../configuration.md#single-attempt-validation).
 - [ ] **2.3** Share one bounded status/log observation step between active, resumed
   and targeted tracking. Reuse Phase 1 submission/intent safeguards; do not rebuild
   them. `run` submits, `validate` also watches/reports, and `plan` stays read-only.
-  Source implemented in the existing monitor, manager, targeted validator and state
-  helper. Each observation verifies the submitted Job and owned pod/container, reads
-  bounded logs under one deadline, and separates terminal tracking from confirmed
-  runtime completion. Routine active/resumed tracking no longer scans raw stores;
-  targeted validation retains its once-only exact-run audit outside polling.
-  Real historical observations covered a retained successful pod and a terminal Job
-  whose pod is gone. Neither old log history was promoted to new-runtime acceptance.
-  Missing Jobs, unavailable status and identity conflicts retain reservations. See
-  [implementation and verification limits](job-control-major-component.md#phase-23-implementation).
-  Fresh new-source completion, failure, and live resume/state transitions remain
-  separately approval-gated; the checkbox stays open until acceptance.
+  See [shared tracking](job-control-major-component.md#phase-23-implementation).
 - [ ] **2.4** Batch Job/pod reads, bind logs to the expected pod/container and run,
   and propagate one remaining deadline. Read bounded incremental logs and require
   an explicit ingestion success event, never a generic "Completed" substring.
   Retain fresh per-create node checks and unknown-outcome safeguards.
-  Source implemented in the existing monitor and manager. CLI phase reads use one
-  complete Job inventory; multi-intent reconciliation shares Job/pod inventories
-  and one deadline, retaining each outcome before deciding whether to block.
-  Timestamped log reads resume from an identity-bound boundary second and preserve
-  compact progress/acknowledgements; incomplete byte-limited output stays unconfirmed.
-  Read-only real-Job checks matched exact phase reads, used four kubectl calls for
-  two historical Jobs with one retained pod, and reduced that pod's repeated log
-  read from 285,339 to 2,140 bytes. Expired deadlines and a real 4,096-byte cap were
-  checked. See [implementation and limits](job-control-major-component.md#phase-24-implementation).
-  Scalar shell state-helper calls remain until 2.5; do not claim all shell polling
-  is batched. No new workload, source object or controller activation occurred.
+  See [bounded batch reads](job-control-major-component.md#phase-24-implementation).
 - [ ] **2.5** Retire duplicated shell monitoring/conversions after equivalent real-run
   comparison. Record terminal failures and advance other work without workload
   retries. Implement the reviewed retest-freshness rule without erasing failed raw
   status. Keep detailed audits separate from routine tracking and preserve the
   independently gated acceptance workflow.
-  Source implemented: active/resumed shell watching shares one batched durable
-  reconciliation/report helper; separate phase reads and per-Job state updates are
-  removed from routine polling. Five old private helpers became two shared helpers,
-  reducing the shell by 194 lines. Terminal slot release is consumed explicitly,
-  independent of successful tests/ingestion; unresolved identity still blocks.
-  Coverage uses `successful_complete_run`, rejecting old-policy reports and skipping
-  failures while preserving latest attempts, older successes, cooldown and raw rows.
-  A real 478-node history scan retained 476 successful records, skipped seven failed
-  attempts and preserved older successes on four nodes. A real Failed Job without
-  a retained pod released tracking in the local predicate/report check without
-  becoming accepted. See [control verification](job-control-major-component.md#phase-25-implementation)
+  See [shared shell control](job-control-major-component.md#phase-25-implementation)
   and [freshness policy](discovery-scheduling-major-component.md#phase-25-successful-freshness).
-  Live state writes, actual scheduling after failure and controller resume were not
-  exercised; the loop stays paused. The checkbox remains open for fresh acceptance.
 
 **Done when:** On approved real runs, Kubernetes state and the compact runtime log
 explain execution, retained logs/results and ingestion outcome. Confirmed failure
@@ -346,62 +239,21 @@ FIO packaging and additional timing fields are deferred unless separately justif
 
 - [ ] **3.1** Share secure reservation for production and supported standalone
   callers; reuse existing helpers before retiring old path setup, not a new compatibility layer.
-  Source implemented: standalone runner entry reserves through the existing supervisor
-  helper; inherited descriptors still belong to the supervisor. One execution path
-  uses retained descriptors, while standalone retains its own logging and remains
-  test-only. Removed three setup helpers and 149 runner lines; no new abstraction,
-  setting, script or raw store. Marker-only adoption now fails closed, and the root
-  must already exist. Three real-filesystem checks passed for ownership, reuse and
-  symlink rejection without starting benchmarks. Fresh standalone/supervised workload
-  acceptance remains pending. See
-  [reservation ownership and limits](validation-runtime-major-component.md#phase-31-shared-reservation).
+  See [reservation ownership](validation-runtime-major-component.md#phase-31-shared-reservation).
 - [ ] **3.2** Reuse the existing config snapshot and secure layout to derive child
   environment and compatibility aliases once. Reject disagreements; add no new context layer.
-  Source implemented: one evidence projection in the existing runtime module is
-  shared by supervisor and runner, using the existing built-in alias table and
-  selected descriptor filenames. The ingestion shell validates supplied paths
-  instead of reconstructing them. Conflicting run/test/global aliases fail closed;
-  matching canonical paths can be replaced with their reserved descriptor paths.
-  Five focused filesystem/environment checks passed, including the real shell
-  handoff; configuration projection, workloads, results and raw writers are unchanged.
-  Image/CUDA/PyTorch/iterations remain variable. No new setting, module or script.
-  Fresh in-pod execution/ingestion acceptance remains pending. See
-  [projection ownership and limits](validation-runtime-major-component.md#phase-32-environment-projection).
+  See [environment projections](validation-runtime-major-component.md#phase-32-environment-projection).
 - [ ] **3.3** Preserve separate phase/outcome values and bounded child cleanup;
   freeze the finalized result before ingestion and test interruption at each boundary.
-  Cleanup source implemented first: supervisor reuses the existing process-group
-  terminator, bounds runner/ingestion children through two required runtime limits,
-  and rejects a zero-exit leader that leaves descendants. Existing result binding,
-  writers and test settings are unchanged. Three focused real-OS regression tests
-  passed, including timeout and abandoned descendants; no GPU test or raw DB was
-  fabricated. Fresh pod execution, signal-boundary and ingestion-interruption
-  acceptance remain unverified and separately gated. See
-  [cleanup implementation](validation-runtime-major-component.md#phase-33-child-cleanup).
+  See [bounded child cleanup](validation-runtime-major-component.md#phase-33-child-cleanup).
 - [ ] **3.4** Address mutable external DL code/plan only after defining the smallest
   per-run consistency change. Keep source/plan selectable across runs; do not pin
   image/CUDA/PyTorch versions or build a new image as part of this phase.
-  Source implemented in the existing DL scripts: copy `src`, the selected plan and
-  any baseline into the existing work directory; compare them with the inputs and
-  execute the local source. Reused work directories are rejected rather than erased.
-  The existing summary `source_dir` identifies the execution copy; settings, schemas
-  and raw writers are unchanged. Two checks on retained actual DL source passed for
-  isolation, reuse and an observed change during copying. Real setup preflight also
-  passed locally. No benchmark was run; baseline-file and fresh pod acceptance remain
-  unverified. See [per-run source boundary](test-workloads-major-component.md#phase-34-run-local-dl-source).
+  See [per-run source isolation and its limits](test-workloads-major-component.md#phase-34-run-local-dl-source).
 - [ ] **3.5** Use existing timing/events and recorded environment fields to compare
   approved runs. Add instrumentation only for a demonstrated missing measurement.
-  Evidence review complete; no runtime change is justified. Existing event boundaries
-  separate approximate setup/workload/ingestion intervals, and emitted monotonic
-  totals already cover tests and newer ingestion/supervisor stages. Historical runs
-  `0192/1790178532` and `0359/1790277187` have matching recorded environments,
-  descriptors, requested resources and iteration/plan settings, but different nodes
-  and source revisions. They demonstrate inspection, not a speedup or regression.
-  `0359` canonical digest and exact raw environment/iteration records were checked;
-  resource usage and fresh Phase 3 execution remain unmeasured. See
-  [timing interpretation](../result-schema.md#timing-interpretation) and
-  [review evidence](validation-runtime-major-component.md#phase-35-evidence-review).
-  Keep this acceptance checkbox open until separately approved new-source runs and
-  comparable evidence are available; do not add fields/scripts to replace that gate.
+  Review found no need for instrumentation. See [timing interpretation](../result-schema.md#timing-interpretation)
+  and [historical comparison limits](validation-runtime-major-component.md#phase-35-evidence-review).
 
 **Done when:** Approved exact-commit real-node validation confirms intended coverage,
 retained artifacts and dependency identity. Check safe rejection cases without

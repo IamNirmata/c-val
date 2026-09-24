@@ -1,5 +1,62 @@
 # Framework Simplification Review
 
+## Phase 1–3 Retrospective
+
+Reviewed 2026-09-24 at `ebe5cae33b495984aa013fe2f3041d805bbb7286` against
+Phase 0 `b79a5e0`. **Not every addition was minimal.** Keep the core workflow:
+discover/select, submit once, observe Job/pod/logs, run configured tests, ingest raw
+results, and inspect exact evidence. Do not add another controller, report service,
+database, environment-pinning policy or generic runtime framework.
+
+### Findings and Decisions
+
+1. **Acceptance, not more features, is the main gap.** Phases 1–3 are published
+	source, not fresh cluster-accepted deployment. Local process/filesystem checks
+	and historical reads cannot replace an approved exact-commit workload. Keep the
+	loop paused and preserve the separate source/session/submission approval gates.
+2. **Phase 1 safeguards are necessary but expensive.** Keep explicit TOML snapshots,
+	fresh eligibility, one admission owner, durable no-recreate intents, successful
+	coverage and exact-timestamp exports. Keep the detailed raw verifier for targeted
+	acceptance/diagnosis, outside routine Job polling. No cross-host failover, generic
+	workflow engine, broader compatibility database or classifier is justified.
+3. **Phase 2 left dead implementations behind.** Removed the uncalled single-Job
+	receipt observer, unused namespace phase lister, stale receipt-file recovery
+	search and pass-through event parser. Shared batch observation, bounded logs,
+	identity checks, cooldown and failure/unknown distinctions remain unchanged.
+4. **Phase 3 retained a redundant ingestion handoff.** The supervisor now starts
+	`cval.storage.run_ingest` directly with the same interpreter. It no longer starts
+	an environment shell that can import PyTorch twice after the result is finalized.
+	Ingestion still authorizes the result/snapshot and each writer revalidates it;
+	image/CUDA/PyTorch values come from the result. Shell compatibility entry points
+	remain available. Shared reservation, child cleanup and run-local DL inputs stay;
+	extra timing instrumentation and custom images remain out of scope.
+5. **Documentation grew faster than runtime code.** The phase series added 1,773
+	net documentation lines, 1,163 runtime/config lines and 246 test lines in the
+	reviewed paths. The roadmap repeated component-level implementation history and
+	the job-control guide retained a superseded recovery rule. Trimmed the repetition,
+	preserved all task IDs/linked anchors and corrected the terminal-release rule.
+	Git and retained run records preserve the detailed history; current behavior
+	should have one owning reference, not a new document for each iteration.
+
+### Boundaries and Verification
+
+The cleanup removes 76 net runtime lines without adding a module, setting, CLI
+mode or raw schema. A small regression test covers direct-entry authorization
+rejection. Four real-process lifecycle/authorization tests passed; current imports,
+CLI construction, shell syntax, retained real-event parsing and identity/release
+predicates passed. The customization validator passed; no customizations changed.
+The session-store query had no indexed match, so the retrospective uses the current
+conversation, Git history, source and retained evidence, not an archive reconstruction.
+
+Do not equate this with all legacy tests passing: older synthetic/default-based
+suites are not a demonstrated current regression gate. Fresh valid-result ingestion,
+controller resume and installed Volcano single-attempt behavior remain unverified.
+No cluster resource, live session, raw DB, existing log or source artifact was changed.
+Further implementation should remove a demonstrated duplicate or fix a concrete
+defect; retain separate approval for any live validation or activation.
+
+## Earlier Review
+
 Review date: 2026-09-22. Baseline:
 `7464e4fc55ec88691d015afdb3ec08ffa246f6c1`.
 
