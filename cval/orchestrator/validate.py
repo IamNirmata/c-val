@@ -14,19 +14,20 @@ cluster through a `KubectlClient`.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import re
 import time
 from typing import Any, Callable
 
 from cval.config import CvalConfig, is_exact_commit, load_config
-from cval.jobs.manager import submit_workflow_plan
+from cval.jobs.manager import admission_lock, read_admission_session, retain_submission_event, submit_workflow_plan
 from cval.jobs.monitor import TERMINAL_PHASES, get_job_phase
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
 from cval.models import PlannedJob, QueueCandidate, WorkflowPlan
 from cval.policy import ExecutionPolicy, PolicyViolation
-from cval.storage.status import get_latest_status_rows
+from cval.storage.verification import verify_run_evidence
 from cval.validation.builtins import (
     BUILTIN_DB_UPDATE_DONE_MARKER,
     BUILTIN_DONE_MARKERS,
@@ -197,10 +198,11 @@ def build_validation_report(
     schedulability: dict[str, Any],
     raw_results: dict[str, str],
     interrupted: bool = False,
-    ingestion_complete: bool = True,
-    fresh_status_complete: bool = True,
+    ingestion_complete: bool = False,
+    fresh_status_complete: bool = False,
     notes: list[str] | None = None,
     test_ids: list[str] | tuple[str, ...] | None = None,
+    verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the structured single-node validation report."""
 
@@ -231,10 +233,20 @@ def build_validation_report(
         "ok": (
             job_ok
             and not interrupted
+            and bool(report_tests)
+            and all(raw_results.get(test) == "pass" for test in report_tests)
             and ingestion_complete
             and fresh_status_complete
             and raw_overall == "pass"
+            and verification is not None
+            and verification.get("accepted") is True
+            and verification.get("complete") is True
+            and verification.get("identity_verified") is True
+            and all(verification.get("request", {}).get(key) == value for key, value in (
+                ("node", node), ("timestamp", timestamp), ("job_name", job_name), ("git_ref", git_ref),
+            ))
         ),
+        "verification": verification or {"state": "unavailable", "accepted": False, "reason": "exact-run evidence was not verified"},
         "ingestion_complete": ingestion_complete,
         "fresh_status_complete": fresh_status_complete,
         "schedulability": schedulability,
@@ -257,6 +269,11 @@ def render_validation_report(report: dict[str, Any]) -> str:
         lines.append(f"commit:     {report['git_ref']}")
     lines.append(f"timestamp:  {report['timestamp']}")
     lines.append(f"job phase:  {report['job_phase']}")
+    verification = report.get("verification", {})
+    lines.append(f"evidence:   {verification.get('state', 'unavailable')} accepted={report['ok']}")
+    for name, source in verification.get("sources", {}).items():
+        if source.get("state") not in {"complete", "not_required"}:
+            lines.append(f"  {name}: {source.get('state')} {source.get('reason', '')}")
 
     sched = report.get("schedulability") or {}
     if sched:
@@ -540,41 +557,29 @@ def run_node_validation(
         notes.append("interrupted by operator; job left running")
         emit("\ninterrupted; the validation job is still running and was left untouched.")
 
-    # 5. Raw pass/fail from logs, augmented only by rows from this exact run.
     raw_results = raw_results_from_log(logs, enabled_tests=enabled_tests)
-    ingestion_complete = log_signals_db_updated(logs)
-    fresh_status_tests: set[str] = set()
-    fresh_status_results: dict[str, str] = {}
+    expected_config = replace(config, job=replace(config.job, git_ref=resolved_git_ref))
+    verification = {"state": "unavailable", "accepted": False, "complete": False, "release": False, "sources": {}}
     try:
-        rows = get_latest_status_rows(
-            client=kubectl,
-            namespace=namespace,
-            pod=config.cluster.pvc_access_pod,
-            db_path=config.storage.validation_db_path,
-            config=config,
-        )
-        for row in rows:
-            if row.node == node and row.latest_timestamp == timestamp:
-                raw_results.setdefault(row.test, row.result)
-                fresh_status_tests.add(row.test)
-                fresh_status_results[row.test] = row.result
-            elif row.node == node and row.test in enabled_tests:
-                notes.append(
-                    f"ignored stale {row.test} DB row at timestamp "
-                    f"{row.latest_timestamp}; expected {timestamp}"
-                )
-    except Exception as exc:  # noqa: BLE001
-        notes.append(f"could not read validation.db status: {_first_line(str(exc))}")
-
-    # 6. Verify fresh raw rows.
-    compatibility_status_tests = enabled_tests & set(BUILTIN_TEST_IDS)
-    required_fresh_tests = compatibility_status_tests | {"all"}
-    fresh_rows_complete = required_fresh_tests.issubset(fresh_status_tests)
-    fresh_rows_match = all(
-        fresh_status_results.get(test) == raw_results.get(test)
-        for test in required_fresh_tests
-    )
-    # 7. Build and render the report.
+        if interrupted or deadline <= clock():
+            raise TimeoutError("No remaining verification budget; retain pending evidence")
+        with admission_lock(expected_config):
+            session_dir, state = read_admission_session(expected_config)
+            intent = state["intents"][job_name]
+        verification = verify_run_evidence(intent, expected_config, kubectl,
+                                           timeout=min(deadline - clock(), config.monitoring.ingestion_grace_seconds))
+        raw_results = verification.get("raw_results", raw_results)
+        with admission_lock(expected_config):
+            session_dir, state = read_admission_session(expected_config)
+            event = {"state": "verification_finished", "phase": verification.get("job_phase", phase), "verification": verification}
+            if verification.get("identity_verified"):
+                event["uid"] = verification["request"]["job_uid"]
+            retain_submission_event(session_dir, state, job_name, event)
+    except Exception as exc:
+        verification = {**verification, "state": "unavailable", "accepted": False, "release": False, "reason": str(exc)}
+        notes.append(f"Exact-run verification remains pending: {_first_line(str(exc))}")
+    ingestion_complete = verification["sources"].get("ingestion", {}).get("state") == "complete"
+    fresh_status_complete = verification["sources"].get("validation", {}).get("state") == "complete"
     report = build_validation_report(
         node=node,
         timestamp=timestamp,
@@ -586,7 +591,8 @@ def run_node_validation(
         test_ids=enabled_test_order,
         interrupted=interrupted,
         ingestion_complete=ingestion_complete,
-        fresh_status_complete=fresh_rows_complete and fresh_rows_match,
+        fresh_status_complete=fresh_status_complete,
+        verification=verification,
         notes=notes,
     )
 

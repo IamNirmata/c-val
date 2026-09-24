@@ -136,10 +136,21 @@ CLI names and raw schemas remain.
   retain reservations. Real Job/NotFound reads and isolated real filesystem failures
   were checked without synthetic Kubernetes clients or live session changes. See
   [implementation and verification limits](job-control-major-component.md#phase-14-implementation).
+  Source published at `31023001db1010780c4d35eefb25ce064627a24e`; its approved
+  immutable ConfigMap was created and verified on 2026-09-24 UTC.
   Real create reply loss, partial batches and concurrent submitters remain unverified;
   live-loop activation stays deferred until Phase 1 is complete.
 - [ ] **1.5** Implement outcome-specific exact-run verification against expected
   request identity; bound generation-change retries. Keep evidence and acceptance separate.
+  Source implemented with one read-only C7 verifier shared by targeted validation
+  and terminal intent reconciliation. Canonical identity/digests/events, exact status
+  rows, storage/NCCL values, DL ranks/rows/receipts and generation stability are checked
+  against submitted context. The historical `0192` run at `1790178532` verified fully;
+  a failed historical Job without a retained pod remained unavailable, and the absent
+  approved `0307` run remained incomplete. No synthetic DBs or new validation Jobs
+  were used. See [verification and limits](raw-evidence-major-component.md#phase-15-implementation).
+  Fresh exact-commit execution, live release transitions and generation-change retry
+  acceptance remain pending; activation stays deferred until Phase 1 is finished.
 - [ ] **1.6** Implement compatible-coverage reads and exact-run exports; distinguish
   forbidden/unavailable history from empty or incomplete evidence. Keep the declared
   legacy age policy until new dependency provenance is produced and its comparison

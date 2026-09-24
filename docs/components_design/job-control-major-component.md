@@ -1,8 +1,8 @@
 # C4: Job Control
 
-Status: Phase 1.3 admission and Phase 1.4 durable intent source implemented;
-deployment acceptance pending. Outcome verification and control consolidation
-below remain proposals. Baseline/counting:
+Status: Phase 1.3 admission, Phase 1.4 durable intents and Phase 1.5 verification
+source implemented; deployment acceptance pending. Control consolidation below
+remains proposed. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -74,8 +74,8 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
    subprocesses reload config and translate the same state through JSON/TSV/CSV.
 2. Targeted validation and the regular monitor have different deadline and evidence
    handling. Job phase alone is not proof of a complete successful run.
-3. Terminal intent reservations deliberately remain until Phase 1.5 supplies an
-   outcome-specific evidence decision. Do not activate an incomplete Phase 1 stack.
+3. New-source submission, crash recovery and evidence-release transitions still
+   need separately approved live acceptance. Do not activate an incomplete Phase 1 stack.
 
 ## Phase 1.3 Implementation
 
@@ -111,8 +111,8 @@ GPU submissions or live state mutations were used.
 Successful create, new-session initialization, slot saturation and concurrent real
 submitters remain unverified and approval-gated. The new lock cannot fence an old
 writer or another host. Existing shell cooldown behavior is unchanged. Durable
-intent/receipt persistence is described below; evidence-based reservation release
-remains part of the later outcome work. Do not treat this
+intent/receipt persistence and evidence-based reservation release are described
+below. Do not treat this
 source change as exactly-once delivery or completed cluster acceptance.
 
 ## Phase 1.4 Implementation
@@ -142,8 +142,8 @@ equivalence claim is made from the current historical observation.
 
 Missing or unavailable observations remain `uncertain`; mismatches become
 `conflict`. Neither frees the node/slot or triggers another create. Prepared-only
-crash records and conflicts require explicit reconciliation. Even a terminal
-matching Job retains its reservation pending Phase 1.5 evidence handling. The
+crash records and conflicts require explicit reconciliation. A terminal matching
+Job retains its reservation until the Phase 1.5 evidence decision described below. The
 existing state-helper `job` operation can retain a bounded exact observation under
 the same lock; a supplied phase alone cannot establish identity. No new retry mode,
 service, test script or raw DB was introduced.
@@ -168,6 +168,26 @@ No fake Kubernetes clients or benchmark fixtures were used. Successful creation,
 actual lost-create replies, partial live batches, fsync failure after replacement,
 and concurrent real submitters were not exercised. Raw SQLite was not changed.
 Live session turnover/activation is deferred until Phase 1 is finished.
+
+## Phase 1.5 Integration
+
+Terminal reconciliation and the existing state-helper `job` operation invoke the
+[C7 exact-run verifier](raw-evidence-major-component.md#phase-15-implementation).
+The resulting `verification_finished` event retains the report in v2 intent history.
+The shared release predicate checks the original node/run/source/config/manifest
+and known Job UID, not just a terminal phase or a caller-supplied success flag.
+
+Known complete, incomplete or conflicting terminal evidence may release tracking
+without accepting the run. Any inaccessible evidence, unstable generation, changed
+Job/pod identity or nonterminal execution keeps the reservation. Fully recorded
+failed tests remain failures. Same-run reuse stays blocked, and ordinary cooldown
+and approval requirements remain; verification never deletes or retries a Job.
+
+Targeted validation no longer uses latest status or log markers as acceptance proof.
+It checks exact evidence, retains the decision under the existing admission lock,
+and reports per-source state. Historical read-only evidence validated the consumer
+and release predicates, but no live state was released in development. Actual
+turnover and fresh execution remain deferred until Phase 1 is finished.
 
 ## Proposed Design
 

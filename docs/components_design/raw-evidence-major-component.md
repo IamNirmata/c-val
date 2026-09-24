@@ -1,6 +1,8 @@
 # C7: Raw Evidence
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 1.5 exact-run verification source implemented; fresh execution
+acceptance pending. Writer consolidation and export changes remain proposals.
+Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -68,10 +70,67 @@ SQLite retry/URI and status. Workload plugins belong to C6; config paths to C1.
    receipt, replacement, generation and commit mechanics.
 2. [Exports](../../cval/storage/results_export.py#L131) join metrics by node; the
    NCCL path can substitute an older metric timestamp while retaining newer status.
-3. [Acceptance](../../cval/orchestrator/validate.py#L539) reads logs and latest status,
-   not a shared exact-run canonical/metric verification result.
-4. Latest-status readers and PVC-pod resolution hide some observation detail;
+3. Latest-status/export readers and PVC-pod resolution hide some observation detail;
    unavailable, forbidden, empty and conflicting evidence need separate reporting.
+
+## Phase 1.5 Implementation
+
+The [shared verifier](../../cval/storage/verification.py) is the read-only C7 owner
+used by targeted validation and terminal admission reconciliation. The caller
+supplies its retained intent and frozen configuration; expected values never come
+from the canonical result being checked. Job UID/controlled fields, submitted
+snapshot digest, test descriptors, destinations, owned pod/node/runtime and stable
+terminal Job phase bind the audit to the requested execution.
+
+Canonical checks cover the result/config identity, exact ingestion digest marker,
+per-test results and logs, passing summaries, and execution/ingestion event order.
+Text summaries remain text. Custom result-only tests need no invented metric table.
+Passing storage/NCCL tests require artifact-derived metric values to match exact
+node/timestamp rows, including NCCL HCA samples. Passing DL requires the configured
+plan/iterations/GPU count, complete ranks, exact artifact-derived rows and receipts.
+Stored DL run keys are read, not reconstructed from a presumed historical prefix.
+Failed or disabled tests do not require passing metric rows.
+
+Status reads query `runs` at the exact timestamp, not `latest_status`. Identical
+historical status duplicates can be deduplicated; conflicting rows cannot. All
+SQLite opens use `mode=ro` and `query_only=ON`, with file identity checks and bounded
+queries. DL reads sample all four completed generations before and after; a changed
+or in-progress generation retries within configured SQLite retry counts/delays and
+the common remaining deadline. This is not a cross-store transaction.
+
+The reader streams the checked-out Python modules into an in-memory importer in
+the configured PVC reader pod. It writes no code, bytecode or temporary DB there,
+and never invokes writer authorization. It reuses existing parsers and SQLite
+identity helpers. Explicit `monitoring.verification_max_bytes` and
+`monitoring.verification_max_files` bound artifact reads; exceeding either is
+unavailable, not missing. Reports retain per-source states, artifact hashes and
+the reader-source hash. Unreadable sources keep reservations even when another
+source is known to conflict.
+
+The `cval.verification.v1` report separates `complete`, `accepted` and `release`.
+Acceptance requires the verified successful terminal Job/pod and a nonempty set
+of passing requested tests. A fully recorded failed test remains failed. With
+stable execution identity, bounded proof of incomplete/conflicting evidence can
+release terminal tracking without accepting the run; forbidden/unavailable or
+identity-conflicting observations cannot. C4 durably binds this decision to the
+original request before releasing a reservation. No Job or raw evidence is deleted.
+
+On 2026-09-24 UTC, a read-only historical audit of
+`slc01-cl02-hgx-0192-1790178532` used independently retained submitted Job context:
+four status rows, 12 storage metrics, NCCL values/12 sampled HCAs, and DL row counts
+2,168/3,040/384/1,536 across eight ranks all matched. Both generation samples were
+`1790179992764511-ab1a1cbce1e34bc798db3c7412e2ce49`. The requested plan was
+`80gb-example`, 100 iterations. Applying that report to another actual request
+was rejected. The actual absent `0307-1790221580` run was incomplete; a retained
+failed Job lacking an identifiable pod was unavailable and not eligible for release.
+
+Evidence is retained under `run-logs/phase15-*-20260924.json`, including
+`phase15-final-historical-verification-20260924.json` and
+`phase15-failed-historical-verification-20260924.json`. This verifies historical
+reads, not a new-source workload. Complete failed-run evidence, live generation
+changes, deadline exhaustion, forbidden access, and live reservation release were
+not exercised. No synthetic nodes/DBs or GPU Jobs were created. Controller
+activation remains deferred until Phase 1 is finished.
 
 ## Proposed Design
 

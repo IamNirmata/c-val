@@ -39,6 +39,8 @@ ingestion_grace_seconds = 300
 validation_poll_seconds = 3
 validation_pending_seconds = 600
 log_tail_lines = 2000
+verification_max_bytes = 67108864
+verification_max_files = 5000
 
 [live]
 session_name = "cval-live"

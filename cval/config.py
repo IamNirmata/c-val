@@ -90,6 +90,8 @@ class MonitoringConfig:
     validation_poll_seconds: float
     validation_pending_seconds: float
     log_tail_lines: int
+    verification_max_bytes: int
+    verification_max_files: int
 
 
 @dataclass(frozen=True)
@@ -398,6 +400,8 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
         ("monitoring.validation_poll_seconds", config.monitoring.validation_poll_seconds),
         ("monitoring.validation_pending_seconds", config.monitoring.validation_pending_seconds),
         ("monitoring.log_tail_lines", config.monitoring.log_tail_lines),
+        ("monitoring.verification_max_bytes", config.monitoring.verification_max_bytes),
+        ("monitoring.verification_max_files", config.monitoring.verification_max_files),
         ("live.loop_sleep_seconds", config.live.loop_sleep_seconds),
         ("scheduling.batch_size", config.scheduling.batch_size),
         ("policy.max_batch_size", config.policy.max_batch_size),

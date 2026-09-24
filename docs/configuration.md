@@ -30,7 +30,8 @@ and independent confirmations remain explicit command inputs.
 - `[scheduling]`: stale threshold, concurrent batch size, submission cooldown;
 - `[job]`: template, prefix, recorded image name, source repository/ref and explicit source transport;
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
-- `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace and log-tail size;
+- `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace,
+  log-tail size and explicit verification byte/file limits;
 - `[live]`: session name, absolute shared log directory, runner worktree, sleep,
   plan limit, remote branch, designated `control_host` and credential-free HTTPS `cluster_server`;
 - `[maintenance]`: separately invoked backup/inventory/journal bounds and staging directory;
@@ -107,8 +108,8 @@ granted by the presence of a file. Existing mutation approval gates still apply.
 Requested manifests and create responses are retained in v2 intents. The existing
 jobs CSV is a compatible projection, not authoritative proof of an outcome.
 Successful Job UID/creation time observations are preserved; unknown times remain
-unknown. A single NotFound never permits reuse, and all attempted intents reserve
-their node/slot until the later evidence-release implementation. Do not point a
+unknown. A single NotFound never permits reuse, and attempted intents reserve
+their node/slot until a bound terminal evidence decision permits release. Do not point a
 v1-only writer at v2 state or rewrite v2 into v1 for rollback.
 
 Keep `CVAL_CONFIG`, `CVAL_GIT_REF`, source/session locators and approval variables.
@@ -117,6 +118,20 @@ Move former `CVAL_BATCH_SIZE`, `CVAL_PLAN_LIMIT`, `CVAL_DAYS_THRESHOLD`,
 worktree overrides into their main TOML fields. The live launcher rejects those
 setting overrides. In-pod environment settings are snapshot transport and must
 match; they are not a second configuration layer.
+
+### Verification Limits
+
+`monitoring.verification_max_bytes` bounds total canonical/artifact bytes read by
+one audit; the checked-in value is 67,108,864. `verification_max_files` bounds unique
+files at 5,000. These required TOML settings have no code fallback. Reaching a limit
+is an unavailable observation, not proof that evidence is absent. Old snapshots
+lacking these settings remain with their pinned source; do not silently enrich them.
+
+Generation retries use `sqlite_retry.attempts` and `sqlite_retry.delay_seconds`.
+Each read uses the lesser of its configured SQLite/Kubernetes bound and the remaining
+verification deadline. Targeted validation shares its overall deadline and caps the
+verification portion by `monitoring.ingestion_grace_seconds`; terminal reconciliation
+uses that configured grace budget. No retry resets the deadline.
 
 ## Storage paths
 

@@ -200,15 +200,52 @@ def reconcile_submission_intents(session_dir: Path, state: dict, client: Kubectl
 
     for name, intent in state["intents"].items():
         last = intent["events"][-1]
-        if last["state"] == "not_created":
+        if intent_finished(intent):
             continue
         if last["state"] == "conflict" or not any(event["state"] == "submitting" for event in intent["events"]):
             raise PolicyViolation(f"Intent {name!r} requires explicit reconciliation; no retry is authorized")
         event = observe_submission(intent, client, config.cluster.namespace)
+        event = verify_terminal_submission(intent, event, config, client)
         state = retain_submission_event(session_dir, state, name, event)
-        if event["state"] != "observed":
+        if event["state"] != "observed" and not intent_finished(state["intents"][name]):
             raise PolicyViolation(f"Intent {name!r} is {event['state']}; node and slot remain reserved")
     return state
+
+
+def verification_releases(intent: dict, report: dict) -> bool:
+    """Release only an identity-bound terminal evidence decision, never a phase alone."""
+
+    if report.get("schema_version") != "cval.verification.v1" or report.get("release") is not True or report.get("identity_verified") is not True:
+        return False
+    expected = {"node": intent["node_name"], "timestamp": intent["timestamp"], "run_id": intent["run_id"],
+                "git_ref": intent["git_ref"], "config_digest": intent["config_digest"],
+                "job_name": intent["job_name"], "manifest_sha256": intent["manifest_sha256"]}
+    actual = report.get("request", {})
+    job = report.get("sources", {}).get("job", {})
+    known_uids = {event["uid"] for event in intent["events"] if event.get("uid")}
+    return (
+        all(actual.get(key) == value for key, value in expected.items())
+        and bool(known_uids) and known_uids == {actual.get("job_uid")}
+        and job.get("uid") == actual.get("job_uid") and job.get("state") == "complete"
+        and job.get("phase") in _TERMINAL_PHASES and report.get("state") in {"complete", "incomplete", "conflicting"}
+        and not any(source.get("state") in {"forbidden", "unavailable"} for source in report["sources"].values())
+    )
+
+
+def intent_finished(intent: dict) -> bool:
+    last = intent["events"][-1]
+    return last["state"] == "not_created" or (
+        last["state"] == "verification_finished" and verification_releases(intent, last["verification"])
+    )
+
+
+def verify_terminal_submission(intent: dict, event: dict, config: CvalConfig, client: KubectlClient, *, timeout: float | None = None) -> dict:
+    if event["state"] != "observed" or event.get("phase") not in _TERMINAL_PHASES:
+        return event
+    from cval.storage.verification import verify_run_evidence
+
+    report = verify_run_evidence(intent, config, client, timeout=timeout)
+    return {**event, "state": "verification_finished", "verification": report}
 
 
 def admission_scope(config: CvalConfig) -> dict[str, str]:
@@ -290,8 +327,10 @@ def read_session_state(session_dir: Path) -> dict[str, object]:
             if not isinstance(intent["manifest"], str) or hashlib.sha256(intent["manifest"].encode()).hexdigest() != intent["manifest_sha256"]:
                 raise PolicyViolation("Retained intent manifest digest mismatch")
             for event in intent["events"]:
-                if not isinstance(event, dict) or event.get("state") not in {"prepared", "submitting", "not_created", "submitted", "observed", "uncertain", "conflict"} or not event.get("observed_at"):
+                if not isinstance(event, dict) or event.get("state") not in {"prepared", "submitting", "not_created", "submitted", "observed", "uncertain", "conflict", "verification_finished"} or not event.get("observed_at"):
                     raise PolicyViolation("Invalid retained create outcome")
+                if event["state"] == "verification_finished" and not isinstance(event.get("verification"), dict):
+                    raise PolicyViolation("Missing retained evidence-verification report")
     return state
 
 
@@ -358,7 +397,7 @@ def check_active_jobs(
     for name, intent in read_session_state(session_dir).get("intents", {}).items():
         if name == planned.rendered_job.job_name or intent["run_id"] == f"{planned.candidate.node}-{planned.rendered_job.timestamp}":
             raise PolicyViolation("Run identity already has a durable intent; never recreate it")
-        if intent["events"][-1]["state"] != "not_created":
+        if not intent_finished(intent):
             active[name] = intent["node_name"]
     for name, row in read_session_jobs(session_dir).items():
         if name == planned.rendered_job.job_name:

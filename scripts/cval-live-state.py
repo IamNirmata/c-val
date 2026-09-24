@@ -20,6 +20,8 @@ from cval.jobs.manager import (
     observe_submission,
     project_submission_jobs,
     retain_submission_event,
+    intent_finished,
+    verify_terminal_submission,
     write_session_jobs as _write_jobs,
     admission_lock,
     admission_scope,
@@ -141,10 +143,11 @@ def _job(args: argparse.Namespace) -> None:
     client = KubectlClient(config=config)
     check_admission_cluster(config, client)
     event = observe_submission(intent, client, config.cluster.namespace)
+    event = verify_terminal_submission(intent, event, config, client)
     event.update(reported_phase=args.phase, reported_at=args.observed_at, deleted_at=args.deleted_at)
-    retain_submission_event(args.session_dir, state, args.job_name, event)
+    state = retain_submission_event(args.session_dir, state, args.job_name, event)
     _render(args.session_dir)
-    if event["state"] != "observed":
+    if event["state"] != "observed" and not intent_finished(state["intents"][args.job_name]):
         raise ValueError("Job observation is unresolved; retain its node and slot")
 
 
@@ -160,7 +163,7 @@ def _receipt(args: argparse.Namespace) -> None:
         intent = state["intents"].get(job_name)
         if not intent or item.get("node") != intent["node_name"] or item.get("git_ref") != intent["git_ref"]:
             raise ValueError("Submitted identity lacks a matching durable intent")
-        if intent["events"][-1]["state"] not in {"submitted", "observed"}:
+        if intent["events"][-1]["state"] not in {"submitted", "observed", "verification_finished"}:
             raise ValueError("Submission receipt has not been durably verified")
     _render(args.session_dir)
 

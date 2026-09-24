@@ -120,10 +120,35 @@ crash records for explicit reconciliation rather than assuming nothing happened.
 
 A successful state write followed by a failed CSV write is still retained evidence;
 the next append loads that on-disk state before rebuilding the projection. Missing
-or corrupt authoritative state never becomes an empty session. All attempted
-intents, including terminal Jobs, retain reservations until Phase 1.5 implements
-outcome-specific evidence release. Actual lost replies, concurrent live submission
+or corrupt authoritative state never becomes an empty session. Attempted
+intents retain reservations until identity-bound terminal evidence verification
+permits release. Actual lost replies, concurrent live submission
 and partial live batches remain unverified; this is not exactly-once delivery.
+
+### Exact Evidence and Release
+
+Targeted validation and terminal intent reconciliation share a read-only verifier.
+It uses the retained request and submitted snapshot, not the observed result, for
+expected identity. It checks the owned terminal Job/pod, canonical files and digests,
+event order, exact status rows and outcome-required metric values/receipts. Historical
+or newer latest-status rows never substitute for the requested timestamp.
+
+Reports include `verification.state`, `complete`, `accepted`, `release`, per-source
+states and artifact hashes. Successful execution alone is insufficient. Complete
+evidence of a failed test is still a failure. A bounded incomplete/conflicting
+terminal evidence report may release tracking without acceptance; inaccessible
+sources, changing generations or Job/pod identity conflicts keep the reservation.
+No verification step deletes Jobs, edits raw rows or retries the workload.
+
+The reader executes in memory in the configured PVC-access pod, opens SQLite with
+`mode=ro` and `query_only=ON`, and creates no remote files. Both artifact limits are
+explicit TOML settings. DL generation changes/in-progress publication use the
+configured retry budget under the same deadline. Inspect unavailable reasons rather
+than raising limits or changing identities without reviewing the request.
+
+The new-source acceptance and live state-release paths are not yet exercised on a
+fresh workload. Historical read verification passed; live-loop activation remains
+deferred until all of Phase 1 is finished and exact rollout commands are approved.
 
 ## Exact-commit validation
 
