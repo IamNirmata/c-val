@@ -148,10 +148,10 @@ def get_latest_nccl_metrics(
     pod = pod or active_config.cluster.pvc_access_pod
     namespace = namespace or active_config.cluster.namespace
     db_path = db_path or active_config.storage.nccl_db_path
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=active_config)
     try:
         status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = _NCCL_FETCH_SCRIPT
+        code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + _NCCL_FETCH_SCRIPT
         result = kubectl.run(
             [
                 "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
@@ -180,10 +180,10 @@ def get_latest_storage_metrics(
     pod = pod or active_config.cluster.pvc_access_pod
     namespace = namespace or active_config.cluster.namespace
     db_path = db_path or active_config.storage.storage_db_path
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=active_config)
     try:
         status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = _STORAGE_FETCH_SCRIPT.replace(
+        code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + _STORAGE_FETCH_SCRIPT.replace(
             "__CVAL_STORAGE_COLUMNS__", repr(list(STORAGE_METRIC_FIELDS))
         )
         result = kubectl.run(
@@ -271,10 +271,10 @@ def get_latest_nccl_health_metrics(
     pod = pod or active_config.cluster.pvc_access_pod
     namespace = namespace or active_config.cluster.namespace
     db_path = db_path or active_config.storage.nccl_db_path
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=active_config)
     try:
         status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = _NCCL_HEALTH_FETCH_SCRIPT.replace(
+        code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + _NCCL_HEALTH_FETCH_SCRIPT.replace(
             "__CVAL_NCCL_PORT_COLUMNS__", repr(list(NCCL_IB_PORT_COLUMNS))
         )
         result = kubectl.run(

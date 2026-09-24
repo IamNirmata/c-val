@@ -30,3 +30,4 @@ summary_filename = "summary.json"
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
 capabilities = ["config", "export"]
+support_files = []

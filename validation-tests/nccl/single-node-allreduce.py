@@ -15,13 +15,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--iterations",
         type=int,
-        default=int(os.environ.get("CVAL_NCCL_ITERATIONS", "20")),
+        required=True,
         help="Number of all-reduce iterations to average",
     )
     parser.add_argument(
         "--data-size-gb",
         type=int,
-        default=int(os.environ.get("CVAL_NCCL_DATA_SIZE_GB", "8")),
+        required=True,
         help="Base Gi elements used for the BF16 all-reduce tensor",
     )
     return parser.parse_args()
@@ -30,9 +30,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
 
     dist.init_process_group("nccl", init_method="env://", rank=world_rank, world_size=world_size)
     torch.cuda.set_device(local_rank)

@@ -106,6 +106,15 @@ def _render(session_dir: Path) -> None:
 
 
 def _init(args: argparse.Namespace) -> None:
+    sys_path = str(Path(__file__).resolve().parents[1])
+    import sys
+    from dataclasses import replace
+
+    sys.path.insert(0, sys_path)
+    from cval.config import encode_config_snapshot, load_config_snapshot
+
+    config = load_config_snapshot(os.environ["CVAL_CONFIG_SNAPSHOT_B64"])
+    config = replace(config, job=replace(config.job, git_ref=args.git_ref))
     session_dir = args.session_dir
     session_dir.mkdir(parents=True, exist_ok=False)
     (session_dir / "cycles").mkdir()
@@ -119,6 +128,7 @@ def _init(args: argparse.Namespace) -> None:
         "updated_at": args.started_at,
         "state": "starting",
         "git_ref": args.git_ref,
+        "config_snapshot_b64": encode_config_snapshot(config),
         "branch": args.branch,
         "cycle_id": "",
         "message": "session initialized",

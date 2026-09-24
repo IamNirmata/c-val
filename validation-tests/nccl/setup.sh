@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Validate NCCL runtime dependencies without installing or mutating the image.
 
-CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
-CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
+CVAL_REPO_DIR=${CVAL_REPO_DIR:?Missing configured CVAL_REPO_DIR}
+CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:?Missing configured tests directory}
 
 for command_name in python3 torchrun; do
 	if ! command -v "$command_name" >/dev/null 2>&1; then

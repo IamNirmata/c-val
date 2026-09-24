@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cval.config import StorageConfig
 from cval.storage.paths import safe_existing_evidence_path, safe_writable_file_path
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
@@ -27,10 +26,6 @@ from cval.storage.write_provenance import (
 )
 
 VALID_STATUSES = {"pass", "fail", "incomplete"}
-_STORAGE_DEFAULTS = StorageConfig()
-DEFAULT_VALIDATION_DB_PATH = _STORAGE_DEFAULTS.validation_db_path
-DEFAULT_STORAGE_DB_PATH = _STORAGE_DEFAULTS.storage_db_path
-DEFAULT_NCCL_DB_PATH = _STORAGE_DEFAULTS.nccl_db_path
 
 NCCL_HEALTH_TABLE = "IB_HEALTH"
 NCCL_IB_PORT_COLUMNS = tuple(f"mlx5_{index}" for index in range(14))
@@ -236,7 +231,7 @@ def add_nccl_health_result(
     ibbw_log_path: str | Path | None = None,
     recover_descriptor_ibbw_log: bool = False,
     require_hca_samples: bool = False,
-    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+    db_path: str | Path,
     _authorization: ResultWriteAuthorization | None = None,
 ) -> int:
     """Upsert one consolidated ``IB_HEALTH`` row for an NCCL validation run."""
@@ -378,7 +373,7 @@ def add_nccl_health_from_summary(
     ibbw_log_path: str | Path | None = None,
     recover_descriptor_ibbw_log: bool = False,
     require_hca_samples: bool = False,
-    db_path: str | Path = DEFAULT_NCCL_DB_PATH,
+    db_path: str | Path,
     _authorization: ResultWriteAuthorization | None = None,
 ) -> int:
     """Parse an NCCL summary JSON and upsert one consolidated health row."""
@@ -619,7 +614,8 @@ def add_validation_result(
     image_name: str = "",
     pytorch_version: str = "",
     cuda_version: str = "",
-    db_path: str | Path = DEFAULT_VALIDATION_DB_PATH,
+    *,
+    db_path: str | Path,
     _authorization: ResultWriteAuthorization | None = None,
 ) -> int:
     """Append one validation result row and return the parsed timestamp."""
@@ -681,7 +677,8 @@ def add_validation_run_results(
     image_name: str = "",
     pytorch_version: str = "",
     cuda_version: str = "",
-    db_path: str | Path = DEFAULT_VALIDATION_DB_PATH,
+    *,
+    db_path: str | Path,
     _authorization: ResultWriteAuthorization | None = None,
 ) -> int:
     """Atomically append the current fixed current rows for one run."""
@@ -805,7 +802,8 @@ def add_storage_result(
     image_name: str = "",
     run_id: str = "",
     immutable: bool = False,
-    db_path: str | Path = DEFAULT_STORAGE_DB_PATH,
+    *,
+    db_path: str | Path,
     _authorization: ResultWriteAuthorization | None = None,
 ) -> int:
     """Parse fio JSON artifacts and upsert one row into the storage metrics DB."""
@@ -992,8 +990,7 @@ def _connect_writable(db_path: str | Path) -> sqlite3.Connection:
     path = safe_writable_file_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path = safe_writable_file_path(path)
-    connection = connect_sqlite_file(path, mode="rwc", timeout=30)
-    connection.execute("PRAGMA busy_timeout=30000")
+    connection = connect_sqlite_file(path, mode="rwc")
     connection.execute("PRAGMA journal_mode=DELETE")
     connection.execute("PRAGMA synchronous=FULL")
     return connection

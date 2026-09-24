@@ -3,9 +3,9 @@ set -euo pipefail
 
 # Validate DL unit-test dependencies without modifying the shared source tree.
 
-CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
-CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-$CVAL_VALIDATION_ROOT/deep-learning-unit-test-main}
-CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:-80gb-example}
+CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:?Missing configured validation root}
+CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:?Missing configured DL source}
+CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:?Missing configured DL plan}
 
 for command_name in python3 torchrun realpath; do
 	if ! command -v "$command_name" >/dev/null 2>&1; then

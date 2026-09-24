@@ -110,10 +110,10 @@ Expected successful category: `Fully recorded`, required tests `pass`.
 | 5. Verify evidence | Canonical run/test identity and digests, selected-test outcomes, terminal ingestion and exact-run raw rows/receipts. | Successful terminal Job plus all required evidence; never latest-row substitution. |
 | 6. Record outcome | Use the result categories, keeping test outcome and DB state separate; retain any incomplete/unavailable evidence. | Activation, cancellation and another run each retain separate approval gates. |
 
-Read-only targeted check, with a bounded Kubernetes client:
+Read-only targeted check, using `cluster.kubectl_timeout_seconds` from the reviewed TOML:
 
 ```bash
-CVAL_KUBECTL_TIMEOUT_SECONDS=120 python3 -m cval.cli \
+python3 -m cval.cli \
 	--config "${CVAL_CONFIG:?Set reviewed config}" nodes \
 	--check-node "${CVAL_NODE:?Set reviewed node}" --output json
 ```
@@ -185,8 +185,8 @@ export CVAL_QUICK_TIMESTAMP="$(date +%s)"
 export CVAL_QUICK_DIR="$PWD/run-logs/quick-test-${CVAL_QUICK_TIMESTAMP}"
 mkdir -p "$PWD/run-logs"
 mkdir "$CVAL_QUICK_DIR"
-timeout --foreground 150s env CVAL_KUBECTL_TIMEOUT_SECONDS=120 python3 -m cval.cli --config "$CVAL_CONFIG" nodes --inventory-only --output json > "$CVAL_QUICK_DIR/inventory.json" 2> "$CVAL_QUICK_DIR/inventory.stderr"
-timeout --foreground 390s env CVAL_KUBECTL_TIMEOUT_SECONDS=120 python3 -m cval.cli --config "$CVAL_CONFIG" nodes --output json > "$CVAL_QUICK_DIR/discovery.json" 2> "$CVAL_QUICK_DIR/discovery.stderr"
+timeout --foreground 150s python3 -m cval.cli --config "$CVAL_CONFIG" nodes --inventory-only --output json > "$CVAL_QUICK_DIR/inventory.json" 2> "$CVAL_QUICK_DIR/inventory.stderr"
+timeout --foreground 390s python3 -m cval.cli --config "$CVAL_CONFIG" nodes --output json > "$CVAL_QUICK_DIR/discovery.json" 2> "$CVAL_QUICK_DIR/discovery.stderr"
 ```
 
 Both commands are read-only. Require successful exit codes and valid JSON before

@@ -25,66 +25,74 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 SOURCE_REPO=${CVAL_SOURCE_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}
 CONFIG_PATH=${CVAL_CONFIG:-$SOURCE_REPO/config/cval.toml}
-SESSION_NAME=${CVAL_TMUX_SESSION:-cval-live}
-LOG_DIR=${CVAL_LIVE_LOG_DIR:-$SOURCE_REPO/run-logs/cval-live}
+SESSION_NAME=""
+LOG_DIR=""
 LIVE_CONFIRM=${CVAL_LIVE_CONFIRM:-}
 PRUNE_CONFIRM=${CVAL_PRUNE_CONFIRM:-}
-STATE_HELPER=${CVAL_LIVE_STATE_HELPER:-$SCRIPT_DIR/cval-live-state.py}
+STATE_HELPER="$SCRIPT_DIR/cval-live-state.py"
 SESSION_DIR=${CVAL_SESSION_DIR:-}
 declare -A LAST_JOB_PHASES=()
 
-config_value() {
-    local section="$1"
-    local key="$2"
-    local default_value="$3"
-    python - "$CONFIG_PATH" "$section" "$key" "$default_value" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-
-path, section, key, default = sys.argv[1:]
-try:
-    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    value = data.get(section, {}).get(key, default)
-except FileNotFoundError:
-    value = default
-print(value)
-PY
-}
-
-validate_operational_config() {
-    python - "$CONFIG_PATH" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-
-path = Path(sys.argv[1])
-with path.open("rb") as handle:
-    data = tomllib.load(handle)
-if not isinstance(data, dict):
-    raise ValueError("c-val config must be a TOML table")
-PY
-}
-
 load_operational_settings() {
-    validate_operational_config
-    RUNNER_WORKTREE=${CVAL_RUNNER_WORKTREE:-/tmp/cval-live-worktree}
-    LOOP_SLEEP_SECONDS=${CVAL_LOOP_SLEEP_SECONDS:-300}
-    PLAN_LIMIT_SETTING=${CVAL_PLAN_LIMIT:-all}
+    local settings
+    settings=$(PYTHONPATH="$SOURCE_REPO${PYTHONPATH:+:$PYTHONPATH}" python3 - "$CONFIG_PATH" "$SOURCE_REPO" "$SESSION_DIR" <<'PY'
+import json
+import os
+import shlex
+import sys
+from pathlib import Path
+from cval.config import load_config, load_config_snapshot, encode_config_snapshot
+
+path, source, session = sys.argv[1:]
+if session:
+    state = json.loads((Path(session) / "state.json").read_text())
+    snapshot = state.get("config_snapshot_b64")
+    if not snapshot:
+        raise SystemExit("Session lacks a pinned config snapshot; start a separately approved new session")
+    config = load_config_snapshot(snapshot, repo_root=Path(source))
+    requested_ref = os.environ.get("CVAL_GIT_REF")
+    if requested_ref and requested_ref != state["git_ref"]:
+        raise SystemExit("CVAL_GIT_REF disagrees with the pinned session")
+else:
+    config = load_config(Path(path))
+snapshot = encode_config_snapshot(config)
+log_dir = Path(config.live.log_dir)
+if not log_dir.is_absolute():
+    log_dir = Path(source) / log_dir
+values = {
+    "SESSION_NAME": config.live.session_name, "LOG_DIR": str(log_dir),
+    "RUNNER_WORKTREE": config.live.runner_worktree,
+    "LOOP_SLEEP_SECONDS": config.live.loop_sleep_seconds,
+    "PLAN_LIMIT_SETTING": config.live.plan_limit,
+    "KUBECTL_TIMEOUT_SECONDS": config.cluster.kubectl_timeout_seconds,
+    "GIT_BRANCH_SETTING": config.live.git_branch, "GIT_REPO": config.job.git_repo,
+    "EXPLICIT_GIT_REF": state["git_ref"] if session else os.environ.get("CVAL_GIT_REF", config.job.git_ref),
+    "BATCH_SIZE": config.scheduling.batch_size, "DAYS_THRESHOLD": config.scheduling.days_threshold,
+    "NODE_COOLDOWN_SECONDS": config.scheduling.node_cooldown_seconds,
+    "NODE_COOLDOWN_STATE_FILE": str(log_dir / "node_cool_down.csv"),
+    "NODE_COOLDOWN_HELPER": str(Path(source) / "scripts/cval-node-cooldown.py"),
+    "WATCH_TIMEOUT_SECONDS": config.monitoring.timeout_seconds,
+    "WATCH_POLL_SECONDS": config.monitoring.poll_interval_seconds,
+    "PENDING_START_TIMEOUT_SECONDS": config.monitoring.pending_start_timeout_seconds,
+    "NAMESPACE": config.cluster.namespace, "JOB_PREFIX": config.job.job_prefix,
+    "CVAL_CONFIG_SNAPSHOT_B64": snapshot,
+}
+retired = ("CVAL_TMUX_SESSION", "CVAL_LIVE_LOG_DIR", "CVAL_RUNNER_WORKTREE", "CVAL_BATCH_SIZE",
+           "CVAL_PLAN_LIMIT", "CVAL_DAYS_THRESHOLD", "CVAL_NODE_COOLDOWN_SECONDS",
+           "CVAL_NODE_COOLDOWN_STATE_FILE", "CVAL_NODE_COOLDOWN_HELPER", "CVAL_GIT_BRANCH",
+           "CVAL_WATCH_TIMEOUT_SECONDS", "CVAL_WATCH_POLL_SECONDS", "CVAL_KUBECTL_TIMEOUT_SECONDS",
+           "CVAL_PENDING_START_TIMEOUT_SECONDS", "CVAL_NAMESPACE", "CVAL_JOB_PREFIX",
+           "CVAL_LOOP_SLEEP_SECONDS", "CVAL_LIVE_STATE_HELPER")
+present = [name for name in retired if name in os.environ]
+if present:
+    raise SystemExit("Move operational overrides to main TOML: " + ", ".join(present))
+for name, value in values.items():
+    rendered = format(value, "g") if isinstance(value, float) else str(value)
+    print(f"export {name}={shlex.quote(rendered)}")
+PY
+    ) || return "$?"
+    eval "$settings"
     PLAN_LIMIT=1
-    KUBECTL_TIMEOUT_SECONDS=${CVAL_KUBECTL_TIMEOUT_SECONDS:-120}
-    GIT_BRANCH_SETTING=${CVAL_GIT_BRANCH:-}
-    EXPLICIT_GIT_REF=${CVAL_GIT_REF:-}
-    BATCH_SIZE=${CVAL_BATCH_SIZE:-$(config_value scheduling batch_size 3)}
-    DAYS_THRESHOLD=${CVAL_DAYS_THRESHOLD:-$(config_value scheduling days_threshold 7)}
-    NODE_COOLDOWN_SECONDS=${CVAL_NODE_COOLDOWN_SECONDS:-$(config_value scheduling node_cooldown_seconds 14400)}
-    NODE_COOLDOWN_STATE_FILE=${CVAL_NODE_COOLDOWN_STATE_FILE:-$LOG_DIR/node_cool_down.csv}
-    NODE_COOLDOWN_HELPER=${CVAL_NODE_COOLDOWN_HELPER:-$SCRIPT_DIR/cval-node-cooldown.py}
-    WATCH_TIMEOUT_SECONDS=${CVAL_WATCH_TIMEOUT_SECONDS:-$(config_value monitoring timeout_seconds 3600)}
-    WATCH_POLL_SECONDS=${CVAL_WATCH_POLL_SECONDS:-$(config_value monitoring poll_interval_seconds 60)}
-    PENDING_START_TIMEOUT_SECONDS=${CVAL_PENDING_START_TIMEOUT_SECONDS:-$(config_value monitoring pending_start_timeout_seconds 1200)}
-    NAMESPACE=${CVAL_NAMESPACE:-$(config_value cluster namespace gcr-admin)}
-    JOB_PREFIX=${CVAL_JOB_PREFIX:-$(config_value job job_prefix cval)}
 }
 
 la_now() {
@@ -117,10 +125,11 @@ initialize_session() {
     python "$STATE_HELPER" init "$SESSION_DIR" \
         --started-at "$(la_now)" \
         --git-ref "$git_ref" \
-        --branch "${GIT_BRANCH_SETTING:-main}" \
+        --branch "$GIT_BRANCH_SETTING" \
         --batch-size "$BATCH_SIZE" \
         --plan-limit "$PLAN_LIMIT_SETTING" \
         "${pruning_args[@]}"
+    load_operational_settings
 }
 
 session_update() {
@@ -180,29 +189,21 @@ usage() {
 Usage: $(basename "$0") <command>
 
 Commands:
-  start      Start tmux session '$SESSION_NAME' running the live loop
+    start      Start the TOML-configured tmux session running the live loop
   stop       Stop the tmux session; does not delete Kubernetes jobs
   attach     Attach to the tmux session
   status     Show session status and latest log tail
   run-once   Run one live cycle in the current shell
   run-loop   Internal: run cycles forever
 
-Environment overrides:
-    CVAL_LIVE_CONFIRM=submit                       # required for every cycle
-    CVAL_PRUNE_CONFIRM=delete-pending              # optional independent gate
-  CVAL_CONFIG=$CONFIG_PATH
-    CVAL_BATCH_SIZE=<positive-integer>
-    CVAL_DAYS_THRESHOLD=<days>
-    CVAL_NODE_COOLDOWN_SECONDS=14400              # 4 hours; 0 disables
-    CVAL_NODE_COOLDOWN_STATE_FILE=$LOG_DIR/node_cool_down.csv
-    CVAL_PENDING_START_TIMEOUT_SECONDS=<seconds>
-    CVAL_GIT_BRANCH=<remote-branch>                # default: current local branch
-    CVAL_GIT_REF=<40-hex-commit>                   # optional; must equal branch tip
-    CVAL_KUBECTL_TIMEOUT_SECONDS=120
-    CVAL_PLAN_LIMIT=all                            # default: all discovered nodes
-  CVAL_TMUX_SESSION=$SESSION_NAME
-    CVAL_LIVE_LOG_DIR=$LOG_DIR
-    CVAL_LOOP_SLEEP_SECONDS=300
+Inputs and independent approvals:
+    CVAL_CONFIG=$CONFIG_PATH
+    CVAL_GIT_REF=<40-hex-commit>                     # must equal configured remote branch tip
+    CVAL_LIVE_CONFIRM=submit
+    CVAL_PRUNE_CONFIRM=delete-pending               # optional separate approval
+
+All operational settings belong to the main TOML, including [live].
+New sessions retain an immutable config snapshot; old sessions need reviewed turnover.
 EOF
 }
 
@@ -267,18 +268,11 @@ pruning_enabled() {
 
 resolve_git_ref() {
     local requested_ref source resolved rc
-    if [[ -n "$EXPLICIT_GIT_REF" ]]; then
-        requested_ref="$EXPLICIT_GIT_REF"
-        source="explicit"
-    else
-        rc=0
-        git -C "$SOURCE_REPO" fetch --quiet origin main || rc=$?
-        if (( rc != 0 )); then
-            log "git fetch failed source=origin-main exit_code=$rc" >&2
-            return "$rc"
-        fi
-        requested_ref="origin/main"
-        source="origin-main"
+    requested_ref="$EXPLICIT_GIT_REF"
+    source="pinned"
+    if [[ ! "$requested_ref" =~ ^[0-9a-f]{40}$ || "$requested_ref" == "0000000000000000000000000000000000000000" ]]; then
+        log "an exact published CVAL_GIT_REF or job.git_ref is required" >&2
+        return 2
     fi
     rc=0
     resolved=$(git -C "$SOURCE_REPO" rev-parse --verify "${requested_ref}^{commit}") || rc=$?
@@ -298,24 +292,21 @@ resolve_git_ref() {
 resolve_latest_start_ref() {
     local branch="$GIT_BRANCH_SETTING"
     local latest_ref latest_sha explicit_sha rc=0
-    if [[ -z "$branch" ]]; then
-        branch=$(git -C "$SOURCE_REPO" branch --show-current) || rc=$?
-        if (( rc != 0 )) || [[ -z "$branch" ]]; then
-            log "latest start ref failed: source repository is not on a branch; set CVAL_GIT_BRANCH" >&2
-            return 2
-        fi
+    if [[ ! "$EXPLICIT_GIT_REF" =~ ^[0-9a-f]{40}$ || "$EXPLICIT_GIT_REF" == "0000000000000000000000000000000000000000" ]]; then
+        log "latest start requires an exact nonzero CVAL_GIT_REF or configured job.git_ref" >&2
+        return 2
     fi
     if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
         log "latest start ref failed: invalid branch=$branch" >&2
         return 2
     fi
     rc=0
-    git -C "$SOURCE_REPO" fetch --quiet origin "$branch" || rc=$?
+    git -C "$SOURCE_REPO" fetch --quiet "$GIT_REPO" "$branch" || rc=$?
     if (( rc != 0 )); then
         log "latest start ref fetch failed branch=$branch exit_code=$rc" >&2
         return "$rc"
     fi
-    latest_ref="origin/$branch"
+    latest_ref="FETCH_HEAD"
     rc=0
     latest_sha=$(git -C "$SOURCE_REPO" rev-parse --verify "${latest_ref}^{commit}") || rc=$?
     if (( rc != 0 )) || [[ ! "$latest_sha" =~ ^[0-9a-f]{40}$ ]]; then
@@ -358,7 +349,7 @@ ensure_runner_worktree() {
             return "$rc"
         fi
     else
-        git -C "$RUNNER_WORKTREE" fetch --quiet origin main || rc=$?
+        git -C "$RUNNER_WORKTREE" fetch --quiet "$GIT_REPO" "$GIT_BRANCH_SETTING" || rc=$?
         if (( rc != 0 )); then
             log "runner worktree git fetch failed exit_code=$rc" >&2
             return "$rc"
@@ -1611,7 +1602,7 @@ run_submit_cycle() {
                 python -m cval.cli --config "$CONFIG_PATH" run \
                     --free-nodes "$nodes_csv" \
                     --threshold-days "$DAYS_THRESHOLD" \
-                    --batch-size 1 \
+                    --batch-size "$BATCH_SIZE" \
                     --timestamp "$run_timestamp" \
                     --git-ref "$git_ref" \
                     --submit \
@@ -1782,8 +1773,8 @@ start_session() {
     local session_log="$SESSION_DIR/loop.log"
     local runner_cmd
     printf -v runner_cmd \
-        'CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_LIVE_LOG_DIR=%q CVAL_SESSION_DIR=%q CVAL_LIVE_STATE_HELPER=%q CVAL_RUNNER_WORKTREE=%q CVAL_BATCH_SIZE=%q CVAL_PLAN_LIMIT=%q CVAL_DAYS_THRESHOLD=%q CVAL_NODE_COOLDOWN_SECONDS=%q CVAL_NODE_COOLDOWN_STATE_FILE=%q CVAL_NODE_COOLDOWN_HELPER=%q CVAL_PENDING_START_TIMEOUT_SECONDS=%q CVAL_NAMESPACE=%q CVAL_JOB_PREFIX=%q CVAL_LOOP_SLEEP_SECONDS=%q CVAL_WATCH_TIMEOUT_SECONDS=%q CVAL_WATCH_POLL_SECONDS=%q CVAL_KUBECTL_TIMEOUT_SECONDS=%q CVAL_GIT_BRANCH=%q CVAL_GIT_REF=%q bash %q run-loop' \
-        "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$LOG_DIR" "$SESSION_DIR" "$STATE_HELPER" "$RUNNER_WORKTREE" "$BATCH_SIZE" "$PLAN_LIMIT_SETTING" "$DAYS_THRESHOLD" "$NODE_COOLDOWN_SECONDS" "$NODE_COOLDOWN_STATE_FILE" "$NODE_COOLDOWN_HELPER" "$PENDING_START_TIMEOUT_SECONDS" "$NAMESPACE" "$JOB_PREFIX" "$LOOP_SLEEP_SECONDS" "$WATCH_TIMEOUT_SECONDS" "$WATCH_POLL_SECONDS" "$KUBECTL_TIMEOUT_SECONDS" "$GIT_BRANCH_SETTING" "$EXPLICIT_GIT_REF" "$SCRIPT_PATH"
+        'CVAL_LIVE_CONFIRM=%q CVAL_PRUNE_CONFIRM=%q CVAL_CONFIG=%q CVAL_SOURCE_REPO=%q CVAL_SESSION_DIR=%q bash %q run-loop' \
+        "$LIVE_CONFIRM" "$PRUNE_CONFIRM" "$CONFIG_PATH" "$SOURCE_REPO" "$SESSION_DIR" "$SCRIPT_PATH"
 
     local tmux_body
     printf -v tmux_body \
@@ -1854,17 +1845,19 @@ case "$COMMAND" in
         resolve_latest_start_ref
         start_session
         ;;
-    stop) stop_session ;;
-    attach) exec tmux attach -t "$SESSION_NAME" ;;
-    status) show_status ;;
+    stop) load_operational_settings; stop_session ;;
+    attach) load_operational_settings; exec tmux attach -t "$SESSION_NAME" ;;
+    status) load_operational_settings; show_status ;;
     run-once)
         load_operational_settings
         validate_runtime_settings
+        [[ -n "$SESSION_DIR" ]] || resolve_latest_start_ref
         run_once
         ;;
     run-loop)
         load_operational_settings
         validate_runtime_settings
+        [[ -n "$SESSION_DIR" ]] || resolve_latest_start_ref
         run_loop
         ;;
     -h|--help|help) usage ;;

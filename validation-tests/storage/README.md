@@ -1,12 +1,12 @@
 # Storage validation test
 
-Runs six checked-in FIO profiles against the shared validation PVC. Setup
+Runs six FIO profiles from [test_config.toml](test_config.toml) against the shared validation PVC. Setup
 verifies `fio`; `run-test.sh` executes the workload and retains each JSON result
 under `STORAGE_OUTPUT_DIR`.
 
 For a passing phase, `db-update.sh` validates all six artifacts and writes one
 raw `metadata/test-storage.db` row containing IOPS and bandwidth measurements.
-The plugin validates `install_fio` and provides read-only raw export rows.
+The plugin validates explicit setup and FIO settings and provides read-only raw export rows.
 
 Troubleshooting:
 

@@ -14,13 +14,10 @@ import math
 import re
 import tomllib
 from collections.abc import Iterator
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
-
-from cval.validation.builtins import DEFAULT_TEST_REGISTRATIONS
-
 
 TEST_SCHEMA_VERSION = "cval.test.v1"
 PLUGIN_API_VERSION = "cval.plugin.v1"
@@ -91,26 +88,26 @@ class TestMetadata:
     entrypoint: str
     setup: str
     timeout_seconds: int
-    continue_on_failure: bool = True
+    continue_on_failure: bool
 
 
 @dataclass(frozen=True)
 class TestRequirements:
     """Minimum shared job resources required by one validation test."""
 
-    cpu: str = "0"
-    memory: str = "0"
-    gpu_count: int = 0
-    rdma_count: int = 0
-    shared_memory: str = "0"
-    read_sysfs: bool = False
+    cpu: str
+    memory: str
+    gpu_count: int
+    rdma_count: int
+    shared_memory: str
+    read_sysfs: bool
 
 
 @dataclass(frozen=True)
 class TestArtifacts:
     """Test artifact settings used by the generic runner."""
 
-    summary_filename: str = "summary.json"
+    summary_filename: str
 
 
 @dataclass(frozen=True)
@@ -120,7 +117,7 @@ class TestPlugin:
     adapter: str
     api_version: str
     capabilities: tuple[str, ...]
-    support_files: tuple[str, ...] = ()
+    support_files: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -131,7 +128,7 @@ class ValidationTestDefinition:
     metadata: TestMetadata
     requirements: TestRequirements
     artifacts: TestArtifacts
-    settings: Mapping[str, Any] = field(default_factory=dict)
+    settings: Mapping[str, Any]
     plugin: TestPlugin | None = None
 
 
@@ -207,30 +204,19 @@ def load_test_registry(
     tests_section: Mapping[str, Any] | None,
     *,
     repo_root: Path,
-    include_defaults: bool = True,
+    include_defaults: bool = False,
     require_enabled: bool = True,
 ) -> ValidationTestRegistry:
-    """Compose global registrations and load all referenced test descriptors.
+    """Load only explicit registrations and complete test descriptors."""
 
-    ``tests_section`` contains only activation and config path values.  Known
-    built-ins are merged with defaults to preserve partial global config
-    overrides during the compatibility window.
-    """
-
-    if tests_section is None:
-        supplied: dict[str, Any] = {}
-    elif isinstance(tests_section, Mapping):
+    if include_defaults:
+        raise ValueError("Default test registrations are not supported; declare every test in TOML")
+    if isinstance(tests_section, Mapping):
         supplied = dict(tests_section)
     else:
         raise ValueError("Config section [tests] must be a table")
 
     registrations: dict[str, dict[str, object]] = {}
-    if include_defaults:
-        registrations = {
-            test_id: dict(values)
-            for test_id, values in DEFAULT_TEST_REGISTRATIONS.items()
-        }
-
     for test_id, raw in supplied.items():
         _validate_test_id(test_id)
         if not isinstance(raw, Mapping):
@@ -354,7 +340,7 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
     display_name = _strict_str(test.get("display_name"), "test.display_name").strip()
     if not 1 <= len(display_name) <= 100:
         raise ValueError("test.display_name must contain 1 to 100 characters")
-    description = _optional_str(test, "description", "")
+    description = _strict_str(test.get("description"), "test.description")
     if len(description) > 500:
         raise ValueError("test.description must not exceed 500 characters")
     order = _strict_int(test.get("order"), "test.order")
@@ -363,7 +349,7 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
     timeout_seconds = _strict_int(test.get("timeout_seconds"), "test.timeout_seconds")
     if timeout_seconds <= 0:
         raise ValueError("test.timeout_seconds must be positive")
-    continue_on_failure = _optional_bool(test, "continue_on_failure", True)
+    continue_on_failure = _strict_bool(test.get("continue_on_failure"), "test.continue_on_failure")
     if not continue_on_failure:
         raise ValueError("cval.test.v1 requires test.continue_on_failure=true")
 
@@ -382,29 +368,29 @@ def load_test_definition(path: Path, *, expected_id: str) -> ValidationTestDefin
         require_file=True,
     )
 
-    requirements_raw = _optional_table(data, "requirements", path)
+    requirements_raw = _required_table(data, "requirements", path)
     _reject_unknown(
         requirements_raw,
         {"cpu", "memory", "gpu_count", "rdma_count", "shared_memory", "read_sysfs"},
         f"{path} [requirements]",
     )
     requirements = TestRequirements(
-        cpu=_resource_quantity(requirements_raw, "cpu", "0"),
-        memory=_resource_quantity(requirements_raw, "memory", "0"),
-        gpu_count=_non_negative_int(requirements_raw, "gpu_count", 0),
-        rdma_count=_non_negative_int(requirements_raw, "rdma_count", 0),
-        shared_memory=_resource_quantity(requirements_raw, "shared_memory", "0"),
-        read_sysfs=_optional_bool(requirements_raw, "read_sysfs", False),
+        cpu=_resource_quantity(requirements_raw, "cpu"),
+        memory=_resource_quantity(requirements_raw, "memory"),
+        gpu_count=_non_negative_int(requirements_raw, "gpu_count"),
+        rdma_count=_non_negative_int(requirements_raw, "rdma_count"),
+        shared_memory=_resource_quantity(requirements_raw, "shared_memory"),
+        read_sysfs=_strict_bool(requirements_raw.get("read_sysfs"), "requirements.read_sysfs"),
     )
 
-    settings = _optional_table(data, "settings", path)
-    artifacts_raw = _optional_table(data, "artifacts", path)
+    settings = _required_table(data, "settings", path)
+    artifacts_raw = _required_table(data, "artifacts", path)
     _reject_unknown(
         artifacts_raw,
         {"summary_filename"},
         f"{path} [artifacts]",
     )
-    summary_filename = _optional_str(artifacts_raw, "summary_filename", "summary.json")
+    summary_filename = _strict_str(artifacts_raw.get("summary_filename"), "artifacts.summary_filename")
     if Path(summary_filename).name != summary_filename or summary_filename in {"", ".", ".."}:
         raise ValueError("artifacts.summary_filename must be a basename")
     artifacts = TestArtifacts(summary_filename)
@@ -519,7 +505,7 @@ def _parse_plugin(
     if unknown:
         raise ValueError(f"Unknown plugin capabilities: {', '.join(unknown)}")
     support_files = _strict_str_tuple(
-        raw.get("support_files", ()), "plugin.support_files"
+        raw.get("support_files"), "plugin.support_files"
     )
     if len(set(support_files)) != len(support_files):
         raise ValueError("plugin.support_files must not contain duplicates")
@@ -566,13 +552,6 @@ def _required_table(data: Mapping[str, Any], name: str, path: Path) -> Mapping[s
     return value
 
 
-def _optional_table(data: Mapping[str, Any], name: str, path: Path) -> Mapping[str, Any]:
-    value = data.get(name, {})
-    if not isinstance(value, Mapping):
-        raise ValueError(f"[{name}] in {path} must be a table")
-    return value
-
-
 def _reject_unknown(data: Mapping[str, Any], allowed: set[str], where: str) -> None:
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -585,23 +564,10 @@ def _strict_str(value: Any, field_name: str) -> str:
     return value.strip()
 
 
-def _optional_str(data: Mapping[str, Any], key: str, default: str) -> str:
-    if key not in data:
-        return default
-    value = data[key]
-    if not isinstance(value, str):
-        raise ValueError(f"{key} must be a string")
-    return value.strip()
-
-
 def _strict_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field_name} must be a TOML boolean")
     return value
-
-
-def _optional_bool(data: Mapping[str, Any], key: str, default: bool) -> bool:
-    return default if key not in data else _strict_bool(data[key], key)
 
 
 def _strict_int(value: Any, field_name: str) -> int:
@@ -610,28 +576,11 @@ def _strict_int(value: Any, field_name: str) -> int:
     return value
 
 
-def _optional_int(data: Mapping[str, Any], key: str, default: int) -> int:
-    return default if key not in data else _strict_int(data[key], key)
-
-
-def _non_negative_int(data: Mapping[str, Any], key: str, default: int) -> int:
-    value = _optional_int(data, key, default)
+def _non_negative_int(data: Mapping[str, Any], key: str) -> int:
+    value = _strict_int(data.get(key), key)
     if value < 0:
         raise ValueError(f"{key} must be non-negative")
     return value
-
-
-def _strict_float(value: Any, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError(f"{field_name} must be a number")
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError(f"{field_name} must be finite")
-    return result
-
-
-def _optional_float(data: Mapping[str, Any], key: str, default: float) -> float:
-    return default if key not in data else _strict_float(data[key], key)
 
 
 def _strict_str_tuple(value: Any, field_name: str) -> tuple[str, ...]:
@@ -645,7 +594,7 @@ def _strict_str_tuple(value: Any, field_name: str) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _resource_quantity(data: Mapping[str, Any], key: str, default: str) -> str:
-    value = default if key not in data else _strict_str(data[key], key)
+def _resource_quantity(data: Mapping[str, Any], key: str) -> str:
+    value = _strict_str(data.get(key), key)
     parse_resource_quantity(value)
     return value

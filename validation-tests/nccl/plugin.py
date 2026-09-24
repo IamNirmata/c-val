@@ -21,27 +21,28 @@ class NcclPlugin:
         allowed = {
             "gpu_count", "iterations", "data_size_gb", "ibbw_enabled",
             "ibbw_start_device", "ibbw_end_device", "net", "p2p_disable",
-            "shm_disable", "debug",
+            "shm_disable", "debug", "ibbw_interval_seconds", "ib_sys_root",
         }
         issues = []
+        missing = sorted(allowed - set(settings))
+        if missing:
+            issues.append(ConfigIssue("missing_setting", ", ".join(missing)))
         unknown = sorted(set(settings) - allowed)
         if unknown:
             issues.append(ConfigIssue("unknown_setting", ", ".join(unknown)))
-        for key in ("gpu_count", "iterations", "data_size_gb"):
+        for key in ("gpu_count", "iterations", "data_size_gb", "ibbw_interval_seconds"):
             value = settings.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 issues.append(ConfigIssue(f"invalid_{key}", f"{key} must be positive integer"))
         for key in ("ibbw_enabled", "p2p_disable", "shm_disable"):
             if not isinstance(settings.get(key), bool):
                 issues.append(ConfigIssue(f"invalid_{key}", f"{key} must be boolean"))
-        for key in ("net", "debug"):
+        for key in ("net", "debug", "ib_sys_root"):
             if not isinstance(settings.get(key), str) or not settings.get(key).strip():
                 issues.append(ConfigIssue(f"invalid_{key}", f"{key} must be non-empty string"))
         start = settings.get("ibbw_start_device")
         end = settings.get("ibbw_end_device")
-        if (start is None) != (end is None):
-            issues.append(ConfigIssue("invalid_ibbw_range", "both IBBW bounds are required"))
-        elif start is not None and (
+        if (start, end) != ("", "") and (
             isinstance(start, bool) or isinstance(end, bool)
             or not isinstance(start, int) or not isinstance(end, int)
             or start < 0 or end < start

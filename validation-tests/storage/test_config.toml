@@ -21,6 +21,63 @@ read_sysfs = false
 [settings]
 install_fio = true
 
+[settings.fio]
+ioengine = "libaio"
+direct = 1
+gtod_reduce = 1
+size = "1G"
+time_based = true
+runtime = 30
+group_reporting = true
+
+[settings.workloads.randwrite]
+name = "randwrite"
+rw = "randwrite"
+bs = "4k"
+iodepth = 64
+numjobs = 1
+filename = "randwrite.dat"
+
+[settings.workloads.randread]
+name = "randread"
+rw = "randread"
+bs = "4k"
+iodepth = 64
+numjobs = 1
+filename = "randread.dat"
+
+[settings.workloads.iodepth_write_1file]
+name = "iodepth_write"
+rw = "write"
+bs = "1M"
+iodepth = 128
+numjobs = 1
+filename = "iodepth_write.dat"
+
+[settings.workloads.iodepth_read_1file]
+name = "iodepth_read"
+rw = "read"
+bs = "1M"
+iodepth = 128
+numjobs = 1
+filename = "iodepth_read.dat"
+
+[settings.workloads.numjobs_write_nfiles]
+name = "numjobs_write"
+rw = "write"
+bs = "1M"
+iodepth = 16
+numjobs = 8
+filename_format = "numjobs_write.$jobnum.dat"
+
+[settings.workloads.numjobs_read_nfiles]
+name = "numjobs_read"
+rw = "read"
+bs = "1M"
+iodepth = 16
+numjobs = 8
+filename_format = "numjobs_read.$jobnum.dat"
+
 [artifacts]
 summary_filename = "summary.txt"
 
@@ -28,3 +85,4 @@ summary_filename = "summary.txt"
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
 capabilities = ["config", "export"]
+support_files = []

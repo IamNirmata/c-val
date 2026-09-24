@@ -59,9 +59,9 @@ def get_latest_status_rows(
     pod = pod or active_config.cluster.pvc_access_pod
     namespace = namespace or active_config.cluster.namespace
     db_path = db_path or active_config.storage.validation_db_path
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=active_config)
     status_pod = resolve_status_pod(kubectl, namespace, pod)
-    code = sqlite_readonly_script_prelude() + r'''
+    code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + sqlite_readonly_script_prelude() + r'''
 import json
 import sys
 

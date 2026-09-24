@@ -203,10 +203,10 @@ def default_dl_metric_db_paths(
     }
 
 
-def default_dl_results_root() -> Path:
+def default_dl_results_root(config: CvalConfig | None = None) -> Path:
     """Return the configured DL rank-JSON root."""
 
-    return Path(load_config().runtime.dl_results_root_path)
+    return Path((config or load_config()).runtime.dl_results_root_path)
 
 
 def parse_run_dir(run_dir: Path) -> tuple[str, str, int | None]:
@@ -705,7 +705,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     db_path = safe_writable_file_path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db_path = safe_writable_file_path(db_path)
-    connection = connect_sqlite_file(db_path, mode="rwc", timeout=30)
+    connection = connect_sqlite_file(db_path, mode="rwc")
     try:
         if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
             raise RuntimeError("DL database uses WAL; quiesce writers and migrate to DELETE before ingestion")
@@ -1037,7 +1037,7 @@ def validate_dl_metric_generation(db_paths: dict[str, str | Path]) -> str | None
         if not path.is_file():
             generations[component] = None
             continue
-        with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
+        with closing(connect_sqlite_file(path, mode="ro")) as connection:
             table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='cval_ingest_metadata'"
@@ -1179,7 +1179,7 @@ def ingest_dltest_results(
 ) -> dict[str, Any]:
     """Reconcile DL rank JSONs in bounded batches and return a summary."""
 
-    root = Path(results_root) if results_root is not None else default_dl_results_root()
+    root = Path(results_root) if results_root is not None else default_dl_results_root(config)
     if output_dir is None:
         paths = default_dl_metric_db_paths(config)
         output_label = "configured paths"
@@ -1317,7 +1317,7 @@ def _stored_run_keys(db_path: Path, table_name: str) -> set[str]:
         return set()
     from cval.storage.sqlite_uri import connect_sqlite_file
 
-    with closing(connect_sqlite_file(db_path, mode="ro", timeout=30)) as connection:
+    with closing(connect_sqlite_file(db_path, mode="ro")) as connection:
         table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             (table_name,),
@@ -1358,7 +1358,7 @@ def _initialize_existing_dl_state(
     from cval.storage.sqlite_uri import connect_sqlite_file
 
     for component, path in paths.items():
-        with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
+        with closing(connect_sqlite_file(path, mode="ro")) as connection:
             table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                 (component,),
@@ -1498,7 +1498,7 @@ def _finish_dl_reconciliation(
         if not path.is_file():
             stale[component] = set()
             continue
-        with closing(connect_sqlite_file(path, mode="ro", timeout=30)) as connection:
+        with closing(connect_sqlite_file(path, mode="ro")) as connection:
             stale[component] = _run_keys_in_scope(connection, component, root) - valid_run_keys
     write_standard_db(
         paths["numerical_correctness"],

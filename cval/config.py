@@ -13,9 +13,11 @@ import math
 import os
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, get_type_hints
+
+from cval.storage.retry import RetryPolicy
 
 from cval.validation.registry import (
     ValidationTestRegistry,
@@ -37,136 +39,149 @@ def is_exact_commit(value: str) -> bool:
 
 @dataclass(frozen=True)
 class ClusterConfig:
-    """Cluster-facing defaults used by discovery, status, and submission."""
+    """Explicit cluster settings used by discovery, status, and submission."""
 
-    namespace: str = "gcr-admin"
-    pvc_access_pod: str = "gcr-admin-pvc-access"
-    node_filter: str = "hgx"
-    tolerated_no_schedule_taints: tuple[str, ...] = ("nvidia.com/gpu", "rdma")
+    namespace: str
+    pvc_access_pod: str
+    node_filter: str
+    tolerated_no_schedule_taints: tuple[str, ...]
+    kubectl_timeout_seconds: float
 
 
 @dataclass(frozen=True)
 class SchedulingConfig:
-    """Default prioritization and batching controls."""
+    """Configured prioritization and batching controls."""
 
-    days_threshold: float = 7
-    batch_size: int = 3
-    node_cooldown_seconds: int = 4 * 60 * 60
+    days_threshold: float
+    batch_size: int
+    node_cooldown_seconds: int
 
 
 @dataclass(frozen=True)
 class JobConfig:
-    """Defaults for rendered validation jobs and runtime checkout."""
+    """Configured validation Job and source identity."""
 
-    template_path: Path = field(
-        default_factory=lambda: REPO_ROOT / "ymls" / "specific-node-job.yml"
-    )
-    job_prefix: str = "cval"
-    image_name: str = ""
-    git_repo: str = "https://github.com/msr-central/c-val.git"
-    git_ref: str = "0" * 40
-    source_configmap: str = ""
-    source_sha256: str = ""
+    template_path: Path
+    job_prefix: str
+    image_name: str
+    git_repo: str
+    git_ref: str
+    source_configmap: str
+    source_sha256: str
 
 
 @dataclass(frozen=True)
 class PolicyConfig:
     """Safety policy defaults for real Kubernetes job creation."""
 
-    namespace_allowlist: tuple[str, ...] = ("gcr-admin",)
-    max_batch_size: int = 5
-    confirmation_phrase: str = "submit"
+    namespace_allowlist: tuple[str, ...]
+    max_batch_size: int
+    confirmation_phrase: str
 
 
 @dataclass(frozen=True)
 class MonitoringConfig:
-    """Polling defaults for read-only job monitoring."""
+    """Configured deadlines for monitoring and ingestion."""
 
-    timeout_seconds: float = 6000
-    poll_interval_seconds: float = 60
-    pending_start_timeout_seconds: int = 1200
+    timeout_seconds: float
+    poll_interval_seconds: float
+    pending_start_timeout_seconds: int
+    ingestion_grace_seconds: float
+    validation_poll_seconds: float
+    validation_pending_seconds: float
+    log_tail_lines: int
+
+
+@dataclass(frozen=True)
+class LiveConfig:
+    """Main-TOML settings for the persistent controller."""
+
+    session_name: str
+    log_dir: str
+    runner_worktree: str
+    loop_sleep_seconds: int
+    plan_limit: str
+    git_branch: str
+
+
+@dataclass(frozen=True)
+class MaintenanceConfig:
+    """Explicit bounds for separately approved maintenance commands."""
+
+    backup_safety_margin_percent: float
+    inventory_entry_limit: int
+    inventory_seconds_per_entry: float
+    journal_backup_timeout_seconds: int
+    staging_directory: str
 
 
 @dataclass(frozen=True)
 class StorageConfig:
     """SQLite metadata paths on the shared validation PVC."""
 
-    validation_db_path: str = "/data/continuous_validation/metadata/validation.db"
-    storage_db_path: str = "/data/continuous_validation/metadata/test-storage.db"
-    nccl_db_path: str = "/data/continuous_validation/metadata/test-nccl.db"
-    dl_numerical_db_path: str = (
-        "/data/continuous_validation/metadata/dltest_numerical_correctness.db"
-    )
-    dl_compute_db_path: str = (
-        "/data/continuous_validation/metadata/dltest_compute_performance.db"
-    )
-    dl_collective_db_path: str = (
-        "/data/continuous_validation/metadata/dltest_collective_performance.db"
-    )
-    dl_overlap_db_path: str = (
-        "/data/continuous_validation/metadata/dltest_overlap_performance.db"
-    )
+    validation_db_path: str
+    storage_db_path: str
+    nccl_db_path: str
+    dl_numerical_db_path: str
+    dl_compute_db_path: str
+    dl_collective_db_path: str
+    dl_overlap_db_path: str
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     """In-pod runtime paths used by validation scripts."""
 
-    repo_dir: str = "/workspace/c-val"
-    validation_root: str = "/data/continuous_validation"
-    validation_tests_dir: str = "/workspace/c-val/validation-tests"
-    dl_unit_test_dir: str = "/data/continuous_validation/deep-learning-unit-test-main"
-    dl_results_root_path: str = (
-        "/data/continuous_validation/logs/validation_tests/dltest/runs"
-    )
+    repo_dir: str
+    validation_root: str
+    validation_tests_dir: str
+    dl_unit_test_dir: str
+    dl_results_root_path: str
 
 
 @dataclass(frozen=True)
 class TestsConfig:
     """Dynamic repository-local validation test registry."""
 
-    registry: ValidationTestRegistry = field(default_factory=ValidationTestRegistry)
+    registry: ValidationTestRegistry
 
 
 @dataclass(frozen=True)
 class JobTemplateConfig:
     """Values injected into the Volcano job template."""
 
-    namespace: str = "gcr-admin"
-    queue: str = "gcr-admin"
-    app_label: str = "hari-gcr-bonete-test"
-    pvc_claim: str = "pvc-vast-gcr-admin"
-    container_image: str = "nvcr.io/nvidia/pytorch:25.11-py3"
-    shared_memory_size: str = "256Gi"
-    gpu_resource_name: str = "nvidia.com/gpu"
-    gpu_count: str = "8"
-    cpu: str = "100"
-    memory: str = "1500Gi"
-    rdma_resource_name: str = "rdma/rdma_shared_device_a"
-    rdma_count: str = "1"
-    rdma_toleration_key: str = "rdma"
-    gpu_toleration_key: str = "nvidia.com/gpu"
+    namespace: str
+    queue: str
+    app_label: str
+    pvc_claim: str
+    container_image: str
+    shared_memory_size: str
+    gpu_resource_name: str
+    gpu_count: str
+    cpu: str
+    memory: str
+    rdma_resource_name: str
+    rdma_count: str
+    rdma_toleration_key: str
+    gpu_toleration_key: str
 
 
 @dataclass(frozen=True)
 class CvalConfig:
     """Complete c-val configuration tree."""
 
-    cluster: ClusterConfig = field(default_factory=ClusterConfig)
-    scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
-    job: JobConfig = field(default_factory=JobConfig)
-    policy: PolicyConfig = field(default_factory=PolicyConfig)
-    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
-    storage: StorageConfig = field(default_factory=StorageConfig)
-    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    tests: TestsConfig = field(default_factory=TestsConfig)
-    job_template: JobTemplateConfig = field(default_factory=JobTemplateConfig)
-
-
-def default_config() -> CvalConfig:
-    """Return built-in defaults used when no config file is available."""
-
-    return CvalConfig()
+    cluster: ClusterConfig
+    scheduling: SchedulingConfig
+    job: JobConfig
+    policy: PolicyConfig
+    monitoring: MonitoringConfig
+    storage: StorageConfig
+    runtime: RuntimeConfig
+    tests: TestsConfig
+    job_template: JobTemplateConfig
+    sqlite_retry: RetryPolicy
+    live: LiveConfig
+    maintenance: MaintenanceConfig
 
 
 def load_config(
@@ -174,14 +189,13 @@ def load_config(
     *,
     validate_plugins: bool = True,
 ) -> CvalConfig:
-    """Load c-val config from TOML, falling back to built-in defaults."""
+    """Load a complete c-val TOML configuration without setting defaults."""
 
+    snapshot = os.environ.get("CVAL_CONFIG_SNAPSHOT_B64")
+    if snapshot:
+        runtime_root = os.environ.get("CVAL_TEST_REPO_ROOT") or os.environ.get("CVAL_REPO_DIR")
+        return load_config_snapshot(snapshot, repo_root=Path(runtime_root) if runtime_root else None)
     config_path = _config_path(path)
-    if not config_path.exists():
-        if path is not None or os.environ.get("CVAL_CONFIG"):
-            raise FileNotFoundError(f"c-val config file not found: {config_path}")
-        return _build_config({}, validate_plugins=validate_plugins)
-
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("c-val config must be a TOML table")
@@ -201,6 +215,9 @@ def config_to_dict(config: CvalConfig) -> dict[str, Any]:
         "runtime": asdict(config.runtime),
         "tests": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
+        "sqlite_retry": asdict(config.sqlite_retry),
+        "live": asdict(config.live),
+        "maintenance": asdict(config.maintenance),
     }
 
 
@@ -229,6 +246,9 @@ def encode_config_snapshot(config: CvalConfig) -> str:
         },
         "test_definitions": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
+        "sqlite_retry": asdict(config.sqlite_retry),
+        "live": asdict(config.live),
+        "maintenance": asdict(config.maintenance),
     }
     payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(payload).decode("ascii")
@@ -259,6 +279,9 @@ def load_config_snapshot(
         "tests",
         "test_definitions",
         "job_template",
+        "sqlite_retry",
+        "live",
+        "maintenance",
     }
     unknown = sorted(set(data) - allowed)
     if unknown:
@@ -274,7 +297,6 @@ def load_config_snapshot(
     config = _build_config(
         data,
         repo_root=repo_root,
-        include_test_defaults=False,
     )
     actual_definitions_json = json.dumps(
         config.tests.registry.to_dict(), sort_keys=True, separators=(",", ":")
@@ -317,160 +339,20 @@ def _build_config(
     data: dict[str, Any],
     *,
     repo_root: Path | None = None,
-    include_test_defaults: bool = True,
     validate_plugins: bool = True,
 ) -> CvalConfig:
-    defaults = default_config()
-    cluster = _section(data, "cluster")
-    scheduling = _section(data, "scheduling")
-    job = _section(data, "job")
-    policy = _section(data, "policy")
-    monitoring = _section(data, "monitoring")
-    storage = _section(data, "storage")
-    runtime = _section(data, "runtime")
-    tests = _section(data, "tests")
-    test_registry = load_test_registry(
-        tests,
-        repo_root=repo_root or REPO_ROOT,
-        include_defaults=include_test_defaults,
-    )
-    job_template = _section(data, "job_template")
-    config = CvalConfig(
-        cluster=ClusterConfig(
-            namespace=_str(cluster, "namespace", defaults.cluster.namespace),
-            pvc_access_pod=_str(cluster, "pvc_access_pod", defaults.cluster.pvc_access_pod),
-            node_filter=_str(cluster, "node_filter", defaults.cluster.node_filter),
-            tolerated_no_schedule_taints=_str_tuple(
-                cluster,
-                "tolerated_no_schedule_taints",
-                defaults.cluster.tolerated_no_schedule_taints,
-            ),
-        ),
-        scheduling=SchedulingConfig(
-            days_threshold=_float(scheduling, "days_threshold", defaults.scheduling.days_threshold),
-            batch_size=_int(scheduling, "batch_size", defaults.scheduling.batch_size),
-            node_cooldown_seconds=_int(
-                scheduling,
-                "node_cooldown_seconds",
-                defaults.scheduling.node_cooldown_seconds,
-            ),
-        ),
-        job=JobConfig(
-            template_path=_repo_path(job, "template_path", defaults.job.template_path),
-            job_prefix=_str(job, "job_prefix", defaults.job.job_prefix),
-            git_repo=_str(job, "git_repo", defaults.job.git_repo),
-            git_ref=_str(job, "git_ref", defaults.job.git_ref),
-            source_configmap=_str(job, "source_configmap", defaults.job.source_configmap),
-            source_sha256=_str(job, "source_sha256", defaults.job.source_sha256),
-        ),
-        policy=PolicyConfig(
-            namespace_allowlist=_str_tuple(
-                policy,
-                "namespace_allowlist",
-                defaults.policy.namespace_allowlist,
-            ),
-            max_batch_size=_int(policy, "max_batch_size", defaults.policy.max_batch_size),
-            confirmation_phrase=_str(
-                policy,
-                "confirmation_phrase",
-                defaults.policy.confirmation_phrase,
-            ),
-        ),
-        monitoring=MonitoringConfig(
-            timeout_seconds=_float(
-                monitoring,
-                "timeout_seconds",
-                defaults.monitoring.timeout_seconds,
-            ),
-            poll_interval_seconds=_float(
-                monitoring,
-                "poll_interval_seconds",
-                defaults.monitoring.poll_interval_seconds,
-            ),
-            pending_start_timeout_seconds=_int(
-                monitoring,
-                "pending_start_timeout_seconds",
-                defaults.monitoring.pending_start_timeout_seconds,
-            ),
-        ),
-        storage=StorageConfig(
-            validation_db_path=_str(storage, "validation_db_path", defaults.storage.validation_db_path),
-            storage_db_path=_str(storage, "storage_db_path", defaults.storage.storage_db_path),
-            nccl_db_path=_str(storage, "nccl_db_path", defaults.storage.nccl_db_path),
-            dl_numerical_db_path=_str(
-                storage, "dl_numerical_db_path", defaults.storage.dl_numerical_db_path
-            ),
-            dl_compute_db_path=_str(
-                storage, "dl_compute_db_path", defaults.storage.dl_compute_db_path
-            ),
-            dl_collective_db_path=_str(
-                storage, "dl_collective_db_path", defaults.storage.dl_collective_db_path
-            ),
-            dl_overlap_db_path=_str(
-                storage, "dl_overlap_db_path", defaults.storage.dl_overlap_db_path
-            ),
-        ),
-        runtime=RuntimeConfig(
-            repo_dir=_str(runtime, "repo_dir", defaults.runtime.repo_dir),
-            validation_root=_str(runtime, "validation_root", defaults.runtime.validation_root),
-            validation_tests_dir=_str(
-                runtime,
-                "validation_tests_dir",
-                defaults.runtime.validation_tests_dir,
-            ),
-            dl_unit_test_dir=_str(
-                runtime,
-                "dl_unit_test_dir",
-                defaults.runtime.dl_unit_test_dir,
-            ),
-            dl_results_root_path=_str(
-                runtime,
-                "dl_results_root_path",
-                defaults.runtime.dl_results_root_path,
-            ),
-        ),
-        tests=TestsConfig(registry=test_registry),
-        job_template=JobTemplateConfig(
-            namespace=_str(job_template, "namespace", defaults.job_template.namespace),
-            queue=_str(job_template, "queue", defaults.job_template.queue),
-            app_label=_str(job_template, "app_label", defaults.job_template.app_label),
-            pvc_claim=_str(job_template, "pvc_claim", defaults.job_template.pvc_claim),
-            container_image=_str(
-                job_template,
-                "container_image",
-                defaults.job_template.container_image,
-            ),
-            shared_memory_size=_str(
-                job_template,
-                "shared_memory_size",
-                defaults.job_template.shared_memory_size,
-            ),
-            gpu_resource_name=_str(
-                job_template,
-                "gpu_resource_name",
-                defaults.job_template.gpu_resource_name,
-            ),
-            gpu_count=_str(job_template, "gpu_count", defaults.job_template.gpu_count),
-            cpu=_str(job_template, "cpu", defaults.job_template.cpu),
-            memory=_str(job_template, "memory", defaults.job_template.memory),
-            rdma_resource_name=_str(
-                job_template,
-                "rdma_resource_name",
-                defaults.job_template.rdma_resource_name,
-            ),
-            rdma_count=_str(job_template, "rdma_count", defaults.job_template.rdma_count),
-            rdma_toleration_key=_str(
-                job_template,
-                "rdma_toleration_key",
-                defaults.job_template.rdma_toleration_key,
-            ),
-            gpu_toleration_key=_str(
-                job_template,
-                "gpu_toleration_key",
-                defaults.job_template.gpu_toleration_key,
-            ),
-        ),
-    )
+    root = repo_root or REPO_ROOT
+    section_types = get_type_hints(CvalConfig)
+    _require_keys(data, set(section_types), "configuration")
+    values = {
+        name: _typed_section(data[name], section_type, name, root)
+        for name, section_type in section_types.items()
+        if name != "tests"
+    }
+    values["tests"] = TestsConfig(load_test_registry(
+        _section(data, "tests"), repo_root=root, include_defaults=False,
+    ))
+    config = CvalConfig(**values)
     _validate_config(config, validate_plugins=validate_plugins)
     return config
 
@@ -479,6 +361,45 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     """Reject invalid test settings before rendering or submitting jobs."""
 
     tests = config.tests
+    for section_name in ("cluster", "job", "policy", "storage", "runtime", "job_template", "live", "maintenance"):
+        section = getattr(config, section_name)
+        for item in fields(section):
+            value = getattr(section, item.name)
+            if isinstance(value, str) and not value and (section_name, item.name) not in {
+                ("cluster", "node_filter"), ("job", "source_configmap"), ("job", "source_sha256"),
+            }:
+                raise ValueError(f"{section_name}.{item.name} must not be empty")
+    for name, value in vars(config.storage).items():
+        _absolute_lexical_config_path(value, f"storage.{name}")
+    for name, value in vars(config.runtime).items():
+        _absolute_lexical_config_path(value, f"runtime.{name}")
+    _absolute_lexical_config_path(config.live.runner_worktree, "live.runner_worktree")
+    _absolute_lexical_config_path(config.maintenance.staging_directory, "maintenance.staging_directory")
+    if config.maintenance.backup_safety_margin_percent < 0:
+        raise ValueError("maintenance.backup_safety_margin_percent must be non-negative")
+    if not 1 <= config.maintenance.inventory_entry_limit <= 100000 or not 0 < config.maintenance.inventory_seconds_per_entry <= 60:
+        raise ValueError("Invalid maintenance inventory bounds")
+    if config.maintenance.journal_backup_timeout_seconds <= 0:
+        raise ValueError("maintenance.journal_backup_timeout_seconds must be positive")
+    for name, value in (
+        ("cluster.kubectl_timeout_seconds", config.cluster.kubectl_timeout_seconds),
+        ("monitoring.timeout_seconds", config.monitoring.timeout_seconds),
+        ("monitoring.poll_interval_seconds", config.monitoring.poll_interval_seconds),
+        ("monitoring.validation_poll_seconds", config.monitoring.validation_poll_seconds),
+        ("monitoring.validation_pending_seconds", config.monitoring.validation_pending_seconds),
+        ("monitoring.log_tail_lines", config.monitoring.log_tail_lines),
+        ("live.loop_sleep_seconds", config.live.loop_sleep_seconds),
+        ("scheduling.batch_size", config.scheduling.batch_size),
+        ("policy.max_batch_size", config.policy.max_batch_size),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if config.scheduling.days_threshold < 0:
+        raise ValueError("scheduling.days_threshold must be non-negative")
+    if config.cluster.namespace != config.job_template.namespace:
+        raise ValueError("cluster.namespace must match job_template.namespace")
+    if config.live.plan_limit != "all" and (not config.live.plan_limit.isdigit() or int(config.live.plan_limit) <= 0):
+        raise ValueError("live.plan_limit must be all or a positive integer string")
     if not tests.registry.enabled:
         raise ValueError("At least one test must be enabled under [tests.*]")
     # Reject reserved/colliding operator-facing names during config loading,
@@ -537,10 +458,12 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     sequential_timeout = sum(
         test.definition.metadata.timeout_seconds for test in tests.registry.enabled
     )
-    if config.monitoring.timeout_seconds < sequential_timeout + 300:
+    if config.monitoring.ingestion_grace_seconds <= 0:
+        raise ValueError("monitoring.ingestion_grace_seconds must be positive")
+    if config.monitoring.timeout_seconds < sequential_timeout + config.monitoring.ingestion_grace_seconds:
         raise ValueError(
             "monitoring.timeout_seconds must cover enabled sequential test "
-            "timeouts plus 300 seconds of ingestion grace"
+            "timeouts plus configured ingestion grace"
         )
 
     # Import lazily to avoid the plugins module's TYPE_CHECKING-only config
@@ -553,68 +476,41 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
 
 
 def _section(data: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = data.get(name, {})
+    value = data[name]
     if not isinstance(value, Mapping):
         raise ValueError(f"Config section [{name}] must be a table")
     return dict(value)
 
 
-def _reject_section_keys(
-    section: Mapping[str, Any],
-    allowed: set[str],
-    name: str,
-) -> None:
-    unknown = sorted(set(section) - allowed)
-    if unknown:
-        raise ValueError(
-            f"Unknown value(s) under [{name}]: {', '.join(unknown)}"
-        )
+def _require_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
+    missing = sorted(expected - set(value))
+    unknown = sorted(set(value) - expected)
+    if missing or unknown:
+        raise ValueError(f"{name}: missing keys {missing}; unknown keys {unknown}")
 
 
-def _str(section: dict[str, Any], key: str, default: str) -> str:
-    return str(section.get(key, default))
-
-
-def _int(section: dict[str, Any], key: str, default: int) -> int:
-    value = section.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{key} must be an integer")
-    return value
-
-
-def _float(section: dict[str, Any], key: str, default: float) -> float:
-    value = section.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError(f"{key} must be a number")
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError(f"{key} must be finite")
-    return result
-
-
-def _strict_config_bool(
-    section: dict[str, Any],
-    key: str,
-    default: bool,
-) -> bool:
-    value = section.get(key, default)
-    if not isinstance(value, bool):
-        raise ValueError(f"Config value {key!r} must be a TOML boolean")
-    return value
-
-
-def _str_tuple(section: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
-    value = section.get(key, default)
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, list | tuple):
-        return tuple(str(item) for item in value)
-    raise ValueError(f"Config value {key!r} must be a string or list of strings")
-
-
-def _repo_path(section: dict[str, Any], key: str, default: Path) -> Path:
-    value = section.get(key)
-    if value is None:
-        return default
-    path = Path(str(value)).expanduser()
-    return path if path.is_absolute() else REPO_ROOT / path
+def _typed_section(value: Any, section_type: type, name: str, root: Path):
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Config section [{name}] must be a table")
+    types = get_type_hints(section_type)
+    _require_keys(value, {item.name for item in fields(section_type)}, name)
+    converted = {}
+    for key, kind in types.items():
+        item = value[key]
+        if kind is Path:
+            if not isinstance(item, str) or not item:
+                raise ValueError(f"{name}.{key} must be a nonempty path string")
+            path = Path(item).expanduser()
+            item = path if path.is_absolute() else root / path
+        elif kind == tuple[str, ...]:
+            if not isinstance(item, (list, tuple)) or not all(isinstance(entry, str) for entry in item):
+                raise ValueError(f"{name}.{key} must be a list of strings")
+            item = tuple(item)
+        elif kind is float:
+            if type(item) not in (int, float) or not math.isfinite(item):
+                raise ValueError(f"{name}.{key} must be a finite number")
+            item = float(item)
+        elif type(item) is not kind:
+            raise ValueError(f"{name}.{key} must be {kind.__name__}")
+        converted[key] = item
+    return section_type(**converted)

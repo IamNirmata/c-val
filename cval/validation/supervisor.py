@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, Mapping, Sequence
 
-from cval.config import load_config_snapshot
+from cval.config import CvalConfig, load_config_snapshot
 from cval.validation.builtins import BUILTIN_TEST_IDS
 from cval.validation.path_preflight import SAFE_SEGMENT, _registry_test_ids
 from cval.validation.results import (
@@ -22,7 +22,7 @@ from cval.validation.results import (
     load_validation_result,
     validation_result_digest,
 )
-from cval.validation.runtime import effective_config_digest
+from cval.validation.runtime import build_runtime_environment, effective_config_digest
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(
@@ -404,6 +404,15 @@ def supervise_validation_run(
     missing = [name for name in required if not runtime_env.get(name)]
     if missing:
         raise ValueError("Missing secure supervisor environment: " + ", ".join(missing))
+    config = load_config_snapshot(
+        runtime_env["CVAL_CONFIG_SNAPSHOT_B64"],
+        repo_root=Path(runtime_env["CVAL_REPO_DIR"]),
+    )
+    for name, expected in build_runtime_environment(config).items():
+        if runtime_env.get(name) != expected:
+            raise ValueError(f"{name} disagrees with the immutable config snapshot")
+    if str(validation_tests_dir) != config.runtime.validation_tests_dir:
+        raise ValueError("Validation test directory disagrees with the config snapshot")
     layout = reserve_secure_run_layout(
         runtime_env["CVAL_VALIDATION_ROOT"],
         runtime_env["GCRNODE"],
@@ -430,7 +439,7 @@ def supervise_validation_run(
             if not existing_pythonpath
             else f"{repo_dir}{os.pathsep}{existing_pythonpath}"
         )
-    _add_builtin_compatibility_paths(runtime_env, layout)
+    _add_builtin_compatibility_paths(runtime_env, layout, config)
     stdout = stdout or sys.stdout.buffer
     stderr = stderr or sys.stderr.buffer
     previous_handlers: dict[signal.Signals, object] = {}
@@ -655,7 +664,7 @@ def _fd_path(descriptor: int) -> str:
 
 
 def _add_builtin_compatibility_paths(
-    environment: dict[str, str], layout: SecureRunLayout
+    environment: dict[str, str], layout: SecureRunLayout, config: CvalConfig
 ) -> None:
     node = environment["GCRNODE"]
     run_id = environment["CVAL_RUN_ID"]
@@ -664,6 +673,7 @@ def _add_builtin_compatibility_paths(
         if test_id not in BUILTIN_TEST_IDS:
             continue
         prefix = test_id.upper()
+        summary_name = config.tests.registry.require(test_id).definition.artifacts.summary_filename
         canonical_run = canonical_root / "logs/validation_tests" / test_id / "runs" / node / run_id
         environment[f"{prefix}_RUN_DIR"] = _fd_path(run_fd)
         environment[f"{prefix}_OUTPUT_DIR"] = _fd_path(artifacts_fd)
@@ -671,14 +681,14 @@ def _add_builtin_compatibility_paths(
         environment[f"CVAL_CANONICAL_{prefix}_OUTPUT_DIR"] = str(canonical_run / "artifacts")
         if test_id == "storage":
             environment["STORAGE_LOG_FILE"] = f"{_fd_path(log_fd)}/stdout.log"
-            environment["STORAGE_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/summary.txt"
+            environment["STORAGE_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/{summary_name}"
         elif test_id == "nccl":
             environment["NCCL_LOG_FILE"] = f"{_fd_path(log_fd)}/workload.log"
-            environment["NCCL_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/summary.json"
+            environment["NCCL_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/{summary_name}"
             environment["CVAL_CANONICAL_NCCL_SUMMARY_FILE"] = str(
-                canonical_run / "summary.json"
+                canonical_run / summary_name
             )
-            timestamp = environment.get("GCRTIME", "unknown")
+            timestamp = environment["GCRTIME"]
             environment["NCCL_IBBW_LOG_FILE"] = (
                 f"{_fd_path(artifacts_fd)}/ibbw-{node}-{timestamp}.log"
             )
@@ -687,7 +697,7 @@ def _add_builtin_compatibility_paths(
             )
         else:
             environment["DLTEST_LOG_FILE"] = f"{_fd_path(log_fd)}/workload.log"
-            environment["DLTEST_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/summary.json"
+            environment["DLTEST_SUMMARY_FILE"] = f"{_fd_path(run_fd)}/{summary_name}"
 
 
 def _run_child(

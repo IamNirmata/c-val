@@ -86,7 +86,7 @@ def connect_sqlite_file(
     path: str | Path,
     *,
     mode: str,
-    timeout: float = 30,
+    timeout: float | None = None,
     expected_identity: SQLiteFileIdentity | None = None,
     **kwargs: Any,
 ) -> sqlite3.Connection:
@@ -94,6 +94,10 @@ def connect_sqlite_file(
 
     if mode not in {"ro", "rw", "rwc"}:
         raise ValueError(f"Unsupported SQLite filesystem mode: {mode!r}")
+    if timeout is None:
+        from cval.config import load_config
+
+        timeout = load_config().sqlite_retry.timeout_seconds
     must_exist = mode in {"ro", "rw"}
     canonical = canonical_sqlite_path(path, must_exist=must_exist)
     before = SQLiteFileIdentity.capture(canonical) if canonical.exists() else None
@@ -210,7 +214,8 @@ def connect_sqlite_readonly(raw_path):
     if not stat.S_ISREG(before.st_mode):
         raise RuntimeError("SQLite database is not a regular file")
     uri = "file:" + quote(str(canonical), safe="/") + "?mode=ro"
-    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    connection = sqlite3.connect(uri, uri=True, timeout=CVAL_SQLITE_TIMEOUT)
+    connection.execute("PRAGMA query_only=ON")
     try:
         mains = [
             row for row in connection.execute("PRAGMA database_list").fetchall()

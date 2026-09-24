@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_args.config,
                 validate_plugins=not descriptor_only,
             )
-            if config_args.config is not None or not snapshot
+            if not snapshot
             else load_config_snapshot(
                 snapshot,
                 repo_root=Path(runtime_repo_root) if runtime_repo_root else None,
@@ -87,12 +87,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser(config)
     args = parser.parse_args(raw_argv)
     args.cval_config = config
+    settings = {
+        "node_filter": config.cluster.node_filter,
+        "threshold_days": config.scheduling.days_threshold,
+        "timeout_seconds": config.monitoring.timeout_seconds,
+        "poll_interval": config.monitoring.validation_poll_seconds,
+        "poll_interval_seconds": config.monitoring.poll_interval_seconds,
+        "pending_timeout": config.monitoring.validation_pending_seconds,
+    }
+    if args.command == "run":
+        settings["batch_size"] = config.scheduling.batch_size
+    for name, expected in settings.items():
+        if hasattr(args, name) and getattr(args, name) != expected:
+            parser.error(f"--{name.replace('_', '-')} disagrees with TOML; change the reviewed config")
+    os.environ["CVAL_CONFIG_SNAPSHOT_B64"] = encode_config_snapshot(config)
     try:
         if args.command.startswith("db-"):
-            from cval.storage.retry import load_retry_policy, retry_sqlite
+            from cval.storage.retry import retry_sqlite
 
             return retry_sqlite(
-                lambda: args.handler(args), load_retry_policy(config_args.config)
+                lambda: args.handler(args), config.sqlite_retry
             )
         return args.handler(args)
     except BrokenPipeError:
@@ -204,7 +218,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "--timestamp", type=int, help="Override the run timestamp (defaults to now)"
     )
     validate.add_argument(
-        "--poll-interval", type=float, default=3.0, help="Live status poll seconds"
+        "--poll-interval", type=float, default=active_config.monitoring.validation_poll_seconds, help="Live status poll seconds"
     )
     validate.add_argument(
         "--timeout-seconds",
@@ -215,7 +229,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     validate.add_argument(
         "--pending-timeout",
         type=float,
-        default=600.0,
+        default=active_config.monitoring.validation_pending_seconds,
         help="Warn if the job is still Pending after N seconds (it stays queued)",
     )
     validate.add_argument("--output", choices=["table", "json"], default="table")
@@ -370,7 +384,7 @@ def handle_nodes(args: argparse.Namespace) -> int:
     """Run read-only GPU node discovery and print table or JSON output."""
 
     if args.inventory_only:
-        names = discover_gpu_node_names(node_name_filter=args.node_filter)
+        names = discover_gpu_node_names(node_name_filter=args.node_filter, config=args.cval_config)
         if args.output == "json":
             print(json.dumps({"nodes": names, "node_count": len(names)}, indent=2))
         else:
@@ -399,7 +413,7 @@ def handle_nodes(args: argparse.Namespace) -> int:
             )
         return 0
 
-    nodes, totals = discover_free_nodes(node_name_filter=args.node_filter)
+    nodes, totals = discover_free_nodes(node_name_filter=args.node_filter, config=args.cval_config)
     if args.output == "json":
         # JSON output is meant for Hermes, scripts, and tests.
         print(
@@ -618,6 +632,7 @@ def handle_run(args: argparse.Namespace) -> int:
     )
     result = submit_workflow_plan(
         plan,
+        config=config,
         namespace=config.cluster.namespace,
         policy=policy,
         submit=args.submit,
@@ -641,6 +656,7 @@ def handle_jobs(args: argparse.Namespace) -> int:
     if args.watch:
         jobs = monitor_jobs_until_terminal(
             _parse_csv(args.jobs),
+            config=args.cval_config,
             namespace=args.cval_config.cluster.namespace,
             timeout_seconds=args.timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
@@ -658,7 +674,7 @@ def handle_jobs(args: argparse.Namespace) -> int:
         return 0
 
     phases = get_job_phases(
-        _parse_csv(args.jobs), namespace=args.cval_config.cluster.namespace
+        _parse_csv(args.jobs), namespace=args.cval_config.cluster.namespace, config=args.cval_config
     )
     if args.output == "json":
         print(json.dumps([asdict(phase) for phase in phases], indent=2))
@@ -989,7 +1005,7 @@ def _load_plan_inputs(args: argparse.Namespace) -> tuple[list[str], dict[str, in
         free_nodes = _parse_csv(args.free_nodes)
     else:
         # No explicit nodes means live read-only discovery is part of the plan.
-        nodes, _ = discover_free_nodes(node_name_filter=args.node_filter)
+        nodes, _ = discover_free_nodes(node_name_filter=args.node_filter, config=args.cval_config)
         free_nodes = fully_free_node_names(nodes)
 
     return free_nodes, db_status

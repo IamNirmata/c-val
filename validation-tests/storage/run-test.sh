@@ -5,21 +5,12 @@ set -euo pipefail
 # job writes raw JSON; the summary extracts IOPS and bandwidth for operators and
 # metric ingestion.
 
-CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
-CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
-CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
+CVAL_REPO_DIR=${CVAL_REPO_DIR:?Missing configured CVAL_REPO_DIR}
+CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:?Missing configured validation root}
+CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:?Missing configured tests directory}
+: "${GCRNODE:?Missing assigned node}" "${GCRTIME:?Missing run timestamp}"
 
-if [[ -z "${GCRNODE:-}" ]]; then
-    echo "WARNING: GCRNODE is not set. Using 'unknown_node'"
-    GCRNODE="unknown_node"
-fi
-
-if [[ -z "${GCRTIME:-}" ]]; then
-    GCRTIME=$(TZ=America/Los_Angeles date +%Y%m%d_%H%M%S)
-    echo "WARNING: GCRTIME is not set. Generated timestamp: $GCRTIME"
-fi
-
-JOB_DIR="$CVAL_VALIDATION_TESTS_DIR/storage/fio_jobs"
+: "${CVAL_STORAGE_SETTINGS_JSON:?Missing storage TOML settings}"
 CVAL_RUN_ID=${CVAL_RUN_ID:-$GCRNODE-$GCRTIME}
 STORAGE_RUN_DIR=${STORAGE_RUN_DIR:-\
 $CVAL_VALIDATION_ROOT/logs/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID}
@@ -37,14 +28,10 @@ echo "==========================================================================
 echo " STORAGE VALIDATION SUITE"
 echo " Node:       $GCRNODE"
 echo " Time:       $GCRTIME"
-echo " Job Source: $JOB_DIR"
+echo " Job Source: $CVAL_TEST_CONFIG"
 echo " Output Dir: $STORAGE_OUTPUT_DIR"
 echo "================================================================================"
 
-if [[ ! -d "$JOB_DIR" ]]; then
-    echo "CRITICAL ERROR: FIO jobs directory not found at $JOB_DIR" >&2
-    exit 1
-fi
 if ! command -v fio >/dev/null 2>&1; then
     echo "CRITICAL ERROR: fio is not installed; run storage/setup.sh first" >&2
     exit 1
@@ -66,35 +53,23 @@ trap cleanup_fio_data EXIT
 trap 'cleanup_fio_data; exit 130' INT TERM
 
 echo "Starting storage tests..."
-echo "Running random write test... (1/6)"
-fio "$JOB_DIR/randwrite.fio" --output-format=json \
-    --directory="$STORAGE_DATA_DIR" \
-    --output="$STORAGE_OUTPUT_DIR/randwrite.json"
+python3 - "$STORAGE_DATA_DIR" "$STORAGE_OUTPUT_DIR" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-echo "Running random read test... (2/6)"
-fio "$JOB_DIR/randread.fio" --output-format=json \
-    --directory="$STORAGE_DATA_DIR" \
-    --output="$STORAGE_OUTPUT_DIR/randread.json"
-
-echo "Running iodepth write test... (3/6)"
-fio "$JOB_DIR/iodepth_write_1file.fio" --output-format=json \
-    --directory="$STORAGE_DATA_DIR" \
-    --output="$STORAGE_OUTPUT_DIR/iodepth_write_1file.json"
-
-echo "Running iodepth read test... (4/6)"
-fio "$JOB_DIR/iodepth_read_1file.fio" --output-format=json \
-    --directory="$STORAGE_DATA_DIR" \
-    --output="$STORAGE_OUTPUT_DIR/iodepth_read_1file.json"
-
-echo "Running numjobs write test... (5/6)"
-fio "$JOB_DIR/numjobs_write_nfiles.fio" --output-format=json \
-    --directory="$STORAGE_DATA_DIR" \
-    --output="$STORAGE_OUTPUT_DIR/numjobs_write_nfiles.json"
-
-echo "Running numjobs read test... (6/6)"
-fio "$JOB_DIR/numjobs_read_nfiles.fio" --output-format=json \
-    --directory="$STORAGE_DATA_DIR" \
-    --output="$STORAGE_OUTPUT_DIR/numjobs_read_nfiles.json"
+settings = json.loads(os.environ["CVAL_STORAGE_SETTINGS_JSON"])
+for name in ("randwrite", "randread", "iodepth_write_1file", "iodepth_read_1file", "numjobs_write_nfiles", "numjobs_read_nfiles"):
+    options = settings["fio"] | settings["workloads"][name]
+    command = ["fio", f"--name={options.pop('name')}"]
+    for key, value in options.items():
+        command.append(f"--{key}={int(value) if isinstance(value, bool) else value}")
+    command.extend(["--output-format=json", f"--directory={sys.argv[1]}", f"--output={Path(sys.argv[2]) / (name + '.json')}"])
+    print(f"Running storage workload: {name}", flush=True)
+    subprocess.run(command, check=True)
+PY
 echo "Storage tests completed. Results saved in $STORAGE_OUTPUT_DIR"
 
 if ! command -v jq >/dev/null 2>&1; then

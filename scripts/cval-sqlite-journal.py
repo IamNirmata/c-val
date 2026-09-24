@@ -10,12 +10,15 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from cval.config import load_config
 
 COMPONENTS = (
     "numerical_correctness",
@@ -32,7 +35,7 @@ def canonical(path: Path) -> Path:
 
 
 def open_db(path: Path, mode: str):
-    connection = sqlite3.connect(canonical(path).as_uri() + f"?mode={mode}", uri=True, timeout=10)
+    connection = sqlite3.connect(canonical(path).as_uri() + f"?mode={mode}", uri=True, timeout=load_config().sqlite_retry.timeout_seconds)
     if mode == "ro":
         connection.execute("PRAGMA query_only=ON")
     return connection
@@ -208,15 +211,16 @@ def save_manifest(root, payload):
 
 
 def main():
+    config = load_config()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--metadata", type=Path, default=Path("/data/continuous_validation/metadata"))
+    parser.add_argument("--metadata", type=Path, default=Path(config.storage.dl_numerical_db_path).parent)
     parser.add_argument("--backup-root", type=Path)
-    parser.add_argument("--staging-directory", type=Path, default=Path(tempfile.gettempdir()))
+    parser.add_argument("--staging-directory", type=Path, default=Path(config.maintenance.staging_directory))
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--check-backup-source", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--confirm-quiesced")
-    parser.add_argument("--backup-timeout", type=int, default=600)
+    parser.add_argument("--backup-timeout", type=int, default=config.maintenance.journal_backup_timeout_seconds)
     args = parser.parse_args()
     if args.apply and args.check_backup_source:
         parser.error("--check-backup-source is read-only and cannot be combined with --apply")

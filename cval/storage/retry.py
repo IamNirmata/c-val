@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import time
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -16,9 +14,9 @@ Result = TypeVar("Result")
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    attempts: int = 5
-    delay_seconds: float = 2.0
-    timeout_seconds: float = 5.0
+    attempts: int
+    delay_seconds: float
+    timeout_seconds: float
 
     def __post_init__(self) -> None:
         if type(self.attempts) is not int or not 1 <= self.attempts <= 20:
@@ -29,9 +27,9 @@ class RetryPolicy:
 
 
 def load_retry_policy(path: Path | None = None) -> RetryPolicy:
-    path = path or Path(os.environ.get("CVAL_CONFIG", Path(__file__).resolve().parents[2] / "config/cval.toml"))
-    settings = tomllib.loads(path.read_text(encoding="utf-8")).get("sqlite_retry", {})
-    return RetryPolicy(**settings)
+    from cval.config import load_config
+
+    return load_config(path).sqlite_retry
 
 
 def retry_sqlite(

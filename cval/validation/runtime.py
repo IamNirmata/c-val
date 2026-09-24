@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 from cval.config import REPO_ROOT, config_to_dict, encode_config_snapshot
 from cval.validation.builtins import (
     BUILTIN_ENABLE_ENV,
-    BUILTIN_RUNTIME_SETTING_DEFAULTS,
 )
 
 if TYPE_CHECKING:
@@ -37,21 +36,6 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
     storage = registry.get("storage")
     nccl = registry.get("nccl")
     dltest = registry.get("dltest")
-    storage_settings = (
-        storage.definition.settings
-        if storage is not None
-        else BUILTIN_RUNTIME_SETTING_DEFAULTS["storage"]
-    )
-    nccl_settings = (
-        nccl.definition.settings
-        if nccl is not None
-        else BUILTIN_RUNTIME_SETTING_DEFAULTS["nccl"]
-    )
-    dltest_settings = (
-        dltest.definition.settings
-        if dltest is not None
-        else BUILTIN_RUNTIME_SETTING_DEFAULTS["dltest"]
-    )
     registrations = {
         test.id: {
             "enabled": test.enabled,
@@ -61,6 +45,11 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
         for test in registry.tests
     }
     values = {
+        "CVAL_REPO_DIR": config.runtime.repo_dir,
+        "CVAL_VALIDATION_ROOT": config.runtime.validation_root,
+        "CVAL_IMAGE_NAME": config.job.image_name,
+        "CVAL_GIT_REPO": config.job.git_repo,
+        "CVAL_GIT_REF": config.job.git_ref,
         "CVAL_CONFIG_PATH": f"{config.runtime.repo_dir.rstrip('/')}/config/cval.toml",
         "CVAL_CONFIG_DIGEST": effective_config_digest(config),
         "CVAL_CONFIG_SNAPSHOT_B64": encode_config_snapshot(config),
@@ -81,29 +70,30 @@ def build_runtime_environment(config: CvalConfig) -> dict[str, str]:
             f"{config.runtime.validation_root.rstrip('/')}/metadata/.dl-metric-ingest.lock"
         ),
         BUILTIN_ENABLE_ENV["storage"]: _shell_bool(bool(storage and storage.enabled)),
-        "CVAL_STORAGE_INSTALL_FIO": _shell_bool(bool(storage_settings["install_fio"])),
         BUILTIN_ENABLE_ENV["nccl"]: _shell_bool(bool(nccl and nccl.enabled)),
-        "CVAL_NCCL_GPU_COUNT": str(nccl_settings["gpu_count"]),
-        "CVAL_NCCL_ITERATIONS": str(nccl_settings["iterations"]),
-        "CVAL_NCCL_DATA_SIZE_GB": str(nccl_settings["data_size_gb"]),
-        "CVAL_IBBW_ENABLED": _shell_bool(bool(nccl_settings["ibbw_enabled"])),
-        "CVAL_IBBW_START_DEVICE": (
-            "" if nccl_settings.get("ibbw_start_device") is None
-            else str(nccl_settings["ibbw_start_device"])
-        ),
-        "CVAL_IBBW_END_DEVICE": (
-            "" if nccl_settings.get("ibbw_end_device") is None
-            else str(nccl_settings["ibbw_end_device"])
-        ),
-        "CVAL_NCCL_NET": str(nccl_settings["net"]),
-        "CVAL_NCCL_P2P_DISABLE": _shell_bool(bool(nccl_settings["p2p_disable"])),
-        "CVAL_NCCL_SHM_DISABLE": _shell_bool(bool(nccl_settings["shm_disable"])),
-        "CVAL_NCCL_DEBUG": str(nccl_settings["debug"]),
         BUILTIN_ENABLE_ENV["dltest"]: _shell_bool(bool(dltest and dltest.enabled)),
-        "CVAL_DL_GPU_COUNT": str(dltest_settings["gpu_count"]),
-        "CVAL_DL_TEST_PLAN": str(dltest_settings["test_plan"]),
-        "CVAL_DL_ITERATIONS": str(dltest_settings["iterations"]),
     }
+    projections = {
+        "storage": {"install_fio": "CVAL_STORAGE_INSTALL_FIO"},
+        "nccl": {
+            "gpu_count": "CVAL_NCCL_GPU_COUNT", "iterations": "CVAL_NCCL_ITERATIONS",
+            "data_size_gb": "CVAL_NCCL_DATA_SIZE_GB", "ibbw_enabled": "CVAL_IBBW_ENABLED",
+            "ibbw_start_device": "CVAL_IBBW_START_DEVICE", "ibbw_end_device": "CVAL_IBBW_END_DEVICE",
+            "net": "CVAL_NCCL_NET", "p2p_disable": "CVAL_NCCL_P2P_DISABLE",
+            "shm_disable": "CVAL_NCCL_SHM_DISABLE", "debug": "CVAL_NCCL_DEBUG",
+            "ibbw_interval_seconds": "CVAL_IBBW_INTERVAL_SECONDS", "ib_sys_root": "CVAL_IB_SYS_ROOT",
+        },
+        "dltest": {"gpu_count": "CVAL_DL_GPU_COUNT", "test_plan": "CVAL_DL_TEST_PLAN", "iterations": "CVAL_DL_ITERATIONS"},
+    }
+    for test_id, names in projections.items():
+        registered = registry.get(test_id)
+        if registered is None:
+            continue
+        for setting, name in names.items():
+            value = registered.definition.settings[setting]
+            values[name] = _shell_bool(value) if isinstance(value, bool) else str(value)
+    if storage is not None:
+        values["CVAL_STORAGE_SETTINGS_JSON"] = json.dumps(storage.to_dict()["settings"], sort_keys=True, separators=(",", ":"))
     _validate_environment(values)
     return values
 

@@ -8,7 +8,6 @@ read-only or mutating; this client only executes explicit arguments.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from dataclasses import dataclass
 from typing import Sequence
@@ -27,13 +26,17 @@ class CommandResult:
 class KubectlClient:
     """Small testable adapter around the `kubectl` executable."""
 
-    def __init__(self, kubectl: str = "kubectl", timeout_seconds: float | None = None) -> None:
+    def __init__(self, kubectl: str = "kubectl", timeout_seconds: float | None = None, *, config=None) -> None:
         """Store the kubectl binary path or command name."""
 
         self.kubectl = kubectl
         if timeout_seconds is None:
-            timeout_seconds = float(os.environ.get("CVAL_KUBECTL_TIMEOUT_SECONDS", "120"))
-        self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+            from cval.config import load_config
+
+            timeout_seconds = (config or load_config()).cluster.kubectl_timeout_seconds
+        if timeout_seconds <= 0:
+            raise ValueError("kubectl timeout must be positive")
+        self.timeout_seconds = timeout_seconds
 
     def run(
         self,
@@ -135,13 +138,14 @@ class KubectlClient:
 
         return self.get_json(["get", "node", node_name])
 
-    def get_nodes_capacity_table(self) -> str:
+    def get_nodes_capacity_table(self, resource_name: str) -> str:
         """Return a compact node table containing GPU capacity and allocatable values."""
 
+        resource = resource_name.replace(".", "\\.")
         columns = (
-            r"custom-columns=NAME:.metadata.name,"
-            r"CAP:.status.capacity.nvidia\.com/gpu,"
-            r"ALLOC:.status.allocatable.nvidia\.com/gpu"
+            "custom-columns=NAME:.metadata.name,"
+            f"CAP:.status.capacity.{resource},"
+            f"ALLOC:.status.allocatable.{resource}"
         )
         return self.run(
             [

@@ -17,11 +17,11 @@
 # Port 1 uses the bare device label (mlx5_N); additional ports use mlx5_N.P.
 
 space='    '
-start_device=${1:-}
-end_device=${2:-}
-interval_seconds=${3:-1}
+start_device=${1-${CVAL_IBBW_START_DEVICE?Missing configured range}}
+end_device=${2-${CVAL_IBBW_END_DEVICE?Missing configured range}}
+interval_seconds=${3-${CVAL_IBBW_INTERVAL_SECONDS:?Missing configured sampling interval}}
 
-IB_SYS_ROOT=${IB_SYS_ROOT:-/sys/class/infiniband}
+IB_SYS_ROOT=${CVAL_IB_SYS_ROOT:?Missing configured InfiniBand sysfs root}
 
 # The parent NCCL runner stops this monitor with SIGTERM and waits for it. Bash
 # otherwise exits immediately while a foreground sleep/counter helper can remain

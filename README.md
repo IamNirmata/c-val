@@ -130,10 +130,12 @@ See [docs/configuration.md](docs/configuration.md) for details.
 | Container image | `nvcr.io/nvidia/pytorch:26.05-py3` |
 | Monitoring | 100-minute timeout, 60-second polling, 20-minute pending-start timeout |
 
-Defaults can be overridden; a run's effective configuration is the relevant
-reference. The all-zero default `job.git_ref` deliberately prevents accidental
-submission. Pinning source does not by itself pin an image tag or external test
-dependencies.
+These values are explicitly configured in TOML, not code fallbacks. Missing
+settings fail before work starts; use a complete reviewed main TOML and complete
+test descriptors. The all-zero `job.git_ref` prevents accidental submission.
+See the [strict configuration contract](docs/configuration.md#strict-two-level-contract)
+for snapshot/session migration. Pinning source does not itself pin the image or
+external test dependencies.
 
 ## Running Validation Safely
 

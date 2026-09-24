@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from cval.config import load_config
+from cval.config import CvalConfig, load_config
 from cval.k8s.client import KubectlClient
 
 
@@ -44,11 +44,13 @@ def get_job_phase(
     namespace: str | None = None,
     client: KubectlClient | None = None,
     timeout: float | None = None,
+    config: CvalConfig | None = None,
 ) -> JobPhase:
     """Read one Volcano job phase using a non-mutating kubectl get."""
 
-    kubectl = client or KubectlClient()
-    resolved_namespace = namespace or load_config().cluster.namespace
+    active_config = config or load_config()
+    kubectl = client or KubectlClient(config=active_config)
+    resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
     args = [
         "get",
         "vcjob",
@@ -75,18 +77,21 @@ def get_job_phases(
     job_names: Sequence[str],
     namespace: str | None = None,
     client: KubectlClient | None = None,
+    config: CvalConfig | None = None,
 ) -> list[JobPhase]:
     """Read phases for multiple jobs with a shared kubectl client."""
 
-    kubectl = client or KubectlClient()
-    resolved_namespace = namespace or load_config().cluster.namespace
-    return [get_job_phase(job_name, namespace=resolved_namespace, client=kubectl) for job_name in job_names]
+    active_config = config or load_config()
+    kubectl = client or KubectlClient(config=active_config)
+    resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
+    return [get_job_phase(job_name, namespace=resolved_namespace, client=kubectl, config=active_config) for job_name in job_names]
 
 
 def list_job_phases(
     namespace: str | None = None,
     prefix: str | None = None,
     client: KubectlClient | None = None,
+    config: CvalConfig | None = None,
 ) -> list[JobPhase]:
     """List phases for all Volcano jobs in a namespace, optionally by name prefix.
 
@@ -94,8 +99,9 @@ def list_job_phases(
     any API or parse failure so callers (e.g. the overview) degrade gracefully.
     """
 
-    kubectl = client or KubectlClient()
-    resolved_namespace = namespace or load_config().cluster.namespace
+    active_config = config or load_config()
+    kubectl = client or KubectlClient(config=active_config)
+    resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
     result = kubectl.run(
         ["get", "vcjob", "-n", resolved_namespace, "-o", "json"], check=False
     )
@@ -124,10 +130,11 @@ def monitor_jobs_until_terminal(
     client: KubectlClient | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
+    config: CvalConfig | None = None,
 ) -> list[MonitoredJob]:
     """Poll jobs until every job is terminal or the timeout expires."""
 
-    config = load_config()
+    config = config or load_config()
     resolved_namespace = namespace or config.cluster.namespace
     resolved_timeout_seconds = (
         timeout_seconds if timeout_seconds is not None else config.monitoring.timeout_seconds
@@ -135,7 +142,7 @@ def monitor_jobs_until_terminal(
     resolved_poll_interval_seconds = (
         poll_interval_seconds if poll_interval_seconds is not None else config.monitoring.poll_interval_seconds
     )
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=config)
     start = clock()
     latest: dict[str, JobPhase] = {
         job_name: JobPhase(job_name, "Unknown") for job_name in job_names
@@ -143,7 +150,7 @@ def monitor_jobs_until_terminal(
 
     while True:
         elapsed = max(0.0, clock() - start)
-        phases = get_job_phases(job_names, namespace=resolved_namespace, client=kubectl)
+        phases = get_job_phases(job_names, namespace=resolved_namespace, client=kubectl, config=config)
         latest = {phase.job_name: phase for phase in phases}
         all_terminal = all(phase.phase in TERMINAL_PHASES for phase in latest.values())
         timed_out = elapsed >= resolved_timeout_seconds

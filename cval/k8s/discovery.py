@@ -191,13 +191,14 @@ def discover_free_nodes_from_outputs(
     nodes_output: str,
     nodes_json: Mapping[str, object] | None = None,
     node_name_filter: str | None = None,
+    config: CvalConfig | None = None,
 ) -> tuple[list[NodeResource], dict[str, int]]:
     """Build node resources and totals from raw pod/node command outputs."""
 
-    usage_by_node = pod_gpu_usage_by_node(pods_json)
-    active_config = load_config()
+    active_config = config or load_config()
+    usage_by_node = pod_resource_usage_by_node(pods_json, active_config.job_template.gpu_resource_name, parse_gpu_quantity)
     node_payload = nodes_json or {}
-    excluded = unschedulable_node_names(node_payload)
+    excluded = unschedulable_node_names(node_payload, set(active_config.cluster.tolerated_no_schedule_taints))
     resource_blocked = resource_insufficient_node_names(
         pods_json,
         node_payload,
@@ -263,9 +264,8 @@ def unschedulable_node_names(
 ) -> set[str]:
     """Return nodes that should not be considered validation candidates."""
 
-    tolerated = tolerated_no_schedule_taints or set(
-        load_config().cluster.tolerated_no_schedule_taints
-    )
+    tolerated = (set(load_config().cluster.tolerated_no_schedule_taints)
+                 if tolerated_no_schedule_taints is None else tolerated_no_schedule_taints)
     excluded: set[str] = set()
     for node in _list(nodes_json.get("items")):
         node_map = _mapping(node)
@@ -317,29 +317,34 @@ def gpu_node_names_from_capacity_table(
 def discover_gpu_node_names(
     client: KubectlClient | None = None,
     node_name_filter: str | None = None,
+    config: CvalConfig | None = None,
 ) -> list[str]:
     """List matching GPU nodes without reading any pod inventory."""
 
-    kubectl = client or KubectlClient()
-    resolved_filter = node_name_filter or load_config().cluster.node_filter
+    active_config = config or load_config()
+    kubectl = client or KubectlClient(config=active_config)
+    resolved_filter = active_config.cluster.node_filter if node_name_filter is None else node_name_filter
     return gpu_node_names_from_capacity_table(
-        kubectl.get_nodes_capacity_table(), node_name_filter=resolved_filter
+        kubectl.get_nodes_capacity_table(active_config.job_template.gpu_resource_name), node_name_filter=resolved_filter
     )
 
 
 def discover_free_nodes(
     client: KubectlClient | None = None,
     node_name_filter: str | None = None,
+    config: CvalConfig | None = None,
 ) -> tuple[list[NodeResource], dict[str, int]]:
     """Discover schedulable GPU nodes from live Kubernetes read-only calls."""
 
-    kubectl = client or KubectlClient()
-    resolved_node_name_filter = node_name_filter or load_config().cluster.node_filter
+    active_config = config or load_config()
+    kubectl = client or KubectlClient(config=active_config)
+    resolved_node_name_filter = active_config.cluster.node_filter if node_name_filter is None else node_name_filter
     return discover_free_nodes_from_outputs(
         kubectl.get_pods_json(),
-        kubectl.get_nodes_capacity_table(),
+        kubectl.get_nodes_capacity_table(active_config.job_template.gpu_resource_name),
         nodes_json=kubectl.get_nodes_json(),
         node_name_filter=resolved_node_name_filter,
+        config=active_config,
     )
 
 
@@ -423,9 +428,9 @@ def describe_node_from_outputs(
 
     active_config = config or load_config()
     node_payload = nodes_json or {}
-    unschedulable = unschedulable_node_names(node_payload)
+    unschedulable = unschedulable_node_names(node_payload, set(active_config.cluster.tolerated_no_schedule_taints))
     resource_blocked = resource_insufficient_node_names(pods_json, node_payload, active_config)
-    usage = pod_gpu_usage_by_node(pods_json)
+    usage = pod_resource_usage_by_node(pods_json, active_config.job_template.gpu_resource_name, parse_gpu_quantity)
 
     found = False
     capacity = 0
@@ -515,15 +520,15 @@ def describe_node(
 ) -> NodeStatus:
     """Describe one node's free/schedulable state from live read-only calls."""
 
-    kubectl = client or KubectlClient()
     active_config = config or load_config()
+    kubectl = client or KubectlClient(config=active_config)
     if not hasattr(kubectl, "get_node_json") or not hasattr(
         kubectl, "get_pods_for_node_json"
     ):
         return describe_node_from_outputs(
             node_name,
             kubectl.get_pods_json(),
-            kubectl.get_nodes_capacity_table(),
+            kubectl.get_nodes_capacity_table(active_config.job_template.gpu_resource_name),
             nodes_json=kubectl.get_nodes_json(),
             config=active_config,
         )
@@ -537,8 +542,8 @@ def describe_node(
         raise ValueError(f"Targeted node response identity mismatch for {node_name!r}")
     nodes_output = (
         f"{node_name} "
-        f"{capacity.get('nvidia.com/gpu', 0)} "
-        f"{allocatable.get('nvidia.com/gpu', 0)}\n"
+        f"{capacity.get(active_config.job_template.gpu_resource_name, 0)} "
+        f"{allocatable.get(active_config.job_template.gpu_resource_name, 0)}\n"
     )
     return describe_node_from_outputs(
         node_name,

@@ -6,13 +6,33 @@ Public commands use that configuration for namespace, PVC reader, database paths
 job template/repository/prefix, namespace allowlist and maximum batch size;
 duplicate command-line overrides for those settings have been removed.
 
+## Strict Two-Level Contract
+
+The main TOML owns framework/cluster settings and explicit test registrations.
+Each registered test's TOML owns its requirements, execution settings and artifacts.
+Missing files, sections or required keys, unknown keys and invalid types are errors;
+Python dataclasses and shell launchers no longer supply setting defaults. Start an
+alternate configuration from the complete checked-in TOML, not a partial override.
+
+An absent optional plugin means no plugin, not a default adapter. A declared plugin
+must explicitly list `support_files` (use `[]` when empty). Blank source ConfigMap/hash
+values explicitly select Git transport; blank NCCL device-range endpoints explicitly
+select all detected ports. Omission is not equivalent to either choice.
+
+The main-file location, schema/format names, canonical derived paths, safety limits
+and arithmetic remain program rules. Assigned node, timestamp and observed software
+versions are runtime evidence, not configurable defaults. Exact source/run identity
+and independent confirmations remain explicit command inputs.
+
 ## Sections
 
-- `[cluster]`: namespace, PVC reader, node filter, tolerated taints;
+- `[cluster]`: namespace, PVC reader, node filter, tolerated taints and kubectl timeout;
 - `[scheduling]`: stale threshold, concurrent batch size, submission cooldown;
-- `[job]`: template, prefix, source repository, fail-closed Git ref;
+- `[job]`: template, prefix, recorded image name, source repository/ref and explicit source transport;
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
-- `[monitoring]`: polling and timeout values;
+- `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace and log-tail size;
+- `[live]`: session name, log directory, runner worktree, sleep, plan limit and remote branch;
+- `[maintenance]`: separately invoked backup/inventory/journal bounds and staging directory;
 - `[sqlite_retry]`: SQLite lock retry policy used by raw ingestion;
 - `[storage]`: authoritative raw SQLite paths;
 - `[runtime]`: repository and retained evidence paths;
@@ -24,12 +44,33 @@ have been removed; this repository does not classify, score or rank nodes.
 
 ## Scheduling
 
-`batch_size` defaults to `3`. `node_cooldown_seconds` defaults to `14400`.
-`cval-live` plans all discovered nodes by default; a positive
-`CVAL_PLAN_LIMIT` may bound an operational session explicitly.
+The checked-in values are `batch_size = 3`, `node_cooldown_seconds = 14400` and
+`live.plan_limit = "all"`. These are TOML values, never fallback values. Set a positive
+integer string for a bounded `live.plan_limit`. Operational CLI tuning flags must
+agree with TOML; the read-only plan's candidate count remains an inspection limit.
 
 `job.git_ref` is an all-zero placeholder. Every real submission supplies an
 exact published lowercase 40-hex commit.
+
+## Frozen Sessions and Runs
+
+At admission, the effective main config and full descriptors are encoded into the
+existing immutable snapshot, now including retry/live/maintenance settings. The
+rendered Job binds its actual source ref to that snapshot. Discovery, clients,
+policy, monitoring, readers and ingestion use the resolved settings.
+
+New live sessions retain `config_snapshot_b64` in their existing state record.
+All cycles and child commands use that snapshot rather than rereading the operator
+TOML. Descriptor/source disagreement fails closed. A changed TOML takes effect only
+in a separately approved new session. Legacy sessions without a snapshot remain
+readable for status; this revision refuses to resume them silently.
+
+Keep `CVAL_CONFIG`, `CVAL_GIT_REF`, source/session locators and approval variables.
+Move former `CVAL_BATCH_SIZE`, `CVAL_PLAN_LIMIT`, `CVAL_DAYS_THRESHOLD`,
+`CVAL_TMUX_SESSION`, `CVAL_LIVE_LOG_DIR`, timeout/cooldown/namespace/prefix and
+worktree overrides into their main TOML fields. The live launcher rejects those
+setting overrides. In-pod environment settings are snapshot transport and must
+match; they are not a second configuration layer.
 
 ## Storage paths
 
@@ -39,9 +80,19 @@ and the four `dl_*_db_path` values. The raw DL ingestion lock is
 
 ## Test descriptors
 
-A `cval.test.v1` descriptor may contain `[test]`, `[requirements]`,
-`[settings]`, `[artifacts]` and optional `[plugin]`. Supported raw plugin
+A `cval.test.v1` descriptor requires `[test]`, `[requirements]`,
+`[settings]`, `[artifacts]` and may declare `[plugin]`. Supported raw plugin
 capabilities are `config` and `export`; export is read-only.
+
+Storage FIO parameters now live in `[settings.fio]` and `[settings.workloads.*]`;
+the six independent `.fio` config files are replaced, with the same measured fields
+and workload order. NCCL explicitly configures sampling interval, sysfs root and
+device range. The runtime projects these values into existing child environment
+variables; scripts reject missing inputs instead of inventing benchmark settings.
+
+Old partial-config/default-based test helpers and operator TOMLs need migration to
+this strict contract. No synthetic runtime suite is claimed as acceptance; real-node
+validation and live turnover remain independently approval-gated.
 
 Inspect effective inputs with:
 

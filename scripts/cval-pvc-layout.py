@@ -750,10 +750,13 @@ def receipt_references(root: Path, *, seconds: float) -> dict:
 
 
 def main() -> int:
+    from cval.config import load_config
+
+    config = load_config()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path("/data/continuous_validation"))
-    parser.add_argument("--entry-limit", type=int, default=5000)
-    parser.add_argument("--seconds-per-entry", type=float, default=8)
+    parser.add_argument("--root", type=Path, default=Path(config.runtime.validation_root))
+    parser.add_argument("--entry-limit", type=int, default=config.maintenance.inventory_entry_limit)
+    parser.add_argument("--seconds-per-entry", type=float, default=config.maintenance.inventory_seconds_per_entry)
     parser.add_argument("--receipts", action="store_true")
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument("--plan-archive", action="store_true")

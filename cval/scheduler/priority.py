@@ -19,7 +19,7 @@ SECONDS_PER_DAY = 86400
 def build_priority_queue(
     free_nodes: Sequence[str],
     latest_status_by_node: Mapping[str, int],
-    days_threshold: float = 7,
+    days_threshold: float,
     now: datetime | None = None,
     shuffle: bool = False,
     rng: random.Random | None = None,

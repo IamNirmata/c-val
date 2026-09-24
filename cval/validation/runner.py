@@ -11,7 +11,6 @@ import stat
 import sys
 import threading
 import time
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, TextIO
@@ -33,11 +32,10 @@ from cval.validation.execution import RunLogger, RunPaths, TestPaths, utc_now
 from cval.validation.registry import (
     RegisteredValidationTest,
     ValidationTestRegistry,
-    load_test_registry,
     validation_test_config_digest,
 )
 from cval.validation.results import parse_validation_result_v2
-from cval.validation.runtime import effective_config_digest
+from cval.validation.runtime import build_runtime_environment, effective_config_digest
 
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
@@ -59,11 +57,18 @@ def run_validation_tests(
     runtime_env = dict(os.environ if environ is None else environ)
     config = config or _load_runtime_config(runtime_env)
     registry = registry or _load_runtime_registry(config, runtime_env)
+    if registry.to_dict() != config.tests.registry.to_dict():
+        raise ValueError("Runtime registry disagrees with the configuration")
+    expected_environment = build_runtime_environment(config)
+    for name, expected in expected_environment.items():
+        if name in runtime_env and runtime_env[name] != expected:
+            raise ValueError(f"{name} disagrees with the immutable config snapshot")
+    runtime_env.update(expected_environment)
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
 
     node = _safe_segment(
-        runtime_env.get("CVAL_NODE") or runtime_env.get("GCRNODE") or "unknown",
+        runtime_env.get("CVAL_NODE") or runtime_env["GCRNODE"],
         "node",
     )
     timestamp = _runtime_timestamp(
@@ -73,9 +78,9 @@ def run_validation_tests(
         runtime_env.get("CVAL_RUN_ID") or f"{node}-{timestamp}",
         "run_id",
     )
-    validation_root = Path(
-        runtime_env.get("CVAL_VALIDATION_ROOT", config.runtime.validation_root)
-    ).expanduser()
+    if runtime_env.get("CVAL_VALIDATION_ROOT", config.runtime.validation_root) != config.runtime.validation_root:
+        raise ValueError("CVAL_VALIDATION_ROOT disagrees with the config snapshot")
+    validation_root = Path(config.runtime.validation_root)
     if not validation_root.is_absolute():
         raise ValueError("CVAL_VALIDATION_ROOT must be an absolute path")
 
@@ -543,7 +548,7 @@ def _load_runtime_config(environment: Mapping[str, str]) -> CvalConfig:
             repo_root=Path(runtime_repo_root) if runtime_repo_root else None,
         )
     configured_path = environment.get("CVAL_CONFIG_PATH")
-    if configured_path and Path(configured_path).is_file():
+    if configured_path:
         return load_config(Path(configured_path))
     return load_config()
 
@@ -571,67 +576,7 @@ def _load_runtime_registry(
     config: CvalConfig,
     environment: Mapping[str, str],
 ) -> ValidationTestRegistry:
-    raw_registry = environment.get("CVAL_TEST_REGISTRY_JSON")
-    if raw_registry:
-        try:
-            payload = json.loads(raw_registry)
-        except json.JSONDecodeError as exc:
-            raise ValueError("CVAL_TEST_REGISTRY_JSON is invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise ValueError("CVAL_TEST_REGISTRY_JSON must be an object")
-        registrations: dict[str, dict[str, object]] = {}
-        declared_orders: dict[str, int] = {}
-        for test_id, raw in payload.items():
-            if not isinstance(raw, dict):
-                raise ValueError(
-                    f"Runtime registry test {test_id!r} must be an object"
-                )
-            unknown = sorted(set(raw) - {"enabled", "config_path", "order"})
-            if unknown:
-                raise ValueError(
-                    f"Unknown runtime registry fields for {test_id}: "
-                    f"{', '.join(unknown)}"
-                )
-            registrations[test_id] = {
-                "enabled": raw.get("enabled"),
-                "config_path": raw.get("config_path"),
-            }
-            order = raw.get("order")
-            if isinstance(order, bool) or not isinstance(order, int):
-                raise ValueError(
-                    f"Runtime registry order for {test_id!r} must be integer"
-                )
-            declared_orders[test_id] = order
-        if environment.get("CVAL_TEST_REPO_ROOT"):
-            repo_root = Path(environment["CVAL_TEST_REPO_ROOT"])
-        elif environment.get("CVAL_VALIDATION_TESTS_DIR"):
-            repo_root = Path(environment["CVAL_VALIDATION_TESTS_DIR"]).parent
-        else:
-            repo_root = Path(environment.get("CVAL_REPO_DIR", str(REPO_ROOT)))
-        if not repo_root.is_dir():
-            repo_root = REPO_ROOT
-        registry = load_test_registry(
-            registrations,
-            repo_root=repo_root,
-            include_defaults=False,
-            require_enabled=False,
-        )
-        for test in registry.tests:
-            if declared_orders[test.id] != test.definition.metadata.order:
-                raise ValueError(
-                    f"Runtime registry order for {test.id!r} "
-                    "does not match test config"
-                )
-        return registry
-
-    tests: list[RegisteredValidationTest] = []
-    for test in config.tests.registry.tests:
-        env_name = BUILTIN_ENABLE_ENV.get(test.id)
-        enabled = test.enabled
-        if env_name and env_name in environment:
-            enabled = _is_enabled(environment[env_name])
-        tests.append(replace(test, enabled=enabled))
-    return ValidationTestRegistry(tuple(tests))
+    return config.tests.registry
 
 
 def _test_environment(

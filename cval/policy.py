@@ -7,9 +7,7 @@ real submission always passes these checks.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-from cval.config import load_config
+from dataclasses import dataclass
 
 
 class PolicyViolation(ValueError):
@@ -22,13 +20,9 @@ class PolicyViolation(ValueError):
 class ExecutionPolicy:
     """Runtime limits for approval-gated job submission."""
 
-    namespace_allowlist: tuple[str, ...] = field(
-        default_factory=lambda: load_config().policy.namespace_allowlist
-    )
-    max_batch_size: int = field(default_factory=lambda: load_config().policy.max_batch_size)
-    confirmation_phrase: str = field(
-        default_factory=lambda: load_config().policy.confirmation_phrase
-    )
+    namespace_allowlist: tuple[str, ...]
+    max_batch_size: int
+    confirmation_phrase: str
 
 
 def validate_submit_request(

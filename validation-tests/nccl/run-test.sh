@@ -16,22 +16,16 @@ bool_to_int() {
     if is_enabled "$1"; then echo 1; else echo 0; fi
 }
 
-CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
-CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
-CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
-CVAL_NCCL_GPU_COUNT=${CVAL_NCCL_GPU_COUNT:-8}
-CVAL_NCCL_ITERATIONS=${CVAL_NCCL_ITERATIONS:-20}
-CVAL_NCCL_DATA_SIZE_GB=${CVAL_NCCL_DATA_SIZE_GB:-8}
-CVAL_IBBW_ENABLED=${CVAL_IBBW_ENABLED:-true}
-CVAL_IBBW_START_DEVICE=${CVAL_IBBW_START_DEVICE:-}
-CVAL_IBBW_END_DEVICE=${CVAL_IBBW_END_DEVICE:-}
-CVAL_NCCL_NET=${CVAL_NCCL_NET:-IB}
-CVAL_NCCL_P2P_DISABLE=${CVAL_NCCL_P2P_DISABLE:-true}
-CVAL_NCCL_SHM_DISABLE=${CVAL_NCCL_SHM_DISABLE:-true}
-CVAL_NCCL_DEBUG=${CVAL_NCCL_DEBUG:-INFO}
-
-GCRNODE=${GCRNODE:-unknown}
-GCRTIME=${GCRTIME:-unknown}
+for setting in CVAL_REPO_DIR CVAL_VALIDATION_ROOT CVAL_VALIDATION_TESTS_DIR \
+    CVAL_NCCL_GPU_COUNT CVAL_NCCL_ITERATIONS CVAL_NCCL_DATA_SIZE_GB \
+    CVAL_IBBW_ENABLED CVAL_NCCL_NET CVAL_NCCL_P2P_DISABLE CVAL_NCCL_SHM_DISABLE \
+    CVAL_NCCL_DEBUG CVAL_IBBW_INTERVAL_SECONDS CVAL_IB_SYS_ROOT GCRNODE GCRTIME; do
+    if [[ ! -v "$setting" || -z "${!setting}" ]]; then
+        echo "Missing configured runtime value: $setting" >&2
+        exit 2
+    fi
+done
+: "${CVAL_IBBW_START_DEVICE?Missing configured IBBW range}" "${CVAL_IBBW_END_DEVICE?Missing configured IBBW range}"
 CVAL_RUN_ID=${CVAL_RUN_ID:-$GCRNODE-$GCRTIME}
 NCCL_RUN_DIR=${NCCL_RUN_DIR:-\
 $CVAL_VALIDATION_ROOT/logs/validation_tests/nccl/runs/$GCRNODE/$CVAL_RUN_ID}
@@ -76,11 +70,11 @@ start_ibbw_monitor() {
     if [[ -n "$CVAL_IBBW_START_DEVICE" && -n "$CVAL_IBBW_END_DEVICE" ]]; then
         echo "Starting IBBW monitor: $ibbw_script $CVAL_IBBW_START_DEVICE "\
 "$CVAL_IBBW_END_DEVICE -> $NCCL_IBBW_LOG_FILE"
-        bash "$ibbw_script" "$CVAL_IBBW_START_DEVICE" "$CVAL_IBBW_END_DEVICE" \
+        bash "$ibbw_script" "$CVAL_IBBW_START_DEVICE" "$CVAL_IBBW_END_DEVICE" "$CVAL_IBBW_INTERVAL_SECONDS" \
             > "$NCCL_IBBW_LOG_FILE" 2>&1 &
     else
         echo "Starting IBBW monitor (auto-detect all ports) -> $NCCL_IBBW_LOG_FILE"
-        bash "$ibbw_script" > "$NCCL_IBBW_LOG_FILE" 2>&1 &
+        bash "$ibbw_script" "" "" "$CVAL_IBBW_INTERVAL_SECONDS" > "$NCCL_IBBW_LOG_FILE" 2>&1 &
     fi
     IBBW_PID=$!
 }

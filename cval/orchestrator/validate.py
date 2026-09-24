@@ -339,10 +339,11 @@ def _pod_logs(
     namespace: str,
     pod_name: str,
     *,
+    tail_lines: int,
     timeout: float | None = None,
 ) -> str:
     result = kubectl.run(
-        ["logs", "-n", namespace, pod_name, "--tail=2000"],
+        ["logs", "-n", namespace, pod_name, f"--tail={tail_lines}"],
         check=False,
         timeout=timeout,
     )
@@ -357,9 +358,9 @@ def run_node_validation(
     namespace: str | None = None,
     git_ref: str | None = None,
     timestamp: int | None = None,
-    poll_interval: float = 3.0,
+    poll_interval: float | None = None,
     overall_timeout: float | None = None,
-    pending_timeout: float = 600.0,
+    pending_timeout: float | None = None,
     submit: bool = False,
     confirmation: str | None = None,
     verbose: bool = True,
@@ -371,7 +372,9 @@ def run_node_validation(
 
     config = config or load_config()
     namespace = namespace or config.cluster.namespace
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=config)
+    poll_interval = config.monitoring.validation_poll_seconds if poll_interval is None else poll_interval
+    pending_timeout = config.monitoring.validation_pending_seconds if pending_timeout is None else pending_timeout
     timestamp = int(time.time()) if timestamp is None else int(timestamp)
     overall_timeout = (
         config.monitoring.timeout_seconds if overall_timeout is None else overall_timeout
@@ -467,6 +470,7 @@ def run_node_validation(
     )
     submission = submit_workflow_plan(
         plan,
+        config=config,
         namespace=namespace,
         client=kubectl,
         policy=policy,
@@ -495,6 +499,7 @@ def run_node_validation(
                 break
             phase = get_job_phase(
                 job_name,
+                config=config,
                 namespace=namespace,
                 client=kubectl,
                 timeout=remaining,
@@ -509,6 +514,7 @@ def run_node_validation(
                 kubectl,
                 namespace,
                 pod_name,
+                tail_lines=config.monitoring.log_tail_lines,
                 timeout=remaining,
             )
             elapsed = clock() - start

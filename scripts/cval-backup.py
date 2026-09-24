@@ -98,12 +98,15 @@ class TreeEntry:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    from cval.config import load_config
+
+    config = load_config()
     parser = argparse.ArgumentParser(
         description="Inspect capacity, explicitly create, or verify a coherent whole-root c-val backup."
     )
-    parser.add_argument("--source", type=Path, default=Path("/data/continuous_validation"))
+    parser.add_argument("--source", type=Path, default=Path(config.runtime.validation_root))
     parser.add_argument("--destination-root", type=Path)
-    parser.add_argument("--safety-margin-percent", type=float, default=10.0)
+    parser.add_argument("--safety-margin-percent", type=float, default=config.maintenance.backup_safety_margin_percent)
     parser.add_argument("--preserve-history-bytes", action="store_true")
     parser.add_argument("--exclude-dl-unit-test-evaluation", action="store_true")
     parser.add_argument("--apply", action="store_true")

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cval.config import is_exact_commit, load_config
+from cval.config import CvalConfig, is_exact_commit, load_config
 from cval.k8s.client import KubectlClient
 from cval.models import WorkflowPlan
 from cval.policy import ExecutionPolicy, PolicyViolation, validate_submit_request
@@ -47,6 +47,7 @@ def submit_workflow_plan(
     policy: ExecutionPolicy | None = None,
     submit: bool = False,
     confirmation: str | None = None,
+    config: CvalConfig | None = None,
 ) -> JobSubmissionResult:
     """Submit a workflow plan after exact policy validation."""
 
@@ -55,8 +56,13 @@ def submit_workflow_plan(
             "Submission requires submit=True; use the plan command for read-only inspection"
         )
 
-    resolved_namespace = namespace or load_config().cluster.namespace
-    active_policy = policy or ExecutionPolicy(namespace_allowlist=(resolved_namespace,))
+    active_config = config or load_config()
+    resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
+    active_policy = policy or ExecutionPolicy(
+        namespace_allowlist=active_config.policy.namespace_allowlist,
+        max_batch_size=active_config.policy.max_batch_size,
+        confirmation_phrase=active_config.policy.confirmation_phrase,
+    )
     invalid_refs = sorted(
         {
             planned.rendered_job.git_ref
@@ -77,7 +83,7 @@ def submit_workflow_plan(
         confirmation=confirmation,
     )
 
-    kubectl = client or KubectlClient()
+    kubectl = client or KubectlClient(config=active_config)
     records: list[JobSubmissionRecord] = []
     for planned in plan.planned_jobs:
         # Manifest is sent through stdin so no temporary YAML file is needed.

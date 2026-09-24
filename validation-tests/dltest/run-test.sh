@@ -3,15 +3,19 @@ set -u -o pipefail
 
 # Run the JSON-native dl_unit_test package and summarize rank JSON outputs.
 
-GCRNODE=${GCRNODE:-unknown}
-GCRTIME=${GCRTIME:-unknown}
-CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
-CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
-CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
-CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-$CVAL_VALIDATION_ROOT/deep-learning-unit-test-main}
-CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:-80gb-example}
-CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:-100}
-GPU_COUNT=${1:-${CVAL_DL_GPU_COUNT:-8}}
+GCRNODE=${GCRNODE:?Missing assigned node}
+GCRTIME=${GCRTIME:?Missing run timestamp}
+CVAL_REPO_DIR=${CVAL_REPO_DIR:?Missing configured CVAL_REPO_DIR}
+CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:?Missing configured validation root}
+CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:?Missing configured tests directory}
+CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:?Missing configured DL source}
+CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:?Missing configured DL plan}
+CVAL_DL_ITERATIONS=${CVAL_DL_ITERATIONS:?Missing configured DL iterations}
+GPU_COUNT=${CVAL_DL_GPU_COUNT:?Missing configured DL GPU count}
+if [[ $# -gt 0 && "$1" != "$GPU_COUNT" ]]; then
+    echo "GPU count override disagrees with test_config.toml" >&2
+    exit 2
+fi
 CVAL_RUN_ID=${CVAL_RUN_ID:-$GCRNODE-$GCRTIME}
 DLTEST_RUN_DIR=${DLTEST_RUN_DIR:-\
 $CVAL_VALIDATION_ROOT/logs/validation_tests/dltest/runs/$GCRNODE/$CVAL_RUN_ID}

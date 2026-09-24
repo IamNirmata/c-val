@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import textwrap
 import time
+from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -113,9 +114,8 @@ def render_validation_job(
     resolved_git_repo = git_repo if git_repo is not None else config.job.git_repo
     resolved_git_ref = git_ref if git_ref is not None else config.job.git_ref
     template_config = job_template_config or config.job_template
-    resolved_image_name = config.job.image_name or _image_name_from_container(
-        template_config.container_image
-    )
+    config = replace(config, job=replace(config.job, git_ref=resolved_git_ref, git_repo=resolved_git_repo, job_prefix=resolved_job_prefix), job_template=template_config)
+    resolved_image_name = config.job.image_name
     if template_config.gpu_resource_name == template_config.rdma_resource_name:
         raise ValueError("GPU and RDMA resource names must be distinct YAML keys")
     rendered_timestamp = int(time.time()) if timestamp is None else int(timestamp)

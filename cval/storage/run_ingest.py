@@ -17,7 +17,7 @@ from cval.storage.ingest import (
     add_storage_result,
     add_validation_run_results,
 )
-from cval.storage.retry import load_retry_policy, retry_sqlite
+from cval.storage.retry import retry_sqlite
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
     authorize_result_write,
@@ -124,7 +124,7 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
         marker=log_dir / ".run-active",
     )
     bind_ingestion_digest(authorization)
-    policy = load_retry_policy()
+    policy = config.sqlite_retry
     logger = RunLogger(paths, run_id, stdout=sys.stdout, stderr=sys.stderr, write_global_files=False)
     statuses = project_builtin_statuses(validation_result_to_env(result))
     logger.emit("ingestion_started", status="incomplete")

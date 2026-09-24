@@ -132,41 +132,6 @@ RESULT_PROJECTION_KEYS = MappingProxyType(
     }
 )
 
-DEFAULT_TEST_REGISTRATIONS = MappingProxyType(
-    {
-        item.test_id: MappingProxyType(
-            {
-                "enabled": True,
-                "config_path": f"validation-tests/{item.test_id}/test_config.toml",
-            }
-        )
-        for item in BUILTIN_TEST_PROJECTIONS
-    }
-)
-
-BUILTIN_RUNTIME_SETTING_DEFAULTS = MappingProxyType(
-    {
-        "storage": MappingProxyType({"install_fio": True}),
-        "nccl": MappingProxyType(
-            {
-                "gpu_count": 8,
-                "iterations": 20,
-                "data_size_gb": 8,
-                "ibbw_enabled": True,
-                "ibbw_start_device": None,
-                "ibbw_end_device": None,
-                "net": "IB",
-                "p2p_disable": True,
-                "shm_disable": True,
-                "debug": "INFO",
-            }
-        ),
-        "dltest": MappingProxyType(
-            {"gpu_count": 8, "test_plan": "80gb-example", "iterations": 100}
-        ),
-    }
-)
-
 def project_builtin_statuses(projected_environment: Mapping[str, str]) -> dict[str, str]:
     """Project current built-in status rows from a validated result."""
 
@@ -186,13 +151,11 @@ __all__ = [
     "BUILTIN_FINAL_RESULT_PREFIX",
     "BUILTIN_RESULT_ENV",
     "BUILTIN_RUNNING_MARKERS",
-    "BUILTIN_RUNTIME_SETTING_DEFAULTS",
     "BUILTIN_SKIPPED_MARKERS",
     "BUILTIN_STATUS_TEST_IDS",
     "BUILTIN_TEST_EVIDENCE_ENV",
     "BUILTIN_TEST_IDS",
     "BUILTIN_TEST_PROJECTIONS",
-    "DEFAULT_TEST_REGISTRATIONS",
     "RESULT_PROJECTION_KEYS",
     "project_builtin_statuses",
 ]

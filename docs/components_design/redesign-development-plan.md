@@ -1,6 +1,7 @@
 # Redesign Development Plan
 
-Status: Phase 0 contracts complete; Phases 1-6 are not started.
+Status: Phase 0 contracts complete; Phase 1.1 source implementation is under verification.
+Real-node execution/ingestion acceptance and activation remain pending; later tasks are not started.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
 Shared contracts live in [Redesign.md](Redesign.md).
@@ -97,7 +98,10 @@ CLI names and raw schemas remain.
 ### Tasks
 
 - [ ] **1.1** Freeze effective config per command/controller session and pass it
-  through callers; test edits during a session and retries using the original snapshot.
+  through callers; require complete main/per-test TOMLs with no setting defaults.
+  Source changes and read-only real-cluster checks are recorded in this release;
+  real-node execution/ingestion and session turnover still require approval. See
+  the [strict config contract](../configuration.md#strict-two-level-contract).
 - [ ] **1.2** Share a structured eligibility function. Require explicit Ready and
   complete resource evidence; permit cordon only for approved targeted validation.
 - [ ] **1.3** Serialize all supported submitters through C4's shared admission state;

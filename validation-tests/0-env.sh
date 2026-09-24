@@ -2,21 +2,16 @@
 # This file is sourced inside the validation pod before tests start. Every path
 # includes node and timestamp so concurrent or repeated runs do not collide.
 
-CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:-/data/continuous_validation}
-CVAL_REPO_DIR=${CVAL_REPO_DIR:-/workspace/c-val}
-CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:-$CVAL_REPO_DIR/validation-tests}
-CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:-$CVAL_VALIDATION_ROOT/deep-learning-unit-test-main}
-CVAL_VALIDATION_DB_PATH=${CVAL_VALIDATION_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/validation.db}
-CVAL_STORAGE_DB_PATH=${CVAL_STORAGE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-storage.db}
-CVAL_NCCL_DB_PATH=${CVAL_NCCL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/test-nccl.db}
-CVAL_DL_NUMERICAL_DB_PATH=${CVAL_DL_NUMERICAL_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_numerical_correctness.db}
-CVAL_DL_COMPUTE_DB_PATH=${CVAL_DL_COMPUTE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_compute_performance.db}
-CVAL_DL_COLLECTIVE_DB_PATH=${CVAL_DL_COLLECTIVE_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_collective_performance.db}
-CVAL_DL_OVERLAP_DB_PATH=${CVAL_DL_OVERLAP_DB_PATH:-$CVAL_VALIDATION_ROOT/metadata/dltest_overlap_performance.db}
-CVAL_RUN_ID=${CVAL_RUN_ID:-${GCRNODE:-unknown}-${GCRTIME:-unknown}}
-RUN_STORAGE=${RUN_STORAGE:-true}
-RUN_NCCL=${RUN_NCCL:-true}
-RUN_DLTEST=${RUN_DLTEST:-true}
+for setting in CVAL_CONFIG_SNAPSHOT_B64 CVAL_VALIDATION_ROOT CVAL_REPO_DIR \
+	CVAL_VALIDATION_TESTS_DIR CVAL_DL_UNIT_TEST_DIR CVAL_VALIDATION_DB_PATH \
+	CVAL_STORAGE_DB_PATH CVAL_NCCL_DB_PATH CVAL_DL_NUMERICAL_DB_PATH \
+	CVAL_DL_COMPUTE_DB_PATH CVAL_DL_COLLECTIVE_DB_PATH CVAL_DL_OVERLAP_DB_PATH \
+	CVAL_RUN_ID GCRNODE GCRTIME RUN_STORAGE RUN_NCCL RUN_DLTEST; do
+	if [[ ! -v "$setting" || -z "${!setting}" ]]; then
+		echo "Missing configured runtime value: $setting" >&2
+		return 2
+	fi
+done
 
 export CVAL_VALIDATION_ROOT CVAL_REPO_DIR CVAL_VALIDATION_TESTS_DIR CVAL_DL_UNIT_TEST_DIR
 export CVAL_VALIDATION_DB_PATH

@@ -6,6 +6,7 @@ namespace = "gcr-admin"
 pvc_access_pod = "gcr-admin-pvc-access"
 node_filter = "hgx"
 tolerated_no_schedule_taints = ["nvidia.com/gpu", "rdma"]
+kubectl_timeout_seconds = 120
 
 [scheduling]
 days_threshold = 7
@@ -16,9 +17,12 @@ node_cooldown_seconds = 14400
 [job]
 template_path = "ymls/specific-node-job.yml"
 job_prefix = "cval"
+image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/msr-central/c-val.git"
 # Fail closed. Supply an exact published 40-hex commit to cluster validation.
 git_ref = "0000000000000000000000000000000000000000"
+source_configmap = ""
+source_sha256 = ""
 
 [policy]
 namespace_allowlist = ["gcr-admin"]
@@ -31,6 +35,25 @@ confirmation_phrase = "submit"
 timeout_seconds = 6000
 poll_interval_seconds = 60
 pending_start_timeout_seconds = 1200
+ingestion_grace_seconds = 300
+validation_poll_seconds = 3
+validation_pending_seconds = 600
+log_tail_lines = 2000
+
+[live]
+session_name = "cval-live"
+log_dir = "run-logs/cval-live"
+runner_worktree = "/tmp/cval-live-worktree"
+loop_sleep_seconds = 300
+plan_limit = "all"
+git_branch = "main"
+
+[maintenance]
+backup_safety_margin_percent = 10
+inventory_entry_limit = 5000
+inventory_seconds_per_entry = 8
+journal_backup_timeout_seconds = 600
+staging_directory = "/tmp"
 
 [sqlite_retry]
 attempts = 5

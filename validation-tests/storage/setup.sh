@@ -4,7 +4,7 @@ set -euo pipefail
 # Prepare storage-test dependencies. This is idempotent when fio is already
 # present and honors the current compatibility setting injected by the renderer.
 
-CVAL_STORAGE_INSTALL_FIO=${CVAL_STORAGE_INSTALL_FIO:-true}
+CVAL_STORAGE_INSTALL_FIO=${CVAL_STORAGE_INSTALL_FIO:?Missing storage.settings.install_fio}
 
 is_enabled() {
 	case "${1,,}" in
