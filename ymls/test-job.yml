@@ -6,6 +6,10 @@ metadata:
 spec:
   queue: queue-placeholder
   minAvailable: 1
+  maxRetry: job-max-retry-placeholder
+  policies:
+    - events: failure-events-placeholder
+      action: failure-action-placeholder
   plugins:
     ssh: []
     svc: []
@@ -13,6 +17,7 @@ spec:
   tasks:
     - name: server
       replicas: 1
+      maxRetry: task-max-retry-placeholder
       template:
         metadata:
           labels:
@@ -20,7 +25,7 @@ spec:
             role: server
         spec:
           schedulerName: volcano
-          restartPolicy: Never
+          restartPolicy: pod-restart-policy-placeholder
           volumes:
             - name: dshm
               emptyDir:

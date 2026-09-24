@@ -169,6 +169,11 @@ class JobTemplateConfig:
     rdma_count: str
     rdma_toleration_key: str
     gpu_toleration_key: str
+    pod_restart_policy: str
+    job_max_retry: int
+    task_max_retry: int
+    failure_action: str
+    failure_events: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -362,6 +367,19 @@ def _build_config(
     return config
 
 
+def validate_single_attempt_config(config: JobTemplateConfig) -> None:
+    """Reject settings that permit workload replay or Volcano's zero defaults."""
+
+    if config.pod_restart_policy != "Never":
+        raise ValueError("job_template.pod_restart_policy must be Never for single-attempt validation")
+    if any(type(value) is not int or value != 1 for value in (config.job_max_retry, config.task_max_retry)):
+        raise ValueError("Single-attempt validation requires job_max_retry=1 and task_max_retry=1; zero is defaulted by Volcano")
+    if config.failure_action != "TerminateJob":
+        raise ValueError("job_template.failure_action must be TerminateJob")
+    if len(config.failure_events) != 4 or set(config.failure_events) != {"PodFailed", "PodEvicted", "TaskFailed", "JobUnknown"}:
+        raise ValueError("job_template.failure_events must contain PodFailed, PodEvicted, TaskFailed and JobUnknown exactly once")
+
+
 def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> None:
     """Reject invalid test settings before rendering or submitting jobs."""
 
@@ -414,6 +432,7 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
         raise ValueError("scheduling.days_threshold must be non-negative")
     if config.cluster.namespace != config.job_template.namespace:
         raise ValueError("cluster.namespace must match job_template.namespace")
+    validate_single_attempt_config(config.job_template)
     if config.live.plan_limit != "all" and (not config.live.plan_limit.isdigit() or int(config.live.plan_limit) <= 0):
         raise ValueError("live.plan_limit must be all or a positive integer string")
     if not tests.registry.enabled:

@@ -247,6 +247,17 @@ activation; no status rows are suppressed or deleted to force retesting.
   the installed Volcano retry/restart behavior, including failure policies; do not
   assume `restartPolicy: Never` alone covers it. Settings belong in TOML and must
   be validated by rendering. Preserve failed Jobs/pods and their evidence.
+  Source implemented in the existing config, renderer and both validation templates:
+  `Never`, explicit Job/task `maxRetry=1`, and inherited `TerminateJob` policies for
+  PodFailed/PodEvicted/TaskFailed/JobUnknown. Zero is rejected because inspected
+  upstream admission replaces it with three. Conflicting policies, container restart
+  overrides, replica changes and automatic TTL cleanup are rejected by rendering.
+  Both templates/source transports and strict snapshots passed local checks using
+  retained real run inputs; an actual legacy Job with default retries was rejected.
+  Installed controller Deployment/CRD reads were forbidden, so version/admission
+  verification and real single-attempt acceptance remain pending. Existing Jobs,
+  pods, controller and source objects were not altered. See
+  [configuration and upstream semantics](../configuration.md#single-attempt-validation).
 - [ ] **2.3** Share one bounded status/log observation step between active, resumed
   and targeted tracking. Reuse Phase 1 submission/intent safeguards; do not rebuild
   them. `run` submits, `validate` also watches/reports, and `plan` stays read-only.

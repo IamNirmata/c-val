@@ -130,9 +130,12 @@ and an explicit unconfirmed ingestion status are the honest result.
 
 The supervisor runs each child once; it does not restart failed workloads or pods.
 The Job template/renderer owns scheduler-level no-restart policy, not the supervisor.
-Current `restartPolicy: Never` prevents container restart but is not sufficient
-evidence of disabled Volcano Job/task retries. Verify and explicitly configure
-those independently. Keep approved bounded SQLite lock retries distinct from a
+Phase 2.2 source now requires the explicit
+[single-attempt contract](../configuration.md#single-attempt-validation) in both
+templates. `Never` alone was insufficient; an actual retained Job had Job/task
+`maxRetry=3`. The new source uses inherited termination policies and validates the
+decoded manifest. Installed-controller acceptance remains pending, not inferred
+from upstream source. Keep approved bounded SQLite lock retries distinct from a
 benchmark or Job restart; no ingestion replay after terminal failure is introduced.
 
 ### Phase 2.1 Verification
@@ -153,8 +156,9 @@ New-source GPU execution, per-store commit/failure milestones and the complete
 supervisor path remain unverified until a separately approved real-node run.
 No synthetic benchmark/DB fixtures or fake Kubernetes clients were used. No Job,
 pod, controller, source ConfigMap or raw DB was changed during development.
-Tasks 2.2-2.5, including scheduler retry policy, tracking and retest freshness,
-remain unimplemented by this logging-only slice.
+Task 2.2 is implemented in its separate source slice, with acceptance limitations
+recorded in the roadmap. Tasks 2.3-2.5, including tracking and retest freshness,
+remain outside this logging-only slice.
 
 ## Evidence Lifecycle
 

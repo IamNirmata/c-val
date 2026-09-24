@@ -7,6 +7,7 @@ returns the rendered manifest for inspection or policy-gated submission.
 
 from __future__ import annotations
 
+import json
 import re
 import textwrap
 import time
@@ -19,7 +20,7 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
-from cval.config import CvalConfig, JobTemplateConfig, is_exact_commit, load_config
+from cval.config import CvalConfig, JobTemplateConfig, is_exact_commit, load_config, validate_single_attempt_config
 from cval.models import RenderedJob
 from cval.validation.runtime import build_runtime_environment, encode_runtime_environment
 
@@ -114,6 +115,7 @@ def render_validation_job(
     resolved_git_repo = git_repo if git_repo is not None else config.job.git_repo
     resolved_git_ref = git_ref if git_ref is not None else config.job.git_ref
     template_config = job_template_config or config.job_template
+    validate_single_attempt_config(template_config)
     config = replace(config, job=replace(config.job, git_ref=resolved_git_ref, git_repo=resolved_git_repo, job_prefix=resolved_job_prefix), job_template=template_config)
     resolved_image_name = config.job.image_name
     if template_config.gpu_resource_name == template_config.rdma_resource_name:
@@ -204,6 +206,7 @@ def render_validation_job(
         expected_runtime_environment=runtime_replacements[
             "runtime-environment-b64-placeholder"
         ],
+        job_template_config=template_config,
     )
 
     return RenderedJob(
@@ -468,6 +471,7 @@ def _validate_semantic_runtime_manifest(
     template_text: str,
     *,
     expected_runtime_environment: str = "runtime-environment-b64-placeholder",
+    job_template_config: JobTemplateConfig | None = None,
 ) -> dict[str, Any]:
     """Validate decoded YAML keys and the actual Volcano workload structure."""
 
@@ -517,6 +521,8 @@ def _validate_semantic_runtime_manifest(
         raise ValueError(
             "Template must contain exactly one task workload container named server"
         )
+    if job_template_config is not None:
+        _validate_single_attempt_manifest(manifest, job_template_config)
     if container.get("command") != ["/bin/bash", "-lc"]:
         raise ValueError(
             "The CVAL_RUNTIME_ENV_B64 workload container must use /bin/bash -lc"
@@ -543,6 +549,33 @@ def _validate_semantic_runtime_manifest(
     ):
         raise ValueError("Template must contain one executable Bash args block")
     return container
+
+
+def _validate_single_attempt_manifest(manifest: dict, config: JobTemplateConfig) -> None:
+    """Enforce the decoded manifest contract, including task-policy precedence."""
+
+    validate_single_attempt_config(config)
+    spec = manifest["spec"]
+    task = spec["tasks"][0]
+    pod = task["template"]["spec"]
+    policy = [{"events": list(config.failure_events), "action": config.failure_action}]
+    if manifest.get("apiVersion") != "batch.volcano.sh/v1alpha1" or manifest.get("kind") != "Job":
+        raise ValueError("Single-attempt validation requires a Volcano v1alpha1 Job")
+    if type(spec.get("maxRetry")) is not int or spec["maxRetry"] != config.job_max_retry:
+        raise ValueError("Job maxRetry differs from single-attempt configuration")
+    if type(task.get("maxRetry")) is not int or task["maxRetry"] != config.task_max_retry:
+        raise ValueError("Task maxRetry differs from single-attempt configuration")
+    if type(task.get("replicas")) is not int or task["replicas"] != 1:
+        raise ValueError("Single-attempt validation requires exactly one replica")
+    if spec.get("policies") != policy or "policies" in task:
+        raise ValueError("Validation requires exact termination policies with no task overrides")
+    if "ttlSecondsAfterFinished" in spec:
+        raise ValueError("Validation must retain terminal Job/pod evidence without automatic TTL cleanup")
+    if pod.get("restartPolicy") != config.pod_restart_policy:
+        raise ValueError("Validation pod restartPolicy must match Never")
+    for container in pod["containers"]:
+        if "restartPolicy" in container or "restartPolicyRules" in container:
+            raise ValueError("Container restart overrides are forbidden for validation")
 
 
 def render_validation_job_from_file(
@@ -636,6 +669,11 @@ def _job_template_replacements(config: JobTemplateConfig) -> dict[str, str]:
         "rdma-count-placeholder": config.rdma_count,
         "rdma-toleration-key-placeholder": config.rdma_toleration_key,
         "gpu-toleration-key-placeholder": config.gpu_toleration_key,
+        "pod-restart-policy-placeholder": config.pod_restart_policy,
+        "job-max-retry-placeholder": str(config.job_max_retry),
+        "task-max-retry-placeholder": str(config.task_max_retry),
+        "failure-action-placeholder": config.failure_action,
+        "failure-events-placeholder": json.dumps(list(config.failure_events)),
     }
 
 

@@ -39,7 +39,7 @@ and independent confirmations remain explicit command inputs.
 - `[storage]`: authoritative raw SQLite paths;
 - `[runtime]`: repository and retained evidence paths;
 - `[tests.<id>]`: `enabled` and descriptor `config_path` only;
-- `[job_template]`: validation pod resources and image.
+- `[job_template]`: validation pod resources, image and explicit single-attempt lifecycle settings.
 
 These sections support validation and raw evidence only. Evaluation settings
 have been removed; this repository does not classify, score or rank nodes.
@@ -69,6 +69,48 @@ It does not derive cooldown from failed preflight or an uncertain create attempt
 
 `job.git_ref` is an all-zero placeholder. Every real submission supplies an
 exact published lowercase 40-hex commit.
+
+## Single-Attempt Validation
+
+Both pinned and scheduler-selected validation templates use these required
+`[job_template]` settings. They are included in the immutable configuration snapshot:
+
+```toml
+pod_restart_policy = "Never"
+job_max_retry = 1
+task_max_retry = 1
+failure_action = "TerminateJob"
+failure_events = ["PodFailed", "PodEvicted", "TaskFailed", "JobUnknown"]
+```
+
+`maxRetry = 0` is not a no-retry option in the inspected Volcano admission code:
+it is replaced with the default `3`. The value `1` avoids that defaulting. The
+explicit `TerminateJob` policy is the primary failure control, not a claim that
+`maxRetry = 1` alone disables every restart. Job-level policy is inherited by the
+single task; task policy overrides are rejected because Volcano gives them priority.
+
+The renderer validates the decoded output, requiring one replica, `Never`, exact
+Job/task limits and the configured termination events. It rejects additional task
+policies, per-container restart overrides and `ttlSecondsAfterFinished` cleanup.
+Direct callers cannot bypass the config constraints with alternate template settings.
+These settings are intentionally constrained to the single-attempt contract, not
+general-purpose retry tuning. Existing templates or snapshots lacking them must
+be explicitly migrated; no operational defaults are supplied by Python.
+
+Upstream `TerminateJob` moves a Job through Terminating to Terminated and retains
+already Failed/Succeeded pods. It may terminate remaining live pods of that Job;
+it cannot preserve a pod already evicted/deleted externally. Neither c-val nor this
+policy recreates the failed attempt. A later scheduled test is a new approved run
+after the normal checks. This does not change SQLite lock retries, test-failure
+process exit semantics, tracking logic or the still-planned retest-freshness change.
+
+Source references: Volcano v1.15.2
+[defaulting](https://github.com/volcano-sh/volcano/blob/v1.15.2/pkg/webhooks/admission/jobs/mutate/mutate_job.go),
+[policy dispatch](https://github.com/volcano-sh/volcano/blob/v1.15.2/pkg/controllers/job/job_controller_util.go),
+and [termination](https://github.com/volcano-sh/volcano/blob/v1.15.2/pkg/controllers/job/state/terminating.go).
+The deployed controller version and CRD could not be read with the current RBAC.
+Rendered-source checks are not deployed-policy acceptance; verify admission and
+actual single-attempt behavior on the installed version before activation.
 
 ## Frozen Sessions and Runs
 

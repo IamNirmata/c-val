@@ -188,6 +188,26 @@ appear as blanks. DL's existing export remains status-only.
 
 ### Validation workflow
 
+Newly rendered validation Jobs are single-attempt: the configured pod policy is
+`Never` and failure/eviction/task-failure/Job-unknown events use `TerminateJob`.
+The templates explicitly set Job/task retry limits to one; do not replace them
+with zero, which upstream admission defaults to three. No task-level override or
+automatic finished-Job TTL is permitted. See
+[single-attempt settings](configuration.md#single-attempt-validation).
+
+Expect terminal failures to be reported as Failed or Terminated, not success.
+The policy preserves already-terminal pods under the inspected upstream semantics;
+it may terminate live pods belonging to that Job, and cannot recover externally
+deleted/evicted logs. Do not restart or recreate a failed run. Preserve what remains
+and leave later testing to a new reviewed scheduler decision. This source change
+does not modify existing Jobs or the active controller.
+
+Before rollout, verify the installed Volcano version/schema and read back the
+admitted Job's effective policies. The current agent was forbidden from reading
+the controller Deployment and CRD, so their compatibility remains unverified.
+Any server-side admission exercise, submission or deliberate failure/eviction
+requires its own exact approval. A local render is not a single-attempt cluster test.
+
 The validation command requires an eligible node, exact published commit,
 explicit submit flag, and exact confirmation. The validation pod checks out
 that commit, runs enabled storage, NCCL, and DL tests, validates canonical
