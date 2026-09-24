@@ -195,26 +195,67 @@ commits with compatibility checks.
 
 ## Phase 2: Consolidate Control
 
-**What it does:** Replace repeated shell orchestration with one job-control path.
-**Changes:** Loop internals, monitoring and CLI delegation; preserve commands,
-session records and cooldown semantics.
+**What it does:** Track each submitted Job through Kubernetes status and compact
+runtime logs, using one small shared control path. Do not restart failed workloads.
+**Changes:** Loop/CLI delegation, explicit no-restart policy, and producer-owned
+completion logs; preserve commands, evidence, approval gates and cooldown semantics.
+
+### Reviewed Direction
+
+User decision (2026-09-24): ordinary tracking needs bounded `kubectl` Job/pod
+observations plus the corresponding container logs. It does not need a second
+workflow engine, new tracking service, or repeated full database/artifact audits.
+Keep detailed exact-run audits for separately approved release acceptance and
+diagnosis; logs are not a substitute for that acceptance evidence.
+
+The runtime produces the information the tracker needs. C5's supervisor owns the
+final run summary, the runner owns test progress/outcomes, and C7 owns truthful
+ingestion completion acknowledgements. Reuse `CVAL_EVENT` and existing files;
+do not add another log schema/parser stack. See the
+[compact runtime log contract](validation-runtime-major-component.md#phase-2-compact-runtime-logs).
+
+A definitively failed terminal Job is recorded and left failed. Move on to other
+eligible nodes; never restart its pod, restart/recreate that Job, or immediately
+resubmit the same run. Later testing is a new run selected by the scheduler after
+normal eligibility, age and cooldown checks. Controller resume means observe the
+existing Job, not resume or replay the workload. Unknown ownership, a lost create
+reply or an unavailable API is not a confirmed failed Job.
+
+Current code can persist `fail`/`incomplete` status rows, and Phase 1 coverage can
+count a fully exercised failed run. Therefore absence of DB rows is not a valid
+failure/retest rule. Phase 2 must explicitly separate the latest attempt from the
+latest usable successful-test evidence: failure is retained, not relabeled as a
+fresh pass. The proposed success-based retest freshness is an intentional change
+to the prior complete-failure coverage policy, to document and verify before
+activation; no status rows are suppressed or deleted to force retesting.
 
 ### Tasks
 
-- [ ] **2.1** Extract one bounded lifecycle transition function into existing Python
-  orchestration; reuse the existing clock/Kubernetes helpers without new test abstractions.
-- [ ] **2.2** Share resume/active monitoring; preserve receipts, cooldown repair and
-  occupied slots for uncertain submissions or pending verification. Block unknown ownership.
-- [ ] **2.3** Route `run` and `validate` through shared submission/reconciliation;
-  keep targeted watch/verification and read-only `plan` distinct.
-- [ ] **2.4** Batch observation reads and propagate one remaining deadline. Retain
-  fresh per-create checks; never cache eligibility across submissions.
-- [ ] **2.5** Keep shell for launch/session duties; remove duplicated conversions
-  after comparing behavior on equivalent approved real runs, never duplicate submits.
+- [ ] **2.1** Define and produce compact run/test/ingestion milestones and one final
+  summary through existing runtime logging. Only the component completing an action
+  may acknowledge it; keep test outcome and ingestion outcome separate.
+- [ ] **2.2** Make validation single-attempt at container, Job and task levels. Verify
+  the installed Volcano retry/restart behavior, including failure policies; do not
+  assume `restartPolicy: Never` alone covers it. Settings belong in TOML and must
+  be validated by rendering. Preserve failed Jobs/pods and their evidence.
+- [ ] **2.3** Share one bounded status/log observation step between active, resumed
+  and targeted tracking. Reuse Phase 1 submission/intent safeguards; do not rebuild
+  them. `run` submits, `validate` also watches/reports, and `plan` stays read-only.
+- [ ] **2.4** Batch Job/pod reads, bind logs to the expected pod/container and run,
+  and propagate one remaining deadline. Read bounded incremental logs and require
+  an explicit ingestion success event, never a generic "Completed" substring.
+  Retain fresh per-create node checks and unknown-outcome safeguards.
+- [ ] **2.5** Retire duplicated shell monitoring/conversions after equivalent real-run
+  comparison. Record terminal failures and advance other work without workload
+  retries. Implement the reviewed retest-freshness rule without erasing failed raw
+  status. Keep detailed audits separate from routine tracking and preserve the
+  independently gated acceptance workflow.
 
-**Done when:** Crash/restart, uncertain create, missing Job, unavailable API,
-cooldown and separately gated pruning observations agree with the retained contract
-where verified. Comparable real runs show fewer subprocesses/API calls; missing
+**Done when:** On approved real runs, Kubernetes state and the compact runtime log
+explain execution, retained logs/results and ingestion outcome. Confirmed failure
+does not restart/recreate work or stop unrelated scheduling; uncertain submission
+is not blindly repeated. Verify controller resume, cooldown and retest semantics,
+with fewer subprocess/API calls and no routine full-store rescans. Missing real
 failure coverage remains explicit rather than replaced by a simulator.
 **Risk/control:** High; migrate one path at a time, reconcile outstanding Jobs and
 verify a single active controller before any separately approved activation.

@@ -89,6 +89,49 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
    and writer revalidation. Separate terminal test outcome from ingestion outcome
    in reporting; preserve historical formats and paths unchanged.
 
+## Phase 2 Compact Runtime Logs
+
+Reviewed proposal (2026-09-24): operators and the normal Job tracker should be able
+to understand one run from Kubernetes status plus `kubectl logs` on its owned pod
+and container. Improve the existing log producer, not an external interpretation
+framework. This contract is planned, not a claim about current emitted fields.
+
+| Owner | What It Reports |
+| --- | --- |
+| Supervisor (C5) | Run identity and start, child exits, retained result/log locations, and one final run summary after ingestion finishes or fails. |
+| Runner (C5) | Selected tests, start/end per test, pass/fail/incomplete, elapsed time and a short failure reason. |
+| Ingestion coordinator/writers (C7) | Per-required-store commit completion or not-required state, partial failures, and the final ingestion acknowledgement only after required writes finish. |
+
+Reuse `RunLogger`/`CVAL_EVENT` (`cval.event.v1`) and existing descriptor-owned
+canonical log files. Add fields/events compatibly rather than renaming historical
+events or inventing another output format. Keep `run_finished` as test execution
+completion; add a distinct supervisor final-summary event after the ingestion
+attempt. The existing `ingestion_finished` event already originates in C7 and is
+printed to container stdout as well as retained in the canonical event log.
+
+Useful compact fields are node_name/run identity, source/config identity at start,
+test/stage, outcome, elapsed time, short reason, and canonical evidence paths.
+The final summary separates test outcome, log/result finalization and ingestion
+outcome. Include counts or store-specific receipts only when known by the writer;
+never infer a successful commit from process launch or print "all DBs updated"
+when only some stores committed. A failed test can have successfully ingested
+failure evidence; it is still a failed test. Disabled tests are not passing tests.
+
+Flush milestone lines immediately. Keep raw workload stdout/stderr and artifacts,
+but avoid repetitive progress dumps and giant JSON summaries in the informational
+stream. Normal tracking reads a bounded log tail/increment, not the entire artifact
+tree. Do not log credentials or full secret-bearing environments. Do not emit a
+success summary until writes/log finalization actually succeed; if SIGKILL, OOM,
+eviction or lost log transport prevents a final event, Kubernetes termination state
+and an explicit unconfirmed ingestion status are the honest result.
+
+The supervisor runs each child once; it does not restart failed workloads or pods.
+The Job template/renderer owns scheduler-level no-restart policy, not the supervisor.
+Current `restartPolicy: Never` prevents container restart but is not sufficient
+evidence of disabled Volcano Job/task retries. Verify and explicitly configure
+those independently. Keep approved bounded SQLite lock retries distinct from a
+benchmark or Job restart; no ingestion replay after terminal failure is introduced.
+
 ## Evidence Lifecycle
 
 | Stage | Allowed Change | Failure Behavior |

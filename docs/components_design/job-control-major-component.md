@@ -17,6 +17,42 @@ Own the complete lifecycle of an approved validation request: select an availabl
 slot, recheck eligibility, submit once, track identity, reconcile uncertainty and
 request exact-run verification. Run one active controller per configured scope.
 
+## Phase 2 Tracking Contract
+
+Reviewed proposal (2026-09-24), not the deployed Phase 1 behavior: keep everyday
+tracking to Kubernetes Job/pod status and bounded container-log observations. The
+shared tracker answers: has execution started, is it running or terminal, did the
+tests pass/fail, and did the runtime explicitly finish retaining evidence and
+ingesting the required raw results? No new service, tracking database, recovery
+engine or per-poll full-store audit is needed.
+
+Reuse the existing client, intent identity and `CVAL_EVENT` parser. Resolve the
+owned pod/container for the exact submitted Job/run; do not adopt another pod's
+success message. The supervisor provides the final compact summary, with test and
+ingestion acknowledgements produced by their actual owners. Missing log output
+means completion is unconfirmed, not successful. A Kubernetes Completed/Succeeded
+phase plus passing test outcomes and explicit successful ingestion is the routine
+completion signal, distinct from independently verified release acceptance.
+
+Confirmed terminal failure ends this workload attempt. Preserve the Job/pod and
+available evidence, record any missing or partial ingestion, free execution capacity
+for other eligible work, and do not restart/recreate it. Preserve submission
+cooldown and same-run identity protection. A controller restart observes retained
+work; it must not restart its Jobs. Lost create replies, missing identity or API
+failure still require bounded read-only reconciliation, never blind resubmission.
+
+This deliberately changes Phase 1's coupling of routine tracking to full C7
+verification. During implementation, separate an execution slot from a retained
+unresolved evidence report; do not simply erase the report or mark it accepted.
+C7 exact-run audits remain available for release acceptance, incidents and explicit
+operator inspection. Any rollout still needs the existing exact approvals.
+
+Later scheduler-selected work is a new run, not a retry of the failed Job. The
+current writers may retain failure rows, and complete failed runs can currently
+refresh coverage. Follow the [revised Phase 2 plan](redesign-development-plan.md#phase-2-consolidate-control)
+when changing retest freshness; do not infer "never tested" from failure or delete
+raw rows to manufacture expiry. No new recovery queue is implied.
+
 ## Details and Purpose
 
 | Input | Owned Decision | Output |
