@@ -1,8 +1,8 @@
 # C4: Job Control
 
-Status: Phase 1 admission/intents/verification and Phase 2.3 shared tracking are
+Status: Phase 1 admission/intents/verification and Phase 2.3-2.4 shared tracking are
 source implemented; fresh deployment acceptance is pending. Remaining shell
-consolidation and batching are proposed. Baseline/counting:
+consolidation is proposed. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -108,8 +108,9 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 
 1. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
    subprocesses reload config and translate the same state through JSON/TSV/CSV.
-2. Phase 2.3 shares one observation deadline and identity/log handling. Multi-Job
-   batching and incremental log reads remain open; phase alone is not success.
+2. Phases 2.3-2.4 share observation identity/deadlines, batch inventories and read
+   incremental logs. Scalar shell state-helper calls still need consolidation;
+   phase alone is not success.
 3. New-source submission, crash recovery and evidence-release transitions still
    need separately approved live acceptance. Do not activate an incomplete Phase 1 stack.
 
@@ -255,8 +256,8 @@ Targeted validation retains the observation and performs the detailed C7 audit
 once after watching, not within polling. Audit results remain separate from terminal
 tracking and do not overwrite its identity. `run` only submits; `plan` stays read-only.
 Two superseded fetch/audit helpers were removed; no script, service, raw store or
-configuration setting was added. Batch reads, incremental logs and shell-loop
-retirement remain tasks 2.4-2.5; retest freshness is unchanged.
+configuration setting was added. Phase 2.4 below adds batching/incremental reads;
+shell-loop retirement remains task 2.5, and retest freshness is unchanged.
 
 Read-only checks on 2026-09-24 UTC observed the real `0359` run `1790277187` with
 one Succeeded pod, no restart, exit zero and readable logs. Its older source lacked
@@ -272,6 +273,60 @@ controller resume remain unexercised. No fake runtime client or synthetic DB was
 used as acceptance. The approved Phase 2.2 source object was created separately;
 the requested loop pause was verified by absent tmux/processes and a free loop
 lock. No workload was cancelled and no source/session was activated.
+
+## Phase 2.4 Implementation
+
+`get_job_phases` now uses one complete namespace Job inventory instead of one
+subprocess per name. API errors, malformed or continued inventories produce Unknown,
+not fabricated Missing phases. `jobs --watch` passes its remaining deadline into
+each read, measures elapsed time after reads, and caps sleeps by that deadline.
+An already-expired deadline returns Unknown/timed-out without querying Kubernetes.
+
+`observe_validation_jobs` shares one Job inventory and one label-selected pod
+inventory across pending intents. Each observed workload still matches its retained
+manifest, Job/pod UID, node, container and requested environment. Per-container logs
+and the post-log pod UID check remain independent reads, under the same remaining
+deadline. Reconciliation retains all obtained outcomes before blocking on an
+unresolved intent. The scalar observer delegates to this implementation; fresh
+pre-create node checks and the separate submission-identity reader are unchanged.
+
+Logs use `--timestamps=true`. The first observation requests the configured tail;
+later reads use `--since-time` from the last complete line, rounded down to its UTC
+second, with all subsequent lines subject to the existing byte cap. Replaying the
+inclusive boundary preserves same-second events without inventing precise offsets.
+The cursor binds the Job/run/source/config/manifest plus pod UID and container.
+Compact test progress, the ingestion acknowledgement and supervisor summary carry
+across observations only with that identity. Starts reset earlier completion state;
+the explicit digest-bound acknowledgement requirements remain unchanged.
+
+Partial final lines are not parsed or used to advance the cursor. A response at the
+byte cap or without a final newline is `limited`, never confirmed completion.
+Unparseable timestamps are unavailable; failed reads do not advance a checkpoint.
+This is bounded progress observation, not lossless log archival. Initial tails and
+external rotation can omit history; a repeatedly oversized boundary second can
+remain limited rather than silently skip evidence. Canonical PVC logs and the
+separate exact-run audit remain authoritative for acceptance.
+
+Read-only verification on 2026-09-24 UTC compared two real Completed Jobs against
+exact reads. Shared observation used four kubectl calls for those Jobs with one
+retained pod. Its initial 285,339-byte tail became a 2,140-byte incremental response
+with identical progress. Processing unchanged historical events in separate chunks
+matched a whole-log parse. A real 4,096-byte log cap stayed limited/unconfirmed;
+zero-budget watchers/observers returned immediately. No raw DB read, mutation,
+fake client or benchmark submission was used. Retained evidence is indexed in
+`run-logs/phase24-operations-20260924.md`.
+
+Semantics were checked against installed kubectl v1.35.0 help and the
+[Kubernetes v1.32.5 log reader](https://github.com/kubernetes/kubernetes/blob/v1.32.5/staging/src/k8s.io/cri-client/pkg/logs/logs.go),
+matching the previously observed kubelet version. This does not certify the vendor
+build; the real pod reads above exercise the actual endpoint.
+
+The shell's phase-list command and initial resume reconciliation benefit from
+batching, but its per-Job state-helper calls still use scalar observation. Retiring
+those duplicated loops/conversions and changing retest freshness are Phase 2.5.
+New-source producer success/failure, live batch persistence/resume, rotation,
+unavailable API recovery and mid-pass deadline exhaustion remain unexercised.
+The controller stays paused; source creation and live acceptance need exact approval.
 
 ## Proposed Design
 

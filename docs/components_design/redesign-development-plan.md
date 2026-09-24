@@ -1,8 +1,8 @@
 # Redesign Development Plan
 
-Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.3 source implemented.
+Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.4 source implemented.
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-tasks 2.4 onward are not complete. The live loop was paused on 2026-09-24 UTC.
+task 2.5 onward is not complete. The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
 Shared contracts live in [Redesign.md](Redesign.md).
@@ -279,6 +279,17 @@ activation; no status rows are suppressed or deleted to force retesting.
   and propagate one remaining deadline. Read bounded incremental logs and require
   an explicit ingestion success event, never a generic "Completed" substring.
   Retain fresh per-create node checks and unknown-outcome safeguards.
+  Source implemented in the existing monitor and manager. CLI phase reads use one
+  complete Job inventory; multi-intent reconciliation shares Job/pod inventories
+  and one deadline, retaining each outcome before deciding whether to block.
+  Timestamped log reads resume from an identity-bound boundary second and preserve
+  compact progress/acknowledgements; incomplete byte-limited output stays unconfirmed.
+  Read-only real-Job checks matched exact phase reads, used four kubectl calls for
+  two historical Jobs with one retained pod, and reduced that pod's repeated log
+  read from 285,339 to 2,140 bytes. Expired deadlines and a real 4,096-byte cap were
+  checked. See [implementation and limits](job-control-major-component.md#phase-24-implementation).
+  Scalar shell state-helper calls remain until 2.5; do not claim all shell polling
+  is batched. No new workload, source object or controller activation occurred.
 - [ ] **2.5** Retire duplicated shell monitoring/conversions after equivalent real-run
   comparison. Record terminal failures and advance other work without workload
   retries. Implement the reviewed retest-freshness rule without erasing failed raw

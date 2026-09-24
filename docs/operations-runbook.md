@@ -160,6 +160,16 @@ restarts, selected passing tests, retained logs/finalized result and matching
 digest-bound ingestion/supervisor acknowledgements. Old/generic completion strings
 are insufficient. See [shared tracking](components_design/job-control-major-component.md#phase-23-implementation).
 
+Phase 2.4 batches CLI phase reads and pending-intent Job/pod inventories under
+one remaining deadline. Scalar shell state updates remain until Phase 2.5.
+Timestamped logs begin with the configured tail and then reuse an identity-bound
+`log_cursor` with inclusive `--since-time` reads. Existing line/byte settings bound
+reads; no config change is needed. Preserve the compact cursor/runtime fields in
+intent history. `log_state=limited` means truncated output, not successful evidence
+capture; unavailable reads do not advance the cursor. The boundary second is
+replayed, not skipped. This reader is not a replacement for canonical retained logs.
+See [batching and limits](components_design/job-control-major-component.md#phase-24-implementation).
+
 Targeted validation retains a once-only read-only acceptance verifier after polling.
 It uses the retained request and submitted snapshot, not the observed result, for
 expected identity. It checks the owned terminal Job/pod, canonical files and digests,

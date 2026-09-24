@@ -27,7 +27,7 @@ import time
 import yaml
 
 from cval.config import CvalConfig, encode_config_snapshot, is_exact_commit, load_config
-from cval.jobs.monitor import TERMINAL_PHASES, observe_validation_job
+from cval.jobs.monitor import TERMINAL_PHASES, observe_validation_jobs
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
@@ -200,18 +200,20 @@ def observe_submission(intent: dict, client: KubectlClient, namespace: str, *, t
 def reconcile_submission_intents(session_dir: Path, state: dict, client: KubectlClient, config: CvalConfig) -> dict:
     """Recover receipts, never create; preserve reservations for unknown outcomes."""
 
-    deadline = time.monotonic() + config.monitoring.ingestion_grace_seconds
+    pending = []
     for name, intent in state["intents"].items():
         last = intent["events"][-1]
         if intent_finished(intent):
             continue
         if last["state"] == "conflict" or not any(event["state"] == "submitting" for event in intent["events"]):
             raise PolicyViolation(f"Intent {name!r} requires explicit reconciliation; no retry is authorized")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise PolicyViolation("Reconciliation deadline expired; reservations retained")
-        event = observe_validation_job(intent, config=config, client=client, timeout=remaining)
+        pending.append(intent)
+    events = observe_validation_jobs(pending, config=config, client=client, timeout=config.monitoring.ingestion_grace_seconds)
+    for intent, event in zip(pending, events):
+        name = intent["job_name"]
         state = retain_submission_event(session_dir, state, name, event)
+    for intent, event in zip(pending, events):
+        name = intent["job_name"]
         if event["state"] != "observed" and not intent_finished(state["intents"][name]):
             raise PolicyViolation(f"Intent {name!r} is {event['state']}; node and slot remain reserved")
     project_submission_jobs(session_dir, state)

@@ -1,8 +1,4 @@
-"""Read-only Volcano job monitoring.
-
-Monitoring only polls job phase. It deliberately does not delete or cancel jobs
-on timeout so operators retain evidence for diagnosis.
-"""
+"""Bounded read-only Volcano Job, owned-pod and runtime-log observations."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Sequence
 
 from cval.config import CvalConfig, load_config
@@ -36,13 +33,14 @@ def structured_progress_events(log_text: str, run_id: str | None = None) -> list
     return events
 
 
-def _runtime_progress(log_text: str, intent: dict, config: CvalConfig) -> dict:
-    progress = {}
+def _runtime_progress(log_text: str, intent: dict, config: CvalConfig, previous: dict | None = None) -> dict:
+    previous = previous or {}
+    progress = dict(previous.get("progress", {}))
     selected = {item.id for item in config.tests.registry.enabled}
     owners = {"storage": "storage", "nccl": "nccl", "numerical_correctness": "dltest", "compute_performance": "dltest",
               "collective_performance": "dltest", "overlap_performance": "dltest"}
-    summary = None
-    acknowledgement = None
+    summary = previous.get("summary")
+    acknowledgement = previous.get("acknowledgement")
     for event in structured_progress_events(log_text, intent["run_id"]):
         name = event.get("event")
         test = event.get("test")
@@ -77,6 +75,7 @@ def _runtime_progress(log_text: str, intent: dict, config: CvalConfig) -> dict:
     if ack_valid:
         runtime["ingestion_outcome"] = acknowledgement["status"]
         runtime["stores"] = stores
+        runtime["acknowledgement"] = acknowledgement
     if not summary or summary.get("producer") != "supervisor" or summary.get("node_name") != intent["node_name"]:
         return runtime
     runtime["summary"] = summary
@@ -106,10 +105,49 @@ def observe_validation_job(intent: dict, *, config: CvalConfig, client: KubectlC
                            timeout: float | None = None) -> dict:
     """Observe one owned Job/pod and bounded logs; never query PVC or retry work."""
 
-    from cval.jobs.manager import _requested_fields_match, verify_submission_identity
+    return observe_validation_jobs([intent], config=config, client=client, timeout=timeout)[0]
 
+
+def _read_inventory(args: list[str], *, config: CvalConfig, client: KubectlClient, deadline: float) -> dict:
+    remaining = min(deadline - time.monotonic(), config.cluster.kubectl_timeout_seconds)
+    if remaining <= 0:
+        return {"state": "unavailable", "reason": "Observation deadline expired", "items": {}}
+    try:
+        result = client.run([*args, "-o", "json"], check=False, timeout=remaining)
+        if result.returncode:
+            return {"state": "forbidden" if "forbidden" in result.stderr.lower() else "unavailable",
+                    "reason": result.stderr.strip(), "items": {}}
+        payload = json.loads(result.stdout)
+        if not isinstance(payload["items"], list) or payload.get("metadata", {}).get("continue"):
+            raise ValueError("Incomplete resource inventory")
+        items = {item["metadata"]["name"]: item for item in payload["items"]}
+        if len(items) != len(payload["items"]) or any(not name for name in items):
+            raise ValueError("Duplicate or empty resource identity")
+        return {"state": "queried", "items": items}
+    except (OSError, KeyError, TypeError, ValueError, AttributeError) as error:
+        return {"state": "unavailable", "reason": str(error), "items": {}}
+
+
+def observe_validation_jobs(intents: Sequence[dict], *, config: CvalConfig, client: KubectlClient | None = None,
+                            timeout: float | None = None) -> list[dict]:
+    """Batch inventories, retaining one shared deadline and per-container log identity."""
+
+    if not intents:
+        return []
     kubectl = client or KubectlClient(config=config)
     deadline = time.monotonic() + (config.cluster.kubectl_timeout_seconds if timeout is None else timeout)
+    jobs = _read_inventory(["get", "vcjob", "-n", config.cluster.namespace], config=config, client=kubectl, deadline=deadline)
+    names = sorted({intent["job_name"] for intent in intents})
+    pods = _read_inventory(["get", "pods", "-n", config.cluster.namespace, "-l", f"volcano.sh/job-name in ({','.join(names)})"],
+                           config=config, client=kubectl, deadline=deadline) if jobs["state"] == "queried" else jobs
+    return [_observe_validation_job(intent, config=config, client=kubectl, deadline=deadline, jobs=jobs, pod_inventory=pods)
+            for intent in intents]
+
+
+def _observe_validation_job(intent: dict, *, config: CvalConfig, client: KubectlClient,
+                            deadline: float, jobs: dict, pod_inventory: dict) -> dict:
+    from cval.jobs.manager import _requested_fields_match, verify_submission_identity
+
     observation = {"state": "uncertain", "observation": "unavailable", "phase": "Unknown",
                    "job_name": intent["job_name"], "run_id": intent["run_id"], "node_name": intent["node_name"],
                    "timestamp": intent["timestamp"], "git_ref": intent["git_ref"],
@@ -121,7 +159,7 @@ def observe_validation_job(intent: dict, *, config: CvalConfig, client: KubectlC
         remaining = min(deadline - time.monotonic(), config.cluster.kubectl_timeout_seconds)
         if remaining <= 0:
             raise TimeoutError("Job observation deadline expired")
-        return kubectl.run(args, check=False, timeout=remaining)
+        return client.run(args, check=False, timeout=remaining)
 
     def read(args):
         response = command([*args, "-o", "json"])
@@ -132,17 +170,19 @@ def observe_validation_job(intent: dict, *, config: CvalConfig, client: KubectlC
 
     try:
         namespace = config.cluster.namespace
-        job = read(["get", "vcjob", intent["job_name"], "-n", namespace, "--ignore-not-found"])
+        for inventory in (jobs, pod_inventory):
+            if inventory["state"] != "queried":
+                observation.update(observation=inventory["state"], reason=inventory["reason"])
+                return observation
+        job = jobs["items"].get(intent["job_name"])
         if job is None:
             observation.update(phase="Missing", observation="absent", reason="Exact Job not found; do not recreate")
             return observation
         uid = verify_submission_identity(intent, job, namespace)
         phase = job.get("status", {}).get("state", {}).get("phase", "Unknown")
         observation.update(uid=uid, phase=phase, created_at=job["metadata"]["creationTimestamp"])
-        payload = read(["get", "pods", "-n", namespace, "-l", f"volcano.sh/job-name={intent['job_name']}"])
-        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list) or payload.get("metadata", {}).get("continue"):
-            raise ValueError("Incomplete owned pod inventory")
-        pods = payload["items"]
+        pods = [pod for pod in pod_inventory["items"].values()
+            if pod["metadata"].get("labels", {}).get("volcano.sh/job-name") == intent["job_name"]]
         for pod in pods:
             if not any(owner.get("uid") == uid and owner.get("name") == intent["job_name"] for owner in pod["metadata"].get("ownerReferences", [])):
                 raise ValueError("Pod owner differs from the exact submitted Job")
@@ -178,8 +218,19 @@ def observe_validation_job(intent: dict, *, config: CvalConfig, client: KubectlC
              "terminated": {key: value for key, value in item.get("state", {}).get("terminated", {}).items()
                             if key in {"exitCode", "reason", "finishedAt"}}} for item in statuses
         ]
-        response = command(["logs", "-n", namespace, pod["metadata"]["name"], "-c", expected["name"],
-                            f"--tail={config.monitoring.log_tail_lines}", f"--limit-bytes={config.monitoring.verification_max_bytes}"])
+        previous = next((event for event in reversed(intent["events"]) if event.get("log_cursor")), None)
+        identity_keys = ("job_name", "run_id", "node_name", "timestamp", "git_ref", "config_digest", "manifest_sha256", "uid")
+        if previous and (any(previous.get(key) != observation[key] for key in identity_keys)
+                         or previous["log_cursor"].get("pod_uid") != pod_uid
+                         or previous["log_cursor"].get("container") != expected["name"]):
+            raise ValueError("Retained log cursor differs from the submitted Job/pod/run")
+        since_time = previous["log_cursor"]["since_time"] if previous else None
+        log_args = ["logs", "-n", namespace, pod["metadata"]["name"], "-c", expected["name"],
+                    "--timestamps=true", f"--limit-bytes={config.monitoring.verification_max_bytes}"]
+        log_args += [f"--since-time={since_time}", "--tail=-1"] if since_time else [f"--tail={config.monitoring.log_tail_lines}"]
+        observation["log_read_mode"] = "incremental" if since_time else "tail"
+        observation["log_since_time"] = since_time
+        response = command(log_args)
         observation["log_state"] = "queried" if response.returncode == 0 else "forbidden" if "forbidden" in response.stderr.lower() else "unavailable"
         if response.returncode:
             observation["reason"] = response.stderr.strip()
@@ -188,9 +239,31 @@ def observe_validation_job(intent: dict, *, config: CvalConfig, client: KubectlC
         if after is None or after["metadata"]["uid"] != pod_uid:
             raise ValueError("Pod identity changed during log fetch")
         observation["log_sha256"] = hashlib.sha256(response.stdout.encode()).hexdigest()
-        observation["runtime"] = _runtime_progress(response.stdout, intent, config)
+        observation["log_bytes"] = len(response.stdout.encode())
+        cursor_time = datetime.fromisoformat(since_time) if since_time else None
+        messages = []
+        for line in response.stdout.splitlines(keepends=True):
+            if not line.endswith("\n"):
+                continue
+            timestamp, separator, message = line.partition(" ")
+            try:
+                instant = datetime.fromisoformat(timestamp)
+                if not separator or instant.tzinfo is None:
+                    raise ValueError("Missing timestamp timezone")
+            except ValueError:
+                observation.update(log_state="unavailable", reason="Unparseable timestamped container log")
+                return observation
+            cursor_time = max(cursor_time, instant) if cursor_time else instant
+            messages.append(message)
+        observation["runtime"] = _runtime_progress("".join(messages), intent, config, previous.get("runtime") if previous else None)
+        if cursor_time is not None:
+            observation["log_cursor"] = {"pod_uid": pod_uid, "container": expected["name"],
+                                         "since_time": cursor_time.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
+        if observation["log_bytes"] >= config.monitoring.verification_max_bytes or (response.stdout and not response.stdout.endswith("\n")):
+            observation.update(log_state="limited", reason="Bounded log response may be truncated; completion unconfirmed")
+            observation["runtime"]["completion_confirmed"] = False
         pod_success = pod["status"].get("phase") == "Succeeded" and len(statuses) == 1 and statuses[0].get("restartCount") == 0 and statuses[0].get("state", {}).get("terminated", {}).get("exitCode") == 0
-        observation["completion_confirmed"] = terminal and phase in {"Completed", "Succeeded"} and pod_success and observation["runtime"]["completion_confirmed"]
+        observation["completion_confirmed"] = terminal and phase in {"Completed", "Succeeded"} and pod_success and observation["log_state"] == "queried" and observation["runtime"]["completion_confirmed"]
     except (TimeoutError, OSError) as error:
         observation.update(state="uncertain", tracking_complete=False, completion_confirmed=False, reason=str(error))
     except Exception as error:
@@ -256,13 +329,26 @@ def get_job_phases(
     namespace: str | None = None,
     client: KubectlClient | None = None,
     config: CvalConfig | None = None,
+    timeout: float | None = None,
 ) -> list[JobPhase]:
-    """Read phases for multiple jobs with a shared kubectl client."""
+    """Read requested phases from one complete namespace inventory."""
 
     active_config = config or load_config()
     kubectl = client or KubectlClient(config=active_config)
     resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
-    return [get_job_phase(job_name, namespace=resolved_namespace, client=kubectl, config=active_config) for job_name in job_names]
+    unknown = [JobPhase(name, "Unknown") for name in job_names]
+    if not job_names or (timeout is not None and timeout <= 0):
+        return unknown
+    deadline = time.monotonic() + (active_config.cluster.kubectl_timeout_seconds if timeout is None else timeout)
+    inventory = _read_inventory(["get", "vcjob", "-n", resolved_namespace], config=active_config, client=kubectl, deadline=deadline)
+    if inventory["state"] != "queried":
+        return unknown
+    try:
+        phases = {name: item.get("status", {}).get("state", {}).get("phase") or "Unknown"
+                  for name, item in inventory["items"].items()}
+        return [JobPhase(name, phases.get(name, "Missing")) for name in job_names]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return unknown
 
 
 def list_job_phases(
@@ -322,14 +408,17 @@ def monitor_jobs_until_terminal(
     )
     kubectl = client or KubectlClient(config=config)
     start = clock()
+    deadline = start + resolved_timeout_seconds
     latest: dict[str, JobPhase] = {
         job_name: JobPhase(job_name, "Unknown") for job_name in job_names
     }
 
     while True:
+        remaining = deadline - clock()
+        if remaining > 0:
+            phases = get_job_phases(job_names, namespace=resolved_namespace, client=kubectl, config=config, timeout=remaining)
+            latest = {phase.job_name: phase for phase in phases}
         elapsed = max(0.0, clock() - start)
-        phases = get_job_phases(job_names, namespace=resolved_namespace, client=kubectl, config=config)
-        latest = {phase.job_name: phase for phase in phases}
         all_terminal = all(phase.phase in TERMINAL_PHASES for phase in latest.values())
         timed_out = elapsed >= resolved_timeout_seconds
         if all_terminal or timed_out:
@@ -347,7 +436,7 @@ def monitor_jobs_until_terminal(
                 )
                 for job_name in job_names
             ]
-        sleeper(max(0.0, resolved_poll_interval_seconds))
+        sleeper(min(max(0.0, resolved_poll_interval_seconds), max(0.0, deadline - clock())))
 
 
 def monitored_jobs_to_dict(jobs: list[MonitoredJob]) -> list[dict[str, object]]:
