@@ -102,6 +102,8 @@ class LiveConfig:
     loop_sleep_seconds: int
     plan_limit: str
     git_branch: str
+    control_host: str
+    cluster_server: str
 
 
 @dataclass(frozen=True)
@@ -374,6 +376,14 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     for name, value in vars(config.runtime).items():
         _absolute_lexical_config_path(value, f"runtime.{name}")
     _absolute_lexical_config_path(config.live.runner_worktree, "live.runner_worktree")
+    _absolute_lexical_config_path(config.live.log_dir, "live.log_dir")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", config.live.control_host):
+        raise ValueError("live.control_host must be an explicit hostname")
+    from urllib.parse import urlsplit
+
+    server = urlsplit(config.live.cluster_server)
+    if server.scheme != "https" or not server.hostname or server.username or server.password or server.query or server.fragment:
+        raise ValueError("live.cluster_server must be an HTTPS API endpoint without credentials")
     _absolute_lexical_config_path(config.maintenance.staging_directory, "maintenance.staging_directory")
     if config.maintenance.backup_safety_margin_percent < 0:
         raise ValueError("maintenance.backup_safety_margin_percent must be non-negative")

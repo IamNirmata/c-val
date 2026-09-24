@@ -74,6 +74,31 @@ Retained `preflight-plan.json` and `plan-slot-*.json` now contain `candidates`
 and a top-level exact `git_ref`, not `planned_jobs`. The plan log field is
 `candidate_count`, not `planned_count`. Historical files are not rewritten.
 
+### Shared Submission Admission
+
+Every supported `run` or `validate` submission requires a compatible active session
+under the configured absolute `live.log_dir`, even when explicit node names are
+supplied. Session creation alone does not start the loop. Use the existing state
+helper's `init` only under a separately approved initialization or turnover command;
+it refuses an existing `current-session` pointer. Preserve and reconcile the prior
+session and outstanding Jobs before approving replacement. See
+[shared admission settings](configuration.md#shared-admission-scope).
+
+Under `.cval-admission.lock`, the manager verifies host/cluster, session/source/config
+identity, the rendered request, existing node reservations and the shared inflight
+budget. It then rechecks policy and fresh node eligibility immediately before each
+create. An unavailable or incomplete Job read is not an empty queue. Unresolved
+placement, missing local Job records or same-run reuse block admission. `Missing`
+and `Pruned` local records do not silently release a reservation.
+
+The lock is released before workload monitoring. It is separate from the loop-owner
+lock and is also used by session updates. Contention fails the command; investigate
+the holder, never delete the lock. No new queue, service or automatic host failover
+is introduced. This only serializes cooperating new-source writers; stop/reconcile
+old writers before activation. A lost create reply, partial batch receipt or pending
+evidence verification still needs the later intent/outcome work. Do not automatically
+retry such a submission or claim this phase guarantees exactly-once creation.
+
 ## Exact-commit validation
 
 The validation command requires an eligible node, exact published commit,

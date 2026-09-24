@@ -31,7 +31,8 @@ and independent confirmations remain explicit command inputs.
 - `[job]`: template, prefix, recorded image name, source repository/ref and explicit source transport;
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
 - `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace and log-tail size;
-- `[live]`: session name, log directory, runner worktree, sleep, plan limit and remote branch;
+- `[live]`: session name, absolute shared log directory, runner worktree, sleep,
+  plan limit, remote branch, designated `control_host` and credential-free HTTPS `cluster_server`;
 - `[maintenance]`: separately invoked backup/inventory/journal bounds and staging directory;
 - `[sqlite_retry]`: SQLite lock retry policy used by raw ingestion;
 - `[storage]`: authoritative raw SQLite paths;
@@ -64,6 +65,35 @@ All cycles and child commands use that snapshot rather than rereading the operat
 TOML. Descriptor/source disagreement fails closed. A changed TOML takes effect only
 in a separately approved new session. Legacy sessions without a snapshot remain
 readable for status; this revision refuses to resume them silently.
+
+### Shared Admission Scope
+
+`live.log_dir` must be an absolute, non-symlinked control-host directory shared
+by all worktrees and supported submitters. It contains the existing `current-session`
+pointer and session records, plus `.cval-admission.lock`, separate from the loop's
+long-lived `.cval-live.lock`. Do not delete or replace a lock while writers exist.
+Changing a prefix, namespace or evidence root is not permission to run independent
+submitters over overlapping nodes.
+
+`live.control_host` must match the submitting host's hostname. `live.cluster_server`
+must match kubectl's selected API endpoint; no credentials are stored. These fields
+are required in complete TOMLs and new snapshots. Old snapshots lacking them must
+use their pinned source for read-only inspection; they cannot initialize or resume
+new-source writers.
+
+New sessions retain an additive `admission_scope` in the existing v1 state. The
+shared manager requires that scope, exact source and the complete pinned config
+snapshot to match each request. `run`, targeted `validate` and live-loop creates
+share the same short lock; session writers use it too. Missing/corrupt records,
+legacy scope, configuration disagreement or lock contention block admission.
+Lock acquisition is nonblocking; no timeout setting is invented.
+
+The existing state helper's `init` refuses to replace `current-session`. Turnover
+requires separately approved stopping/reconciliation and retention of the previous
+pointer, followed by approved initialization with the reviewed snapshot. No state
+is migrated automatically. The old controller is not fenced by new local code;
+all operational writers must be turned over together. V2 durable intent/outcome
+records and lost-create recovery remain Phase 1.4 work, not a v1 guarantee.
 
 Keep `CVAL_CONFIG`, `CVAL_GIT_REF`, source/session locators and approval variables.
 Move former `CVAL_BATCH_SIZE`, `CVAL_PLAN_LIMIT`, `CVAL_DAYS_THRESHOLD`,

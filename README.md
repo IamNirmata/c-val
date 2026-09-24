@@ -154,6 +154,11 @@ The targeted command requires the node name, an exact published commit, the
 explicit submission flag and the exact `submit` confirmation. Help and local
 configuration checks do not authorize execution.
 
+All supported submitters also require a compatible pinned session on the configured
+control host. Shared admission checks node/slot conflicts and fresh eligibility
+under one short lock; it rejects legacy or missing sessions. See
+[initialization and turnover requirements](docs/operations-runbook.md#shared-submission-admission).
+
 Acceptance requires a successful terminal job phase, passing required tests,
 canonical results, matching exact-timestamp raw rows and retained logs. A
 Completed Job alone is not proof of successful validation. Disabled tests are

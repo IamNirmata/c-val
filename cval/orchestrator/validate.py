@@ -467,6 +467,7 @@ def run_node_validation(
         policy=policy,
         submit=True,
         confirmation=confirmation,
+        allow_cordoned=True,
     )
     record = submission.records[0]
     emit(f"queued job {record.job_name} for node {node} (timestamp {timestamp})")

@@ -111,10 +111,20 @@ CLI names and raw schemas remain.
   init containers and two NotReady nodes. Automatic cordon exclusion, NoExecute
   blocking and per-node unverified diagnostics are explicit. See
   [implementation and verification](discovery-scheduling-major-component.md#phase-12-implementation).
-  New exact-commit ConfigMap creation and GPU acceptance need separate approval;
-  no validation Job was submitted for this phase.
+  Source published at `c3524b67163561dc558d2f7ee1eedf41bbf080f7`; its approved
+  ConfigMap was created and verified. The approved `0307` validation stopped before
+  submission because all eight GPUs were busy and free CPU was insufficient.
+  Execution/ingestion acceptance remains pending; no validation Job was submitted.
 - [ ] **1.3** Serialize all supported submitters through C4's shared admission state;
   recheck eligibility for `node_name` immediately before create. Retain source/policy gates.
+  Source implemented in the existing manager/state helper. Explicit host/cluster
+  scope, an absolute shared state root, session/config binding, outstanding-work
+  checks and the short nonblocking lock cover both submitters and state writers.
+  Real read-only checks rejected busy `0307`, pending validation on `0262`, and the
+  legacy active session; real local processes verified lock exclusion/release.
+  See [implementation and limits](job-control-major-component.md#phase-13-implementation).
+  No new live session, validation Job or controller activation was performed.
+  Approved turnover, successful creation and exact-run acceptance remain pending.
 - [ ] **1.4** Persist intent before create and retain every outcome. Test lost replies,
   intent/receipt write failures, concurrent submitters and a misleading single NotFound.
 - [ ] **1.5** Implement outcome-specific exact-run verification against expected

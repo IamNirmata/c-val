@@ -4,26 +4,27 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import re
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
 
 
-STATE_SCHEMA = "cval.live-state.v1"
-JOB_FIELDS = (
-    "job_name",
-    "node",
-    "timestamp",
-    "git_ref",
-    "phase",
-    "submitted_at",
-    "last_observed_at",
-    "deleted_at",
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from cval.jobs.manager import (
+    SESSION_SCHEMA as STATE_SCHEMA,
+    SESSION_JOB_FIELDS as JOB_FIELDS,
+    admission_lock,
+    admission_scope,
+    check_admission_cluster,
+    read_admission_session,
+    read_session_jobs as _read_jobs,
+    read_session_state as _read_state,
 )
+
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -39,33 +40,13 @@ def _atomic_text(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
-
-
-def _read_state(session_dir: Path) -> dict[str, object]:
-    path = session_dir / "state.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != STATE_SCHEMA:
-        raise ValueError("invalid cval-live state schema")
-    return payload
-
-
-def _read_jobs(session_dir: Path) -> dict[str, dict[str, str]]:
-    path = session_dir / "jobs.csv"
-    if not path.exists():
-        return {}
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) != JOB_FIELDS:
-            raise ValueError("invalid cval-live jobs header")
-        rows = {}
-        for row in reader:
-            job_name = row.get("job_name", "")
-            if not SAFE_NAME.fullmatch(job_name) or job_name in rows:
-                raise ValueError("invalid cval-live job row")
-            rows[job_name] = {field: row.get(field, "") for field in JOB_FIELDS}
-        return rows
 
 
 def _write_jobs(session_dir: Path, jobs: dict[str, dict[str, str]]) -> None:
@@ -106,16 +87,15 @@ def _render(session_dir: Path) -> None:
 
 
 def _init(args: argparse.Namespace) -> None:
-    sys_path = str(Path(__file__).resolve().parents[1])
-    import sys
     from dataclasses import replace
 
-    sys.path.insert(0, sys_path)
     from cval.config import encode_config_snapshot, load_config_snapshot
 
     config = load_config_snapshot(os.environ["CVAL_CONFIG_SNAPSHOT_B64"])
     config = replace(config, job=replace(config.job, git_ref=args.git_ref))
     session_dir = args.session_dir
+    if os.path.lexists(session_dir.parent / "current-session"):
+        raise ValueError("Existing active session must be reconciled and its pointer retained before approved turnover")
     session_dir.mkdir(parents=True, exist_ok=False)
     (session_dir / "cycles").mkdir()
     (session_dir / "nodes").mkdir()
@@ -129,6 +109,7 @@ def _init(args: argparse.Namespace) -> None:
         "state": "starting",
         "git_ref": args.git_ref,
         "config_snapshot_b64": encode_config_snapshot(config),
+        "admission_scope": admission_scope(config),
         "branch": args.branch,
         "cycle_id": "",
         "message": "session initialized",
@@ -290,7 +271,31 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
-    args.handler(args)
+    from dataclasses import replace
+    from cval.config import is_exact_commit, load_config_snapshot
+    from cval.k8s.client import KubectlClient
+
+    snapshot = os.environ["CVAL_CONFIG_SNAPSHOT_B64"] if args.command == "init" else _read_state(args.session_dir)["config_snapshot_b64"]
+    config = load_config_snapshot(snapshot)
+    if args.command == "init":
+        if not is_exact_commit(args.git_ref):
+            raise ValueError("Session initialization requires an exact source commit")
+        config = replace(config, job=replace(config.job, git_ref=args.git_ref))
+    if args.session_dir.parent != Path(config.live.log_dir) or not SAFE_NAME.fullmatch(args.session_dir.name):
+        raise ValueError("Session must be inside the configured shared admission directory")
+    admission_scope(config)
+    if args.command == "init":
+        if args.batch_size != config.scheduling.batch_size or args.plan_limit != config.live.plan_limit or args.branch != config.live.git_branch:
+            raise ValueError("Session settings must match the pinned configuration")
+        Path(config.live.log_dir).mkdir(parents=True, exist_ok=True)
+    with admission_lock(config):
+        if args.command == "init":
+            check_admission_cluster(config, KubectlClient(config=config))
+        else:
+            active_dir, _state = read_admission_session(config)
+            if active_dir != args.session_dir:
+                raise ValueError("Session writer does not own the active admission session")
+        args.handler(args)
     return 0
 
 

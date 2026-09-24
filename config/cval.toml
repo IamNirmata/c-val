@@ -42,11 +42,13 @@ log_tail_lines = 2000
 
 [live]
 session_name = "cval-live"
-log_dir = "run-logs/cval-live"
+log_dir = "/home/v-srsreenath/hari/claw/c-val/run-logs/cval-live"
 runner_worktree = "/tmp/cval-live-worktree"
 loop_sleep_seconds = 300
 plan_limit = "all"
 git_branch = "main"
+control_host = "GCRAZGDL1506"
+cluster_server = "https://msr02.gw.lambda.ai"
 
 [maintenance]
 backup_safety_margin_percent = 10

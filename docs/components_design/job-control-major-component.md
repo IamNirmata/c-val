@@ -1,6 +1,8 @@
 # C4: Job Control
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 1.3 shared admission source implemented; deployment acceptance pending.
+Intent/recovery and control consolidation below remain proposals. Baseline/counting:
+[overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -67,14 +69,50 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 
 ## Current Issues
 
-1. [Submission](../../cval/jobs/manager.py#L43) validates policy and Git syntax,
-   but depends on callers for live eligibility. Explicit CLI node lists bypass it.
-2. A later create failure raises before returning earlier batch receipts. A network
+1. A later create failure raises before returning earlier batch receipts. A network
    timeout can also mean the Job exists even though no receipt reached the caller.
-3. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
+2. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
    subprocesses reload config and translate the same state through JSON/TSV/CSV.
-4. Targeted validation and the regular monitor have different deadline and evidence
+3. Targeted validation and the regular monitor have different deadline and evidence
    handling. Job phase alone is not proof of a complete successful run.
+
+## Phase 1.3 Implementation
+
+The existing [manager](../../cval/jobs/manager.py) now owns one short, nonblocking
+admission lock shared by `run`, targeted `validate`, and the live loop's `run`
+calls. The existing [state helper](../../scripts/cval-live-state.py) uses that same
+lock for initialization and updates. Common session/Job readers are reused rather
+than duplicated; atomic state replacement now fsyncs its parent directory.
+
+Explicit main-TOML host and cluster settings bind admission to the designated
+control host. The absolute shared log directory prevents worktrees from acquiring
+independent locks. The existing active-session pointer must identify a session
+whose additive `admission_scope`, source and full pinned configuration match.
+Missing/corrupt/legacy or incompatible state is rejected, not migrated. New session
+initialization refuses to overwrite the active pointer. All old writers must be
+stopped and reconciled through approved turnover before activation.
+
+Inside the lock, the manager rerenders the request from the pinned configuration,
+checks live Jobs plus unreconciled session rows for node/slot conflicts and name
+reuse, then rechecks policy and C3 eligibility immediately before each create.
+Automatic mode excludes cordons; only targeted validation requests the drained
+Ready cordon exception. Node identity is `node_name`, with no replacement tracking.
+The lock is never held through the benchmark or monitor.
+
+Read-only evidence on 2026-09-24 UTC rejected actual busy node `0307`, an outstanding
+Pending Job on `0262`, and the current legacy session without changing its records.
+Real local OS processes verified lock contention, permissions and release in an
+isolated temporary directory. Strict config snapshots round-tripped and the actual
+control host/cluster matched. Retained evidence is under
+`run-logs/phase13-*-20260924.json`. No fake Kubernetes clients, new test scripts,
+GPU submissions or live state mutations were used.
+
+Successful create, new-session initialization, slot saturation and concurrent real
+submitters remain unverified and approval-gated. The new lock cannot fence an old
+writer or another host. Existing shell cooldown behavior is unchanged. Durable
+intent/receipt persistence and uncertain-create recovery remain Phase 1.4; pending
+verification accounting remains part of the later outcome work. Do not treat this
+source change as exactly-once delivery or completed cluster acceptance.
 
 ## Proposed Design
 
@@ -112,8 +150,8 @@ a job prefix or evidence root does not make concurrent controllers independent.
 2. Persist the approved intent with atomic replacement and required file/directory
    durability. Reserve node and slot before any create. Persistence failure blocks
    creation; approval must match the request's source/config/manifest identity.
-3. Recheck C3 eligibility immediately before the bounded create. Retain node UID
-   and check for identity/config changes. Never hold the admission lock for the
+3. Recheck C3 eligibility for `node_name` immediately before the bounded create
+   and check for config changes. Never hold the admission lock for the
    entire workload; use durable reservations and short serialized state transitions.
 4. Persist the observed Job UID and outcome before admitting more work. Failed
    receipt persistence after creation stops admission; the prior intent and returned
@@ -155,7 +193,7 @@ Use the existing session directory and helpers, not a new database or event engi
 | --- | --- |
 | Session identity | Cluster identity without credentials, namespace, canonical validation root, approved control-host identity and session ID. |
 | Pinned inputs | Exact source SHA, immutable effective config snapshot/digest and source artifact identity; recorded once per session. |
-| Per-Job intent | Existing job/run/node/timestamp identity, observed node UID, requested manifest digest and retained approval/rollback reference. |
+| Per-Job intent | Existing job/run/node_name/timestamp identity, requested manifest digest and retained approval/rollback reference. |
 | Create observation | Whether create was attempted, known/uncertain outcome, returned/observed Job UID and timestamps; unknown fields stay unknown. |
 | Recovery evidence | Existing submission response and exact-observation artifacts; no regenerated approval or new run ID after a lost reply. |
 
