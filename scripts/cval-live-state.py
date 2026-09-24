@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 
@@ -110,8 +111,31 @@ def _init(args: argparse.Namespace) -> None:
     _render(session_dir)
 
 
+def _tracking_rows(state: dict, names: list[str]) -> list[dict]:
+    rows = []
+    if len(set(names)) != len(names) or any(name not in state["intents"] for name in names):
+        raise ValueError("Tracking selection must contain unique retained Job names")
+    for name in names:
+        intent = state["intents"][name]
+        event = intent["events"][-1]
+        created_at = next((item["created_at"] for item in reversed(intent["events"]) if item.get("created_at")), None)
+        runtime = event.get("runtime", {})
+        rows.append({"job_name": name, "node": intent["node_name"], "phase": event.get("phase", "Unknown"),
+                     "tracking_complete": intent_finished(intent), "completion_confirmed": event.get("completion_confirmed") is True,
+                     "created_epoch": int(datetime.fromisoformat(created_at).timestamp()) if created_at else 0,
+                     "log_state": event.get("log_state", "unconfirmed"),
+                     "tests_outcome": runtime.get("tests_outcome", "unconfirmed"),
+                     "ingestion_outcome": runtime.get("ingestion_outcome", "unconfirmed")})
+    return rows
+
+
 def _update(args: argparse.Namespace) -> None:
     state = _read_state(args.session_dir)
+    names = list(state["intents"]) if args.jobs is None else [name for name in args.jobs.split(",") if name]
+    if (args.jobs is not None or args.output is not None) and not args.reconcile:
+        raise ValueError("Tracking selection/output requires --reconcile")
+    if args.output is not None:
+        _tracking_rows(state, names)
     if args.reconcile:
         from cval.config import load_config_snapshot
         from cval.k8s.client import KubectlClient
@@ -134,6 +158,8 @@ def _update(args: argparse.Namespace) -> None:
         json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
     )
     _render(args.session_dir)
+    if args.output == "json":
+        print(json.dumps(_tracking_rows(state, names), sort_keys=True))
 
 
 def _job(args: argparse.Namespace) -> None:
@@ -207,6 +233,8 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument("--message", required=True)
     update.add_argument("--cycle-id")
     update.add_argument("--reconcile", action="store_true")
+    update.add_argument("--jobs", help="Comma-separated retained Job names for the tracking report")
+    update.add_argument("--output", choices=("json",))
     update.set_defaults(handler=_update)
 
     job = subparsers.add_parser("job")

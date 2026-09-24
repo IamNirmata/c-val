@@ -1,8 +1,7 @@
 # C4: Job Control
 
-Status: Phase 1 admission/intents/verification and Phase 2.3-2.4 shared tracking are
-source implemented; fresh deployment acceptance is pending. Remaining shell
-consolidation is proposed. Baseline/counting:
+Status: Phase 1 admission/intents/verification and Phase 2.3-2.5 control consolidation
+are source implemented; fresh deployment acceptance is pending. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -48,9 +47,9 @@ C7 exact-run audits remain available for release acceptance, incidents and expli
 operator inspection. Any rollout still needs the existing exact approvals.
 
 Later scheduler-selected work is a new run, not a retry of the failed Job. The
-current writers may retain failure rows, and complete failed runs can currently
-refresh coverage. Follow the [revised Phase 2 plan](redesign-development-plan.md#phase-2-consolidate-control)
-when changing retest freshness; do not infer "never tested" from failure or delete
+current writers retain failure rows, but Phase 2.5 no longer uses failed runs to
+refresh successful coverage. Follow the [revised Phase 2 plan](redesign-development-plan.md#phase-2-consolidate-control);
+do not infer "never tested" from failure or delete
 raw rows to manufacture expiry. No new recovery queue is implied.
 
 ## Details and Purpose
@@ -73,10 +72,9 @@ flowchart TD
     Queue --> Check[Check selected node]
     Check --> Create[Render and policy-gated create]
     Create --> Receipt[Record job and cooldown]
-    Receipt --> Watch[Observe active jobs]
-    Resume[Resume saved jobs] --> OtherWatch[Separate resume watch loop]
+   Receipt --> Watch[Shared batched observation and durable report]
+   Resume[Resume saved intents] --> Watch
     Watch --> Status[Read final raw status]
-    OtherWatch --> Status
 ```
 
 ## Codebase Size
@@ -106,10 +104,10 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 
 ## Current Issues
 
-1. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
-   subprocesses reload config and translate the same state through JSON/TSV/CSV.
+1. Phase 2.5 shares active/resumed observation and its report conversion. Shell
+   still launches processes and handles selection/pruning; it is not fully retired.
 2. Phases 2.3-2.4 share observation identity/deadlines, batch inventories and read
-   incremental logs. Scalar shell state-helper calls still need consolidation;
+   incremental logs. Phase 2.5 uses that batch path from both shell watchers;
    phase alone is not success.
 3. New-source submission, crash recovery and evidence-release transitions still
    need separately approved live acceptance. Do not activate an incomplete Phase 1 stack.
@@ -321,12 +319,55 @@ Semantics were checked against installed kubectl v1.35.0 help and the
 matching the previously observed kubelet version. This does not certify the vendor
 build; the real pod reads above exercise the actual endpoint.
 
-The shell's phase-list command and initial resume reconciliation benefit from
-batching, but its per-Job state-helper calls still use scalar observation. Retiring
-those duplicated loops/conversions and changing retest freshness are Phase 2.5.
+At Phase 2.4, the shell's phase-list command and initial resume reconciliation
+benefited from batching, but per-Job state-helper calls were still scalar.
+Phase 2.5 below retires those paths and changes retest freshness.
 New-source producer success/failure, live batch persistence/resume, rotation,
 unavailable API recovery and mid-pass deadline exhaustion remain unexercised.
 The controller stays paused; source creation and live acceptance need exact approval.
+
+## Phase 2.5 Implementation
+
+Active and resumed watching now call the same `observe_tracked_jobs` shell helper.
+It invokes the existing state helper's `update --reconcile` once, which uses the
+manager's batched observer under the admission lock and retains outcomes before
+printing an optional JSON report. `--jobs` selects report rows, not admission scope:
+all unresolved session intents still reconcile. Explicit empty selection reports
+no rows. Existing invocations without `--output json` remain silent.
+
+The report retains the Job/node, phase, creation time, `tracking_complete`, runtime
+completion and test/log/ingestion states. One validated JSON-to-TSV conversion per
+pass replaces per-Job phase, node and timestamp subprocesses. Shell removes a Job
+only on the identity-bound terminal tracking decision; terminal-looking Jobs with
+nonterminal pods remain tracked. A confirmed Failed Job frees capacity for other
+work without waiting for successful ingestion, restarting it or recreating its run.
+Missing/unknown observations, invalid output or writer failure stop the pass.
+
+Compact console lines include phase, tests, ingestion, logs and separate completion
+decisions, emitted on change. The existing worktree/source assertions, same-cycle
+submitted-node exclusions, submission cooldown and independent pruning gate remain.
+Pruning uses verified creation time from the report, not another per-Job lookup;
+its scalar recording hook remains for that separately authorized operation. The
+public CLI, eight-column jobs CSV and exact-run acceptance audit are unchanged.
+
+Five private shell helpers were replaced by two shared ones; the script shrank by
+194 lines. No new script, service, raw store or configuration setting was introduced.
+Success-only scheduler freshness is owned by the existing C7 coverage reader; see
+[the policy and compatibility change](discovery-scheduling-major-component.md#phase-25-successful-freshness).
+
+Verification used retained actual Completed Job observations through the report
+projection and the shell's exact converter. A fresh read of the actual historical
+`0437` Job (`1788675493`) found Failed with no retained pod: tracking released in
+the predicate/report, while completion/ingestion stayed unconfirmed. Bash syntax,
+all 15 embedded Python blocks, imports, diagnostics and read-only planner checks
+passed. An initial extraction syntax error was repaired and the same check rerun.
+Evidence is indexed in `run-logs/phase25-operations-20260924.md`.
+
+No fake runtime or synthetic raw DB was used. No controller was started and no
+active session or Kubernetes workload was changed. The entire mutation-bearing
+shell loop was not run; live durable writes, scheduling after failure, resume and
+pruning equivalence remain unverified. Retained real evidence validates the shared
+report boundary, not fresh source execution or live controller acceptance.
 
 ## Proposed Design
 

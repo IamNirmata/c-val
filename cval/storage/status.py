@@ -17,40 +17,15 @@ from cval.models import LatestStatusRow
 from cval.storage.sqlite_uri import sqlite_readonly_script_prelude
 
 
-def _failed_workload_completed(test_id: str, summary: Path, reader) -> bool:
-    if test_id == "dltest":
-        value = reader.json(summary)
-        count = value.get("gpu_count")
-        return (
-            value.get("schema_version") == "cval.dltest.summary.v1"
-            and all(value.get(key) is True for key in ("rank_coverage_valid", "test_plans_match", "tasks_complete"))
-            and type(count) is int and count > 0 and value.get("rank_result_count") == count
-            and value.get("observed_ranks") == list(range(count))
-        )
-    if test_id == "nccl":
-        from cval.storage.ingest import parse_nccl_health_summary
-
-        parse_nccl_health_summary(summary)
-        return True
-    if test_id == "storage":
-        from cval.storage.ingest import STORAGE_FILE_PREFIXES, parse_storage_metrics
-
-        for name in STORAGE_FILE_PREFIXES:
-            reader.read(summary.parent / "artifacts" / name)
-        parse_storage_metrics(summary.parent / "artifacts")
-        return True
-    return False
-
-
 def read_local_coverage(request: dict) -> dict:
-    """Choose one complete requested-test run, retaining the declared legacy age policy."""
+    """Choose one complete passing run; failed attempts never refresh successful coverage."""
 
     from cval.storage.verification import EvidenceReader, _failure
     from cval.storage.paths import safe_existing_evidence_path
     from cval.validation.results import parse_validation_result_v2, validation_result_digest
 
     reader = EvidenceReader(request)
-    report = {"schema_version": "cval.coverage.v1", "state": "queried", "policy": "legacy_complete_run",
+    report = {"schema_version": "cval.coverage.v1", "state": "queried", "policy": "successful_complete_run",
               "compatibility": "legacy_age_only; dependency provenance not yet produced", "requested_tests": sorted(request["tests"]), "nodes": [], "timestamps": {}}
     try:
         required = set(request["tests"])
@@ -71,7 +46,7 @@ def read_local_coverage(request: dict) -> dict:
             history = grouped.get(node, [])
             item = {"node": node, "state": "queried" if history else "empty", "coverage_timestamp": None,
                     "latest_attempt_timestamp": history[0]["timestamp"] if history else None,
-                    "reason": "no_complete_requested_run" if history else "no_history", "skipped": []}
+                    "reason": "no_successful_requested_run" if history else "no_history", "skipped": []}
             for timestamp, run_rows in groupby(history, lambda row: row["timestamp"]):
                 reader.remaining()
                 run_rows = list(run_rows)
@@ -90,7 +65,9 @@ def read_local_coverage(request: dict) -> dict:
                 status_tests = (required & {"storage", "nccl", "dltest"}) | {"all"}
                 if conflicting:
                     reason = "conflicting_status_duplicates"
-                elif status_tests.issubset(values) and all(values[test][0] in {"pass", "fail"} for test in status_tests):
+                elif status_tests.issubset(values) and any(values[test][0] == "fail" for test in status_tests):
+                    reason = "unsuccessful_status_set"
+                elif status_tests.issubset(values) and all(values[test][0] == "pass" for test in status_tests):
                     root = Path(request["root"])
                     run_id = f"{node}-{timestamp}"
                     canonical = root / "logs/job_logs" / node / run_id / "result.json"
@@ -103,9 +80,9 @@ def read_local_coverage(request: dict) -> dict:
                         result = parse_validation_result_v2(payload)
                         if (result.node, result.timestamp, result.run_id) != (node, timestamp, run_id):
                             raise ValueError("Coverage canonical run identity mismatch")
-                        complete = not result.errors and result.completed_at and required.issubset(result.tests) and all(
+                        complete = not result.errors and result.completed_at and result.overall == "pass" and required.issubset(result.tests) and all(
                             result.tests[test].enabled and result.tests[test].selected and result.tests[test].phase == "finished"
-                            and result.tests[test].status in {"pass", "fail"} for test in required
+                            and result.tests[test].status == "pass" for test in required
                         )
                         if complete and any(values[test][0] != (result.overall if test == "all" else result.tests[test].status) for test in status_tests):
                             raise ValueError("Coverage canonical outcome differs from exact status")
@@ -120,8 +97,6 @@ def read_local_coverage(request: dict) -> dict:
                                                                      allowed_root=root, expect_directory=False, allow_relocated=True)
                                 if not reader.read(summary).strip():
                                     raise ValueError("Coverage lacks canonical test summary")
-                                if test.status == "fail" and not _failed_workload_completed(test_id, summary, reader):
-                                    raise ValueError("Failed test lacks full-workload completion evidence")
                             if reader.read(canonical.parent / ".ingestion-result-digest") != (validation_result_digest(result) + "\n").encode():
                                 raise ValueError("Coverage ingestion digest mismatch")
                             item.update(coverage_timestamp=timestamp, reason="complete_canonical_run", outcome=result.overall)
@@ -168,7 +143,7 @@ def get_coverage_report(config=None, client=None, nodes: list[str] | None = None
 def coverage_timestamps(report: dict, config=None) -> dict[str, int]:
     if report.get("schema_version") != "cval.coverage.v1" or report.get("state") not in {"queried", "empty"}:
         raise RuntimeError(f"{report.get('state', 'unavailable')}: coverage cannot authorize planning: {report.get('reason', '')}")
-    if report.get("policy") != "legacy_complete_run" or not isinstance(report.get("nodes"), list):
+    if report.get("policy") != "successful_complete_run" or not isinstance(report.get("nodes"), list):
         raise ValueError("Invalid coverage policy or rows")
     if config is not None and report.get("requested_tests") != sorted(test.id for test in config.tests.registry.enabled):
         raise ValueError("Coverage request test set differs from current selection")
@@ -180,8 +155,8 @@ def coverage_timestamps(report: dict, config=None) -> dict[str, int]:
         seen.add(item["node"])
         timestamp = item.get("coverage_timestamp")
         if timestamp is not None:
-            if type(timestamp) is not int or timestamp <= 0:
-                raise ValueError("Invalid coverage timestamp")
+            if type(timestamp) is not int or timestamp <= 0 or item.get("outcome") != "pass":
+                raise ValueError("Invalid successful coverage timestamp or outcome")
             timestamps[item["node"]] = timestamp
     if report.get("timestamps") != timestamps or (report["state"] == "empty" and timestamps):
         raise ValueError("Coverage timestamp projection conflicts with observations")

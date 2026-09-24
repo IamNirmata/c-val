@@ -240,7 +240,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Read latest validation status from the PVC access pod",
     )
     status.add_argument("--output", choices=["table", "json"], default="table")
-    status.add_argument("--coverage", action="store_true", help="Read complete-run scheduling coverage and provenance limits")
+    status.add_argument("--coverage", action="store_true", help="Read successful-run scheduling coverage and provenance limits")
     status.set_defaults(handler=handle_status)
 
     plan = subparsers.add_parser(
@@ -1087,7 +1087,7 @@ def _load_db_status(args: argparse.Namespace) -> dict[str, int]:
         from cval.storage.status import coverage_timestamps
 
         timestamps = coverage_timestamps(report, args.cval_config)
-        args.coverage_reasons = {item["node"]: "no-complete-coverage" for item in report["nodes"]
+        args.coverage_reasons = {item["node"]: "no-successful-coverage" for item in report["nodes"]
                                  if item["coverage_timestamp"] is None and item["state"] == "queried"}
         return timestamps
 

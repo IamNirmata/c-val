@@ -175,16 +175,6 @@ session_record_node() {
     python "$STATE_HELPER" node "$SESSION_DIR" --source "$source"
 }
 
-record_job_observation() {
-    local job_name="$1"
-    local phase="$2"
-    session_record_job "$job_name" "$phase" || return "$?"
-    if [[ "${LAST_JOB_PHASES[$job_name]:-}" != "$phase" ]]; then
-        log "job $job_name phase=$phase"
-        LAST_JOB_PHASES[$job_name]="$phase"
-    fi
-}
-
 usage() {
     cat <<EOF
 Usage: $(basename "$0") <command>
@@ -798,7 +788,7 @@ collect_plan_inputs() {
         if (( status_parse_rc == 0 )); then
             IFS=$'\t' read -r PLAN_STATUS_ROW_COUNT PLAN_STATUS_NODE_COUNT <<<"$status_summary"
             PLAN_STATUS_MAP="$status_map"
-            log "component=coverage status=ok row_count=$PLAN_STATUS_ROW_COUNT node_count=$PLAN_STATUS_NODE_COUNT source=validation.db/runs policy=legacy_complete_run"
+            log "component=coverage status=ok row_count=$PLAN_STATUS_ROW_COUNT node_count=$PLAN_STATUS_NODE_COUNT source=validation.db/runs policy=successful_complete_run"
         else
             log "component=latest-status status=invalid-json exit_code=$status_parse_rc artifact=$status_file"
             failed=1
@@ -932,25 +922,6 @@ run_kubectl() {
         kubectl --request-timeout="${KUBECTL_TIMEOUT_SECONDS}s" "$@"
 }
 
-json_phase() {
-    local status_file="$1"
-    local job_name="$2"
-    python - "$status_file" "$job_name" <<'PY'
-import json
-import sys
-
-status_file, job_name = sys.argv[1:]
-with open(status_file, encoding="utf-8") as handle:
-    data = json.load(handle)
-for item in data:
-    if item.get("job_name") == job_name:
-        print(item.get("phase", "Unknown"))
-        break
-else:
-    print("Unknown")
-PY
-}
-
 csv_contains() {
     local csv="$1"
     local needle="$2"
@@ -971,18 +942,6 @@ csv_append_unique() {
     fi
 }
 
-csv_remove_value() {
-    local csv="$1"
-    local remove="$2"
-    python - "$csv" "$remove" <<'PY'
-import sys
-
-csv, remove = sys.argv[1:]
-values = [item for item in csv.split(",") if item and item != remove]
-print(",".join(values))
-PY
-}
-
 csv_count() {
     local csv="$1"
     if [[ -z "$csv" ]]; then
@@ -995,18 +954,6 @@ PY
     fi
 }
 
-job_node_from_name() {
-    local job_name="$1"
-    python - "$job_name" <<'PY'
-import re
-import sys
-
-name = sys.argv[1]
-match = re.search(r"(slc01-cl02-hgx-[0-9]{4})", name)
-print(match.group(1) if match else "")
-PY
-}
-
 latest_cycle_dir_with_submits() {
     find "$LOG_DIR" -type f \( -name 'submit.json' -o -name 'submit-*.json' \) -printf '%T@ %h\n' 2>/dev/null \
         | sort -nr \
@@ -1014,36 +961,48 @@ latest_cycle_dir_with_submits() {
         | cut -d' ' -f2-
 }
 
-json_jobs_observation_state() {
+json_tracking_rows() {
     python - "$1" "$2" <<'PY'
+import csv
 import json
+import re
 import sys
 
 status_path, jobs_csv = sys.argv[1:]
 tracked = [item for item in jobs_csv.split(",") if item]
 with open(status_path, encoding="utf-8") as handle:
-    phases = json.load(handle)
-if not isinstance(phases, list):
-    raise ValueError("jobs JSON must be a list")
+    rows = json.load(handle)
+if not isinstance(rows, list) or len(set(tracked)) != len(tracked):
+    raise ValueError("Invalid tracking rows or selection")
 observed = {}
-for item in phases:
+for item in rows:
     if not isinstance(item, dict):
-        raise ValueError("jobs JSON contains a non-object row")
+        raise ValueError("Tracking JSON contains a non-object row")
     job_name = item.get("job_name")
-    phase = item.get("phase")
-    if not isinstance(job_name, str) or not job_name or not isinstance(phase, str):
-        raise ValueError("jobs JSON contains an invalid row")
+    for field in ("job_name", "node", "phase"):
+        if not isinstance(item.get(field), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", item[field]):
+            raise ValueError("Tracking JSON contains an invalid identity/phase")
     if job_name in observed:
-        raise ValueError("jobs JSON contains duplicate job rows")
-    observed[job_name] = phase
-tracked_phases = [observed.get(job_name, "Unknown") for job_name in tracked]
-terminal = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated", "Missing"}
-if any(phase not in terminal | {"Pending", "Running"} for phase in tracked_phases):
-    print("unknown")
-elif any(phase in {"Pending", "Running"} for phase in tracked_phases):
-    print("active")
-else:
-    print("terminal")
+        raise ValueError("Tracking JSON contains duplicate Job rows")
+    if any(type(item.get(field)) is not bool for field in ("tracking_complete", "completion_confirmed")):
+        raise ValueError("Tracking JSON lacks explicit completion decisions")
+    if item["tracking_complete"] and item["phase"] not in {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}:
+        raise ValueError("Tracking release requires terminal execution")
+    if type(item.get("created_epoch")) is not int or item["created_epoch"] < 0:
+        raise ValueError("Invalid observed creation time")
+    if item.get("log_state") not in {"queried", "limited", "unavailable", "forbidden", "absent", "unconfirmed"}:
+        raise ValueError("Invalid log observation state")
+    if any(item.get(field) not in {"pass", "fail", "incomplete", "unconfirmed"} for field in ("tests_outcome", "ingestion_outcome")):
+        raise ValueError("Invalid runtime outcome")
+    observed[job_name] = item
+if set(observed) != set(tracked):
+    raise ValueError("Tracking report differs from requested Jobs")
+writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
+for name in tracked:
+    item = observed[name]
+    writer.writerow((name, item["node"], item["phase"], str(item["tracking_complete"]).lower(),
+                     item["created_epoch"], item["log_state"], item["tests_outcome"], item["ingestion_outcome"],
+                     str(item["completion_confirmed"]).lower()))
 PY
 }
 
@@ -1114,93 +1073,66 @@ delete_job() {
     session_record_job "$job_name" "Pruned" "$(la_now)"
 }
 
+observe_tracked_jobs() {
+    local cycle_dir="$1"
+    local active_jobs="$2"
+    local expected_sha="$3"
+    local status_file="$cycle_dir/jobs.json"
+    local status_error="$status_file.stderr"
+    local rows_file="$cycle_dir/jobs.tsv"
+    local status_rc=0
+    assert_runner_worktree "tracking-before" "$expected_sha" || return 2
+    python "$STATE_HELPER" update "$SESSION_DIR" --updated-at "$(la_now)" \
+        --state watching --message "observing tracked Jobs" --reconcile \
+        --jobs "$active_jobs" --output json >"$status_file" 2>"$status_error" || status_rc=$?
+    assert_runner_worktree "tracking-after" "$expected_sha" || return 2
+    if (( status_rc != 0 )); then
+        log "tracking observation failed exit_code=$status_rc; retaining unresolved Jobs"
+        [[ ! -s "$status_error" ]] || cat "$status_error" >&2
+        return 2
+    fi
+    json_tracking_rows "$status_file" "$active_jobs" >"$rows_file" || return 2
+    local remaining=() skipped=()
+    local job_name node phase finished created_epoch log_state tests_outcome ingestion_outcome confirmed signature
+    while IFS=$'\t' read -r job_name node phase finished created_epoch log_state tests_outcome ingestion_outcome confirmed; do
+        signature="$phase/$finished/$log_state/$tests_outcome/$ingestion_outcome/$confirmed"
+        if [[ "${LAST_JOB_PHASES[$job_name]:-}" != "$signature" ]]; then
+            log "job $job_name phase=$phase tracking_complete=$finished tests=$tests_outcome ingestion=$ingestion_outcome logs=$log_state completion_confirmed=$confirmed"
+            LAST_JOB_PHASES[$job_name]="$signature"
+        fi
+        [[ "$finished" == "true" ]] && continue
+        case "$phase" in
+            Pending)
+                if pruning_enabled && (( created_epoch > 0 && $(date +%s) - created_epoch >= PENDING_START_TIMEOUT_SECONDS )); then
+                    delete_job "$job_name" "$cycle_dir/deleted-jobs.log" "$cycle_dir" || return 2
+                    skipped+=("$node")
+                    continue
+                fi
+                ;;
+            Running|Completing|Aborting|Terminating|Restarting|Completed|Succeeded|Failed|Aborted|Terminated) ;;
+            *)
+                log "job $job_name phase=$phase is indeterminate; retaining tracked work"
+                return 2
+                ;;
+        esac
+        remaining+=("$job_name")
+    done <"$rows_file"
+    local IFS=,
+    TRACKING_ACTIVE_JOBS="${remaining[*]}"
+    TRACKING_SKIPPED_NODES="${skipped[*]}"
+}
+
 watch_existing_jobs_until_clear() {
     local cycle_dir="$1"
     local active_jobs="$2"
     local expected_sha="$3"
-
     enter_runner_worktree "resume-watch" || return "$?"
     while [[ -n "$active_jobs" ]]; do
-        local status_file="$cycle_dir/jobs.json"
-        local status_error="$status_file.stderr"
-        local status_rc=0
-        assert_runner_worktree "resume-watch-jobs-before" "$expected_sha" || {
+        observe_tracked_jobs "$cycle_dir" "$active_jobs" "$expected_sha" || {
             leave_runner_worktree "resume-watch" 2 || return "$?"
             return 2
         }
-        python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$active_jobs" --output json \
-            >"$status_file" 2>"$status_error" || status_rc=$?
-        assert_runner_worktree "resume-watch-jobs-after" "$expected_sha" || {
-            leave_runner_worktree "resume-watch" 2 || return "$?"
-            return 2
-        }
-        if (( status_rc != 0 )); then
-            log "resume jobs observation failed exit_code=$status_rc; retaining tracked jobs for a later bounded observation"
-            [[ ! -s "$status_error" ]] || cat "$status_error" >&2
-            leave_runner_worktree "resume-watch" 2 || return "$?"
-            return 2
-        fi
-        local observation_state
-        local observation_rc=0
-        observation_state=$(json_jobs_observation_state "$status_file" "$active_jobs") || observation_rc=$?
-        if (( observation_rc != 0 )); then
-            log "resume jobs observation was invalid; retaining tracked jobs for a later bounded observation"
-            leave_runner_worktree "resume-watch" 2 || return "$?"
-            return 2
-        fi
-        if [[ "$observation_state" == "unknown" ]]; then
-            log "resume jobs observation is indeterminate; retaining tracked jobs and ending this observation pass"
-            leave_runner_worktree "resume-watch" 2 || return "$?"
-            return 2
-        fi
-
-        IFS=',' read -r -a active_array <<< "$active_jobs"
-        for job_name in "${active_array[@]}"; do
-            [[ -n "$job_name" ]] || continue
-            local phase
-            local phase_rc=0
-            phase=$(json_phase "$status_file" "$job_name") || phase_rc=$?
-            if (( phase_rc != 0 )); then
-                log "resume job $job_name observation was invalid; retaining tracked jobs for a later bounded observation"
-                leave_runner_worktree "resume-watch" 2 || return "$?"
-                return 2
-            fi
-            record_job_observation "$job_name" "$phase" || {
-                leave_runner_worktree "resume-watch" 2 || return "$?"
-                return 2
-            }
-
-            case "$phase" in
-                Completed|Succeeded|Failed|Aborted|Terminated|Missing)
-                    active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
-                    ;;
-                Pending)
-                    if pruning_enabled; then
-                        local created_ts
-                        created_ts=$(run_kubectl get vcjob -n "$NAMESPACE" "$job_name" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
-                        local created_epoch
-                        created_epoch=$(python -c 'import datetime,sys; s=sys.stdin.read().strip(); print(int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else 0)' <<< "$created_ts")
-                        local now_epoch
-                        now_epoch=$(date +%s)
-                        if [[ "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
-                            if ! delete_job "$job_name" "$cycle_dir/deleted-jobs.log" "$cycle_dir"; then
-                                log "resume prune failed for $job_name; retaining tracked job"
-                                leave_runner_worktree "resume-watch" 2 || return "$?"
-                                return 2
-                            fi
-                            active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
-                        fi
-                    fi
-                    ;;
-                Running) ;;
-                Unknown|*)
-                    log "resume job $job_name phase=$phase is indeterminate; retaining tracked jobs and ending this observation pass"
-                    leave_runner_worktree "resume-watch" 2 || return "$?"
-                    return 2
-                    ;;
-            esac
-        done
-
+        active_jobs="$TRACKING_ACTIVE_JOBS"
         [[ -z "$active_jobs" ]] && break
         sleep "$WATCH_POLL_SECONDS"
     done
@@ -1242,61 +1174,8 @@ PY
     resolve_git_ref || return "$?"
     local resume_git_ref="$RESOLVED_GIT_REF"
     ensure_runner_worktree "$resume_git_ref" || return "$?"
-
-    enter_runner_worktree "resume-status" || return "$?"
-    local resume_error="$cycle_dir/resume-status.stderr"
-    local resume_rc=0
-    assert_runner_worktree "resume-status-jobs-before" "$resume_git_ref" || {
-        leave_runner_worktree "resume-status" 2 || return "$?"
-        return 2
-    }
-    python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$jobs_csv" --output json \
-        >"$cycle_dir/resume-status.json" 2>"$resume_error" || resume_rc=$?
-    assert_runner_worktree "resume-status-jobs-after" "$resume_git_ref" || {
-        leave_runner_worktree "resume-status" 2 || return "$?"
-        return 2
-    }
-    if (( resume_rc != 0 )); then
-        log "resume jobs observation failed exit_code=$resume_rc; deferring new submission cycle"
-        [[ ! -s "$resume_error" ]] || cat "$resume_error" >&2
-        leave_runner_worktree "resume-status" 2 || return "$?"
-        return 2
-    fi
-    leave_runner_worktree "resume-status" 0 || return "$?"
-
-    local observation_state
-    local observation_rc=0
-    observation_state=$(json_jobs_observation_state "$cycle_dir/resume-status.json" "$jobs_csv") || observation_rc=$?
-    if (( observation_rc != 0 )); then
-        log "resume jobs observation was invalid; deferring new submission cycle"
-        return 2
-    fi
-    IFS=',' read -r -a resumed_jobs <<< "$jobs_csv"
-    local resumed_job resumed_phase
-    for resumed_job in "${resumed_jobs[@]}"; do
-        [[ -n "$resumed_job" ]] || continue
-        resumed_phase=$(json_phase "$cycle_dir/resume-status.json" "$resumed_job")
-        record_job_observation "$resumed_job" "$resumed_phase" || return 2
-    done
-    case "$observation_state" in
-        active)
-            log "resuming watch for active jobs from $cycle_dir: $jobs_csv"
-            watch_existing_jobs_until_clear "$cycle_dir" "$jobs_csv" "$resume_git_ref"
-            return "$?"
-            ;;
-        unknown)
-            log "resume jobs observation is indeterminate; retaining tracked jobs and deferring new submission cycle"
-            return 2
-            ;;
-        terminal) ;;
-        *)
-            log "resume jobs observation returned an invalid state; deferring new submission cycle"
-            return 2
-            ;;
-    esac
-
-    log "latest submitted jobs are already terminal; no resume needed"
-    return 1
+    log "resuming watch for retained jobs from $cycle_dir: $jobs_csv"
+    watch_existing_jobs_until_clear "$cycle_dir" "$jobs_csv" "$resume_git_ref"
 }
 
 new_cycle_dir() {
@@ -1399,95 +1278,21 @@ run_submit_cycle() {
 
     local active_jobs=""
     local submitted_nodes=""
-    local completed_jobs=""
     local skipped_nodes=""
+    local node
     local idle_rounds=0
 
     while true; do
-        local status_file="$cycle_dir/jobs.json"
         if [[ -n "$active_jobs" ]]; then
-            local status_error="$status_file.stderr"
-            local status_rc=0
-            assert_runner_worktree "submit-jobs-before" "$git_ref" || {
+            observe_tracked_jobs "$cycle_dir" "$active_jobs" "$git_ref" || {
                 leave_runner_worktree "submit" 2 || return "$?"
                 return 2
             }
-            python -m cval.cli --config "$CONFIG_PATH" jobs --jobs "$active_jobs" --output json \
-                >"$status_file" 2>"$status_error" || status_rc=$?
-            assert_runner_worktree "submit-jobs-after" "$git_ref" || {
-                leave_runner_worktree "submit" 2 || return "$?"
-                return 2
-            }
-            if (( status_rc != 0 )); then
-                log "submit jobs observation failed exit_code=$status_rc; retaining active jobs and ending cycle"
-                [[ ! -s "$status_error" ]] || cat "$status_error" >&2
-                leave_runner_worktree "submit" "$status_rc" || return "$?"
-                return "$status_rc"
-            fi
-
-            local observation_state
-            local observation_rc=0
-            observation_state=$(json_jobs_observation_state "$status_file" "$active_jobs") || observation_rc=$?
-            if (( observation_rc != 0 )); then
-                log "submit jobs observation was invalid; retaining active jobs and ending cycle"
-                leave_runner_worktree "submit" 1 || return "$?"
-                return 1
-            fi
-            if [[ "$observation_state" == "unknown" ]]; then
-                log "submit jobs observation is indeterminate; retaining active jobs and ending cycle"
-                leave_runner_worktree "submit" 1 || return "$?"
-                return 1
-            fi
-
-            IFS=',' read -r -a active_array <<< "$active_jobs"
-            for job_name in "${active_array[@]}"; do
-                [[ -n "$job_name" ]] || continue
-                local phase
-                local phase_rc=0
-                phase=$(json_phase "$status_file" "$job_name") || phase_rc=$?
-                if (( phase_rc != 0 )); then
-                    log "job $job_name observation was invalid; retaining active jobs and ending cycle"
-                    leave_runner_worktree "submit" 1 || return "$?"
-                    return 1
-                fi
-                local node
-                node=$(job_node_from_name "$job_name")
-                record_job_observation "$job_name" "$phase" || {
-                    leave_runner_worktree "submit" 1 || return "$?"
-                    return 1
-                }
-
-                case "$phase" in
-                    Completed|Succeeded|Failed|Aborted|Terminated|Missing)
-                        active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
-                        completed_jobs=$(csv_append_unique "$completed_jobs" "$job_name")
-                        ;;
-                    Pending)
-                        if pruning_enabled; then
-                            local created_ts
-                            created_ts=$(run_kubectl get vcjob -n "$NAMESPACE" "$job_name" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
-                            local created_epoch
-                            created_epoch=$(python -c 'import datetime,sys; s=sys.stdin.read().strip(); print(int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()) if s else 0)' <<< "$created_ts")
-                            local now_epoch
-                            now_epoch=$(date +%s)
-                            if [[ "$phase" == "Pending" && "$created_epoch" != "0" && $((now_epoch - created_epoch)) -ge "$PENDING_START_TIMEOUT_SECONDS" ]]; then
-                                if ! delete_job "$job_name" "$cycle_dir/deleted-jobs.log" "$cycle_dir"; then
-                                    log "pending job prune failed for $job_name; retaining it and ending cycle"
-                                    leave_runner_worktree "submit" 1 || return "$?"
-                                    return 1
-                                fi
-                                active_jobs=$(csv_remove_value "$active_jobs" "$job_name")
-                                skipped_nodes=$(csv_append_unique "$skipped_nodes" "$node")
-                            fi
-                        fi
-                        ;;
-                    Running) ;;
-                    Unknown|*)
-                        log "job $job_name phase=$phase is indeterminate; retaining active jobs and ending cycle"
-                        leave_runner_worktree "submit" 1 || return "$?"
-                        return 1
-                        ;;
-                esac
+            active_jobs="$TRACKING_ACTIVE_JOBS"
+            local skipped_node
+            IFS=',' read -r -a observed_skips <<< "$TRACKING_SKIPPED_NODES"
+            for skipped_node in "${observed_skips[@]}"; do
+                skipped_nodes=$(csv_append_unique "$skipped_nodes" "$skipped_node")
             done
         fi
 

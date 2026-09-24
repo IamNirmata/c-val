@@ -41,13 +41,17 @@ keeps requested tests, provenance limitations, skipped incomplete/conflicting ru
 and per-node coverage timestamps. `plan --live-status` reads the same history;
 `--db-status-json` can consume a retained full coverage report. Plain node/timestamp
 maps remain explicit offline inputs. An unreadable history stops planning rather
-than labelling every node never-tested. `no-complete-coverage` means history was
-read but no complete requested run qualified; it differs from `never-tested`.
+than labelling every node never-tested. `no-successful-coverage` means history was
+read but no complete passing requested run qualified; it differs from `never-tested`.
 
 The live loop collects this coverage report before each planning pass. The named
-age policy is `legacy_complete_run`: coherent historical passing status can still
+age policy is `successful_complete_run`: coherent historical passing status can still
 count with explicit limitations; full dependency compatibility waits for its
 producer. No source-only commit invalidates all prior workload coverage.
+Failed/incomplete attempts remain visible but do not refresh successful coverage;
+an older passing timestamp remains usable with normal age and cooldown checks.
+Old `legacy_complete_run` reports are rejected rather than silently reinterpreted;
+regenerate them with `status --coverage`. Raw failure rows are never suppressed.
 
 Plain `plan` uses the existing priority queue without rendering Jobs.
 Its JSON has `batch_size`, `days_threshold`, `free_nodes_count`, `queue_count`,
@@ -161,7 +165,13 @@ digest-bound ingestion/supervisor acknowledgements. Old/generic completion strin
 are insufficient. See [shared tracking](components_design/job-control-major-component.md#phase-23-implementation).
 
 Phase 2.4 batches CLI phase reads and pending-intent Job/pod inventories under
-one remaining deadline. Scalar shell state updates remain until Phase 2.5.
+one remaining deadline. Phase 2.5 routes active/resumed shell monitoring through
+one existing `update --reconcile` state-helper call and one report conversion.
+Its optional `--output json --jobs <names>` report follows durable observations;
+`--jobs` selects output only, never bypasses other unresolved session intents.
+The shell consumes `tracking_complete`, not phase alone, to free slots. Failed
+terminal work is retained and never restarted/recreated. The scalar `job` hook
+remains for compatibility and separately authorized pruning, not ordinary polling.
 Timestamped logs begin with the configured tail and then reuse an identity-bound
 `log_cursor` with inclusive `--since-time` reads. Existing line/byte settings bound
 reads; no config change is needed. Preserve the compact cursor/runtime fields in

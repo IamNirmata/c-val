@@ -1,8 +1,8 @@
 # Redesign Development Plan
 
-Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.4 source implemented.
+Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemented.
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-task 2.5 onward is not complete. The live loop remains paused since 2026-09-24 UTC.
+Phase 3 onward is not complete. The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
 Shared contracts live in [Redesign.md](Redesign.md).
@@ -222,11 +222,11 @@ normal eligibility, age and cooldown checks. Controller resume means observe the
 existing Job, not resume or replay the workload. Unknown ownership, a lost create
 reply or an unavailable API is not a confirmed failed Job.
 
-Current code can persist `fail`/`incomplete` status rows, and Phase 1 coverage can
+Current code can persist `fail`/`incomplete` status rows, and Phase 1 coverage could
 count a fully exercised failed run. Therefore absence of DB rows is not a valid
-failure/retest rule. Phase 2 must explicitly separate the latest attempt from the
+failure/retest rule. Phase 2.5 now explicitly separates the latest attempt from the
 latest usable successful-test evidence: failure is retained, not relabeled as a
-fresh pass. The proposed success-based retest freshness is an intentional change
+fresh pass. Success-based retest freshness is an intentional change
 to the prior complete-failure coverage policy, to document and verify before
 activation; no status rows are suppressed or deleted to force retesting.
 
@@ -295,6 +295,20 @@ activation; no status rows are suppressed or deleted to force retesting.
   retries. Implement the reviewed retest-freshness rule without erasing failed raw
   status. Keep detailed audits separate from routine tracking and preserve the
   independently gated acceptance workflow.
+  Source implemented: active/resumed shell watching shares one batched durable
+  reconciliation/report helper; separate phase reads and per-Job state updates are
+  removed from routine polling. Five old private helpers became two shared helpers,
+  reducing the shell by 194 lines. Terminal slot release is consumed explicitly,
+  independent of successful tests/ingestion; unresolved identity still blocks.
+  Coverage uses `successful_complete_run`, rejecting old-policy reports and skipping
+  failures while preserving latest attempts, older successes, cooldown and raw rows.
+  A real 478-node history scan retained 476 successful records, skipped seven failed
+  attempts and preserved older successes on four nodes. A real Failed Job without
+  a retained pod released tracking in the local predicate/report check without
+  becoming accepted. See [control verification](job-control-major-component.md#phase-25-implementation)
+  and [freshness policy](discovery-scheduling-major-component.md#phase-25-successful-freshness).
+  Live state writes, actual scheduling after failure and controller resume were not
+  exercised; the loop stays paused. The checkbox remains open for fresh acceptance.
 
 **Done when:** On approved real runs, Kubernetes state and the compact runtime log
 explain execution, retained logs/results and ingestion outcome. Confirmed failure
