@@ -2,7 +2,8 @@
 
 Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemented.
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-Phase 3 onward is not complete. The live loop remains paused since 2026-09-24 UTC.
+Phase 3.1 and 3.3 cleanup source is implemented; remaining Phase 3 tasks are pending.
+The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
 Shared contracts live in [Redesign.md](Redesign.md).
@@ -344,6 +345,15 @@ FIO packaging and additional timing fields are deferred unless separately justif
 
 - [ ] **3.1** Share secure reservation for production and supported standalone
   callers; reuse existing helpers before retiring old path setup, not a new compatibility layer.
+  Source implemented: standalone runner entry reserves through the existing supervisor
+  helper; inherited descriptors still belong to the supervisor. One execution path
+  uses retained descriptors, while standalone retains its own logging and remains
+  test-only. Removed three setup helpers and 149 runner lines; no new abstraction,
+  setting, script or raw store. Marker-only adoption now fails closed, and the root
+  must already exist. Three real-filesystem checks passed for ownership, reuse and
+  symlink rejection without starting benchmarks. Fresh standalone/supervised workload
+  acceptance remains pending. See
+  [reservation ownership and limits](validation-runtime-major-component.md#phase-31-shared-reservation).
 - [ ] **3.2** Reuse the existing config snapshot and secure layout to derive child
   environment and compatibility aliases once. Reject disagreements; add no new context layer.
 - [ ] **3.3** Preserve separate phase/outcome values and bounded child cleanup;

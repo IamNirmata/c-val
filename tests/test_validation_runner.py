@@ -4,11 +4,13 @@ import io
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from cval.config import load_config
@@ -16,6 +18,89 @@ from cval.validation.execution import TestPaths
 from cval.validation.registry import load_test_registry
 from cval.validation.results import ValidationResultV2, load_validation_result
 from cval.validation.runner import _test_environment, run_validation_tests
+from cval.validation.runtime import build_runtime_environment
+from cval.validation.supervisor import reserve_secure_run_layout
+
+
+class RunnerReservationTests(unittest.TestCase):
+    def _inputs(self, root: Path):
+        config = load_config()
+        config = replace(config, runtime=replace(config.runtime, validation_root=str(root)))
+        node = socket.gethostname()
+        timestamp = int(time.time())
+        environment = build_runtime_environment(config)
+        environment.update(GCRNODE=node, GCRTIME=str(timestamp), CVAL_RUN_ID=f"{node}-{timestamp}")
+        return config, environment, root / "logs/job_logs" / node / environment["CVAL_RUN_ID"]
+
+    def test_closed_console_preserves_evidence_and_descriptor_ownership(self) -> None:
+        for borrowed in (False, True):
+            with self.subTest(supervisor_owned=borrowed), tempfile.TemporaryDirectory() as directory:
+                config, environment, run_dir = self._inputs(Path(directory))
+                before = set(os.listdir("/proc/self/fd"))
+                layout = None
+                if borrowed:
+                    layout = reserve_secure_run_layout(
+                        directory, environment["GCRNODE"], environment["CVAL_RUN_ID"],
+                        registry_json=environment["CVAL_TEST_REGISTRY_JSON"],
+                    )
+                    environment.update(layout.environment())
+                reserved = set(os.listdir("/proc/self/fd"))
+                console = tempfile.TemporaryFile(mode="w+")
+                console.close()
+                try:
+                    with self.assertRaisesRegex(ValueError, "closed file"):
+                        run_validation_tests(config=config, environ=environment, stdout=console, stderr=io.StringIO())
+                    self.assertEqual(set(os.listdir("/proc/self/fd")), reserved)
+                    result = json.loads((run_dir / "result.json").read_text())
+                    self.assertEqual(result["overall"], "incomplete")
+                    for test in result["tests"].values():
+                        self.assertIn(test["phase"], {"pending", "not_selected"})
+                        self.assertNotIn("/proc/self/fd", test["summary"])
+                    self.assertTrue((run_dir / ".run-active").is_file())
+                    self.assertFalse((Path(directory) / "metadata").exists())
+                    self.assertEqual(len((run_dir / "events.jsonl").read_text().splitlines()), 1)
+                    if layout is not None:
+                        layout.verify()
+                        self.assertEqual((run_dir / "stdout.log").read_bytes(), b"")
+                    else:
+                        self.assertIn(b"run_started", (run_dir / "stdout.log").read_bytes())
+                finally:
+                    if layout is not None:
+                        layout.close()
+                self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+
+    def test_reused_or_marker_only_evidence_is_not_adopted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config, environment, run_dir = self._inputs(Path(directory))
+            layout = reserve_secure_run_layout(
+                directory, environment["GCRNODE"], environment["CVAL_RUN_ID"],
+                registry_json=environment["CVAL_TEST_REGISTRY_JSON"],
+            )
+            layout.close()
+            original = {path.name: path.read_bytes() for path in run_dir.iterdir()}
+            before = set(os.listdir("/proc/self/fd"))
+            with self.assertRaisesRegex(FileExistsError, "refusing run_id reuse"):
+                run_validation_tests(config=config, environ=environment)
+            environment.update(CVAL_EXTERNAL_GLOBAL_LOGGING="true", CVAL_RUN_MARKER_PREACQUIRED="true")
+            with self.assertRaisesRegex(ValueError, "verified secure run layout"):
+                run_validation_tests(config=config, environ=environment)
+            self.assertEqual({path.name: path.read_bytes() for path in run_dir.iterdir()}, original)
+            self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+
+    def test_symlinked_test_directory_cannot_redirect_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            config, environment, run_dir = self._inputs(root)
+            test_id = config.tests.registry.enabled[0].id
+            (root / "logs").mkdir()
+            (root / "logs" / test_id).symlink_to(outside, target_is_directory=True)
+            before = set(os.listdir("/proc/self/fd"))
+            with self.assertRaises(OSError):
+                run_validation_tests(config=config, environ=environment)
+            self.assertEqual(list(Path(outside).iterdir()), [])
+            self.assertTrue((run_dir / ".run-active").is_file())
+            self.assertEqual((run_dir / "result.json").read_bytes(), b"")
+            self.assertEqual(set(os.listdir("/proc/self/fd")), before)
 
 
 class ValidationRunnerTests(unittest.TestCase):
@@ -321,38 +406,6 @@ exit 0
                 )
 
         self.assertEqual(first["tests"]["smoke"]["status"], "pass")
-
-    def test_accepts_manifest_preacquired_marker_and_external_logs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            self._write_test(root, "smoke", order=10)
-            registry = self._registry(root, {"smoke": True})
-            environment = self._environment(root, root / "data")
-            environment["CVAL_EXTERNAL_GLOBAL_LOGGING"] = "true"
-            environment["CVAL_RUN_MARKER_PREACQUIRED"] = "true"
-            log_dir = root / "data/logs/job_logs/node-a/node-a-123"
-            log_dir.mkdir(parents=True)
-            marker = log_dir / ".run-active"
-            marker.write_text("pod=test\n", encoding="utf-8")
-            (log_dir / "stdout.log").write_text("pre-run\n", encoding="utf-8")
-            (log_dir / "stderr.log").touch()
-            (log_dir / "job.log").write_text("pre-run\n", encoding="utf-8")
-
-            result = run_validation_tests(
-                config=load_config(),
-                registry=registry,
-                environ=environment,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-
-            self.assertTrue(marker.exists())
-            self.assertEqual(
-                (log_dir / "stdout.log").read_text(encoding="utf-8"),
-                "pre-run\n",
-            )
-
-        self.assertEqual(result["overall"], "pass")
 
     def test_rejects_preexisting_per_test_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

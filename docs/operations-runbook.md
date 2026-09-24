@@ -280,6 +280,21 @@ checkout directory. It then runs the same descriptor-anchored supervisor.
 Publishing the ConfigMap and submitting the Job remain separate gated operations.
 Do not put personal Git credentials in a ConfigMap, Pod environment, or manifest.
 
+### Standalone Runner Evidence
+
+Production Jobs continue to enter through the descriptor-anchored supervisor.
+The standalone runner remains test-only: it now reserves through the same secure
+helper, owns its log capture and closes only its own descriptors. It does not start
+ingestion. The configured evidence root must already exist; each run ID must be
+unused. An interrupted or failed setup retains available evidence and its marker.
+
+Do not precreate canonical run paths or supply only
+`CVAL_RUN_MARKER_PREACQUIRED` / `CVAL_EXTERNAL_GLOBAL_LOGGING` to adopt them.
+Pre-acquired evidence requires the verified descriptor layout from the supervisor.
+Existing result/DB contracts and variable image/CUDA/PyTorch/iteration inputs are
+unchanged. See [reservation ownership](components_design/validation-runtime-major-component.md#phase-31-shared-reservation).
+Workload execution and raw writes still require the normal exact approvals.
+
 ### Real-node development procedure
 
 Phase 0 procedure; the templates below are not approval to execute a mutation.

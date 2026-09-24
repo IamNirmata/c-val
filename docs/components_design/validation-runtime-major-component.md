@@ -1,7 +1,8 @@
 # C5: Validation Runtime
 
-Status: Phase 2.1 logging and Phase 3.3 child-cleanup source implemented; new-source
-pod acceptance pending. Remaining runtime consolidation is proposed. Baseline/counting:
+Status: Phase 2.1 logging, Phase 3.3 child cleanup and Phase 3.1 shared reservation
+source implemented; new-source pod acceptance pending. Environment consolidation
+remains proposed. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -61,12 +62,12 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
 | Critical | Descriptor-bound evidence, no run reuse, deadlines, child cleanup, canonical results | Preserve. |
 | Good | Structured progress, isolated setup failures, historical result readers | Retain one implementation per contract. |
 | Not important | Legacy text markers and result environment output | Keep as compatibility projections, not write authority. |
-| Useless | Two independent implementations of evidence setup | Replace with one secure reservation path after caller migration. |
+| Removed in 3.1 | Independent standalone directory/marker setup | Both entries now use the existing secure reservation helper. |
 
 ## Current Issues
 
-1. [The runner](../../cval/validation/runner.py#L49) supports both supervisor-provided
-   descriptors and standalone path construction. Both require extensive protection.
+1. [The runner](../../cval/validation/runner.py) now shares descriptor reservation
+   for supervised and standalone entry; fresh workload equivalence remains unverified.
 2. Built-in environment aliases are reconstructed in multiple layers; canonical
    and descriptor-backed paths must not diverge.
 3. Runtime success, test outcome and ingestion completion are different signals.
@@ -159,6 +160,43 @@ pod, controller, source ConfigMap or raw DB was changed during development.
 Task 2.2 is implemented in its separate source slice, with acceptance limitations
 recorded in the roadmap. Tasks 2.3-2.5, including tracking and retest freshness,
 remain outside this logging-only slice.
+
+## Phase 3.1 Shared Reservation
+
+The existing `reserve_secure_run_layout` now supplies both supervisor and standalone
+runner entry. Standalone execution acquires the same exclusive directories, private
+files and marker, then uses the existing descriptor-backed path readers and built-in
+compatibility path helper. The separate mkdir/touch/marker implementation is removed:
+three helpers and 149 runner lines, with no new runtime abstraction or setting.
+Canonical path computation remains for result fields, not evidence creation.
+
+Ownership stays explicit. A supervised runner borrows the supplied descriptors;
+the supervisor retains global stdout/stderr and controls marker release after
+ingestion. A standalone runner writes its own global logs, releases only its own
+marker after normal test completion, and closes its descriptors on every exit.
+Failure retains partial evidence and the marker, and the run ID cannot be reused.
+Standalone execution never binds a result for ingestion or starts a DB writer.
+
+The configured evidence root must already exist as a concrete directory, matching
+the supervisor contract. Startup no longer creates a missing root or adopts manually
+created logs/markers from flags alone. Pre-acquired logging/marker flags or inherited
+FDs require a valid secure layout. Existing production bootstrap already supplies
+that layout; standalone callers should let the runner reserve fresh evidence.
+
+Three focused checks in the existing runner test file use the real local filesystem,
+current registered test definitions and the actual control-host name. They stop
+before any benchmark: a closed console verifies both ownership paths and retained
+incomplete results, reuse/marker-only attempts leave existing files unchanged, and
+a symlinked test directory cannot redirect writes. All descriptors are accounted
+for after failure. Additional local checks used retained real run identities and
+confirmed unchanged canonical result/workload functions. Evidence is indexed in
+`run-logs/phase31-operations-20260924.md`.
+
+Image, CUDA, PyTorch, iterations, test outcomes, raw schemas/writers and result
+binding are unchanged. Phase 3.2 still owns further environment consolidation.
+Fresh successful standalone/supervised execution and in-pod interruption remain
+unverified; local filesystem checks do not substitute for approved real-node
+acceptance. No source object, live session, Job or raw DB was changed by these checks.
 
 ## Phase 3.3 Child Cleanup
 

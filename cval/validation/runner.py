@@ -11,6 +11,7 @@ import stat
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, TextIO
@@ -36,6 +37,7 @@ from cval.validation.registry import (
 )
 from cval.validation.results import parse_validation_result_v2
 from cval.validation.runtime import build_runtime_environment, effective_config_digest
+from cval.validation.supervisor import _add_builtin_compatibility_paths, reserve_secure_run_layout
 
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
@@ -90,108 +92,107 @@ def run_validation_tests(
     marker_preacquired = _is_enabled(
         runtime_env.get("CVAL_RUN_MARKER_PREACQUIRED", "false")
     )
-    secure_layout = _load_secure_layout(runtime_env, validation_root, registry)
-    secure_pass_fds = _secure_pass_fds(runtime_env)
-    if secure_layout is not None:
+    with ExitStack() as resources:
+        owned_layout = None
+        secure_layout = _load_secure_layout(runtime_env, validation_root, registry)
+        if secure_layout is None:
+            if external_logging or marker_preacquired or runtime_env.get("CVAL_SECURE_RUN_FDS"):
+                raise ValueError("Pre-acquired evidence requires a verified secure run layout")
+            owned_layout = reserve_secure_run_layout(
+                validation_root, node, run_id, registry_json=runtime_env["CVAL_TEST_REGISTRY_JSON"],
+            )
+            resources.callback(owned_layout.close)
+            runtime_env.update(owned_layout.environment())
+            runtime_env.update(CVAL_NODE=node, CVAL_RUN_ID=run_id, GCRNODE=node, GCRTIME=str(timestamp),
+                               CVAL_EXTERNAL_GLOBAL_LOGGING="false")
+            _add_builtin_compatibility_paths(runtime_env, owned_layout, config)
+            secure_layout = _load_secure_layout(runtime_env, validation_root, registry)
+        elif not external_logging or not marker_preacquired:
+            raise ValueError("Inherited secure layout requires supervisor-owned marker and logging")
+        secure_pass_fds = _secure_pass_fds(runtime_env)
         _validate_secure_pass_fds(secure_layout, secure_pass_fds)
-    run_paths = (
-        _secure_run_paths(secure_layout)
-        if secure_layout is not None
-        else _run_paths(validation_root, node, run_id)
-    )
-    if secure_layout is None:
-        _preflight_registry_paths(
-            validation_root,
-            node,
-            run_id,
-            registry,
+        run_paths = _secure_run_paths(secure_layout)
+        runtime_env.update(
+            {
+                "CVAL_JOB_LOG_DIR": str(run_paths.log_dir),
+                "CVAL_RESULT_JSON_FILE": str(run_paths.result),
+                "CVAL_RESULT_ENV_FILE": str(run_paths.legacy_env),
+            }
         )
-    runtime_env.update(
-        {
-            "CVAL_JOB_LOG_DIR": str(run_paths.log_dir),
-            "CVAL_RESULT_JSON_FILE": str(run_paths.result),
-            "CVAL_RESULT_ENV_FILE": str(run_paths.legacy_env),
-        }
-    )
-    _prepare_run_paths(
-        run_paths,
-        allow_external_logs=external_logging,
-        marker_preacquired=marker_preacquired,
-        secure_precreated=secure_layout is not None,
-    )
-    logger = RunLogger(
-        run_paths,
-        run_id,
-        stdout=stdout,
-        stderr=stderr,
-        write_global_files=not external_logging,
-        pass_fds=secure_pass_fds,
-    )
-    result = _initial_result(
-        config=config,
-        registry=registry,
-        runtime_env=runtime_env,
-        node=node,
-        timestamp=timestamp,
-        run_id=run_id,
-        validation_root=validation_root,
-    )
-    _write_state(result, run_paths)
-    started_clock = time.monotonic()
-    logger.emit(
-        "run_started",
-        status="incomplete",
-        tests=[test.id for test in registry.enabled],
-        producer="runner",
-        node_name=node,
-        git_ref=result["git_ref"],
-        config_digest=result["global_config_digest"],
-    )
-
-    previous_handlers = _install_signal_handlers(logger)
-    try:
-        _execute_registry(
-            registry,
-            validation_root=validation_root,
+        _prepare_run_paths(run_paths)
+        logger = RunLogger(
+            run_paths,
+            run_id,
+            stdout=stdout,
+            stderr=stderr,
+            write_global_files=not external_logging,
+            pass_fds=secure_pass_fds,
+        )
+        result = _initial_result(
+            config=config,
+            registry=registry,
+            runtime_env=runtime_env,
             node=node,
             timestamp=timestamp,
             run_id=run_id,
-            result=result,
-            run_paths=run_paths,
-            logger=logger,
-            runtime_env=runtime_env,
-            secure_layout=secure_layout,
+            validation_root=validation_root,
         )
-    except KeyboardInterrupt:
+        _write_state(result, run_paths)
+        started_clock = time.monotonic()
         logger.emit(
-            "run_interrupted",
+            "run_started",
             status="incomplete",
-            message="received termination signal",
+            tests=[test.id for test in registry.enabled],
+            producer="runner",
+            node_name=node,
+            git_ref=result["git_ref"],
+            config_digest=result["global_config_digest"],
+        )
+
+        previous_handlers = _install_signal_handlers(logger)
+        try:
+            _execute_registry(
+                registry,
+                validation_root=validation_root,
+                node=node,
+                timestamp=timestamp,
+                run_id=run_id,
+                result=result,
+                run_paths=run_paths,
+                logger=logger,
+                runtime_env=runtime_env,
+                secure_layout=secure_layout,
+            )
+        except KeyboardInterrupt:
+            logger.emit(
+                "run_interrupted",
+                status="incomplete",
+                message="received termination signal",
+                producer="runner",
+                node_name=node,
+                duration_ms=max(0, int((time.monotonic() - started_clock) * 1000)),
+            )
+            _write_state(result, run_paths)
+            raise
+        finally:
+            _restore_signal_handlers(previous_handlers)
+
+        if result["completed_at"] is None:
+            result["completed_at"] = utc_now()
+        _write_state(result, run_paths)
+        logger.emit(
+            "run_finished",
+            status=result["overall"],
+            overall=result["overall"],
             producer="runner",
             node_name=node,
             duration_ms=max(0, int((time.monotonic() - started_clock) * 1000)),
         )
+        logger.message(_legacy_final_line(result))
         _write_state(result, run_paths)
-        raise
-    finally:
-        _restore_signal_handlers(previous_handlers)
-
-    if result["completed_at"] is None:
-        result["completed_at"] = utc_now()
-    _write_state(result, run_paths)
-    logger.emit(
-        "run_finished",
-        status=result["overall"],
-        overall=result["overall"],
-        producer="runner",
-        node_name=node,
-        duration_ms=max(0, int((time.monotonic() - started_clock) * 1000)),
-    )
-    logger.message(_legacy_final_line(result))
-    _write_state(result, run_paths)
-    if not marker_preacquired:
-        run_paths.marker.unlink()
-    return result
+        if owned_layout is not None:
+            owned_layout.release_marker()
+        return result
 
 
 def main() -> int:
@@ -219,7 +220,7 @@ def _execute_registry(
     run_paths: RunPaths,
     logger: RunLogger,
     runtime_env: dict[str, str],
-    secure_layout: Mapping[str, Any] | None,
+    secure_layout: Mapping[str, Any],
 ) -> None:
     for registered_test in registry.tests:
         if not registered_test.enabled:
@@ -233,12 +234,8 @@ def _execute_registry(
             if compatibility_skip:
                 logger.message(compatibility_skip)
             continue
-        test_paths = (
-            _secure_test_paths(secure_layout, registered_test)
-            if secure_layout is not None
-            else _test_paths(validation_root, node, run_id, registered_test)
-        )
-        _prepare_test_paths(test_paths, secure_precreated=secure_layout is not None)
+        test_paths = _secure_test_paths(secure_layout, registered_test)
+        _prepare_test_paths(test_paths)
         _run_one_test(
             registered_test,
             test_paths=test_paths,
@@ -634,57 +631,6 @@ def _test_environment(
     return environment
 
 
-def _run_paths(
-    validation_root: Path,
-    node: str,
-    run_id: str,
-) -> RunPaths:
-    log_dir = validation_root / "logs" / "job_logs" / node / run_id
-    _require_below(validation_root, log_dir, "global run log directory")
-    return RunPaths(
-        log_dir=log_dir,
-        stdout=log_dir / "stdout.log",
-        stderr=log_dir / "stderr.log",
-        job_log=log_dir / "job.log",
-        events=log_dir / "events.jsonl",
-        result=log_dir / "result.json",
-        legacy_env=log_dir / "result.env",
-        marker=log_dir / ".run-active",
-    )
-
-
-def _preflight_registry_paths(
-    validation_root: Path,
-    node: str,
-    run_id: str,
-    registry: ValidationTestRegistry,
-) -> None:
-    """Reject all global/dynamic test path hazards before the first evidence write."""
-
-    _require_below(
-        validation_root,
-        validation_root / "logs/job_logs" / node / run_id,
-        "global run log directory",
-    )
-    run_paths = _run_paths(validation_root, node, run_id)
-    for field_name, path in (
-        ("global stdout", run_paths.stdout),
-        ("global stderr", run_paths.stderr),
-        ("global job log", run_paths.job_log),
-        ("global events", run_paths.events),
-        ("global result", run_paths.result),
-        ("global legacy result", run_paths.legacy_env),
-        ("global marker", run_paths.marker),
-        (
-            "global ingestion digest",
-            run_paths.log_dir / ".ingestion-result-digest",
-        ),
-    ):
-        _require_below(validation_root, path, field_name)
-    for registered_test in registry.tests:
-        _test_paths(validation_root, node, run_id, registered_test)
-
-
 def _test_paths(
     validation_root: Path,
     node: str,
@@ -712,120 +658,25 @@ def _test_paths(
     )
 
 
-def _prepare_run_paths(
-    paths: RunPaths,
-    *,
-    allow_external_logs: bool = False,
-    marker_preacquired: bool = False,
-    secure_precreated: bool = False,
-) -> None:
-    if not secure_precreated:
-        _require_below(paths.log_dir.parents[3], paths.log_dir, "global run log directory")
-        for path in (
-            paths.stdout,
-            paths.stderr,
-            paths.job_log,
-            paths.events,
-            paths.result,
-            paths.legacy_env,
-            paths.marker,
-            paths.log_dir / ".ingestion-result-digest",
-        ):
-            _require_below(paths.log_dir.parents[3], path, "global evidence file")
-    if secure_precreated:
-        expected_names = {
-            "stdout.log",
-            "stderr.log",
-            "job.log",
-            "events.jsonl",
-            "result.json",
-            "result.env",
-            ".run-active",
-        }
-        actual_names = {path.name for path in paths.log_dir.iterdir()}
-        if actual_names != expected_names:
-            raise FileExistsError("Secure run evidence reservation is incomplete or reused")
-        for path in paths.log_dir.iterdir():
-            if path.is_symlink() or not path.is_file():
-                raise ValueError(f"Reserved global evidence is not regular: {path.name}")
-        if not marker_preacquired or not allow_external_logs:
-            raise ValueError("Secure run layout requires pre-acquired marker and logging")
-        return
-    allowed_existing: set[Path] = set()
-    if allow_external_logs:
-        allowed_existing.update((paths.stdout, paths.stderr, paths.job_log))
-    if marker_preacquired:
-        allowed_existing.add(paths.marker)
-    existing = set(paths.log_dir.iterdir()) if paths.log_dir.exists() else set()
-    unexpected = existing - allowed_existing
-    if unexpected:
-        raise FileExistsError(
-            "Run evidence already exists; refusing run_id reuse: "
-            f"{', '.join(str(path) for path in sorted(unexpected))}"
-        )
-    paths.log_dir.mkdir(parents=True, exist_ok=True)
-    if marker_preacquired:
-        if not paths.marker.is_file():
-            raise FileNotFoundError(
-                f"Pre-acquired run marker is missing: {paths.marker}"
-            )
-    else:
-        _create_run_marker(paths)
-    for path in allowed_existing:
-        if path.exists() and (path.is_symlink() or not path.is_file()):
-            raise ValueError(f"External global evidence is not a regular file: {path}")
-    paths.result.parent.mkdir(parents=True, exist_ok=True)
-    paths.legacy_env.parent.mkdir(parents=True, exist_ok=True)
-    for path in (paths.stdout, paths.stderr, paths.job_log, paths.events):
-        path.touch(exist_ok=True)
+def _prepare_run_paths(paths: RunPaths) -> None:
+    expected_names = {"stdout.log", "stderr.log", "job.log", "events.jsonl", "result.json", "result.env", ".run-active"}
+    if {path.name for path in paths.log_dir.iterdir()} != expected_names:
+        raise FileExistsError("Secure run evidence reservation is incomplete or reused")
+    for path in paths.log_dir.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Reserved global evidence is not regular: {path.name}")
 
 
-def _create_run_marker(paths: RunPaths) -> None:
-    """Atomically acquire one run ID for the current process."""
-
-    try:
-        descriptor = os.open(
-            paths.marker,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
-        )
-    except FileExistsError as exc:
-        raise FileExistsError(
-            f"Run is already active; refusing duplicate run_id: {paths.log_dir.name}"
-        ) from exc
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(f"pid={os.getpid()}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _prepare_test_paths(paths: TestPaths, *, secure_precreated: bool = False) -> None:
-    if secure_precreated:
-        expected_logs = {"stdout.log", "stderr.log", "events.jsonl", "workload.log"}
-        if {path.name for path in paths.log_dir.iterdir()} != expected_logs:
-            raise FileExistsError("Secure per-test log reservation is incomplete or reused")
-        if {path.name for path in paths.run_dir.iterdir()} != {"artifacts"}:
-            raise FileExistsError("Secure per-test run reservation is incomplete or reused")
-        if any(path.is_symlink() or not path.is_file() for path in paths.log_dir.iterdir()):
-            raise ValueError("Secure per-test log reservation contains a non-regular file")
-        if not paths.artifacts.is_dir():
-            raise ValueError("Secure per-test artifacts reservation is not a directory")
-        return
-    validation_root = paths.log_dir.parents[3]
-    _require_below(validation_root, paths.log_dir, "test log directory")
-    _require_below(validation_root, paths.run_dir, "test run directory")
-    if paths.log_dir.exists() or paths.run_dir.exists():
-        raise FileExistsError(
-            "Per-test run evidence already exists; refusing reuse: "
-            f"{paths.log_dir} or {paths.run_dir}"
-        )
-    paths.log_dir.parent.mkdir(parents=True, exist_ok=True)
-    paths.run_dir.parent.mkdir(parents=True, exist_ok=True)
-    paths.log_dir.mkdir()
-    paths.run_dir.mkdir()
-    paths.artifacts.mkdir()
-    for path in (paths.stdout, paths.stderr, paths.events, paths.workload_log):
-        path.touch(exist_ok=True)
+def _prepare_test_paths(paths: TestPaths) -> None:
+    expected_logs = {"stdout.log", "stderr.log", "events.jsonl", "workload.log"}
+    if {path.name for path in paths.log_dir.iterdir()} != expected_logs:
+        raise FileExistsError("Secure per-test log reservation is incomplete or reused")
+    if {path.name for path in paths.run_dir.iterdir()} != {"artifacts"}:
+        raise FileExistsError("Secure per-test run reservation is incomplete or reused")
+    if any(path.is_symlink() or not path.is_file() for path in paths.log_dir.iterdir()):
+        raise ValueError("Secure per-test log reservation contains a non-regular file")
+    if not paths.artifacts.is_dir():
+        raise ValueError("Secure per-test artifacts reservation is not a directory")
 
 
 def _write_state(result: dict[str, Any], paths: RunPaths) -> None:
