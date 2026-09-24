@@ -4,6 +4,9 @@ import unittest
 import subprocess
 import json
 import os
+import hashlib
+import importlib.machinery
+import shutil
 import signal
 import sqlite3
 import stat
@@ -23,6 +26,80 @@ from cval.validation.runtime import build_runtime_environment, effective_config_
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class DlRunLocalSourceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        config = load_config()
+        self.source = Path(os.environ.get("CVAL_DL_UNIT_TEST_DIR", config.runtime.dl_unit_test_dir))
+        self.plan = config.tests.registry.require("dltest").definition.settings["test_plan"]
+        if not (self.source / "src/dl_unit_test/__main__.py").is_file():
+            self.skipTest("Requires the actual configured DL source or a retained copy, not a fake workload")
+        self.script = (REPO_ROOT / "validation-tests/dltest/run-test.sh").read_text()
+        self.functions = self.script[self.script.index("find_source_plan_dir() {"):self.script.index("write_summary() {")]
+
+    def _prepare(self, source: Path, output: Path, before: str = "") -> subprocess.CompletedProcess:
+        environment = os.environ | {
+            "CVAL_DL_UNIT_TEST_DIR": str(source), "CVAL_DL_TEST_PLAN": self.plan,
+            "DLTEST_OUTPUT_DIR": str(output), "DLTEST_WORK_DIR": str(output / "workdir"),
+        }
+        return subprocess.run(
+            ["bash", "-u", "-o", "pipefail", "-s"], input=self.functions + before + "\nprepare_workdir\n",
+            env=environment, text=True, capture_output=True, timeout=30,
+        )
+
+    def _hashes(self, root: Path) -> dict[str, str]:
+        return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in root.rglob("*") if path.is_file()}
+
+    def test_real_source_copy_is_independent_and_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "shared-input"
+            shutil.copytree(self.source / "src", source / "src")
+            if (self.source / "test_plans" / self.plan).is_dir():
+                shutil.copytree(self.source / "test_plans" / self.plan, source / "test_plans" / self.plan)
+            output = root / "output"
+            original = self._hashes(source)
+            result = self._prepare(source, output)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            workdir = output / "workdir"
+            self.assertEqual(self._hashes(source / "src"), self._hashes(workdir / "src"))
+            selected_plan = source / "test_plans" / self.plan / "test_plan.json"
+            if not selected_plan.exists():
+                selected_plan = source / "src/dl_unit_test/test_plans" / self.plan / "test_plan.json"
+            self.assertEqual(json.loads(selected_plan.read_text()),
+                             json.loads((workdir / "test_plans" / self.plan / "test_plan.json").read_text()))
+            prepared = self._hashes(workdir)
+            self.assertFalse(any(path.is_symlink() for path in workdir.rglob("*")))
+            self.assertNotEqual(self._prepare(source, output).returncode, 0)
+            self.assertEqual(prepared, self._hashes(workdir))
+            self.assertEqual(original, self._hashes(source))
+            (source / "src/dl_unit_test/__main__.py").unlink()
+            selected_plan.unlink()
+            self.assertEqual(prepared, self._hashes(workdir))
+            spec = importlib.machinery.PathFinder.find_spec("dl_unit_test", [str(workdir / "src")])
+            self.assertIsNotNone(spec)
+            self.assertTrue(all(Path(path).is_relative_to(workdir) for path in spec.submodule_search_locations))
+            self.assertIn('PYTHONPATH="$DLTEST_WORK_DIR/src${PYTHONPATH:+:$PYTHONPATH}"', self.script)
+            self.assertIn('--source-dir "$DLTEST_WORK_DIR"', self.script)
+
+    def test_source_change_during_copy_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "shared-input"
+            shutil.copytree(self.source / "src", source / "src")
+            if (self.source / "test_plans" / self.plan).is_dir():
+                shutil.copytree(self.source / "test_plans" / self.plan, source / "test_plans" / self.plan)
+            boundary = """
+set -T
+trap 'if [[ "$BASH_COMMAND" == "diff -qr --"* ]]; then trap - DEBUG; rm -- "$CVAL_DL_UNIT_TEST_DIR/src/dl_unit_test/__main__.py"; fi' DEBUG
+"""
+            result = self._prepare(source, root / "output", boundary)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((source / "src/dl_unit_test/__main__.py").exists())
+            self.assertTrue((root / "output/workdir/src/dl_unit_test/__main__.py").is_file())
+            self.assertIn("__main__.py", result.stdout)
 
 
 class ValidationScriptTests(unittest.TestCase):

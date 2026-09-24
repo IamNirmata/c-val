@@ -2,7 +2,7 @@
 
 Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemented.
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-Phase 3.1-3.3 cleanup source is implemented; remaining Phase 3 tasks are pending.
+Phase 3.1-3.4 cleanup source is implemented; Phase 3.5 comparison remains pending.
 The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
@@ -379,6 +379,14 @@ FIO packaging and additional timing fields are deferred unless separately justif
 - [ ] **3.4** Address mutable external DL code/plan only after defining the smallest
   per-run consistency change. Keep source/plan selectable across runs; do not pin
   image/CUDA/PyTorch versions or build a new image as part of this phase.
+  Source implemented in the existing DL scripts: copy `src`, the selected plan and
+  any baseline into the existing work directory; compare them with the inputs and
+  execute the local source. Reused work directories are rejected rather than erased.
+  The existing summary `source_dir` identifies the execution copy; settings, schemas
+  and raw writers are unchanged. Two checks on retained actual DL source passed for
+  isolation, reuse and an observed change during copying. Real setup preflight also
+  passed locally. No benchmark was run; baseline-file and fresh pod acceptance remain
+  unverified. See [per-run source boundary](test-workloads-major-component.md#phase-34-run-local-dl-source).
 - [ ] **3.5** Use existing timing/events and recorded environment fields to compare
   approved runs. Add instrumentation only for a demonstrated missing measurement.
 

@@ -7,7 +7,7 @@ CVAL_VALIDATION_ROOT=${CVAL_VALIDATION_ROOT:?Missing configured validation root}
 CVAL_DL_UNIT_TEST_DIR=${CVAL_DL_UNIT_TEST_DIR:?Missing configured DL source}
 CVAL_DL_TEST_PLAN=${CVAL_DL_TEST_PLAN:?Missing configured DL plan}
 
-for command_name in python3 torchrun realpath; do
+for command_name in python3 torchrun realpath cp diff; do
 	if ! command -v "$command_name" >/dev/null 2>&1; then
 		echo "dltest setup: required command not found: $command_name" >&2
 		exit 1

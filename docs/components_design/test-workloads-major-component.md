@@ -1,6 +1,8 @@
 # C6: Test Workloads
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 3.4 run-local DL source is implemented; fresh workload acceptance
+pending. Other proposals remain scoped by the reviewed plan. Baseline/counting:
+[overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -69,8 +71,9 @@ are not in this repository and are excluded from these numbers.
 
 1. [Storage setup](../../validation-tests/storage/setup.sh) can install FIO after
    GPU allocation, adding network dependence and unmeasured reservation overhead.
-2. [DL execution](../../validation-tests/dltest/run-test.sh) imports a shared source
-   tree outside the c-val commit. Pinning c-val alone does not pin the benchmark.
+2. [DL execution](../../validation-tests/dltest/run-test.sh) now copies and compares
+   shared inputs before using its run-local source. This is not an atomic snapshot
+   of concurrent shared-source edits; fresh GPU execution remains unverified.
 3. Built-in-specific settings are projected through framework environment aliases;
    adding a test still requires understanding those compatibility boundaries.
 4. Shared storage/network traffic can affect other workloads even when the selected
@@ -82,15 +85,53 @@ are not in this repository and are excluded from these numbers.
    process handling. Avoid a universal benchmark engine or forced rewrite of FIO/PyTorch.
 2. Preserve selectable images, CUDA/PyTorch environments and iteration settings:
    varying them and recording their values is part of testing, not a defect.
-   Custom-image/FIO packaging is deferred. Review only the smallest per-run DL
-   source/plan consistency fix; source and plan remain selectable between runs,
-   and no identity is backfilled into historical records.
+   Custom-image/FIO packaging is deferred. Phase 3.4 implements only run-local DL
+   source/plan isolation; source and plan remain selectable between runs, and no
+   identity is backfilled into historical records.
 3. Use existing setup, execution and ingestion events before adding measurements.
    Add fields only for a demonstrated gap. Keep bounded controller concurrency as the initial
    shared-resource budget rather than adding a new traffic-scheduling service.
 4. Preserve descriptor ordering and required resource checks. Future test-owned
    persistence must reuse authorization and explicit destinations without changing
    existing raw stores or expanding the plugin API silently.
+
+## Phase 3.4 Run-Local DL Source
+
+The existing launcher prepares `artifacts/workdir/src` together with the selected
+`test_plans/<plan>/test_plan.json` and optional baseline. Copies dereference links
+so execution does not keep following shared-source files. Preparation compares
+source, plan and baseline against their copies; a failed copy or observed mismatch
+stops before `torchrun`. Setup checks `cp` and `diff` alongside its existing tools.
+Preparation is covered by the existing test deadline; no new timeout or setting.
+
+The workload still runs from the existing work directory with the selected plan,
+GPU count and iterations. Its `PYTHONPATH` now starts with the run-local `src`, not
+the shared tree. The original input path and execution path are logged. Existing
+summary field `source_dir` points to the run-local execution copy; `work_dir`,
+rank outputs, summary schema and raw writers are unchanged. Existing work directories
+are rejected, not removed/reused; partial preparation remains diagnostic evidence.
+
+Setup remains a presence check. Copy/compare at launch defines the run-local input;
+it does not guarantee an atomic multi-file revision while another writer edits the
+shared tree. After preparation, later shared changes cannot alter the copied inputs.
+This is isolation, not a security sandbox or fixed-version policy. Images, CUDA,
+PyTorch, iterations, source directory and plan remain configurable between runs.
+
+Read-only inspection found 41 source files (145,377 bytes) with no symlinks, and the
+actual package prefers the work-directory plan/baseline. Two focused checks in the
+existing script test module used a retained copy of that real package: local import
+resolution and file equality, reuse rejection, independence after original files
+were removed, and rejection when an input file disappeared during copying. Tests
+mutated temporary local copies only and never launched a benchmark or wrote raw DBs.
+They require actual source locally via the existing `CVAL_DL_UNIT_TEST_DIR` input
+(or the configured path); absent source skips rather than fabricating a workload.
+
+The inspected package had no baseline files, so that branch lacks real-input
+execution coverage. Fresh in-pod `torchrun`, rank/metric equivalence, shared-storage
+copy cost and concurrent-writer edge cases remain unverified. Evidence is indexed
+in `run-logs/phase34-operations-20260924.md`; source creation and workload acceptance
+remain independently approval-gated. No shared source or retained live artifact
+was modified. No new script, module, setting, database or image was introduced.
 
 ## Test-Owned Evidence Requirements
 

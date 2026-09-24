@@ -304,6 +304,19 @@ Version detection and existing database recording stay unchanged; varying image,
 CUDA, PyTorch and iterations remains supported. See
 [environment projection](components_design/validation-runtime-major-component.md#phase-32-environment-projection).
 
+### DL Execution Source
+
+Phase 3.4 copies the selected shared DL `src`, plan and any baseline into the
+existing run-local work directory, compares the copies, and imports from local
+`src`. Copy errors or observed mismatches stop before workload launch. The existing
+summary `source_dir` records the executed local copy; the original input path stays
+in the log. Work-directory reuse is rejected rather than deleting old artifacts.
+Do not clear evidence and rerun the same identity to bypass a preparation failure.
+
+Image, CUDA, PyTorch, plan and iteration selection remain unchanged. Copy/compare
+does not establish an atomic shared-source revision; subsequent shared edits cannot
+change prepared files. See [scope and verification limits](components_design/test-workloads-major-component.md#phase-34-run-local-dl-source).
+
 ### Real-node development procedure
 
 Phase 0 procedure; the templates below are not approval to execute a mutation.

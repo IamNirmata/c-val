@@ -71,11 +71,17 @@ prepare_workdir() {
     fi
     source_plan_dir=$(find_source_plan_dir) || return 1
 
-    rm -rf "$DLTEST_WORK_DIR"
-    mkdir -p "$target_plan_dir" "$DLTEST_OUTPUT_DIR"
-    cp "$source_plan_dir/test_plan.json" "$target_plan_dir/test_plan.json"
+    mkdir "$DLTEST_WORK_DIR" || return 1
+    mkdir -p "$target_plan_dir" || return 1
+    cp -RL -- "$CVAL_DL_UNIT_TEST_DIR/src" "$DLTEST_WORK_DIR/src" || return 1
+    cp -L -- "$source_plan_dir/test_plan.json" "$target_plan_dir/test_plan.json" || return 1
     if [[ -d "$source_plan_dir/baseline" ]]; then
-        cp -a "$source_plan_dir/baseline" "$target_plan_dir/baseline"
+        cp -RL -- "$source_plan_dir/baseline" "$target_plan_dir/baseline" || return 1
+    fi
+    diff -qr -- "$CVAL_DL_UNIT_TEST_DIR/src" "$DLTEST_WORK_DIR/src" || return 1
+    diff -q -- "$source_plan_dir/test_plan.json" "$target_plan_dir/test_plan.json" || return 1
+    if [[ -d "$source_plan_dir/baseline" || -d "$target_plan_dir/baseline" ]]; then
+        diff -qr -- "$source_plan_dir/baseline" "$target_plan_dir/baseline" || return 1
     fi
 }
 
@@ -89,7 +95,7 @@ write_summary() {
         --iterations "$CVAL_DL_ITERATIONS" \
         --gpu-count "$GPU_COUNT" \
         --log-file "$DLTEST_LOG_FILE" \
-        --source-dir "$CVAL_DL_UNIT_TEST_DIR" \
+        --source-dir "$DLTEST_WORK_DIR" \
         --work-dir "$DLTEST_WORK_DIR"
 }
 
@@ -101,6 +107,7 @@ if ! prepare_workdir; then
 fi
 
 echo "DL unit test source: $CVAL_DL_UNIT_TEST_DIR"
+echo "DL execution source: $DLTEST_WORK_DIR/src"
 echo "DL test working dir: $DLTEST_WORK_DIR"
 echo "DL test runs dir: $DLTEST_RUNS_DIR"
 echo "DL summary file: $DLTEST_SUMMARY_FILE"
@@ -110,7 +117,7 @@ echo "DL GPU count: $GPU_COUNT"
 
 (
     cd "$DLTEST_WORK_DIR" || exit 1
-    PYTHONPATH="$CVAL_DL_UNIT_TEST_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$DLTEST_WORK_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
         torchrun --nnodes=1 --nproc_per_node="$GPU_COUNT" -m dl_unit_test \
             --test_plan "$CVAL_DL_TEST_PLAN" \
             --iterations "$CVAL_DL_ITERATIONS"
