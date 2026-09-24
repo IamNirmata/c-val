@@ -99,13 +99,22 @@ CLI names and raw schemas remain.
 
 - [ ] **1.1** Freeze effective config per command/controller session and pass it
   through callers; require complete main/per-test TOMLs with no setting defaults.
-  Source changes and read-only real-cluster checks are recorded in this release;
-  real-node execution/ingestion and session turnover still require approval. See
+  Source published at `45b4d5eb23a218868038189d1055b1d96f561979`; the approved
+  source ConfigMap was created. The approved validation on `slc01-cl02-hgx-0052`
+  stopped before submission because all eight GPUs were occupied. Execution,
+  ingestion and session-turnover acceptance remain pending. See
   the [strict config contract](../configuration.md#strict-two-level-contract).
 - [ ] **1.2** Share a structured eligibility function. Require explicit Ready and
   complete resource evidence; permit cordon only for approved targeted validation.
+  Source implemented; bulk/targeted decisions matched on one retained real
+  snapshot of 500 nodes and 12,592 pods (2026-09-24 UTC), including restartable
+  init containers and two NotReady nodes. Automatic cordon exclusion, NoExecute
+  blocking and per-node unverified diagnostics are explicit. See
+  [implementation and verification](discovery-scheduling-major-component.md#phase-12-implementation).
+  New exact-commit ConfigMap creation and GPU acceptance need separate approval;
+  no validation Job was submitted for this phase.
 - [ ] **1.3** Serialize all supported submitters through C4's shared admission state;
-  recheck eligibility/node UID immediately before create. Retain source/policy gates.
+  recheck eligibility for `node_name` immediately before create. Retain source/policy gates.
 - [ ] **1.4** Persist intent before create and retain every outcome. Test lost replies,
   intent/receipt write failures, concurrent submitters and a misleading single NotFound.
 - [ ] **1.5** Implement outcome-specific exact-run verification against expected

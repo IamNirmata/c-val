@@ -1,6 +1,8 @@
 # C3: Discovery and Scheduling
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 1.2 eligibility source implemented; real-node acceptance pending.
+Coverage/admission changes below remain proposals. Baseline/counting:
+[overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -57,14 +59,49 @@ and the Kubernetes/scheduler package initializers. Tests:
 | Not important | Optional queue shuffling | Retain only for a demonstrated caller; deterministic ordering is the default. |
 | Useless | Duplicate node-table and node-JSON interpretations of one observation | Replace with one structured representation. |
 
-## Current Issues
+## Phase 1.2 Implementation
 
-1. [Bulk discovery](../../cval/k8s/discovery.py#L189) reloads defaults and does not
-   explicitly test Ready. Targeted validation uses a stricter path.
-2. Node capacity tables and JSON are separate reads; their snapshots can differ.
-3. GPU/resource quantities and pod requests are calculated in multiple helpers.
-   Supported Kubernetes request cases need verified real-cluster evidence, not guesses.
-4. [Scheduling history](../../cval/storage/status.py#L40) takes the newest timestamp
+[Discovery](../../cval/k8s/discovery.py) now owns the shared structured eligibility
+decision used by bulk discovery, CLI node checks and targeted validation. It
+requires explicit Ready, idle GPUs, configured GPU/CPU/memory/RDMA capacity and
+compatible taints. Only explicit targeted validation permits a drained Ready
+cordon. Automatic checks reject cordons, and both policies reject NoExecute taints.
+Node identity is `node_name` only; no replacement-node tracking is introduced.
+
+Bulk discovery uses one pod inventory and one node JSON inventory. Pod grouping
+and per-resource accounting are linear in inventory size, not repeated fleet-wide
+for every node. Targeted reads still fetch only the selected node and its pods.
+Existing CLI JSON fields remain unchanged; legacy capacity-table helper parameters
+remain available, but eligibility requires structured JSON evidence.
+
+Request quantities use the existing Decimal parser. Accounting includes app
+containers, ordinary/restartable init containers and pod overhead, following the
+[Kubernetes 1.32 resource helper](https://github.com/kubernetes/kubernetes/blob/v1.32.0/staging/src/k8s.io/component-helpers/resource/helpers.go).
+Unsupported pod-level/in-place resize accounting or malformed per-node data
+remains unverified. Bulk discovery excludes such nodes with stderr diagnostics;
+targeted checks fail rather than invent resource counts. Missing/truncated
+inventories fail globally. Bulk totals cover reported nodes only.
+
+Read-only verification on 2026-09-24 UTC compared all 500 nodes in one retained
+snapshot of 12,592 real pods: bulk and targeted decisions matched, with 469 busy,
+two NotReady, 27 non-GPU and two eligible nodes. The snapshot included 13 active
+pods with restartable init containers. A separate live bulk query also completed;
+its candidate set differed as workloads changed. These are observations, not
+reservations or GPU acceptance.
+
+Retained local evidence: `run-logs/phase12-observations-20260924.json`,
+`run-logs/phase12-shared-snapshot-check-20260924.json`, and
+`run-logs/phase12-structured-discovery-retry-20260924.json`. No synthetic fixtures,
+new test scripts, validation Jobs or DB writes were used. Ready drained-cordon,
+malformed/unsupported input handling, and isolated resource-shortage cases were
+not exercised as real incidents. Exact-published-commit execution, canonical
+results and raw ingestion acceptance remain pending separate approval.
+
+## Remaining Issues
+
+1. Node and pod reads remain separate observations, not a reservation. Shared
+   submission serialization and the final per-create check belong to Phase 1.3.
+2. [Scheduling history](../../cval/storage/status.py#L40) takes the newest timestamp
    across tests. A partial or disabled-test run can obscure missing coverage.
 
 ## Proposed Design
@@ -74,7 +111,7 @@ and the Kubernetes/scheduler package initializers. Tests:
    cordoned-node validation; neither allows active GPU work or unknown readiness.
 2. Inventory once per planning pass; check selected nodes again immediately before
    create through the same function. C3 owns coverage-age rules; C4 owns observation
-   age at admission, cooldown and create timing. Record node UID to detect replacement.
+   age at admission, cooldown and create timing. Identify nodes by `node_name` only.
 3. Keep the small pure priority function. Apply the coverage policy below before
    ordering candidates. C7 supplies read-only history/provenance; do not add direct
    SQL or a second result store to the scheduler.
@@ -142,7 +179,7 @@ a bypass for quarantine taints, resource shortage or unknown workload state.
 Verify real discovery and approved real-node runs using current commands. Observe
 busy/unready/quarantined nodes read-only; never submit to them to prove rejection.
 Check coverage and resource calculations against retained real evidence, including
-failure or changed-UID cases when available. Mark unsupported/unobserved cases
+failure cases when available. Mark unsupported/unobserved cases
 unknown. Preserve stable queue order and zero renders during planning; measure
 calls per real cycle before claiming savings. Follow the
 [real-node policy](Redesign.md#real-node-validation-policy); no new fixtures or simulators.

@@ -15,6 +15,25 @@ Use `--config <reviewed-file>` before the command to select namespace, PVC
 reader and database paths. Result exports are always CSV; configuration output
 is always JSON. Status supports table/JSON, not TSV.
 
+### Node eligibility
+
+`nodes` and `nodes --check-node <node_name>` use the same structured node/pod
+calculation. Both require explicit Ready, positive GPU capacity, no active GPU
+requests, sufficient configured GPU/CPU/memory/RDMA, and compatible scheduling
+taints. Automatic checks reject cordons. Only explicit targeted `validate` may
+permit a Ready drained cordon; it never bypasses other blocking taints or capacity
+checks. NoExecute taints block because the templates tolerate NoSchedule only.
+
+Bulk discovery reads pods and node JSON once each, without a separate capacity
+table. Requests include regular containers, ordinary and restartable init
+containers, and pod overhead. Completed pods do not reserve resources. Unsupported
+pod-level or resize accounting and malformed per-node evidence are unverified:
+bulk output omits that node and emits a diagnostic on stderr; a targeted check
+fails explicitly. Missing/truncated inventories fail the whole read, not an empty
+candidate list. Retain stderr as well as JSON; totals cover only reported nodes.
+Missing or unknown Ready is ineligible. These reads are not an atomic reservation
+and cannot authorize submission.
+
 ## Candidate inspection
 
 Plain `plan` uses the existing priority queue without rendering Jobs.

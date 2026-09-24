@@ -409,7 +409,7 @@ def run_node_validation(
     # 1. Fail closed unless the node can run the complete validation workload.
     schedulability: dict[str, Any] = {}
     try:
-        status: NodeStatus = describe_node(node, client=kubectl, config=config)
+        status: NodeStatus = describe_node(node, client=kubectl, config=config, allow_cordoned=True)
         schedulability = {
             "found": status.found,
             "is_gpu_node": status.is_gpu_node,
@@ -434,16 +434,7 @@ def run_node_validation(
             notes.append(
                 "node is cordoned; validation job tolerates the cordon taint and targets it anyway"
             )
-        eligible = (
-            status.found
-            and status.is_gpu_node
-            and status.ready
-            and status.resource_ready
-            and status.allocatable > 0
-            and status.free == status.allocatable
-            and status.schedulable
-        )
-        if not eligible:
+        if not status.eligible:
             raise PolicyViolation(
                 f"Node {node!r} is not eligible for cluster validation: "
                 f"{status.status_label or 'unknown'} ({status.reason})"

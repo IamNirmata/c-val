@@ -394,15 +394,7 @@ def handle_nodes(args: argparse.Namespace) -> int:
 
     if args.check_node:
         status = describe_node(args.check_node, config=args.cval_config)
-        eligible = (
-            status.found
-            and status.is_gpu_node
-            and status.ready
-            and status.resource_ready
-            and status.allocatable > 0
-            and status.free == status.allocatable
-            and status.schedulable
-        )
+        eligible = status.eligible
         payload = asdict(status) | {"eligible": eligible}
         if args.output == "json":
             print(json.dumps(payload, indent=2))
