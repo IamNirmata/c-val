@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
-import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -16,7 +16,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cval.jobs.manager import (
     SESSION_SCHEMA as STATE_SCHEMA,
-    SESSION_JOB_FIELDS as JOB_FIELDS,
+    atomic_session_text as _atomic_text,
+    observe_submission,
+    project_submission_jobs,
+    retain_submission_event,
+    write_session_jobs as _write_jobs,
     admission_lock,
     admission_scope,
     check_admission_cluster,
@@ -28,38 +32,9 @@ from cval.jobs.manager import (
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _atomic_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.tmp-", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _write_jobs(session_dir: Path, jobs: dict[str, dict[str, str]]) -> None:
-    output = []
-    output.append(",".join(JOB_FIELDS))
-    for job_name in sorted(jobs):
-        row = jobs[job_name]
-        output.append(",".join(row[field] for field in JOB_FIELDS))
-    _atomic_text(session_dir / "jobs.csv", "\n".join(output) + "\n")
-
-
 def _render(session_dir: Path) -> None:
     state = _read_state(session_dir)
+    project_submission_jobs(session_dir, state)
     jobs = _read_jobs(session_dir)
     phases = Counter(row["phase"] for row in jobs.values() if row["phase"])
     state["job_counts"] = {"total": len(jobs), **dict(sorted(phases.items()))}
@@ -96,6 +71,10 @@ def _init(args: argparse.Namespace) -> None:
     session_dir = args.session_dir
     if os.path.lexists(session_dir.parent / "current-session"):
         raise ValueError("Existing active session must be reconciled and its pointer retained before approved turnover")
+    approval_path = args.approval_record.resolve(strict=True)
+    approval_text = approval_path.read_text(encoding="utf-8")
+    if not approval_text.strip():
+        raise ValueError("Session requires a nonempty approval and rollback record")
     session_dir.mkdir(parents=True, exist_ok=False)
     (session_dir / "cycles").mkdir()
     (session_dir / "nodes").mkdir()
@@ -110,6 +89,8 @@ def _init(args: argparse.Namespace) -> None:
         "git_ref": args.git_ref,
         "config_snapshot_b64": encode_config_snapshot(config),
         "admission_scope": admission_scope(config),
+        "intents": {},
+        "approval": {"path": str(approval_path), "sha256": hashlib.sha256(approval_text.encode()).hexdigest(), "text": approval_text},
         "branch": args.branch,
         "cycle_id": "",
         "message": "session initialized",
@@ -146,70 +127,41 @@ def _update(args: argparse.Namespace) -> None:
 
 
 def _job(args: argparse.Namespace) -> None:
-    jobs = _read_jobs(args.session_dir)
-    current = jobs.get(args.job_name, {field: "" for field in JOB_FIELDS})
-    current.update(
-        {
-            "job_name": args.job_name,
-            "node": args.node or current["node"],
-            "timestamp": args.timestamp or current["timestamp"],
-            "git_ref": args.git_ref or current["git_ref"],
-            "phase": args.phase,
-            "last_observed_at": args.observed_at,
-        }
-    )
-    if not current["submitted_at"]:
-        current["submitted_at"] = args.observed_at
-    if args.deleted_at:
-        current["deleted_at"] = args.deleted_at
-    jobs[args.job_name] = current
-    _write_jobs(args.session_dir, jobs)
+    from cval.config import load_config_snapshot
+    from cval.k8s.client import KubectlClient
+
     state = _read_state(args.session_dir)
-    state["updated_at"] = args.observed_at
-    state["message"] = f"{args.job_name} phase={args.phase}"
-    _atomic_text(
-        args.session_dir / "state.json",
-        json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
-    )
+    intent = state["intents"][args.job_name]
+    for supplied, expected in ((args.node, intent["node_name"]), (args.timestamp, str(intent["timestamp"])), (args.git_ref, intent["git_ref"])):
+        if supplied and supplied != expected:
+            raise ValueError("Job update conflicts with retained intent")
+    if not any(event["state"] == "submitting" for event in intent["events"]) or intent["events"][-1]["state"] == "conflict":
+        raise ValueError("Job update requires explicit reconciliation of this intent")
+    config = load_config_snapshot(state["config_snapshot_b64"])
+    client = KubectlClient(config=config)
+    check_admission_cluster(config, client)
+    event = observe_submission(intent, client, config.cluster.namespace)
+    event.update(reported_phase=args.phase, reported_at=args.observed_at, deleted_at=args.deleted_at)
+    retain_submission_event(args.session_dir, state, args.job_name, event)
     _render(args.session_dir)
+    if event["state"] != "observed":
+        raise ValueError("Job observation is unresolved; retain its node and slot")
 
 
 def _receipt(args: argparse.Namespace) -> None:
     payload = json.loads(args.source.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
         raise ValueError("invalid submission receipt")
-    jobs = _read_jobs(args.session_dir)
+    state = _read_state(args.session_dir)
     for item in payload["jobs"]:
         if not isinstance(item, dict) or item.get("submitted") is not True:
             continue
         job_name = item.get("job_name")
-        node = item.get("node")
-        git_ref = item.get("git_ref") or ""
-        match = re.search(r"-([0-9]+)$", str(job_name))
-        if (
-            not isinstance(job_name, str)
-            or not SAFE_NAME.fullmatch(job_name)
-            or not isinstance(node, str)
-            or not SAFE_NAME.fullmatch(node)
-            or not isinstance(git_ref, str)
-            or (git_ref and re.fullmatch(r"[0-9a-f]{40}", git_ref) is None)
-            or match is None
-        ):
-            raise ValueError("invalid submitted job identity")
-        current = jobs.get(job_name, {field: "" for field in JOB_FIELDS})
-        current.update(
-            {
-                "job_name": job_name,
-                "node": node,
-                "timestamp": match.group(1),
-                "git_ref": git_ref,
-                "phase": current["phase"] or "Submitted",
-                "submitted_at": current["submitted_at"] or args.observed_at,
-                "last_observed_at": current["last_observed_at"] or args.observed_at,
-            }
-        )
-        jobs[job_name] = current
-    _write_jobs(args.session_dir, jobs)
+        intent = state["intents"].get(job_name)
+        if not intent or item.get("node") != intent["node_name"] or item.get("git_ref") != intent["git_ref"]:
+            raise ValueError("Submitted identity lacks a matching durable intent")
+        if intent["events"][-1]["state"] not in {"submitted", "observed"}:
+            raise ValueError("Submission receipt has not been durably verified")
     _render(args.session_dir)
 
 
@@ -235,6 +187,7 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--batch-size", type=int, required=True)
     init.add_argument("--plan-limit", required=True)
     init.add_argument("--pruning-enabled", action="store_true")
+    init.add_argument("--approval-record", type=Path, required=True)
     init.set_defaults(handler=_init)
 
     update = subparsers.add_parser("update")

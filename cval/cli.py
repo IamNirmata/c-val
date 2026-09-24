@@ -27,7 +27,7 @@ from cval.config import (
     load_config,
     load_config_snapshot,
 )
-from cval.jobs.manager import submission_result_to_dict, submit_workflow_plan
+from cval.jobs.manager import JobSubmissionError, submission_result_to_dict, submit_workflow_plan
 from cval.jobs.monitor import get_job_phases, monitored_jobs_to_dict, monitor_jobs_until_terminal
 from cval.k8s.discovery import (
     describe_node,
@@ -622,24 +622,31 @@ def handle_run(args: argparse.Namespace) -> int:
         max_batch_size=config.policy.max_batch_size,
         confirmation_phrase=config.policy.confirmation_phrase,
     )
-    result = submit_workflow_plan(
-        plan,
-        config=config,
-        namespace=config.cluster.namespace,
-        policy=policy,
-        submit=args.submit,
-        confirmation=args.confirm,
-    )
+    exit_code = 0
+    try:
+        result = submit_workflow_plan(
+            plan,
+            config=config,
+            namespace=config.cluster.namespace,
+            policy=policy,
+            submit=args.submit,
+            confirmation=args.confirm,
+        )
+    except JobSubmissionError as exc:
+        result = exc.result
+        exit_code = 1
 
     if args.output == "json":
         print(json.dumps(submission_result_to_dict(result), indent=2))
-        return 0
+        return exit_code
 
-    print("Validation job submission (submitted)")
+    print("Validation job submission (stopped)" if exit_code else "Validation job submission (submitted)")
     print(f"Namespace: {result.namespace} | Jobs: {len(result.records)}")
     for record in result.records:
         print(f"  {record.node} -> {record.job_name} [{record.action}]")
-    return 0
+        if exit_code and record.action != "submitted":
+            print(f"    {record.stdout}")
+    return exit_code
 
 
 def handle_jobs(args: argparse.Namespace) -> int:
@@ -754,18 +761,24 @@ def handle_validate(args: argparse.Namespace) -> int:
         )
     from cval.orchestrator.validate import run_node_validation
 
-    report = run_node_validation(
-        args.node,
-        config=args.cval_config,
-        git_ref=args.git_ref,
-        timestamp=args.timestamp,
-        poll_interval=args.poll_interval,
-        overall_timeout=args.timeout_seconds,
-        pending_timeout=args.pending_timeout,
-        submit=args.submit,
-        confirmation=args.confirm,
-        verbose=(args.output == "table"),
-    )
+    try:
+        report = run_node_validation(
+            args.node,
+            config=args.cval_config,
+            git_ref=args.git_ref,
+            timestamp=args.timestamp,
+            poll_interval=args.poll_interval,
+            overall_timeout=args.timeout_seconds,
+            pending_timeout=args.pending_timeout,
+            submit=args.submit,
+            confirmation=args.confirm,
+            verbose=(args.output == "table"),
+        )
+    except JobSubmissionError as exc:
+        report = {"ok": False, "node": args.node, "stage": "submission",
+                  "submission": submission_result_to_dict(exc.result), "notes": [str(exc)]}
+        if args.output == "table":
+            print(json.dumps(report, indent=2))
     if args.output == "json":
         print(json.dumps(report, indent=2))
     return 0 if report.get("ok", False) else 1

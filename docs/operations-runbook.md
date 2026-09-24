@@ -79,8 +79,10 @@ and a top-level exact `git_ref`, not `planned_jobs`. The plan log field is
 Every supported `run` or `validate` submission requires a compatible active session
 under the configured absolute `live.log_dir`, even when explicit node names are
 supplied. Session creation alone does not start the loop. Use the existing state
-helper's `init` only under a separately approved initialization or turnover command;
-it refuses an existing `current-session` pointer. Preserve and reconcile the prior
+helper's `init --approval-record <reviewed-path>` only under a separately approved
+initialization or turnover command; it refuses an existing `current-session`
+pointer. The live launcher requires `CVAL_APPROVAL_RECORD` for a new session.
+Preserve and reconcile the prior
 session and outstanding Jobs before approving replacement. See
 [shared admission settings](configuration.md#shared-admission-scope).
 
@@ -95,9 +97,33 @@ The lock is released before workload monitoring. It is separate from the loop-ow
 lock and is also used by session updates. Contention fails the command; investigate
 the holder, never delete the lock. No new queue, service or automatic host failover
 is introduced. This only serializes cooperating new-source writers; stop/reconcile
-old writers before activation. A lost create reply, partial batch receipt or pending
-evidence verification still needs the later intent/outcome work. Do not automatically
-retry such a submission or claim this phase guarantees exactly-once creation.
+old writers before activation. Live turnover/activation is deferred until Phase 1
+is finished.
+
+### Durable Submission Outcomes
+
+V2 session state retains approved request identities and ordered intent/outcome
+events before and after each create. `jobs.csv` remains an eight-column projection;
+do not edit it to release uncertain work. `run --output json` preserves earlier
+batch receipts when a later item fails and exits nonzero. Keep stdout, stderr and
+the exit code. The shell already stops that cycle without a replacement submission.
+Targeted `validate` returns a failed submission report on the same error path;
+neither CLI discards a received create response just because state persistence failed.
+
+Before further admission, the manager observes retained attempted intents by exact
+name and verifies requested workload fields and any known Job UID. The existing
+state helper's `job` operation also verifies a live observation instead of trusting
+the supplied phase; it writes operational state and needs the normal approval.
+No create is retried by reconciliation. Absent/unavailable observations keep the
+node/slot reserved, and identity conflicts block admission. Preserve prepared-only
+crash records for explicit reconciliation rather than assuming nothing happened.
+
+A successful state write followed by a failed CSV write is still retained evidence;
+the next append loads that on-disk state before rebuilding the projection. Missing
+or corrupt authoritative state never becomes an empty session. All attempted
+intents, including terminal Jobs, retain reservations until Phase 1.5 implements
+outcome-specific evidence release. Actual lost replies, concurrent live submission
+and partial live batches remain unverified; this is not exactly-once delivery.
 
 ## Exact-commit validation
 

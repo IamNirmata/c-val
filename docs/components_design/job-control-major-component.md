@@ -1,7 +1,8 @@
 # C4: Job Control
 
-Status: Phase 1.3 shared admission source implemented; deployment acceptance pending.
-Intent/recovery and control consolidation below remain proposals. Baseline/counting:
+Status: Phase 1.3 admission and Phase 1.4 durable intent source implemented;
+deployment acceptance pending. Outcome verification and control consolidation
+below remain proposals. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -69,12 +70,12 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 
 ## Current Issues
 
-1. A later create failure raises before returning earlier batch receipts. A network
-   timeout can also mean the Job exists even though no receipt reached the caller.
-2. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
+1. Resume and active-loop observation/pruning are implemented twice. Repeated CLI
    subprocesses reload config and translate the same state through JSON/TSV/CSV.
-3. Targeted validation and the regular monitor have different deadline and evidence
+2. Targeted validation and the regular monitor have different deadline and evidence
    handling. Job phase alone is not proof of a complete successful run.
+3. Terminal intent reservations deliberately remain until Phase 1.5 supplies an
+   outcome-specific evidence decision. Do not activate an incomplete Phase 1 stack.
 
 ## Phase 1.3 Implementation
 
@@ -110,9 +111,63 @@ GPU submissions or live state mutations were used.
 Successful create, new-session initialization, slot saturation and concurrent real
 submitters remain unverified and approval-gated. The new lock cannot fence an old
 writer or another host. Existing shell cooldown behavior is unchanged. Durable
-intent/receipt persistence and uncertain-create recovery remain Phase 1.4; pending
-verification accounting remains part of the later outcome work. Do not treat this
+intent/receipt persistence is described below; evidence-based reservation release
+remains part of the later outcome work. Do not treat this
 source change as exactly-once delivery or completed cluster acceptance.
+
+## Phase 1.4 Implementation
+
+New sessions use `cval.live-state.v2` in the existing state file. V1 remains readable
+without conversion and cannot admit new-source writes. Initialization requires an
+explicit approval/rollback record; its text, path and digest are retained in the
+session. Each intent binds that digest, exact source/config/manifest, node_name,
+timestamp/run ID, confirmation and cordon policy. An approval record is evidence,
+not a substitute for separately approved commands and mutation preconditions.
+
+Before create, the shared manager durably records `prepared` and `submitting`, then
+performs the final node read. A known pre-create failure records `not_created`.
+Create requests return JSON; full responses and errors are saved before proceeding
+to another Job. A verified response adds its Job UID and creation time. Both file
+and parent directory are fsynced. A failed outcome write stops admission, leaving
+the earlier intent/response for reconciliation; appending always reloads the latest
+durable state so a failed CSV projection cannot erase a saved event.
+
+The existing eight-column jobs CSV is derived from intents, including uncertain
+attempts whose CLI replies were lost. Before further admission, retained attempted
+intents are observed by exact Job name. Requested fields and the complete pod
+workload must match, along with any previously received Job UID. Server metadata
+and additional Job/task defaults are not treated as requested fields. Unexpected
+pod-template normalization fails closed and needs reviewed evidence; no scheduler
+equivalence claim is made from the current historical observation.
+
+Missing or unavailable observations remain `uncertain`; mismatches become
+`conflict`. Neither frees the node/slot or triggers another create. Prepared-only
+crash records and conflicts require explicit reconciliation. Even a terminal
+matching Job retains its reservation pending Phase 1.5 evidence handling. The
+existing state-helper `job` operation can retain a bounded exact observation under
+the same lock; a supplied phase alone cannot establish identity. No new retry mode,
+service, test script or raw DB was introduced.
+
+`run` now emits accumulated batch records with a nonzero exit on later failure;
+successful response fields remain unchanged. Durable intents remain authoritative
+if output transport or projection fails. The shell's existing nonzero-exit path
+stops the cycle without a replacement Job. Broader resume-loop consolidation and
+automatic recovery from every crash boundary are not claimed complete here.
+
+Verification on 2026-09-24 UTC used an actual Pending Job, an actually absent prior
+approved Job, a byte-identical historical session copy, and real local OS write
+failures in temporary directories. File-size exhaustion preserved old state; a
+CSV replacement failure preserved the new state event, and a stale caller could
+append without erasing it. Identity comparison used a requested-field projection
+of an observed historical Job, not a historical original intent. Retained evidence:
+`run-logs/phase14-observation-check-20260924.json`,
+`run-logs/phase14-durable-io-check-20260924.json`, and
+`run-logs/phase14-partial-persistence-check-20260924.json`.
+
+No fake Kubernetes clients or benchmark fixtures were used. Successful creation,
+actual lost-create replies, partial live batches, fsync failure after replacement,
+and concurrent real submitters were not exercised. Raw SQLite was not changed.
+Live session turnover/activation is deferred until Phase 1 is finished.
 
 ## Proposed Design
 
@@ -185,8 +240,9 @@ submission, empty queue or fresh approval from missing/corrupt state.
 ## Phase 0 State Contract
 
 Decision for Phase 1 implementation; no session files are changed in Phase 0.
-The [current helper](../../scripts/cval-live-state.py#L16) writes
-`cval.live-state.v1`, a strict eight-column `jobs.csv` and derived summary.
+The Phase 0 helper wrote `cval.live-state.v1`; the
+[current helper](../../scripts/cval-live-state.py) writes v2 for new sessions,
+with a strict eight-column `jobs.csv` and derived summary.
 Use the existing session directory and helpers, not a new database or event engine.
 
 | Record | Required Content |

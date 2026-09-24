@@ -123,6 +123,7 @@ initialize_session() {
     local pruning_args=()
     pruning_enabled && pruning_args+=(--pruning-enabled)
     python "$STATE_HELPER" init "$SESSION_DIR" \
+        --approval-record "${CVAL_APPROVAL_RECORD:?Set the reviewed approval and rollback record path}" \
         --started-at "$(la_now)" \
         --git-ref "$git_ref" \
         --branch "$GIT_BRANCH_SETTING" \

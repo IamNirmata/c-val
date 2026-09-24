@@ -7,15 +7,22 @@ calls `ExecutionPolicy` before every real `kubectl create` operation.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 import csv
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import fcntl
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import socket
 import stat
+import tempfile
+
+import yaml
 
 from cval.config import CvalConfig, encode_config_snapshot, is_exact_commit, load_config
 from cval.jobs.monitor import TERMINAL_PHASES
@@ -24,14 +31,184 @@ from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
 from cval.models import PlannedJob, WorkflowPlan
 from cval.policy import ExecutionPolicy, PolicyViolation, validate_submit_request
+from cval.validation.runtime import effective_config_digest
 
 
-SESSION_SCHEMA = "cval.live-state.v1"
+SESSION_SCHEMA = "cval.live-state.v2"
 SESSION_JOB_FIELDS = (
     "job_name", "node", "timestamp", "git_ref", "phase", "submitted_at",
     "last_observed_at", "deleted_at",
 )
 _TERMINAL_PHASES = TERMINAL_PHASES - {"Missing"}
+
+
+def atomic_session_text(path: Path, content: str) -> None:
+    """Replace operational state durably, retaining the previous file on write failure."""
+
+    if path.is_symlink():
+        raise PolicyViolation("Session output must not be a symlink")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def submission_intent(planned: PlannedJob, config: CvalConfig, confirmation: str, allow_cordoned: bool, approval_sha256: str) -> dict:
+    """Bind one exact request before any create can be attempted."""
+
+    rendered = planned.rendered_job
+    return {
+        "node_name": rendered.node_name,
+        "timestamp": rendered.timestamp,
+        "run_id": f"{rendered.node_name}-{rendered.timestamp}",
+        "job_name": rendered.job_name,
+        "git_ref": rendered.git_ref,
+        "config_digest": effective_config_digest(config),
+        "manifest_sha256": hashlib.sha256(rendered.yaml_text.encode()).hexdigest(),
+        "manifest": rendered.yaml_text,
+        "confirmation": confirmation,
+        "allow_cordoned": allow_cordoned,
+        "approval_sha256": approval_sha256,
+        "events": [],
+    }
+
+
+def retain_submission_event(session_dir: Path, state: dict, name: str, event: dict) -> dict:
+    """Durably append an observation without losing earlier create outcomes."""
+
+    updated = read_session_state(session_dir)
+    if name not in updated["intents"]:
+        updated["intents"][name] = deepcopy(state["intents"][name])
+    elif {key: value for key, value in updated["intents"][name].items() if key != "events"} != {key: value for key, value in state["intents"][name].items() if key != "events"}:
+        raise PolicyViolation("Retained intent changed before outcome persistence")
+    updated["intents"][name]["events"].append({
+        "observed_at": datetime.now(timezone.utc).isoformat(), **event,
+    })
+    updated["updated_at"] = updated["intents"][name]["events"][-1]["observed_at"]
+    updated["message"] = f"{name} submission={event['state']}"
+    atomic_session_text(session_dir / "state.json", json.dumps(updated, sort_keys=True) + "\n")
+    project_submission_jobs(session_dir, updated)
+    return updated
+
+
+def write_session_jobs(session_dir: Path, jobs: dict[str, dict[str, str]]) -> None:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=SESSION_JOB_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(jobs[name] for name in sorted(jobs))
+    atomic_session_text(session_dir / "jobs.csv", output.getvalue())
+
+
+def project_submission_jobs(session_dir: Path, state: dict) -> None:
+    """Rebuild the compatible CSV from authoritative intents, including lost replies."""
+
+    jobs = {}
+    for name, intent in state["intents"].items():
+        events = intent["events"]
+        if events[-1]["state"] == "not_created" or not any(event["state"] == "submitting" for event in events):
+            continue
+        created = [event["created_at"] for event in events if event.get("created_at")]
+        deleted = [event["deleted_at"] for event in events if event.get("deleted_at")]
+        jobs[name] = {
+            "job_name": name, "node": intent["node_name"], "timestamp": str(intent["timestamp"]),
+            "git_ref": intent["git_ref"], "phase": events[-1].get("phase", "Unknown"),
+            "submitted_at": created[0] if created else "", "last_observed_at": events[-1]["observed_at"],
+            "deleted_at": deleted[-1] if deleted else "",
+        }
+    write_session_jobs(session_dir, jobs)
+
+
+def _requested_fields_match(expected, observed) -> bool:
+    if isinstance(expected, dict):
+        return isinstance(observed, dict) and all(
+            key in observed and _requested_fields_match(value, observed[key])
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return isinstance(observed, list) and len(expected) == len(observed) and all(
+            _requested_fields_match(wanted, actual) for wanted, actual in zip(expected, observed)
+        )
+    return type(expected) is type(observed) and expected == observed
+
+
+def verify_submission_identity(intent: dict, observed: dict, namespace: str) -> str:
+    """Verify controlled fields and exact pod workload, ignoring server metadata."""
+
+    if hashlib.sha256(intent["manifest"].encode()).hexdigest() != intent["manifest_sha256"]:
+        raise PolicyViolation("Retained requested manifest digest changed")
+    expected = yaml.safe_load(intent["manifest"])
+    metadata = observed["metadata"]
+    if metadata["name"] != intent["job_name"] or metadata["namespace"] != namespace:
+        raise PolicyViolation("Observed Job name or namespace conflicts with intent")
+    uid = metadata.get("uid")
+    if not isinstance(uid, str) or not uid or metadata.get("deletionTimestamp"):
+        raise PolicyViolation("Observed Job identity is missing or being deleted")
+    known_uids = {event["uid"] for event in intent["events"] if event.get("uid")}
+    for event in intent["events"]:
+        if event.get("returncode") == 0 and event.get("stdout", "").strip():
+            response = json.loads(event["stdout"])
+            response_uid = response.get("metadata", {}).get("uid")
+            if response_uid:
+                known_uids.add(response_uid)
+    if known_uids and known_uids != {uid}:
+        raise PolicyViolation("Observed Job UID conflicts with retained receipt")
+    if not _requested_fields_match(expected, observed):
+        raise PolicyViolation("Observed Job controlled fields conflict with the request")
+    for wanted, actual in zip(expected["spec"]["tasks"], observed["spec"]["tasks"]):
+        if wanted["template"]["spec"] != actual["template"]["spec"]:
+            raise PolicyViolation("Observed pod workload differs from the requested workload")
+    return uid
+
+
+def observe_submission(intent: dict, client: KubectlClient, namespace: str) -> dict:
+    """Observe the exact retained name once; absence never authorizes a retry."""
+
+    evidence = {}
+    try:
+        result = client.run([
+            "get", "vcjob", intent["job_name"], "-n", namespace, "--ignore-not-found", "-o", "json",
+        ], check=False)
+        evidence = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+        if result.returncode != 0 or not result.stdout.strip():
+            return {"state": "uncertain", "observation": "unavailable" if result.returncode else "absent", **evidence}
+        observed = json.loads(result.stdout)
+        uid = verify_submission_identity(intent, observed, namespace)
+        phase = observed.get("status", {}).get("state", {}).get("phase", "Unknown")
+        if any(event.get("uid") for event in intent["events"]):
+            evidence["response_sha256"] = hashlib.sha256(evidence.pop("stdout").encode()).hexdigest()
+        return {"state": "observed", "uid": uid, "phase": phase,
+            "created_at": observed["metadata"]["creationTimestamp"], **evidence}
+    except (PolicyViolation, KeyError, TypeError, ValueError) as exc:
+        return {"state": "conflict", "error": str(exc), **evidence}
+    except Exception as exc:
+        return {"state": "uncertain", "observation": "unavailable", "error": str(exc)}
+
+
+def reconcile_submission_intents(session_dir: Path, state: dict, client: KubectlClient, config: CvalConfig) -> dict:
+    """Recover receipts, never create; preserve reservations for unknown outcomes."""
+
+    for name, intent in state["intents"].items():
+        last = intent["events"][-1]
+        if last["state"] == "not_created":
+            continue
+        if last["state"] == "conflict" or not any(event["state"] == "submitting" for event in intent["events"]):
+            raise PolicyViolation(f"Intent {name!r} requires explicit reconciliation; no retry is authorized")
+        event = observe_submission(intent, client, config.cluster.namespace)
+        state = retain_submission_event(session_dir, state, name, event)
+        if event["state"] != "observed":
+            raise PolicyViolation(f"Intent {name!r} is {event['state']}; node and slot remain reserved")
+    return state
 
 
 def admission_scope(config: CvalConfig) -> dict[str, str]:
@@ -90,8 +267,31 @@ def read_session_state(session_dir: Path) -> dict[str, object]:
     if path.is_symlink() or not path.is_file():
         raise PolicyViolation("Missing or non-regular session state")
     state = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(state, dict) or state.get("schema_version") != SESSION_SCHEMA:
+    if not isinstance(state, dict) or state.get("schema_version") not in {"cval.live-state.v1", SESSION_SCHEMA}:
         raise PolicyViolation("Invalid cval-live state schema")
+    if state["schema_version"] == SESSION_SCHEMA and not isinstance(state.get("intents"), dict):
+        raise PolicyViolation("V2 session lacks durable submission intents")
+    if state["schema_version"] == SESSION_SCHEMA:
+        approval = state.get("approval")
+        if not isinstance(approval, dict) or not isinstance(approval.get("text"), str) or not approval.get("path") or hashlib.sha256(approval["text"].encode()).hexdigest() != approval.get("sha256"):
+            raise PolicyViolation("V2 session lacks a retained approval/rollback record")
+        for name, intent in state["intents"].items():
+            if not isinstance(intent, dict) or intent.get("job_name") != name or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", name):
+                raise PolicyViolation("Invalid retained intent identity")
+            required = {"node_name", "timestamp", "run_id", "git_ref", "config_digest", "manifest", "manifest_sha256", "confirmation", "allow_cordoned", "approval_sha256", "events", "job_name"}
+            if set(intent) != required or not intent["events"] or not isinstance(intent["events"], list):
+                raise PolicyViolation("Incomplete retained intent")
+            if not isinstance(intent["node_name"], str) or not intent["node_name"] or type(intent["timestamp"]) is not int or intent["timestamp"] <= 0:
+                raise PolicyViolation("Invalid retained node/run identity")
+            if intent["run_id"] != f"{intent['node_name']}-{intent['timestamp']}" or not is_exact_commit(intent["git_ref"]):
+                raise PolicyViolation("Retained run/source identity mismatch")
+            if type(intent["allow_cordoned"]) is not bool or intent["approval_sha256"] != approval["sha256"]:
+                raise PolicyViolation("Retained intent approval binding mismatch")
+            if not isinstance(intent["manifest"], str) or hashlib.sha256(intent["manifest"].encode()).hexdigest() != intent["manifest_sha256"]:
+                raise PolicyViolation("Retained intent manifest digest mismatch")
+            for event in intent["events"]:
+                if not isinstance(event, dict) or event.get("state") not in {"prepared", "submitting", "not_created", "submitted", "observed", "uncertain", "conflict"} or not event.get("observed_at"):
+                    raise PolicyViolation("Invalid retained create outcome")
     return state
 
 
@@ -130,13 +330,19 @@ def read_admission_session(config: CvalConfig) -> tuple[Path, dict[str, object]]
     if session_dir.is_symlink() or not session_dir.is_dir():
         raise PolicyViolation("Missing or non-regular active session directory")
     state = read_session_state(session_dir)
+    if state["schema_version"] != SESSION_SCHEMA:
+        raise PolicyViolation("Legacy session requires approved turnover before durable admission")
     if state.get("admission_scope") != admission_scope(config):
         raise PolicyViolation("Legacy or incompatible admission session; approved turnover is required")
     if state.get("session_id") != session_id or state.get("git_ref") != config.job.git_ref:
         raise PolicyViolation("Admission session/source identity differs from the request")
     if state.get("config_snapshot_b64") != encode_config_snapshot(config):
         raise PolicyViolation("Admission session configuration differs from the request")
-    read_session_jobs(session_dir)
+    for intent in state["intents"].values():
+        if intent["git_ref"] != config.job.git_ref or intent["config_digest"] != effective_config_digest(config) or intent["confirmation"] != config.policy.confirmation_phrase:
+            raise PolicyViolation("Retained intent differs from the approved session inputs")
+    if set(read_session_jobs(session_dir)) - set(state["intents"]):
+        raise PolicyViolation("Session jobs contain identities without durable intents")
     return session_dir, state
 
 
@@ -149,6 +355,11 @@ def check_active_jobs(
     if not isinstance(payload.get("items"), list) or payload.get("metadata", {}).get("continue"):
         raise PolicyViolation("Incomplete validation Job inventory")
     active: dict[str, str] = {}
+    for name, intent in read_session_state(session_dir).get("intents", {}).items():
+        if name == planned.rendered_job.job_name or intent["run_id"] == f"{planned.candidate.node}-{planned.rendered_job.timestamp}":
+            raise PolicyViolation("Run identity already has a durable intent; never recreate it")
+        if intent["events"][-1]["state"] != "not_created":
+            active[name] = intent["node_name"]
     for name, row in read_session_jobs(session_dir).items():
         if name == planned.rendered_job.job_name:
             raise PolicyViolation("Run identity already exists in session history")
@@ -203,6 +414,14 @@ class JobSubmissionResult:
         """Count records that actually created Kubernetes resources."""
 
         return sum(1 for record in self.records if record.submitted)
+
+
+class JobSubmissionError(PolicyViolation):
+    """Carry every earlier receipt when a later submission step fails."""
+
+    def __init__(self, message: str, result: JobSubmissionResult):
+        super().__init__(message)
+        self.result = result
 
 
 def check_node_for_submission(
@@ -279,42 +498,96 @@ def submit_workflow_plan(
     records: list[JobSubmissionRecord] = []
     with admission_lock(active_config):
         check_admission_cluster(active_config, kubectl)
-        session_dir, _state = read_admission_session(active_config)
+        session_dir, state = read_admission_session(active_config)
+        state = reconcile_submission_intents(session_dir, state, kubectl, active_config)
         for planned in plan.planned_jobs:
-            expected = render_validation_job_from_file(
-                active_config.job.template_path,
-                node_name=planned.candidate.node,
-                timestamp=planned.rendered_job.timestamp,
-                job_prefix=active_config.job.job_prefix,
-                git_repo=active_config.job.git_repo,
-                git_ref=active_config.job.git_ref,
-                job_template_config=active_config.job_template,
-                cval_config=active_config,
-            )
-            if expected != planned.rendered_job:
-                raise PolicyViolation("Requested manifest differs from the pinned session configuration")
-            check_active_jobs(planned, client=kubectl, config=active_config, session_dir=session_dir)
-            validate_submit_request(
-                namespace=resolved_namespace, planned_jobs_count=len(plan.planned_jobs),
-                policy=active_policy, submit=submit, confirmation=confirmation,
-            )
-            check_node_for_submission(
-                planned, client=kubectl, config=active_config, allow_cordoned=allow_cordoned
-            )
-            result = kubectl.run(
-                ["create", "-n", resolved_namespace, "-f", "-"],
-                input_text=planned.rendered_job.yaml_text,
-            )
-            records.append(
-                JobSubmissionRecord(
-                    node=planned.candidate.node,
-                    job_name=planned.rendered_job.job_name,
-                    git_ref=planned.rendered_job.git_ref,
-                    action="submitted",
-                    submitted=True,
-                    stdout=result.stdout.strip(),
+            name = planned.rendered_job.job_name
+            prepared = False
+            attempted = False
+            created = False
+            result = None
+            uid = None
+            identity_conflict = False
+            try:
+                expected = render_validation_job_from_file(
+                    active_config.job.template_path,
+                    node_name=planned.candidate.node,
+                    timestamp=planned.rendered_job.timestamp,
+                    job_prefix=active_config.job.job_prefix,
+                    git_repo=active_config.job.git_repo,
+                    git_ref=active_config.job.git_ref,
+                    job_template_config=active_config.job_template,
+                    cval_config=active_config,
                 )
-            )
+                if expected != planned.rendered_job:
+                    raise PolicyViolation("Requested manifest differs from the pinned session configuration")
+                check_active_jobs(planned, client=kubectl, config=active_config, session_dir=session_dir)
+                validate_submit_request(
+                    namespace=resolved_namespace, planned_jobs_count=len(plan.planned_jobs),
+                    policy=active_policy, submit=submit, confirmation=confirmation,
+                )
+                state["intents"][name] = submission_intent(planned, active_config, confirmation, allow_cordoned, state["approval"]["sha256"])
+                state = retain_submission_event(session_dir, state, name, {"state": "prepared"})
+                prepared = True
+                state = retain_submission_event(session_dir, state, name, {"state": "submitting"})
+                check_node_for_submission(
+                    planned, client=kubectl, config=active_config, allow_cordoned=allow_cordoned
+                )
+                attempted = True
+                result = kubectl.run(
+                    ["create", "-n", resolved_namespace, "-f", "-", "-o", "json"],
+                    input_text=planned.rendered_job.yaml_text, check=False,
+                )
+                state = retain_submission_event(session_dir, state, name, {
+                    "state": "uncertain", "returncode": result.returncode,
+                    "stdout": result.stdout, "stderr": result.stderr,
+                })
+                if result.returncode != 0:
+                    raise PolicyViolation("Create response failed; retained intent requires read-only reconciliation")
+                observed = json.loads(result.stdout)
+                try:
+                    uid = verify_submission_identity(state["intents"][name], observed, resolved_namespace)
+                except (PolicyViolation, KeyError, TypeError, ValueError):
+                    identity_conflict = True
+                    raise
+                created = True
+                state = retain_submission_event(session_dir, state, name, {
+                    "state": "submitted", "uid": uid,
+                    "phase": observed.get("status", {}).get("state", {}).get("phase", "Unknown"),
+                    "created_at": observed["metadata"]["creationTimestamp"],
+                })
+                records.append(JobSubmissionRecord(
+                    node=planned.candidate.node,
+                    job_name=name,
+                    git_ref=planned.rendered_job.git_ref,
+                    action="submitted", submitted=True, stdout=f"{name} created; uid={uid}",
+                ))
+            except Exception as exc:
+                message = str(exc)
+                if prepared:
+                    try:
+                        event = {"state": "uncertain" if attempted else "not_created", "error": message}
+                        if identity_conflict:
+                            event["state"] = "conflict"
+                        if attempted and result is not None:
+                            event.update(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+                        if created:
+                            event["uid"] = uid
+                        state = retain_submission_event(session_dir, state, name, event)
+                    except Exception as persistence_error:
+                        message += f"; outcome persistence failed: {persistence_error}"
+                failure = {"error": message}
+                if result is not None:
+                    failure["create_response"] = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+                records.append(JobSubmissionRecord(
+                    planned.candidate.node, name, planned.rendered_job.git_ref,
+                    "receipt_unpersisted" if created else "conflict" if identity_conflict else "uncertain" if attempted else "not_created",
+                    created, json.dumps(failure, sort_keys=True),
+                ))
+                raise JobSubmissionError(
+                    f"Admission stopped; retain {session_dir / 'state.json'}: {message}",
+                    JobSubmissionResult(namespace=resolved_namespace, records=records),
+                ) from exc
 
     return JobSubmissionResult(namespace=resolved_namespace, records=records)
 

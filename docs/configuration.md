@@ -81,7 +81,9 @@ are required in complete TOMLs and new snapshots. Old snapshots lacking them mus
 use their pinned source for read-only inspection; they cannot initialize or resume
 new-source writers.
 
-New sessions retain an additive `admission_scope` in the existing v1 state. The
+New sessions use `cval.live-state.v2`, retaining `admission_scope` and durable
+submission intents in the existing state file. Historical v1 remains readable but
+cannot admit new-source writes. The
 shared manager requires that scope, exact source and the complete pinned config
 snapshot to match each request. `run`, targeted `validate` and live-loop creates
 share the same short lock; session writers use it too. Missing/corrupt records,
@@ -92,8 +94,22 @@ The existing state helper's `init` refuses to replace `current-session`. Turnove
 requires separately approved stopping/reconciliation and retention of the previous
 pointer, followed by approved initialization with the reviewed snapshot. No state
 is migrated automatically. The old controller is not fenced by new local code;
-all operational writers must be turned over together. V2 durable intent/outcome
-records and lost-create recovery remain Phase 1.4 work, not a v1 guarantee.
+all operational writers must be turned over together. Activation is deferred until
+Phase 1 is finished. V2 records do not provide cross-host fencing or automatic
+recreation after an uncertain create.
+
+New initialization also requires `--approval-record <path>` on the existing state
+helper. The live launcher passes the explicit locator `CVAL_APPROVAL_RECORD`.
+The approval and rollback text is retained with its digest; each intent binds that
+digest. This is an operational input, not a setting fallback or an authorization
+granted by the presence of a file. Existing mutation approval gates still apply.
+
+Requested manifests and create responses are retained in v2 intents. The existing
+jobs CSV is a compatible projection, not authoritative proof of an outcome.
+Successful Job UID/creation time observations are preserved; unknown times remain
+unknown. A single NotFound never permits reuse, and all attempted intents reserve
+their node/slot until the later evidence-release implementation. Do not point a
+v1-only writer at v2 state or rewrite v2 into v1 for rollback.
 
 Keep `CVAL_CONFIG`, `CVAL_GIT_REF`, source/session locators and approval variables.
 Move former `CVAL_BATCH_SIZE`, `CVAL_PLAN_LIMIT`, `CVAL_DAYS_THRESHOLD`,

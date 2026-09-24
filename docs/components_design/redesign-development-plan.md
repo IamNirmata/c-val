@@ -123,10 +123,21 @@ CLI names and raw schemas remain.
   Real read-only checks rejected busy `0307`, pending validation on `0262`, and the
   legacy active session; real local processes verified lock exclusion/release.
   See [implementation and limits](job-control-major-component.md#phase-13-implementation).
+  Source published at `8a9953e1b18663c1d876d85a6c532767ad577f68`; its approved
+  immutable source ConfigMap was created and verified on 2026-09-24 UTC.
   No new live session, validation Job or controller activation was performed.
-  Approved turnover, successful creation and exact-run acceptance remain pending.
+  Live turnover is deferred until Phase 1 is finished, as requested. Successful
+  Job creation and exact-run acceptance remain pending.
 - [ ] **1.4** Persist intent before create and retain every outcome. Test lost replies,
   intent/receipt write failures, concurrent submitters and a misleading single NotFound.
+  Source implemented with v2 session intents, retained approval/manifest identities,
+  durable create observations and partial batch responses. Same-identity read-only
+  reconciliation never retries create; missing/conflicting/unavailable observations
+  retain reservations. Real Job/NotFound reads and isolated real filesystem failures
+  were checked without synthetic Kubernetes clients or live session changes. See
+  [implementation and verification limits](job-control-major-component.md#phase-14-implementation).
+  Real create reply loss, partial batches and concurrent submitters remain unverified;
+  live-loop activation stays deferred until Phase 1 is complete.
 - [ ] **1.5** Implement outcome-specific exact-run verification against expected
   request identity; bound generation-change retries. Keep evidence and acceptance separate.
 - [ ] **1.6** Implement compatible-coverage reads and exact-run exports; distinguish
