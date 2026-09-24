@@ -317,6 +317,23 @@ Image, CUDA, PyTorch, plan and iteration selection remain unchanged. Copy/compar
 does not establish an atomic shared-source revision; subsequent shared edits cannot
 change prepared files. See [scope and verification limits](components_design/test-workloads-major-component.md#phase-34-run-local-dl-source).
 
+### Timing and Environment Inspection
+
+Use the exact run's retained `result.json`, full `events.jsonl`, test summaries and
+submitted configuration. Match node/run/source identity and result digest before
+joining raw records at that timestamp; do not substitute latest rows. Existing
+image/framework, plan and iteration fields are experiment dimensions, not versions
+to freeze. Inspect [existing timing boundaries](result-schema.md#timing-interpretation)
+without adding another logging or persistence path.
+
+Whole-test `duration_ms` includes setup; event timestamp differences give only
+approximate setup/workload intervals. Prefer emitted monotonic durations for totals,
+and do not add nested supervisor/test/ingestion times together. Missing or repeated
+boundaries remain unconfirmed. Resource requests are not utilization measurements.
+Historical runs on different nodes/source versions cannot establish a Phase 3
+speedup or acceptance; [the historical review](components_design/validation-runtime-major-component.md#phase-35-evidence-review)
+records those limits. Fresh experiments keep the separate submission gates below.
+
 ### Real-node development procedure
 
 Phase 0 procedure; the templates below are not approval to execute a mutation.

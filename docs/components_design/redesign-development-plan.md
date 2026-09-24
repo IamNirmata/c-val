@@ -2,7 +2,8 @@
 
 Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemented.
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-Phase 3.1-3.4 cleanup source is implemented; Phase 3.5 comparison remains pending.
+Phase 3.1-3.4 cleanup source is implemented; Phase 3.5 evidence review is complete,
+but fresh accepted-run comparisons remain pending.
 The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). No runtime changes or new real-node
 acceptance are claimed. Implementation and live mutation approvals remain separate.
@@ -389,6 +390,18 @@ FIO packaging and additional timing fields are deferred unless separately justif
   unverified. See [per-run source boundary](test-workloads-major-component.md#phase-34-run-local-dl-source).
 - [ ] **3.5** Use existing timing/events and recorded environment fields to compare
   approved runs. Add instrumentation only for a demonstrated missing measurement.
+  Evidence review complete; no runtime change is justified. Existing event boundaries
+  separate approximate setup/workload/ingestion intervals, and emitted monotonic
+  totals already cover tests and newer ingestion/supervisor stages. Historical runs
+  `0192/1790178532` and `0359/1790277187` have matching recorded environments,
+  descriptors, requested resources and iteration/plan settings, but different nodes
+  and source revisions. They demonstrate inspection, not a speedup or regression.
+  `0359` canonical digest and exact raw environment/iteration records were checked;
+  resource usage and fresh Phase 3 execution remain unmeasured. See
+  [timing interpretation](../result-schema.md#timing-interpretation) and
+  [review evidence](validation-runtime-major-component.md#phase-35-evidence-review).
+  Keep this acceptance checkbox open until separately approved new-source runs and
+  comparable evidence are available; do not add fields/scripts to replace that gate.
 
 **Done when:** Approved exact-commit real-node validation confirms intended coverage,
 retained artifacts and dependency identity. Check safe rejection cases without

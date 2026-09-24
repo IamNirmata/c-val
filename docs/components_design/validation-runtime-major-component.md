@@ -1,7 +1,8 @@
 # C5: Validation Runtime
 
 Status: Phase 2.1 logging and Phase 3.1-3.3 reservation/environment/cleanup source
-implemented; new-source pod acceptance pending. Baseline/counting:
+implemented; Phase 3.5 existing-evidence review complete. Fresh pod acceptance and
+refactor comparisons remain pending. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -274,6 +275,55 @@ These are process regression checks, not synthetic benchmark/DB acceptance.
 Fresh in-pod execution, real signal boundaries, ingestion interruption and detached
 workload descendants remain unexercised. The live loop stays paused; creation,
 activation and real acceptance each retain their exact approval gates.
+
+## Phase 3.5 Evidence Review
+
+No new instrumentation is required for stage-level inspection. Existing exact-run
+events contain setup/start/finish boundaries, test totals, and newer ingestion and
+supervisor durations. Use the [timing interpretation](../result-schema.md#timing-interpretation)
+to keep timestamp differences separate from monotonic durations and avoid counting
+nested test/child durations twice. Missing boundaries remain unconfirmed.
+
+Read-only review on 2026-09-24 UTC used these actual historical runs:
+`slc01-cl02-hgx-0192-1790178532` and `slc01-cl02-hgx-0359-1790277187`.
+The table contains wall-clock event intervals, in seconds, including transition
+overhead. It is not a benchmark ranking or an accepted refactor comparison.
+
+| Interval | 0192 | 0359 |
+| --- | ---: | ---: |
+| Storage setup | 9.155 | 8.206 |
+| Storage workload | 518.602 | 500.853 |
+| NCCL setup | 0.194 | 0.146 |
+| NCCL workload | 33.689 | 31.590 |
+| DL setup | 0.193 | 0.194 |
+| DL workload | 183.609 | 180.407 |
+| Ingestion | 25.363 | 25.701 |
+
+Both recorded image label `pytorch:26.05-py3`, PyTorch
+`2.12.0a0+5aff3928d8.nv26.05`, CUDA `13.2`, NCCL 20 iterations/8 GB/8 GPUs, and
+DL 100 iterations/8 GPUs/`80gb-example`. Submitted descriptors and resource requests
+also match. Their c-val sources differ (`fe4d405...` versus `1abde89...`), as do
+their nodes and run times. Matching labels/settings do not prove identical external
+DL source bytes, immutable image contents or shared-storage/fabric conditions.
+
+Test-finished monotonic totals match each canonical result; events were checked
+for exact run identity, unique milestones and nonnegative ordering. The fresh
+read of `0359` canonical files verified the ingestion-result digest. Its exact
+raw records across all seven stores match node/timestamp, recorded environment,
+iteration counts and plan; the DL summary covers eight ranks. The earlier `0192`
+canonical/event evidence was reused, not backfilled or rewritten.
+
+These old streams lack the newer supervisor events and ingestion `duration_ms`.
+CPU/GPU/memory utilization, allocation overhead and Phase 3.4 copy cost were not
+measured; requested resources are not actual usage. No claim of performance
+improvement, regression, node health or new-source acceptance follows from this
+table. Evidence and hashes are retained in `run-logs/phase35-operations-20260924.md`.
+
+For environment experiments, varying image/framework/iterations is intentional;
+retain those values as dimensions. For framework-refactor comparisons, use fresh
+accepted runs with controlled workload inputs and comparable node conditions.
+Neither comparison requires a new DB, report service or speculative timing fields.
+Fresh workload submission/activation remains approval-gated; the loop stays paused.
 
 ## Evidence Lifecycle
 

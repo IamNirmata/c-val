@@ -59,6 +59,32 @@ These are source changes pending separately approved exact-commit pod acceptance
 Historical event/result readers remain compatible, but old undigested ingestion
 acknowledgements cannot authorize a new supervisor's success.
 
+### Timing Interpretation
+
+Use the existing event stream for the exact run, not a combined log tail:
+
+| Measurement | Existing Evidence | Interpretation |
+| --- | --- | --- |
+| Test total | Result/test-finished `duration_ms` | Monotonic elapsed time across setup, workload and runner overhead. |
+| Setup interval | `test_setup_started` to `test_started` timestamps | Wall-clock approximation including transition/logging overhead, not pure setup process time. |
+| Workload interval | `test_started` to the matching terminal test event | Wall-clock approximation including summary/result/logging overhead, not kernel-only time. |
+| Ingestion | `ingestion_finished.duration_ms` when present | Coordinator elapsed time; historical start/finish timestamps provide only a wall-clock approximation. |
+| Outer stages | `supervisor_stage_finished.duration_ms` | Child lifetime plus capture/cleanup; not additive to the nested test/ingestion timings. |
+
+Require matching run/test identities and ordered milestones. Missing, repeated,
+out-of-order or interrupted boundaries are unconfirmed; do not fill missing phases
+with zero or infer a pass from elapsed time. Timestamp subtraction can be affected
+by wall-clock changes; prefer emitted monotonic totals when comparing totals.
+Retain setup failure, timeout and test outcome separately from timing.
+
+Image/framework values, selected test descriptors, iterations and plan identify
+the experiment inputs already recorded by c-val. Different values are valid test
+dimensions, not errors to normalize away. Compare environment experiments explicitly;
+do not attribute differences to a framework refactor across different nodes, inputs
+or unaccepted source revisions. Historical evidence cannot establish new-source
+acceptance or a speedup. No new timing DB, fields or instrumentation are required
+for this stage-level inspection.
+
 ## Raw databases
 
 - `metadata/validation.db`: `runs` and `latest_status`;
