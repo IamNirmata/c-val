@@ -55,6 +55,7 @@ class SchedulingConfig:
     days_threshold: float
     batch_size: int
     node_cooldown_seconds: int
+    coverage_max_runs_per_node: int
 
 
 @dataclass(frozen=True)
@@ -404,6 +405,7 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
         ("monitoring.verification_max_files", config.monitoring.verification_max_files),
         ("live.loop_sleep_seconds", config.live.loop_sleep_seconds),
         ("scheduling.batch_size", config.scheduling.batch_size),
+        ("scheduling.coverage_max_runs_per_node", config.scheduling.coverage_max_runs_per_node),
         ("policy.max_batch_size", config.policy.max_batch_size),
     ):
         if value <= 0:

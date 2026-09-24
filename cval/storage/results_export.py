@@ -151,11 +151,15 @@ def rows_to_csv_records(
 
         # NCCL metric columns (busbw GB/s, latency µs)
         nccl = nccl_by_node.get(row.node)
+        if nccl is not None and nccl.timestamp != row.latest_timestamp:
+            nccl = None
         record["nccl_busbw"] = "" if nccl is None or nccl.busbw is None else f"{nccl.busbw:.4f}"
         record["nccl_latency"] = "" if nccl is None or nccl.latency is None else f"{nccl.latency:.4f}"
 
         # Storage metric columns (IOPS and bandwidth KB/s)
         storage = storage_by_node.get(row.node)
+        if storage is not None and storage.timestamp != row.latest_timestamp:
+            storage = None
         for col in STORAGE_EXTRA_COLUMNS:
             val = getattr(storage, col, None) if storage is not None else None
             record[col] = "" if val is None else f"{val:.4f}"
@@ -240,7 +244,9 @@ def nccl_health_rows_to_csv_records(
 
     for row in rows:
         health = health_by_node.get(row.node)
-        timestamp = health.timestamp if health and health.timestamp is not None else row.latest_timestamp
+        if health is not None and health.timestamp != row.latest_timestamp:
+            health = None
+        timestamp = row.latest_timestamp
         record = {
             "node": row.node,
             "test": "nccl",

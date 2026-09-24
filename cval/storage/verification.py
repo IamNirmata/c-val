@@ -391,8 +391,13 @@ def expired(signum, frame):
     raise TimeoutError("Exact-run verification deadline expired")
 signal.signal(signal.SIGALRM, expired)
 signal.setitimer(signal.ITIMER_REAL, payload["request"]["timeout_seconds"])
-from cval.storage.verification import verify_local_evidence
-print(json.dumps(verify_local_evidence(payload["request"]), sort_keys=True, allow_nan=False))
+if payload["operation"] == "coverage":
+    from cval.storage.status import read_local_coverage as collect
+elif payload["operation"] == "verification":
+    from cval.storage.verification import verify_local_evidence as collect
+else:
+    raise ValueError("Unknown read-only collection operation")
+print(json.dumps(collect(payload["request"]), sort_keys=True, allow_nan=False))
 '''
 
 
@@ -418,7 +423,7 @@ def evidence_request(intent: dict, config, timeout: float) -> dict:
     }
 
 
-def collect_exact_evidence(request: dict, config, client) -> dict:
+def collect_exact_evidence(request: dict, config, client, *, operation: str = "verification") -> dict:
     sources = {}
     package_root = Path(__file__).resolve().parents[1]
     for path in package_root.rglob("*.py"):
@@ -430,7 +435,7 @@ def collect_exact_evidence(request: dict, config, client) -> dict:
     try:
         response = client.run(["exec", "-i", "-n", config.cluster.namespace, config.cluster.pvc_access_pod,
                                "--", "python3", "-c", _MEMORY_READER],
-                              input_text=json.dumps({"sources": encoded, "request": request}),
+                              input_text=json.dumps({"sources": encoded, "request": request, "operation": operation}),
                               timeout=request["timeout_seconds"], check=False)
         if response.returncode:
             return {"state": "forbidden" if "forbidden" in response.stderr.lower() else "unavailable",

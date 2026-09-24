@@ -20,6 +20,7 @@ from cval.jobs.manager import (
     observe_submission,
     project_submission_jobs,
     retain_submission_event,
+    reconcile_submission_intents,
     intent_finished,
     verify_terminal_submission,
     write_session_jobs as _write_jobs,
@@ -112,6 +113,14 @@ def _init(args: argparse.Namespace) -> None:
 
 def _update(args: argparse.Namespace) -> None:
     state = _read_state(args.session_dir)
+    if args.reconcile:
+        from cval.config import load_config_snapshot
+        from cval.k8s.client import KubectlClient
+
+        config = load_config_snapshot(state["config_snapshot_b64"])
+        client = KubectlClient(config=config)
+        check_admission_cluster(config, client)
+        state = reconcile_submission_intents(args.session_dir, state, client, config)
     state.update(
         {
             "updated_at": args.updated_at,
@@ -199,6 +208,7 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument("--state", required=True)
     update.add_argument("--message", required=True)
     update.add_argument("--cycle-id")
+    update.add_argument("--reconcile", action="store_true")
     update.set_defaults(handler=_update)
 
     job = subparsers.add_parser("job")

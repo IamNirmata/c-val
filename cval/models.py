@@ -90,6 +90,7 @@ class NcclMetrics:
 
     busbw: float | None
     latency: float | None
+    timestamp: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,3 +126,4 @@ class StorageMetrics:
     randread_bw: float | None
     randwrite_iops: float | None
     randwrite_bw: float | None
+    timestamp: int | None = None

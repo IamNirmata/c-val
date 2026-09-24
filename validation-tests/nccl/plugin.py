@@ -58,6 +58,7 @@ class NcclPlugin:
             nccl_health_rows_to_csv_records,
         )
 
+        selected = latest_result_rows(list(context.status_rows), context.target.name)
         metrics = None
         if context.include_metrics:
             metrics = get_latest_nccl_health_metrics(
@@ -65,8 +66,8 @@ class NcclPlugin:
                 namespace=context.namespace,
                 db_path=context.source_db_path("nccl"),
                 config=context.config,
+                timestamps={row.node: row.latest_timestamp for row in selected},
             )
-        selected = latest_result_rows(list(context.status_rows), context.target.name)
         records = nccl_health_rows_to_csv_records(selected, metrics)
         return export_rows_from_records(
             NCCL_HEALTH_CSV_COLUMNS, records, row_label="nccl IB_HEALTH"

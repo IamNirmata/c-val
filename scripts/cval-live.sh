@@ -740,27 +740,12 @@ import sys
 status_path, map_path = sys.argv[1:]
 with open(status_path, encoding="utf-8") as handle:
     data = json.load(handle)
-if not isinstance(data, list):
-    raise ValueError("status JSON must be a list")
-latest = {}
-for item in data:
-    if not isinstance(item, dict):
-        raise ValueError("status JSON contains a non-object row")
-    node = item.get("node")
-    timestamp = item.get("latest_timestamp")
-    if not isinstance(node, str) or not node:
-        raise ValueError("status JSON contains an invalid node")
-    if timestamp is None:
-        value = 0
-    elif isinstance(timestamp, int) and not isinstance(timestamp, bool):
-        value = timestamp
-    else:
-        raise ValueError("status JSON contains an invalid latest_timestamp")
-    latest[node] = max(latest.get(node, 0), value)
+from cval.storage.status import coverage_timestamps
+latest = coverage_timestamps(data)
 with open(map_path, "w", encoding="utf-8") as handle:
-    json.dump(latest, handle, sort_keys=True)
+    json.dump(data, handle, sort_keys=True)
     handle.write("\n")
-print(f"{len(data)}\t{len(latest)}")
+print(f"{len(data['nodes'])}\t{len(latest)}")
 PY
 }
 
@@ -804,7 +789,7 @@ collect_plan_inputs() {
 
     local status_rc=0
     assert_runner_worktree "$stem-status-before" "$expected_sha" || return "$?"
-    python -m cval.cli --config "$CONFIG_PATH" status --output json >"$status_file" 2>"$status_error" || status_rc=$?
+    python -m cval.cli --config "$CONFIG_PATH" status --coverage --output json >"$status_file" 2>"$status_error" || status_rc=$?
     assert_runner_worktree "$stem-status-after" "$expected_sha" || return "$?"
     if (( status_rc == 0 )); then
         local status_summary
@@ -813,7 +798,7 @@ collect_plan_inputs() {
         if (( status_parse_rc == 0 )); then
             IFS=$'\t' read -r PLAN_STATUS_ROW_COUNT PLAN_STATUS_NODE_COUNT <<<"$status_summary"
             PLAN_STATUS_MAP="$status_map"
-            log "component=latest-status status=ok row_count=$PLAN_STATUS_ROW_COUNT node_count=$PLAN_STATUS_NODE_COUNT source=validation.db/latest_status"
+            log "component=coverage status=ok row_count=$PLAN_STATUS_ROW_COUNT node_count=$PLAN_STATUS_NODE_COUNT source=validation.db/runs policy=legacy_complete_run"
         else
             log "component=latest-status status=invalid-json exit_code=$status_parse_rc artifact=$status_file"
             failed=1
@@ -1238,29 +1223,22 @@ watch_existing_jobs_until_clear() {
 }
 
 resume_latest_cycle_if_needed() {
-    local cycle_dir
-    cycle_dir=$(latest_cycle_dir_with_submits)
-    if [[ -z "$cycle_dir" ]]; then
-        return 1
-    fi
-
-    repair_cycle_cooldowns "$cycle_dir" || return "$?"
-    local receipt
-    while IFS= read -r receipt; do
-        [[ -n "$receipt" ]] || continue
-        session_import_receipt "$receipt" || return 2
-    done < <(
-        find "$cycle_dir" -maxdepth 1 -type f \
-            \( -name 'submit.json' -o -name 'submit-*.json' \) -print | sort
-    )
-
+    python "$STATE_HELPER" update "$SESSION_DIR" --updated-at "$(la_now)" \
+        --state recovering --message "reconciling durable intents" --reconcile || return 2
     local jobs_csv
-    jobs_csv=$(json_submitted_jobs_csv_from_dir "$cycle_dir")
+    jobs_csv=$(PYTHONPATH="$SOURCE_REPO${PYTHONPATH:+:$PYTHONPATH}" python - "$SESSION_DIR" <<'PY'
+import sys
+from pathlib import Path
+from cval.jobs.manager import intent_finished, read_session_state
+state = read_session_state(Path(sys.argv[1]))
+print(",".join(name for name,intent in state["intents"].items() if not intent_finished(intent)))
+PY
+    ) || return 2
     if [[ -z "$jobs_csv" ]]; then
         return 1
     fi
-
-    mkdir -p "$cycle_dir"
+    local cycle_dir="$SESSION_DIR/cycles/recovery-$(la_id)"
+    mkdir "$cycle_dir" || return 2
     resolve_git_ref || return "$?"
     local resume_git_ref="$RESOLVED_GIT_REF"
     ensure_runner_worktree "$resume_git_ref" || return "$?"

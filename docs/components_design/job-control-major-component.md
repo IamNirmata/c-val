@@ -191,6 +191,25 @@ turnover and fresh execution remain deferred until Phase 1 is finished.
 
 ## Proposed Design
 
+### Phase 1 Integration Completion
+
+Shared admission now applies the existing cooldown helper to retained table entries
+and confirmed creation times in durable intents, covering manual commands as well
+as the loop. Uncertain attempts never invent a submission time. The existing state
+helper's `update --reconcile` lets resume recover from authoritative v2 intents even
+if CLI receipt output was lost. Missing derived CSV is rebuilt after reconciliation;
+missing or corrupt authoritative state is never recreated. All intent observations
+in one reconciliation pass share the configured deadline.
+
+The live-loop resume path uses this state before selecting work; it does not infer
+an empty queue from missing or malformed receipt output. Existing receipt-reader
+helpers remain for historical interface compatibility, not as active admission
+authority. No new service or runtime module was added for these changes. Actual
+lost replies, concurrent creates and new-source live turnover still need approved
+acceptance; local checks used the real cooldown table and retained real identities.
+
+### Remaining Design
+
 1. Keep shell only for process/session launch. Move one bounded lifecycle pass into
    existing Python orchestration and share it between continuous and targeted runs.
 2. Before create, durably retain intent in existing session storage: job name,

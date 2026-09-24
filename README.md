@@ -139,6 +139,13 @@ external test dependencies.
 
 ## Running Validation Safely
 
+Phase 1 source implementation (1.1-1.6) is complete; fresh-cluster acceptance and
+controller turnover remain pending separate approval. See the
+[implementation/acceptance distinction](docs/components_design/redesign-development-plan.md#implementation-status).
+Scheduling reads `status --coverage`; `results` supports exact `--node` and
+`--timestamp` selectors without changing CSV columns. Metrics never fall back to
+a different run's values.
+
 ### One-Node Validation
 
 Submission is a live mutation: approve the exact command, target and rollback

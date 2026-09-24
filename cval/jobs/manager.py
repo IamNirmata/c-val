@@ -18,9 +18,11 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import socket
 import stat
 import tempfile
+import time
 
 import yaml
 
@@ -171,14 +173,14 @@ def verify_submission_identity(intent: dict, observed: dict, namespace: str) -> 
     return uid
 
 
-def observe_submission(intent: dict, client: KubectlClient, namespace: str) -> dict:
+def observe_submission(intent: dict, client: KubectlClient, namespace: str, *, timeout: float | None = None) -> dict:
     """Observe the exact retained name once; absence never authorizes a retry."""
 
     evidence = {}
     try:
         result = client.run([
             "get", "vcjob", intent["job_name"], "-n", namespace, "--ignore-not-found", "-o", "json",
-        ], check=False)
+        ], check=False, timeout=timeout)
         evidence = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
         if result.returncode != 0 or not result.stdout.strip():
             return {"state": "uncertain", "observation": "unavailable" if result.returncode else "absent", **evidence}
@@ -198,18 +200,43 @@ def observe_submission(intent: dict, client: KubectlClient, namespace: str) -> d
 def reconcile_submission_intents(session_dir: Path, state: dict, client: KubectlClient, config: CvalConfig) -> dict:
     """Recover receipts, never create; preserve reservations for unknown outcomes."""
 
+    deadline = time.monotonic() + config.monitoring.ingestion_grace_seconds
     for name, intent in state["intents"].items():
         last = intent["events"][-1]
         if intent_finished(intent):
             continue
         if last["state"] == "conflict" or not any(event["state"] == "submitting" for event in intent["events"]):
             raise PolicyViolation(f"Intent {name!r} requires explicit reconciliation; no retry is authorized")
-        event = observe_submission(intent, client, config.cluster.namespace)
-        event = verify_terminal_submission(intent, event, config, client)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PolicyViolation("Reconciliation deadline expired; reservations retained")
+        event = observe_submission(intent, client, config.cluster.namespace, timeout=min(remaining, config.cluster.kubectl_timeout_seconds))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PolicyViolation("Reconciliation deadline expired; reservations retained")
+        event = verify_terminal_submission(intent, event, config, client, timeout=remaining)
         state = retain_submission_event(session_dir, state, name, event)
         if event["state"] != "observed" and not intent_finished(state["intents"][name]):
             raise PolicyViolation(f"Intent {name!r} is {event['state']}; node and slot remain reserved")
+    project_submission_jobs(session_dir, state)
     return state
+
+
+def check_node_cooldown(node: str, state: dict, config: CvalConfig) -> None:
+    """Apply the existing cooldown contract to every supported submitter."""
+
+    helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/cval-node-cooldown.py"))
+    recorded = helper["load_state"](Path(config.live.log_dir) / "node_cool_down.csv")
+    for intent in state.get("intents", {}).values():
+        if intent["node_name"] != node:
+            continue
+        for event in intent["events"]:
+            if event.get("created_at"):
+                timestamp = int(datetime.fromisoformat(event["created_at"].replace("Z", "+00:00")).timestamp())
+                recorded[node] = max(recorded.get(node, 0), timestamp)
+    _eligible, excluded = helper["filter_nodes"](recorded, [node], now=int(time.time()), cooldown_seconds=config.scheduling.node_cooldown_seconds)
+    if excluded:
+        raise PolicyViolation(f"Node {node!r} is in submission cooldown until {excluded[0]['cooldown_until']}")
 
 
 def verification_releases(intent: dict, report: dict) -> bool:
@@ -380,8 +407,6 @@ def read_admission_session(config: CvalConfig) -> tuple[Path, dict[str, object]]
     for intent in state["intents"].values():
         if intent["git_ref"] != config.job.git_ref or intent["config_digest"] != effective_config_digest(config) or intent["confirmation"] != config.policy.confirmation_phrase:
             raise PolicyViolation("Retained intent differs from the approved session inputs")
-    if set(read_session_jobs(session_dir)) - set(state["intents"]):
-        raise PolicyViolation("Session jobs contain identities without durable intents")
     return session_dir, state
 
 
@@ -394,7 +419,9 @@ def check_active_jobs(
     if not isinstance(payload.get("items"), list) or payload.get("metadata", {}).get("continue"):
         raise PolicyViolation("Incomplete validation Job inventory")
     active: dict[str, str] = {}
-    for name, intent in read_session_state(session_dir).get("intents", {}).items():
+    session = read_session_state(session_dir)
+    check_node_cooldown(planned.candidate.node, session, config)
+    for name, intent in session.get("intents", {}).items():
         if name == planned.rendered_job.job_name or intent["run_id"] == f"{planned.candidate.node}-{planned.rendered_job.timestamp}":
             raise PolicyViolation("Run identity already has a durable intent; never recreate it")
         if not intent_finished(intent):

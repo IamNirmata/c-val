@@ -1,7 +1,8 @@
 # C3: Discovery and Scheduling
 
-Status: Phase 1.2 eligibility source implemented; real-node acceptance pending.
-Coverage/admission changes below remain proposals. Baseline/counting:
+Status: Phase 1.2 eligibility and Phase 1.6 coverage source implemented;
+fresh real-node acceptance pending. Dependency compatibility activation remains
+deferred until provenance is produced. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -99,10 +100,50 @@ results and raw ingestion acceptance remain pending separate approval.
 
 ## Remaining Issues
 
-1. Node and pod reads remain separate observations, not a reservation. Shared
-   submission serialization and the final per-create check belong to Phase 1.3.
-2. [Scheduling history](../../cval/storage/status.py#L40) takes the newest timestamp
-   across tests. A partial or disabled-test run can obscure missing coverage.
+1. Node and pod reads remain separate observations, not a reservation. Phase 1.3
+   serializes cooperating submitters and rechecks before create, not other workloads.
+2. Immutable workload/dependency provenance is not yet complete. Coverage explicitly
+   retains the legacy age policy rather than claiming full execution compatibility.
+
+## Phase 1.6 Implementation
+
+[History reads](../../cval/storage/status.py) now select the newest single complete
+run for the requested test set. `status --coverage` returns `cval.coverage.v1` with
+the requested tests, per-node reasons, latest attempt, selected coverage timestamp,
+skipped-run evidence and a timestamp projection. `plan --live-status` and the live
+loop use the same reader; the loop retains this full report instead of reducing
+latest test timestamps to an unrelated maximum. The pure priority rule remains
+never-covered first, then oldest expired, with strict `age > days_threshold`.
+
+Current envelopes must identify the node/run and selected tests, show each requested
+test finished, match exact raw status and retain nonempty canonical summaries and
+the ingestion digest. Failed built-ins additionally need test-owned completion
+evidence: all DL ranks/plans/tasks completed, parseable complete storage artifacts,
+or a validated NCCL completion summary. Failed custom tests without a completion
+contract remain unproven. Incomplete or conflicting newer attempts do not replace
+older qualifying coverage. Historical path relocation uses the existing explicit
+map without rewriting artifacts.
+
+Historical runs without current-format completion provenance can supply only
+`legacy_complete_passing_status` coverage for a coherent passing built-in status
+set. This is the deliberate legacy age rule, not proof of canonical execution,
+current descriptors, image or external-DL compatibility. Missing current artifacts
+cannot use that fallback. Reports state `legacy_age_only`; stronger compatibility
+comparisons remain deferred until Phase 3 supplies immutable dependency identity.
+
+Read denial/failure, malformed history or the configured per-node scan limit stops
+planning; none becomes an empty history. Queried history without a qualifying run
+has candidate reason `no-complete-coverage`, distinct from `never-tested`. New test
+selection must match the report. Existing plain node/timestamp JSON maps remain
+explicit offline planning inputs, not proof of live coverage or submission approval.
+
+Read-only verification on 2026-09-24 UTC scanned 478 real nodes: the final retained
+observation found 379 canonical, 97 legacy passing and two unproven records. Nodes
+`0275` and `0418` planned as `no-complete-coverage`; recent `0192` coverage was excluded.
+Coverage provenance is not an accepted health outcome. Evidence is retained in
+`run-logs/phase16-final-coverage-20260924.json` and
+`run-logs/phase16-plan-reasons-20260924.json`. Complete failed-run coverage and live
+permission/retry/limit failures were not exercised; no synthetic history was used.
 
 ## Proposed Design
 

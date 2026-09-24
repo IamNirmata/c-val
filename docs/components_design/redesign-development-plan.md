@@ -95,6 +95,24 @@ compatibility rules. Neither is treated as a successful validation or silently i
 **Changes:** Config propagation, eligibility, receipts and verification;
 CLI names and raw schemas remain.
 
+### Implementation Status
+
+Source implementation for **1.1 through 1.6 is complete**. The unchecked task
+boxes below include real-cluster acceptance and must not be interpreted as accepted
+deployment. Read-only real-history and isolated local OS checks are recorded; no
+new-source benchmark or controller turnover has occurred.
+
+The final implementation also closes shared cooldown and lost-reply resume paths:
+all submitters use the existing cooldown contract, resume reconciles durable intents
+without depending on CLI receipts, derived CSVs can be rebuilt from intact state,
+and multi-intent reconciliation shares a bounded deadline. Phase 2 consolidation,
+Phase 3 dependency provenance, and cross-host fencing are not included.
+
+Activation remains separately gated. Next: approve the final exact source object,
+review session turnover with retained outstanding work, then perform approved
+fresh execution/ingestion and recovery acceptance. Completing source is not
+permission to stop, restart, cancel or submit live work.
+
 ### Tasks
 
 - [ ] **1.1** Freeze effective config per command/controller session and pass it
@@ -149,12 +167,24 @@ CLI names and raw schemas remain.
   a failed historical Job without a retained pod remained unavailable, and the absent
   approved `0307` run remained incomplete. No synthetic DBs or new validation Jobs
   were used. See [verification and limits](raw-evidence-major-component.md#phase-15-implementation).
+  Source published at `f0cdff9dbb603823adc5cfa956a17b21484d8554`; its approved
+  immutable ConfigMap was created and verified on 2026-09-24 UTC.
   Fresh exact-commit execution, live release transitions and generation-change retry
   acceptance remain pending; activation stays deferred until Phase 1 is finished.
 - [ ] **1.6** Implement compatible-coverage reads and exact-run exports; distinguish
   forbidden/unavailable history from empty or incomplete evidence. Keep the declared
   legacy age policy until new dependency provenance is produced and its comparison
   is accepted; review output compatibility before activating stricter coverage rules.
+  Implemented `status --coverage`, shared complete-run history for CLI/live planning,
+  labeled legacy passing coverage, exact `results --node --timestamp` selection,
+  timestamp-matched metric joins and fail-closed status/metric reads. CSV columns
+  remain unchanged; missing exact status produces no CSV. A real 478-node scan found
+  379 canonical, 97 legacy passing and two unproven coverage records. All four
+  built-in historical exports passed. See
+  [coverage behavior](discovery-scheduling-major-component.md#phase-16-implementation).
+  Complete failed-run coverage, unavailable/forbidden live failures and new-source
+  controller behavior remain unexercised. Strict dependency compatibility is still
+  deferred until its producer exists; no provenance was fabricated or backfilled.
 
 **Done when:** Approved real-node runs and retained real failure evidence demonstrate
 the required eligibility, receipt and exact-run evidence behavior. Document cases

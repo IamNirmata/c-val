@@ -30,6 +30,8 @@ def build_workflow_plan(
     git_ref: str | None = None,
     now: datetime | None = None,
     config: CvalConfig | None = None,
+    *,
+    coverage_reasons: Mapping[str, str] | None = None,
 ) -> WorkflowPlan:
     """Render the first prioritized batch for submission without creating jobs."""
 
@@ -52,6 +54,7 @@ def build_workflow_plan(
         latest_status_by_node,
         days_threshold=resolved_days_threshold,
         now=now,
+        coverage_reasons=coverage_reasons,
     )
     # Only the first batch is rendered; the full queue remains available for visibility.
     planned_jobs = [

@@ -4,14 +4,13 @@ These helpers query test-nccl.db and test-storage.db in read-only mode via a
 kubectl exec stdin call. They return only the most recent row per node so that
 ``cval results`` can join metric columns into the export CSV.
 
-Errors (missing DB, pod unavailable) are caught and returned as an empty dict
-so the main export still succeeds—just without metric columns.
+Exact status timestamps can be supplied instead of selecting latest metrics.
+Read failures never become empty observations.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 
 from cval.config import load_config
 from cval.k8s.client import KubectlClient
@@ -20,7 +19,6 @@ from cval.storage.ingest import NCCL_IB_PORT_COLUMNS
 from cval.storage.sqlite_uri import sqlite_readonly_script_prelude
 from cval.storage.status import resolve_status_pod
 
-logger = logging.getLogger(__name__)
 
 STORAGE_METRIC_FIELDS = (
     "iodepth_read_1file_iops",
@@ -37,100 +35,59 @@ STORAGE_METRIC_FIELDS = (
     "randwrite_bw",
 )
 
-_NCCL_FETCH_SCRIPT = sqlite_readonly_script_prelude() + """\
-import json, sys
-db_path = sys.argv[1]
-rows_out = []
-conn = None
+def _fetch_metrics(kind, client, pod, namespace, db_path, config, timestamps):
+    active = config or load_config()
+    kubectl = client or KubectlClient(config=active)
+    namespace = namespace or active.cluster.namespace
+    reader = resolve_status_pod(kubectl, namespace, pod or active.cluster.pvc_access_pod)
+    table = "storage_performance" if kind == "storage" else "IB_HEALTH"
+    columns = (
+        "node,timestamp," + ",".join(STORAGE_METRIC_FIELDS) if kind == "storage" else
+        "Node AS node,timestamp,BUS_BW AS busbw,LATENCY AS latency" if kind == "nccl" else
+        "Node AS node,timestamp,la_timestamp,iterations,image_name,cuda,pytorch,samples,BUS_BW AS bus_bw,LATENCY AS latency," + ",".join(NCCL_IB_PORT_COLUMNS)
+    )
+    if timestamps is not None and any(not isinstance(node, str) or not node or type(timestamp) is not int or timestamp <= 0 for node, timestamp in timestamps.items()):
+        raise ValueError("Exact metric selection requires node names and positive timestamps")
+    path = db_path or (active.storage.storage_db_path if kind == "storage" else active.storage.nccl_db_path)
+    code = f"CVAL_SQLITE_TIMEOUT = {active.sqlite_retry.timeout_seconds!r}\n" + sqlite_readonly_script_prelude() + r'''
+import json,sys,time
+path,table,columns,selection,limit = sys.argv[1:]
+deadline = time.monotonic() + float(limit)
+connection = connect_sqlite_readonly(path)
 try:
-    conn = connect_sqlite_readonly(db_path)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT Node AS node, BUS_BW AS busbw, LATENCY AS latency "
-        "FROM IB_HEALTH "
-        "WHERE (Node, timestamp) IN "
-        "  (SELECT Node, MAX(timestamp) FROM IB_HEALTH GROUP BY Node) "
-        "ORDER BY Node"
-    ).fetchall()
-    for row in rows:
-        rows_out.append({"node": row["node"], "busbw": row["busbw"], "latency": row["latency"]})
-except Exception as exc:
-    print(f"nccl metrics error: {exc}", file=sys.stderr)
+    connection.row_factory = sqlite3.Row
+    connection.set_progress_handler(lambda: int(time.monotonic() >= deadline),1000)
+    selection = json.loads(selection)
+    if selection is None:
+        rows = [dict(row) for row in connection.execute(f"SELECT {columns} FROM {table} WHERE (node,timestamp) IN (SELECT node,MAX(timestamp) FROM {table} GROUP BY node) ORDER BY node")]
+    else:
+        rows = []
+        for node,timestamp in selection.items():
+            rows.extend(dict(row) for row in connection.execute(f"SELECT {columns} FROM {table} WHERE node=? AND timestamp=?",(node,timestamp)))
+    print(json.dumps(rows,allow_nan=False))
 finally:
-    if conn is not None:
-        conn.close()
-print(json.dumps(rows_out))
-"""
+    connection.close()
+'''
+    result = kubectl.run(["exec", "-i", "-n", namespace, reader, "--", "python3", "-", str(path), table, columns,
+                          json.dumps(timestamps), str(active.cluster.kubectl_timeout_seconds)], input_text=code, check=False)
+    if result.returncode:
+        state = "forbidden" if "forbidden" in result.stderr.lower() or "permission denied" in result.stderr.lower() else "unavailable"
+        raise RuntimeError(f"{state}: {kind} metric read failed: {result.stderr.strip()}")
+    return result.stdout
 
-_STORAGE_FETCH_SCRIPT = sqlite_readonly_script_prelude() + """\
-import json, sys
-db_path = sys.argv[1]
-cols = __CVAL_STORAGE_COLUMNS__
-rows_out = []
-conn = None
-try:
-    conn = connect_sqlite_readonly(db_path)
-    conn.row_factory = sqlite3.Row
-    col_list = ", ".join(cols)
-    rows = conn.execute(
-        f"SELECT node, {col_list} FROM storage_performance "
-        "WHERE (node, timestamp) IN "
-        "  (SELECT node, MAX(timestamp) FROM storage_performance GROUP BY node) "
-        "ORDER BY node"
-    ).fetchall()
-    for row in rows:
-        entry = {"node": row["node"]}
-        for col in cols:
-            entry[col] = row[col]
-        rows_out.append(entry)
-except Exception as exc:
-    print(f"storage metrics error: {exc}", file=sys.stderr)
-finally:
-    if conn is not None:
-        conn.close()
-print(json.dumps(rows_out))
-"""
 
-_NCCL_HEALTH_FETCH_SCRIPT = sqlite_readonly_script_prelude() + """\
-import json, sys
-db_path = sys.argv[1]
-port_columns = __CVAL_NCCL_PORT_COLUMNS__
-rows_out = []
-conn = None
-try:
-    conn = connect_sqlite_readonly(db_path)
-    conn.row_factory = sqlite3.Row
-    selected = ", ".join(port_columns)
-    rows = conn.execute(
-        "SELECT Node, timestamp, la_timestamp, iterations, image_name, cuda, pytorch, "
-        "samples, BUS_BW, LATENCY, " + selected + " FROM IB_HEALTH "
-        "WHERE (Node, timestamp) IN "
-        "  (SELECT Node, MAX(timestamp) FROM IB_HEALTH GROUP BY Node) "
-        "ORDER BY Node"
-    ).fetchall()
-    for row in rows:
-        entry = {
-            "node": row["Node"],
-            "timestamp": row["timestamp"],
-            "la_timestamp": row["la_timestamp"],
-            "iterations": row["iterations"],
-            "image_name": row["image_name"],
-            "cuda": row["cuda"],
-            "pytorch": row["pytorch"],
-            "samples": row["samples"],
-            "bus_bw": row["BUS_BW"],
-            "latency": row["LATENCY"],
-        }
-        for column in port_columns:
-            entry[column] = row[column]
-        rows_out.append(entry)
-except Exception as exc:
-    print(f"IB_HEALTH metrics error: {exc}", file=sys.stderr)
-finally:
-    if conn is not None:
-        conn.close()
-print(json.dumps(rows_out))
-"""
+def _metric_rows(output):
+    rows = json.loads(output)
+    if not isinstance(rows, list):
+        raise ValueError("Metric response must be a JSON array")
+    seen = {}
+    for item in rows:
+        if not isinstance(item, dict) or not isinstance(item.get("node"), str) or not item["node"]:
+            raise ValueError("Invalid metric row identity")
+        if item["node"] in seen and seen[item["node"]] != item:
+            raise ValueError("Conflicting metric rows for the requested identity")
+        seen[item["node"]] = item
+    return seen.values()
 
 
 def get_latest_nccl_metrics(
@@ -139,30 +96,11 @@ def get_latest_nccl_metrics(
     namespace: str | None = None,
     db_path: str | None = None,
     config=None,
+    *,
+    timestamps: dict[str, int] | None = None,
 ) -> dict[str, NcclMetrics]:
-    """Return the latest NCCL busbw/latency per node from test-nccl.db.
-
-    Returns an empty dict on any error so callers can proceed without metrics.
-    """
-    active_config = config or load_config()
-    pod = pod or active_config.cluster.pvc_access_pod
-    namespace = namespace or active_config.cluster.namespace
-    db_path = db_path or active_config.storage.nccl_db_path
-    kubectl = client or KubectlClient(config=active_config)
-    try:
-        status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + _NCCL_FETCH_SCRIPT
-        result = kubectl.run(
-            [
-                "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
-                str(db_path),
-            ],
-            input_text=code,
-        )
-        return _parse_nccl_json(result.stdout)
-    except Exception as exc:
-        logger.warning("Could not fetch NCCL metrics: %s", exc)
-        return {}
+    """Read latest metrics, or exact status timestamps when supplied."""
+    return _parse_nccl_json(_fetch_metrics("nccl", client, pod, namespace, db_path, config, timestamps))
 
 
 def get_latest_storage_metrics(
@@ -171,40 +109,16 @@ def get_latest_storage_metrics(
     namespace: str | None = None,
     db_path: str | None = None,
     config=None,
+    *,
+    timestamps: dict[str, int] | None = None,
 ) -> dict[str, StorageMetrics]:
-    """Return the latest FIO storage metrics per node from test-storage.db.
-
-    Returns an empty dict on any error so callers can proceed without metrics.
-    """
-    active_config = config or load_config()
-    pod = pod or active_config.cluster.pvc_access_pod
-    namespace = namespace or active_config.cluster.namespace
-    db_path = db_path or active_config.storage.storage_db_path
-    kubectl = client or KubectlClient(config=active_config)
-    try:
-        status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + _STORAGE_FETCH_SCRIPT.replace(
-            "__CVAL_STORAGE_COLUMNS__", repr(list(STORAGE_METRIC_FIELDS))
-        )
-        result = kubectl.run(
-            [
-                "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
-                str(db_path),
-            ],
-            input_text=code,
-        )
-        return _parse_storage_json(result.stdout)
-    except Exception as exc:
-        logger.warning("Could not fetch storage metrics: %s", exc)
-        return {}
+    """Read latest metrics, or exact status timestamps when supplied."""
+    return _parse_storage_json(_fetch_metrics("storage", client, pod, namespace, db_path, config, timestamps))
 
 
 def _parse_nccl_json(output: str) -> dict[str, NcclMetrics]:
     """Parse JSON list of {node, busbw, latency} into a node→NcclMetrics map."""
-    try:
-        data = json.loads(output or "[]")
-    except json.JSONDecodeError:
-        return {}
+    data = _metric_rows(output)
     metrics: dict[str, NcclMetrics] = {}
     for item in data:
         if not isinstance(item, dict):
@@ -217,16 +131,14 @@ def _parse_nccl_json(output: str) -> dict[str, NcclMetrics]:
         metrics[node] = NcclMetrics(
             busbw=float(busbw) if busbw is not None else None,
             latency=float(latency) if latency is not None else None,
+            timestamp=int(item["timestamp"]) if item.get("timestamp") is not None else None,
         )
     return metrics
 
 
 def _parse_storage_json(output: str) -> dict[str, StorageMetrics]:
     """Parse JSON list of storage metric rows into a node→StorageMetrics map."""
-    try:
-        data = json.loads(output or "[]")
-    except json.JSONDecodeError:
-        return {}
+    data = _metric_rows(output)
     metrics: dict[str, StorageMetrics] = {}
     for item in data:
         if not isinstance(item, dict):
@@ -252,6 +164,7 @@ def _parse_storage_json(output: str) -> dict[str, StorageMetrics]:
             randread_bw=_f("randread_bw"),
             randwrite_iops=_f("randwrite_iops"),
             randwrite_bw=_f("randwrite_bw"),
+            timestamp=int(item["timestamp"]) if item.get("timestamp") is not None else None,
         )
     return metrics
 
@@ -262,40 +175,16 @@ def get_latest_nccl_health_metrics(
     namespace: str | None = None,
     db_path: str | None = None,
     config=None,
+    *,
+    timestamps: dict[str, int] | None = None,
 ) -> dict[str, NcclHealthMetric]:
-    """Return the latest consolidated ``IB_HEALTH`` row per node.
-
-    Returns an empty dict on any error so callers can proceed without metrics.
-    """
-    active_config = config or load_config()
-    pod = pod or active_config.cluster.pvc_access_pod
-    namespace = namespace or active_config.cluster.namespace
-    db_path = db_path or active_config.storage.nccl_db_path
-    kubectl = client or KubectlClient(config=active_config)
-    try:
-        status_pod = resolve_status_pod(kubectl, namespace, pod)
-        code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + _NCCL_HEALTH_FETCH_SCRIPT.replace(
-            "__CVAL_NCCL_PORT_COLUMNS__", repr(list(NCCL_IB_PORT_COLUMNS))
-        )
-        result = kubectl.run(
-            [
-                "exec", "-i", "-n", namespace, status_pod, "--", "python3", "-",
-                str(db_path),
-            ],
-            input_text=code,
-        )
-        return _parse_nccl_health_json(result.stdout)
-    except Exception as exc:
-        logger.warning("Could not fetch IB_HEALTH metrics: %s", exc)
-        return {}
+    """Read latest wide metrics, or exact status timestamps when supplied."""
+    return _parse_nccl_health_json(_fetch_metrics("health", client, pod, namespace, db_path, config, timestamps))
 
 
 def _parse_nccl_health_json(output: str) -> dict[str, NcclHealthMetric]:
     """Parse wide ``IB_HEALTH`` JSON rows into a node map."""
-    try:
-        data = json.loads(output or "[]")
-    except json.JSONDecodeError:
-        return {}
+    data = _metric_rows(output)
     metrics: dict[str, NcclHealthMetric] = {}
     for item in data:
         if not isinstance(item, dict):

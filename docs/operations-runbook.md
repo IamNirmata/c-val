@@ -36,6 +36,19 @@ and cannot authorize submission.
 
 ## Candidate inspection
 
+Use `cval status --coverage --output json` for scheduling history. The response
+keeps requested tests, provenance limitations, skipped incomplete/conflicting runs
+and per-node coverage timestamps. `plan --live-status` reads the same history;
+`--db-status-json` can consume a retained full coverage report. Plain node/timestamp
+maps remain explicit offline inputs. An unreadable history stops planning rather
+than labelling every node never-tested. `no-complete-coverage` means history was
+read but no complete requested run qualified; it differs from `never-tested`.
+
+The live loop collects this coverage report before each planning pass. The named
+age policy is `legacy_complete_run`: coherent historical passing status can still
+count with explicit limitations; full dependency compatibility waits for its
+producer. No source-only commit invalidates all prior workload coverage.
+
 Plain `plan` uses the existing priority queue without rendering Jobs.
 Its JSON has `batch_size`, `days_threshold`, `free_nodes_count`, `queue_count`,
 `git_ref`, and `candidates`. Each candidate has `node`, `priority`, `reason`,
@@ -53,6 +66,12 @@ inspection mode. See the [CLI migration inventory](components_design/operator-in
 for retired flags and their replacements.
 
 ## Continuous validation loop
+
+On resume, the existing state helper reconciles durable intents before the loop
+inspects any receipt files. Uncertain create outcomes are observed, never retried.
+Derived jobs CSV can be rebuilt from intact v2 state. The shared manager enforces
+cooldown for every submitter from confirmed creation evidence as well as the
+retained cooldown table. Do not bypass an unresolved intent by editing projections.
 
 Every operational `scripts/cval-live.sh` cycle is submit-capable and requires
 exact `CVAL_LIVE_CONFIRM=submit`. Each submission also passes the CLI's
@@ -151,6 +170,23 @@ fresh workload. Historical read verification passed; live-loop activation remain
 deferred until all of Phase 1 is finished and exact rollout commands are approved.
 
 ## Exact-commit validation
+
+### Exact-run exports
+
+```bash
+cval results --test overall --node slc01-cl02-hgx-0192 --timestamp 1790178532 --output-dir ./exports
+cval results --test nccl --node slc01-cl02-hgx-0192 --timestamp 1790178532 --output-dir ./exports
+```
+
+These are read-only historical examples, not validation submissions. Both selectors
+are required together. No matching exact status exits nonzero and writes no CSV.
+The default without selectors still exports latest status. Existing CSV columns
+are unchanged, including the legacy `latest_timestamp` name, which denotes the
+selected status timestamp. Metric columns join only that exact node/timestamp.
+Absent metrics are blank; inaccessible metrics fail the export, never silently
+appear as blanks. DL's existing export remains status-only.
+
+### Validation workflow
 
 The validation command requires an eligible node, exact published commit,
 explicit submit flag, and exact confirmation. The validation pod checks out

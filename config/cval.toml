@@ -13,6 +13,7 @@ days_threshold = 7
 batch_size = 3
 # Do not submit another cval Job to a recently submitted node until this expires.
 node_cooldown_seconds = 14400
+coverage_max_runs_per_node = 100
 
 [job]
 template_path = "ymls/specific-node-job.yml"

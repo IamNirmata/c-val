@@ -70,6 +70,7 @@ class StoragePlugin:
             rows_to_csv_records,
         )
 
+        selected = latest_result_rows(list(context.status_rows), context.target.name)
         metrics = None
         if context.include_metrics:
             metrics = get_latest_storage_metrics(
@@ -77,8 +78,8 @@ class StoragePlugin:
                 namespace=context.namespace,
                 db_path=context.source_db_path("storage"),
                 config=context.config,
+                timestamps={row.node: row.latest_timestamp for row in selected},
             )
-        selected = latest_result_rows(list(context.status_rows), context.target.name)
         records = rows_to_csv_records(
             selected,
             context.target.name,

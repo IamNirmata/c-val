@@ -27,7 +27,7 @@ and independent confirmations remain explicit command inputs.
 ## Sections
 
 - `[cluster]`: namespace, PVC reader, node filter, tolerated taints and kubectl timeout;
-- `[scheduling]`: stale threshold, concurrent batch size, submission cooldown;
+- `[scheduling]`: stale threshold, concurrent batch size, submission cooldown and coverage scan bound;
 - `[job]`: template, prefix, recorded image name, source repository/ref and explicit source transport;
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
 - `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace,
@@ -50,6 +50,22 @@ The checked-in values are `batch_size = 3`, `node_cooldown_seconds = 14400` and
 `live.plan_limit = "all"`. These are TOML values, never fallback values. Set a positive
 integer string for a bounded `live.plan_limit`. Operational CLI tuning flags must
 agree with TOML; the read-only plan's candidate count remains an inspection limit.
+
+`scheduling.coverage_max_runs_per_node` is explicitly 100 in the main TOML.
+Coverage scans newest runs first and stops at the first complete requested-test
+run. Exhausting the bound without a decision is unavailable history, never an
+empty node. Artifact byte/file limits and the configured Kubernetes deadline also
+bound this read. Old snapshots lacking the new field remain with their pinned
+source and need approved turnover; no missing-setting defaults are supplied.
+
+Coverage retains the declared legacy age policy, labeled in `status --coverage`.
+It does not activate dependency-digest comparisons before Phase 3 produces that
+identity. A failed test needs full completion evidence to refresh coverage. Ordinary
+`status` remains a latest-outcome view, not a scheduling coverage calculation.
+
+The shared admission manager enforces `node_cooldown_seconds` for manual and loop
+submitters using the existing table and confirmed creation times retained in intents.
+It does not derive cooldown from failed preflight or an uncertain create attempt.
 
 `job.git_ref` is an all-zero placeholder. Every real submission supplies an
 exact published lowercase 40-hex commit.
@@ -98,6 +114,12 @@ is migrated automatically. The old controller is not fenced by new local code;
 all operational writers must be turned over together. Activation is deferred until
 Phase 1 is finished. V2 records do not provide cross-host fencing or automatic
 recreation after an uncertain create.
+
+Resume first uses the existing state helper's `update --reconcile` operation under
+the same admission lock. It reconstructs the jobs projection from authoritative v2
+state; missing CLI receipt files or a failed CSV write do not erase reservations.
+Missing/corrupt authoritative state still blocks. The reconciliation pass shares
+one `monitoring.ingestion_grace_seconds` deadline across retained intents.
 
 New initialization also requires `--approval-record <path>` on the existing state
 helper. The live launcher passes the explicit locator `CVAL_APPROVAL_RECORD`.

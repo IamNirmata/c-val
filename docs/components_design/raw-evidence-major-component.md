@@ -1,7 +1,7 @@
 # C7: Raw Evidence
 
-Status: Phase 1.5 exact-run verification source implemented; fresh execution
-acceptance pending. Writer consolidation and export changes remain proposals.
+Status: Phase 1.5 verification and Phase 1.6 exact exports/coverage reads implemented;
+fresh execution acceptance pending. Writer consolidation remains proposed.
 Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -68,10 +68,8 @@ SQLite retry/URI and status. Workload plugins belong to C6; config paths to C1.
 
 1. [Standard/overlap DL writers](../../cval/storage/dltest_ingest.py#L738) repeat
    receipt, replacement, generation and commit mechanics.
-2. [Exports](../../cval/storage/results_export.py#L131) join metrics by node; the
-   NCCL path can substitute an older metric timestamp while retaining newer status.
-3. Latest-status/export readers and PVC-pod resolution hide some observation detail;
-   unavailable, forbidden, empty and conflicting evidence need separate reporting.
+2. Historical runs may lack current provenance. Readable legacy rows are not
+   equivalent to canonical verification or current dependency compatibility.
 
 ## Phase 1.5 Implementation
 
@@ -131,6 +129,34 @@ reads, not a new-source workload. Complete failed-run evidence, live generation
 changes, deadline exhaustion, forbidden access, and live reservation release were
 not exercised. No synthetic nodes/DBs or GPU Jobs were created. Controller
 activation remains deferred until Phase 1 is finished.
+
+## Phase 1.6 Export Contract
+
+`results --test <target> --node <node_name> --timestamp <epoch>` queries `runs` at
+that exact identity. Both selectors are required together; no latest fallback is
+allowed. An empty exact status selection exits nonzero without producing a CSV.
+Without selectors, existing latest-per-test selection remains. The established CSV
+columns and plugin export contract are unchanged; `latest_timestamp` is the selected
+status timestamp even for historical exports.
+
+Storage/NCCL and overall exports query metrics at each selected status timestamp.
+Formatters also enforce equality, so a newer or older metric cannot be labeled with
+another run's status. Missing exact metrics yield blank cells, not a substituted
+run. Access failures stop export and preserve a forbidden/unavailable diagnostic;
+they are not exported as empty metrics. DL's existing export remains status-only,
+not a newly introduced generic metric CSV.
+
+The three metric readers share one parameterized read-only query path. Status
+parsing rejects malformed/conflicting rows and deduplicates identical observations.
+Historical metric helper names remain supported; optional exact timestamp maps are
+additive. Compact metric models now retain optional timestamps; unbound metric
+objects are not eligible for a status join.
+
+Real CLI exports for `slc01-cl02-hgx-0192-1790178532` passed for overall, storage,
+NCCL and DL status. The absent approved `0307-1790221580` run produced no CSV;
+the formatter rejected a real newer metric against an older `0307` status. No raw
+schema, metric unit or stored value changed. Evidence is retained under
+`run-logs/phase16-exact-*-20260924/` and `phase16-export-final-check-20260924.json`.
 
 ## Proposed Design
 

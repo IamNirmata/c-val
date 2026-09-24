@@ -23,6 +23,8 @@ def build_priority_queue(
     now: datetime | None = None,
     shuffle: bool = False,
     rng: random.Random | None = None,
+    *,
+    coverage_reasons: Mapping[str, str] | None = None,
 ) -> list[QueueCandidate]:
     """Return never-tested and expired nodes ordered by validation priority."""
 
@@ -35,7 +37,7 @@ def build_priority_queue(
         last_tested = int(latest_status_by_node.get(node, 0) or 0)
         # Never-tested nodes are highest value because c-val has no health signal yet.
         if last_tested <= 0:
-            candidates.append((node, 0, None, "never-tested"))
+            candidates.append((node, 0, None, (coverage_reasons or {}).get(node, "never-tested")))
             continue
 
         age_seconds = current_timestamp - last_tested

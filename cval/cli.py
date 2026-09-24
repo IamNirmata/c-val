@@ -240,6 +240,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Read latest validation status from the PVC access pod",
     )
     status.add_argument("--output", choices=["table", "json"], default="table")
+    status.add_argument("--coverage", action="store_true", help="Read complete-run scheduling coverage and provenance limits")
     status.set_defaults(handler=handle_status)
 
     plan = subparsers.add_parser(
@@ -290,6 +291,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         required=True,
     )
     results.add_argument("--output-dir", type=Path, default=Path.cwd())
+    results.add_argument("--node", help="Exact run node; requires --timestamp")
+    results.add_argument("--timestamp", type=int, help="Exact run timestamp; requires --node")
     results.add_argument(
         "--no-metrics",
         action="store_true",
@@ -541,6 +544,19 @@ def handle_tests_validate(args: argparse.Namespace) -> int:
 def handle_status(args: argparse.Namespace) -> int:
     """Read latest validation status without mutating SQLite metadata."""
 
+    if args.coverage:
+        from cval.storage.status import get_coverage_report
+
+        report = get_coverage_report(config=args.cval_config)
+        if args.output == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"Coverage: {report['state']} policy={report.get('policy', 'unknown')}")
+            for item in report.get("nodes", []):
+                print(f"{item['node']:<32} {str(item['coverage_timestamp']):>12} {item['reason']}")
+            if report.get("reason"):
+                print(report["reason"])
+        return 0 if report["state"] in {"queried", "empty"} else 1
     rows = get_latest_status_rows(config=args.cval_config)
     if args.output == "json":
         print(json.dumps([asdict(row) for row in rows], indent=2))
@@ -570,7 +586,8 @@ def handle_plan(args: argparse.Namespace) -> int:
         raise ValueError("batch_size must be >= 1")
     free_nodes, db_status = _load_plan_inputs(args)
     queue = build_priority_queue(
-        free_nodes, db_status, days_threshold=args.threshold_days
+        free_nodes, db_status, days_threshold=args.threshold_days,
+        coverage_reasons=getattr(args, "coverage_reasons", None),
     )
     candidates = queue[:args.batch_size]
     if args.output == "json":
@@ -700,17 +717,20 @@ def handle_results(args: argparse.Namespace) -> int:
 
     config: CvalConfig = args.cval_config
     test = args.test.lower()
-    rows = get_latest_status_rows(config=config)
+    rows = get_latest_status_rows(config=config, node=args.node, timestamp=args.timestamp)
+    if args.node and not rows:
+        raise ValueError(f"empty: no exact status for {args.node} at {args.timestamp}; no CSV written")
 
     if test in {"overall", "all"}:
         from cval.storage.metrics import get_latest_nccl_metrics, get_latest_storage_metrics
 
         nccl_metrics = None
         storage_metrics = None
-        if not args.no_metrics:
-            nccl_metrics = get_latest_nccl_metrics(config=config)
-            storage_metrics = get_latest_storage_metrics(config=config)
         selected = latest_result_rows(rows, args.test)
+        timestamps = {row.node: row.latest_timestamp for row in selected}
+        if not args.no_metrics:
+            nccl_metrics = get_latest_nccl_metrics(config=config, timestamps=timestamps)
+            storage_metrics = get_latest_storage_metrics(config=config, timestamps=timestamps)
         output_path = write_latest_results_csv(
             rows,
             args.test,
@@ -718,7 +738,7 @@ def handle_results(args: argparse.Namespace) -> int:
             nccl_metrics=nccl_metrics,
             storage_metrics=storage_metrics,
         )
-        output_label = f"{args.test} latest result"
+        output_label = f"{args.test} {'exact-run' if args.node else 'latest'} result"
     else:
         target = resolve_operational_target(args.cval_config, test, RESULTS_EXPORT)
         registered = args.cval_config.tests.registry.require(target.owner_test_id)
@@ -1030,6 +1050,7 @@ def _build_plan_from_args(args: argparse.Namespace):
         timestamp=args.timestamp,
         git_ref=args.git_ref,
         config=args.cval_config,
+        coverage_reasons=getattr(args, "coverage_reasons", None),
     )
 
 
@@ -1062,23 +1083,32 @@ def _parse_csv(value: str) -> list[str]:
 def _load_db_status(args: argparse.Namespace) -> dict[str, int]:
     """Load validation history from JSON, live status, or empty defaults."""
 
+    def from_coverage(report):
+        from cval.storage.status import coverage_timestamps
+
+        timestamps = coverage_timestamps(report, args.cval_config)
+        args.coverage_reasons = {item["node"]: "no-complete-coverage" for item in report["nodes"]
+                                 if item["coverage_timestamp"] is None and item["state"] == "queried"}
+        return timestamps
+
     selected = sum(1 for source in (args.db_status_json, args.live_status) if source)
     if selected > 1:
         raise ValueError("Use only one of --db-status-json or --live-status")
     if args.live_status:
-        # Live status is read-only, but still reaches the cluster through the PVC access pod.
-        return latest_status_rows_to_node_map(
-            get_latest_status_rows(
-                config=args.cval_config,
-            )
-        )
+        from cval.storage.status import get_coverage_report
+
+        return from_coverage(get_coverage_report(config=args.cval_config))
     if args.db_status_json is None:
         # Missing history makes every free node appear never-tested.
         return {}
     data = json.loads(args.db_status_json.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "schema_version" in data:
+        return from_coverage(data)
     if not isinstance(data, dict):
         raise ValueError("DB status JSON must be an object mapping node names to timestamps")
-    return {str(node): int(timestamp) for node, timestamp in data.items()}
+    if any(not isinstance(node, str) or not node or type(timestamp) is not int or timestamp < 0 for node, timestamp in data.items()):
+        raise ValueError("Status map must contain exact node names and nonnegative integer timestamps")
+    return data
 
 
 if __name__ == "__main__":
