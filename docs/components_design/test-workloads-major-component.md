@@ -80,12 +80,13 @@ are not in this repository and are excluded from these numbers.
 
 1. Keep one descriptor plus setup/run/summary code per test; reuse the runner for
    process handling. Avoid a universal benchmark engine or forced rewrite of FIO/PyTorch.
-2. Build a reviewed image with dependencies preinstalled and pinned by digest.
-   Use an immutable external DL artifact or verified run-local copy, not a mutable
-   shared checkout after a one-time hash. Pin copied plan content and record actual
-   identities in canonical provenance. Reject mismatches before workload execution.
-3. Separate setup, execution and ingestion timings so optimization measures real
-   GPU reservation cost. Keep bounded controller concurrency as the initial
+2. Preserve selectable images, CUDA/PyTorch environments and iteration settings:
+   varying them and recording their values is part of testing, not a defect.
+   Custom-image/FIO packaging is deferred. Review only the smallest per-run DL
+   source/plan consistency fix; source and plan remain selectable between runs,
+   and no identity is backfilled into historical records.
+3. Use existing setup, execution and ingestion events before adding measurements.
+   Add fields only for a demonstrated gap. Keep bounded controller concurrency as the initial
    shared-resource budget rather than adding a new traffic-scheduling service.
 4. Preserve descriptor ordering and required resource checks. Future test-owned
    persistence must reuse authorization and explicit destinations without changing
@@ -111,9 +112,10 @@ participate in the aggregate outcome; adding optional-pass semantics is separate
 
 ## Reproducibility Limits
 
-Record image/source/plan identities together with observed framework/driver and
-hardware context when supported. A pinned image does not freeze host drivers,
-thermal state or shared-fabric load, and does not promise identical timings.
+Preserve the existing recorded image, framework and workload settings used for
+comparison across environments. Do not pin all runs to one image, CUDA or PyTorch
+version. A recorded environment does not freeze host drivers, thermal state or
+shared-fabric load, and does not promise identical timings.
 Separate dependency upgrades from orchestration refactors and compare equivalent
 test settings. Measurements show raw behavior; this does not add classifications.
 

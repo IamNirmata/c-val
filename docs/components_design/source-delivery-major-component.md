@@ -79,7 +79,8 @@ The PVC access template is C9; global configuration is C1.
 2. Retain repository-local installation as the supported model initially. Do not
    add a wheel-distribution project solely to move files.
 3. Bind source SHA, archive hash, manifest hash and effective config digest in one
-   reviewed release receipt. Add pinned image/dependency identities through C6.
+   reviewed release receipt. Preserve C6's selectable test environments and existing
+   recorded image/dependency values; no fixed-version image requirement is added.
 4. Separate source preparation, create approval, single-node acceptance and loop
    activation. Verify each observed identity; preserve previous artifacts and
    approval records. Never automatically apply a rollback on failed acceptance.

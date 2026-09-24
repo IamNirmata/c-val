@@ -316,7 +316,7 @@ def process_group_exists(process_group_id: int) -> bool:
 
 def terminate_process_group(
     process_group_id: int,
-    process: subprocess.Popen[str],
+    process: subprocess.Popen[str] | subprocess.Popen[bytes],
     grace_seconds: float = 1.0,
 ) -> None:
     """Terminate an entire process group even when its leader already exited."""

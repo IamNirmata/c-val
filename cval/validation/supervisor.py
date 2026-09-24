@@ -16,7 +16,7 @@ from typing import BinaryIO, Callable, Mapping, Sequence
 
 from cval.config import CvalConfig, load_config_snapshot
 from cval.validation.builtins import BUILTIN_TEST_IDS
-from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload
+from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload, process_group_exists, terminate_process_group
 from cval.validation.path_preflight import SAFE_SEGMENT, _registry_test_ids
 from cval.validation.results import (
     ValidationResultV2,
@@ -525,7 +525,7 @@ def supervise_validation_run(
     def handle_signal(signum: int, _frame: object) -> None:
         process = active[0]
         if process is not None:
-            _terminate_child_group(process)
+            terminate_process_group(process.pid, process, grace_seconds=2.0)
         raise KeyboardInterrupt(signum)
 
     if threading.current_thread() is threading.main_thread():
@@ -575,6 +575,7 @@ def supervise_validation_run(
                 global_stderr_fd=layout.global_file_fds["stderr.log"],
                 job_log_fd=layout.global_file_fds["job.log"],
                 active=active,
+                timeout_seconds=config.runtime.runner_timeout_seconds if index == 0 else config.runtime.ingestion_timeout_seconds,
             )
             log_capture_complete = True
             if index == 0:
@@ -842,7 +843,11 @@ def _run_child(
     global_stderr_fd: int,
     job_log_fd: int,
     active: list[subprocess.Popen[bytes] | None],
+    timeout_seconds: float,
 ) -> int:
+    if timeout_seconds <= 0:
+        raise ValueError("Supervised child timeout must be positive")
+    deadline = time.monotonic() + timeout_seconds
     process = subprocess.Popen(
         list(command),
         cwd=cwd,
@@ -886,14 +891,17 @@ def _run_child(
     for thread in threads:
         thread.start()
     try:
-        return_code = process.wait()
+        return_code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if process_group_exists(process.pid):
+            raise RuntimeError("supervised child left running descendant processes")
     except BaseException:
-        _terminate_child_group(process)
+        terminate_process_group(process.pid, process, grace_seconds=2.0)
         raise
     finally:
         active[0] = None
+        drain_deadline = time.monotonic() + 5.0
         for thread in threads:
-            thread.join(timeout=5.0)
+            thread.join(timeout=max(0.0, drain_deadline - time.monotonic()))
         process.stdout.close()
         process.stderr.close()
         if any(thread.is_alive() for thread in threads):
@@ -901,22 +909,6 @@ def _run_child(
         if errors:
             raise RuntimeError(f"supervised child log capture failed: {errors[0]}")
     return return_code
-
-
-def _terminate_child_group(process: subprocess.Popen[bytes]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + 2.0
-    while process.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait(timeout=2.0)
 
 
 def _write_all(descriptor: int, data: bytes) -> None:

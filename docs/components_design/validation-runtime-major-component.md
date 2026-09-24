@@ -1,7 +1,7 @@
 # C5: Validation Runtime
 
-Status: Phase 2.1 compact logging source implemented; new-source pod acceptance
-pending. Broader runtime redesign below remains proposed. Baseline/counting:
+Status: Phase 2.1 logging and Phase 3.3 child-cleanup source implemented; new-source
+pod acceptance pending. Remaining runtime consolidation is proposed. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -80,8 +80,8 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
    primitive for supported standalone callers before retiring alternate path creation.
    Share existing secure/execution helpers; do not introduce a new adapter layer
    unless it removes a real duplicate implementation.
-2. Define one run context containing immutable identity, checked catalog and owned
-   evidence handles. Map legacy child environment at one boundary.
+2. Reuse the existing immutable config snapshot, checked catalog and secure layout.
+   Map legacy child environment at one boundary; do not add another context framework.
 3. Keep phase and outcome separate. Preserve existing phases such as finished,
    setup_failed, timed_out and interrupted, alongside pass/fail/incomplete and
    timestamps/reasons. Disabled is never pass; do not invent replacement raw enums.
@@ -159,6 +159,42 @@ pod, controller, source ConfigMap or raw DB was changed during development.
 Task 2.2 is implemented in its separate source slice, with acceptance limitations
 recorded in the roadmap. Tasks 2.3-2.5, including tracking and retest freshness,
 remain outside this logging-only slice.
+
+## Phase 3.3 Child Cleanup
+
+The supervisor now uses the existing execution module's process-group terminator,
+removing its leader-only duplicate. The review reproduced a TERM-ignoring descendant
+surviving after the group leader exited; the shared helper kills the remaining
+owned group even when that leader is gone. The supervisor retains its two-second
+termination grace, allowing the runner's own workload cleanup to handle a signal.
+No unrelated process groups are targeted and no restart is introduced.
+
+Two required positive `[runtime]` settings bound outer child execution:
+`runner_timeout_seconds=6000` and `ingestion_timeout_seconds=300` in the reviewed
+main TOML. These are editable run settings, not hidden defaults. They are separate
+from read-only monitoring deadlines and inner per-test deadlines. A timeout or a
+leader that exits while descendants remain is a supervisor error, not success.
+Available log bytes remain retained; both stream drains share the existing
+five-second cleanup budget. A drain failure leaves log retention unconfirmed.
+
+The limits apply to child waits, with bounded termination/drain overhead; they do
+not promise a hard wall-clock bound on filesystem stalls or processes deliberately
+escaping the owned group. Existing result freezing/digest binding and raw writer
+authorization are unchanged. Runner timeout does not start ingestion. Ingestion
+timeout does not undo already committed stores or authorize a retry; preserve all
+partial raw evidence. No image, CUDA, PyTorch, iteration or result-schema changes.
+
+Three focused tests in the existing supervisor test module use actual local OS
+processes, pipes and temporary log files: normal/nonzero exits, a TERM-ignoring
+timeout, and descendants after leader exit or timeout. All passed and all owned
+processes were reaped. Config snapshot round trips and missing/nonpositive-limit
+rejection passed; pre-existing config values match the prior published source.
+Evidence is indexed in `run-logs/phase33-operations-20260924.md`.
+
+These are process regression checks, not synthetic benchmark/DB acceptance.
+Fresh in-pod execution, real signal boundaries, ingestion interruption and detached
+workload descendants remain unexercised. The live loop stays paused; creation,
+activation and real acceptance each retain their exact approval gates.
 
 ## Evidence Lifecycle
 

@@ -80,6 +80,8 @@ validation_root = "/data/continuous_validation"
 validation_tests_dir = "/workspace/c-val/validation-tests"
 dl_unit_test_dir = "/data/continuous_validation/deep-learning-unit-test-main"
 dl_results_root_path = "/data/continuous_validation/logs/validation_tests/dltest/runs"
+runner_timeout_seconds = 6000
+ingestion_timeout_seconds = 300
 
 # ---------------------------------------------------------------------------
 # Validation phases. Set enabled=false to skip a phase in new validation jobs.

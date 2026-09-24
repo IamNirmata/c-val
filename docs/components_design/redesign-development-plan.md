@@ -321,28 +321,52 @@ verify a single active controller before any separately approved activation.
 
 ## Phase 3: Simplify Runtime
 
-**What it does:** Give execution one secure evidence owner and pin what benchmarks run.
-**Changes:** Supervisor/runner handoffs, child environment construction and workload
-dependency preparation. Historical results and test-specific behavior remain readable.
+**What it does:** Fix demonstrated runtime defects and remove duplicate setup paths.
+**Changes:** Reuse existing supervisor/runner helpers and environment projections.
+Historical results, test settings and test-specific behavior remain readable.
+
+### Reviewed Scope
+
+User direction (2026-09-24): keep the codebase trimmed. A change must fix a
+demonstrated defect or remove duplication, not introduce another runtime framework.
+Image, CUDA, PyTorch and iterations are deliberately varied test inputs. Preserve
+the existing configuration and raw evidence used to compare those environments;
+do not fix them to one version or require a new image. A per-run snapshot records
+that run's inputs, not a fleet-wide version constraint.
+
+Start with the confirmed child-cleanup defect in **3.3**, then take **3.1** and
+**3.2** individually. Keep standalone execution test-only, preserve result binding
+and ingestion authorization, and remove superseded implementations when replacing
+them. No new service, script, raw store or generic context framework. Custom image,
+FIO packaging and additional timing fields are deferred unless separately justified.
 
 ### Tasks
 
 - [ ] **3.1** Share secure reservation for production and supported standalone
   callers; reuse existing helpers before retiring old path setup, not a new compatibility layer.
-- [ ] **3.2** Derive child environment and compatibility aliases from one immutable
-  run definition. Reject disagreements rather than applying hidden overrides.
+- [ ] **3.2** Reuse the existing config snapshot and secure layout to derive child
+  environment and compatibility aliases once. Reject disagreements; add no new context layer.
 - [ ] **3.3** Preserve separate phase/outcome values and bounded child cleanup;
   freeze the finalized result before ingestion and test interruption at each boundary.
-- [ ] **3.4** Preinstall FIO and use a pinned image plus immutable DL artifact/run-local
-  copy and plan. Test mutation between preflight and launch; never backfill old identities.
-- [ ] **3.5** Record setup, execution and ingestion timings separately; compare
-  outcomes, artifacts and resource use across real runs with equivalent workload inputs.
+  Cleanup source implemented first: supervisor reuses the existing process-group
+  terminator, bounds runner/ingestion children through two required runtime limits,
+  and rejects a zero-exit leader that leaves descendants. Existing result binding,
+  writers and test settings are unchanged. Three focused real-OS regression tests
+  passed, including timeout and abandoned descendants; no GPU test or raw DB was
+  fabricated. Fresh pod execution, signal-boundary and ingestion-interruption
+  acceptance remain unverified and separately gated. See
+  [cleanup implementation](validation-runtime-major-component.md#phase-33-child-cleanup).
+- [ ] **3.4** Address mutable external DL code/plan only after defining the smallest
+  per-run consistency change. Keep source/plan selectable across runs; do not pin
+  image/CUDA/PyTorch versions or build a new image as part of this phase.
+- [ ] **3.5** Use existing timing/events and recorded environment fields to compare
+  approved runs. Add instrumentation only for a demonstrated missing measurement.
 
 **Done when:** Approved exact-commit real-node validation confirms intended coverage,
 retained artifacts and dependency identity. Check safe rejection cases without
 altering canonical evidence; separately approve any signal/failure exercise.
-**Risk/control:** High for evidence handling; separate runtime refactoring from
-dependency upgrades so changed benchmark measurements have an attributable cause.
+**Risk/control:** High for evidence handling; preserve variable test environments.
+Keep runtime fixes separate from environment changes so comparisons remain interpretable.
 
 ## Phase 4: Simplify Persistence
 

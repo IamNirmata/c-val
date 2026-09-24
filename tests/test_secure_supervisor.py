@@ -3,10 +3,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import ctypes
+import signal
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -20,6 +24,7 @@ from cval.validation.results import load_validation_result, validation_result_di
 from cval.validation.runtime import build_runtime_environment
 from cval.validation.secure_fs import publish_test_summary
 from cval.validation.supervisor import (
+    _run_child,
     reserve_secure_run_layout,
     supervise_validation_run,
 )
@@ -37,6 +42,85 @@ REGISTRY = json.dumps(
     separators=(",", ":"),
 )
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class SupervisorChildLifecycleTests(unittest.TestCase):
+    def _capture(self, command: list[str], timeout: float = 5.0) -> int:
+        self.output = io.BytesIO()
+        self.errors = io.BytesIO()
+        active = [None]
+        with tempfile.TemporaryFile() as stdout_log, tempfile.TemporaryFile() as stderr_log, tempfile.TemporaryFile() as job_log:
+            try:
+                return _run_child(
+                    command, cwd=REPO_ROOT, environment=dict(os.environ), pass_fds=(),
+                    stdout=self.output, stderr=self.errors, global_stdout_fd=stdout_log.fileno(),
+                    global_stderr_fd=stderr_log.fileno(), job_log_fd=job_log.fileno(),
+                    active=active, timeout_seconds=timeout,
+                )
+            finally:
+                self.assertEqual(active, [None])
+                stdout_log.seek(0)
+                stderr_log.seek(0)
+                self.assertEqual(stdout_log.read(), self.output.getvalue())
+                self.assertEqual(stderr_log.read(), self.errors.getvalue())
+
+    def test_output_and_exit_status_are_preserved(self) -> None:
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                code = f"import sys; print('stdout'); print('stderr', file=sys.stderr); sys.exit({exit_code})"
+                self.assertEqual(self._capture([sys.executable, "-u", "-c", code]), exit_code)
+                self.assertEqual(self.output.getvalue(), b"stdout\n")
+                self.assertEqual(self.errors.getvalue(), b"stderr\n")
+
+    def test_timeout_terminates_term_ignoring_child(self) -> None:
+        code = "import signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); signal.pause()"
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self._capture([sys.executable, "-u", "-c", code], timeout=0.5)
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(self.output.getvalue(), b"ready\n")
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux subreaper required to reap owned descendants")
+    def test_descendants_terminate_after_leader_exit_or_timeout(self) -> None:
+        library = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(library.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(library.prctl(36, 1, 0, 0, 0), 0)
+        child = "import os,signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); signal.pause()"
+        leader = (
+            "import signal,subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-u','-c',sys.argv[1]],stdout=subprocess.PIPE); "
+            "print(child.stdout.readline().decode().strip(),flush=True); "
+            "signal.pause() if sys.argv[2]=='wait' else None"
+        )
+        try:
+            for mode in ("exit", "wait"):
+                descendant = None
+                reaped = False
+                with self.subTest(mode=mode):
+                    started = time.monotonic()
+                    try:
+                        error = RuntimeError if mode == "exit" else subprocess.TimeoutExpired
+                        with self.assertRaises(error):
+                            self._capture([sys.executable, "-u", "-c", leader, child, mode], timeout=5.0 if mode == "exit" else 0.5)
+                        descendant = int(self.output.getvalue().strip())
+                        waited, status = os.waitpid(descendant, os.WNOHANG)
+                        reaped = waited == descendant
+                        self.assertTrue(reaped, "Owned descendant survived supervisor cleanup")
+                        self.assertTrue(os.WIFSIGNALED(status))
+                        self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+                        self.assertLess(time.monotonic() - started, 5.0)
+                    finally:
+                        if descendant is None and self.output.getvalue().strip():
+                            descendant = int(self.output.getvalue().strip())
+                        if descendant is not None and not reaped:
+                            try:
+                                os.kill(descendant, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            os.waitpid(descendant, 0)
+        finally:
+            self.assertEqual(library.prctl(36, previous.value, 0, 0, 0), 0)
 
 
 class SecureRunSupervisorTests(unittest.TestCase):

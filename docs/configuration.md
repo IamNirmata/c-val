@@ -37,7 +37,7 @@ and independent confirmations remain explicit command inputs.
 - `[maintenance]`: separately invoked backup/inventory/journal bounds and staging directory;
 - `[sqlite_retry]`: SQLite lock retry policy used by raw ingestion;
 - `[storage]`: authoritative raw SQLite paths;
-- `[runtime]`: repository and retained evidence paths;
+- `[runtime]`: repository/evidence paths and required runner/ingestion child deadlines;
 - `[tests.<id>]`: `enabled` and descriptor `config_path` only;
 - `[job_template]`: validation pod resources, image and explicit single-attempt lifecycle settings.
 
@@ -196,6 +196,25 @@ Each read uses the lesser of its configured SQLite/Kubernetes bound and the rema
 verification deadline. Targeted validation shares its overall deadline and caps the
 verification portion by `monitoring.ingestion_grace_seconds`; terminal reconciliation
 uses that configured grace budget. No retry resets the deadline.
+
+### In-Pod Child Deadlines
+
+`runtime.runner_timeout_seconds` and `runtime.ingestion_timeout_seconds` are
+required positive integers. The checked-in values are 6000 and 300 seconds.
+The supervisor terminates its owned child process group when the corresponding
+child wait expires, then drains available logs. Termination/drain cleanup has its
+own bounded overhead. Inner per-test setup/workload deadlines remain unchanged.
+
+These limits are not the read-only `monitoring.*` watcher deadlines. Adjust them
+explicitly for longer selected workloads or ingestion; stopping a host watcher
+still does not cancel a Job. Old snapshots lack these required fields and must use
+their original source; do not silently enrich or resume them with new code.
+Ingestion interruption can leave committed stores intact and others incomplete;
+no automatic rollback, workload replay or evidence deletion occurs.
+
+Images, CUDA, PyTorch and iteration settings remain variable test inputs. Their
+existing observed/configured values continue into run evidence and raw records.
+No fixed environment version or new image is required by the runtime cleanup.
 
 ## Storage paths
 

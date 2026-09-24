@@ -427,7 +427,7 @@ not inferred from this document or the local Git checkout.
 | Workload compatibility and unreadable history | C1/C3/C6/C7 | [Retest policy](discovery-scheduling-major-component.md#phase-0-retest-decisions); no fabricated provenance or premature activation of producer-dependent rules. |
 | Admission storage and ownership | C4 | [State contract](job-control-major-component.md#phase-0-state-contract); one approved host/session, serialized creates, v2 for new intent-bearing sessions and preserved v1 history. |
 | Resource-accounting limits | C3 | Accept only supported, observed node/pod resource forms; reject unknown accounting rather than claim scheduler-equivalence. Verify deployed cases during real acceptance. |
-| Dependency identity | C6/C8 | Use pinned image plus immutable DL artifact or verified run-local copy; concrete artifacts and additive provenance fields are Phase 3 release inputs, not retroactive requirements on old runs. |
+| Dependency identity | C6/C8 | Preserve variable image/CUDA/PyTorch/iteration inputs and their existing recorded values. Review only necessary per-run DL source/plan consistency; no fixed-version image requirement, speculative provenance fields or historical backfill. |
 | Interface retirement | C2 | [Compatibility inventory](operator-interface-major-component.md#phase-0-compatibility-inventory): no retirement in Phase 1; unknown external callers keep interfaces supported. |
 
 Do not silently choose a new service, database, public plugin capability or

@@ -135,13 +135,15 @@ class StorageConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    """In-pod runtime paths used by validation scripts."""
+    """In-pod runtime paths and outer child deadlines."""
 
     repo_dir: str
     validation_root: str
     validation_tests_dir: str
     dl_unit_test_dir: str
     dl_results_root_path: str
+    runner_timeout_seconds: int
+    ingestion_timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -395,7 +397,8 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
     for name, value in vars(config.storage).items():
         _absolute_lexical_config_path(value, f"storage.{name}")
     for name, value in vars(config.runtime).items():
-        _absolute_lexical_config_path(value, f"runtime.{name}")
+        if isinstance(value, str):
+            _absolute_lexical_config_path(value, f"runtime.{name}")
     _absolute_lexical_config_path(config.live.runner_worktree, "live.runner_worktree")
     _absolute_lexical_config_path(config.live.log_dir, "live.log_dir")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", config.live.control_host):
@@ -414,6 +417,8 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
         raise ValueError("maintenance.journal_backup_timeout_seconds must be positive")
     for name, value in (
         ("cluster.kubectl_timeout_seconds", config.cluster.kubectl_timeout_seconds),
+        ("runtime.runner_timeout_seconds", config.runtime.runner_timeout_seconds),
+        ("runtime.ingestion_timeout_seconds", config.runtime.ingestion_timeout_seconds),
         ("monitoring.timeout_seconds", config.monitoring.timeout_seconds),
         ("monitoring.poll_interval_seconds", config.monitoring.poll_interval_seconds),
         ("monitoring.validation_poll_seconds", config.monitoring.validation_poll_seconds),
