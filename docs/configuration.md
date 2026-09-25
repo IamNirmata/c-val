@@ -81,8 +81,15 @@ pod_restart_policy = "Never"
 job_max_retry = 1
 task_max_retry = 1
 failure_action = "TerminateJob"
-failure_events = ["PodFailed", "PodEvicted", "TaskFailed", "JobUnknown"]
+failure_events = ["PodFailed", "PodEvicted", "TaskFailed", "Unknown"]
 ```
+
+`Unknown` is the serialized Volcano event; the upstream constant is named
+[`JobUnknownEvent`](https://pkg.go.dev/volcano.sh/apis@v1.15.2/pkg/apis/bus/v1alpha1#JobUnknownEvent).
+`JobUnknown` is not a valid policy value. The 2026-09-25 attempt at `2992f19`
+was rejected before Job creation for that spelling. New source/config snapshots
+use `Unknown`; old snapshots and the rejected intent stay with their original
+source and evidence. Do not replay that run or silently rewrite its snapshot.
 
 `maxRetry = 0` is not a no-retry option in the inspected Volcano admission code:
 it is replaced with the default `3`. The value `1` avoids that defaulting. The

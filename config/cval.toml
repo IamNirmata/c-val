@@ -121,4 +121,4 @@ pod_restart_policy = "Never"
 job_max_retry = 1
 task_max_retry = 1
 failure_action = "TerminateJob"
-failure_events = ["PodFailed", "PodEvicted", "TaskFailed", "JobUnknown"]
+failure_events = ["PodFailed", "PodEvicted", "TaskFailed", "Unknown"]

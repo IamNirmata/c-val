@@ -378,8 +378,8 @@ def validate_single_attempt_config(config: JobTemplateConfig) -> None:
         raise ValueError("Single-attempt validation requires job_max_retry=1 and task_max_retry=1; zero is defaulted by Volcano")
     if config.failure_action != "TerminateJob":
         raise ValueError("job_template.failure_action must be TerminateJob")
-    if len(config.failure_events) != 4 or set(config.failure_events) != {"PodFailed", "PodEvicted", "TaskFailed", "JobUnknown"}:
-        raise ValueError("job_template.failure_events must contain PodFailed, PodEvicted, TaskFailed and JobUnknown exactly once")
+    if len(config.failure_events) != 4 or set(config.failure_events) != {"PodFailed", "PodEvicted", "TaskFailed", "Unknown"}:
+        raise ValueError("job_template.failure_events must contain PodFailed, PodEvicted, TaskFailed and Unknown exactly once")
 
 
 def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> None:

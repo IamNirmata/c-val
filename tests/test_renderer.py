@@ -38,6 +38,29 @@ SCHEDULER_TEMPLATE = (Path(__file__).resolve().parents[1] / "ymls/test-job.yml")
 
 
 class RendererTests(unittest.TestCase):
+    def test_single_attempt_policy_uses_volcano_wire_event(self) -> None:
+        config = load_config()
+        events = ["PodFailed", "PodEvicted", "TaskFailed", "Unknown"]
+        for template, node in ((TEMPLATE, "slc01-cl02-hgx-0062"), (SCHEDULER_TEMPLATE, None)):
+            with self.subTest(node=node):
+                rendered = render_validation_job(
+                    template, node, timestamp=1790300635, git_ref=COMMIT, cval_config=config
+                )
+                spec = yaml.safe_load(rendered.yaml_text)["spec"]
+                self.assertEqual(spec["policies"], [{"events": events, "action": "TerminateJob"}])
+                self.assertEqual(spec["maxRetry"], 1)
+                task = spec["tasks"][0]
+                self.assertEqual(task["maxRetry"], 1)
+                self.assertEqual(task["replicas"], 1)
+                self.assertNotIn("policies", task)
+                self.assertEqual(task["template"]["spec"]["restartPolicy"], "Never")
+        for rejected in ((*events[:-1], "JobUnknown"), tuple(events[:-1]), (*events, "Unknown")):
+            with self.subTest(events=rejected), self.assertRaisesRegex(ValueError, "failure_events"):
+                render_validation_job(
+                    TEMPLATE, "slc01-cl02-hgx-0062", timestamp=1790300635, git_ref=COMMIT,
+                    cval_config=replace(config, job_template=replace(config.job_template, failure_events=rejected)),
+                )
+
     def test_shared_bootstrap_is_embedded_in_both_source_transports(self) -> None:
         base = load_config()
         for offline in (False, True):
