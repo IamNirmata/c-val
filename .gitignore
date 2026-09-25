@@ -4,6 +4,7 @@
 /reports/
 /exports/
 /run-logs/
+/.cval-state/
 /*.zip
 /cval_*.csv
 *.log

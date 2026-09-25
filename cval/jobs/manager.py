@@ -129,6 +129,9 @@ def project_submission_jobs(session_dir: Path, state: dict) -> None:
             "deleted_at": deleted[-1] if deleted else "",
         }
     write_session_jobs(session_dir, jobs)
+    from cval.storage.status import project_status_csvs
+
+    project_status_csvs(session_dir, state)
 
 
 def _requested_fields_match(expected, observed) -> bool:

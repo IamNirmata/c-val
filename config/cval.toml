@@ -45,7 +45,9 @@ verification_max_files = 5000
 
 [live]
 session_name = "cval-live"
-log_dir = "/home/v-srsreenath/hari/claw/c-val/run-logs/cval-live"
+log_dir = "/home/v-srsreenath/hari/claw/c-val/.cval-state/cval-live"
+status_dir = "/home/v-srsreenath/hari/claw/c-val/run-logs"
+status_refresh_seconds = 300
 runner_worktree = "/tmp/cval-live-worktree"
 loop_sleep_seconds = 300
 plan_limit = "all"

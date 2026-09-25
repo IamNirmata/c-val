@@ -107,6 +107,8 @@ class LiveConfig:
     git_branch: str
     control_host: str
     cluster_server: str
+    status_dir: str
+    status_refresh_seconds: int
 
 
 @dataclass(frozen=True)
@@ -228,9 +230,17 @@ def config_to_dict(config: CvalConfig) -> dict[str, Any]:
         "tests": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
         "sqlite_retry": asdict(config.sqlite_retry),
-        "live": asdict(config.live),
+        "live": _live_snapshot(config.live),
         "maintenance": asdict(config.maintenance),
     }
+
+
+def _live_snapshot(config: LiveConfig) -> dict[str, Any]:
+    values = asdict(config)
+    if not config.status_dir and config.status_refresh_seconds == 0:
+        values.pop("status_dir")
+        values.pop("status_refresh_seconds")
+    return values
 
 
 def encode_config_snapshot(config: CvalConfig) -> str:
@@ -259,7 +269,7 @@ def encode_config_snapshot(config: CvalConfig) -> str:
         "test_definitions": config.tests.registry.to_dict(),
         "job_template": asdict(config.job_template),
         "sqlite_retry": asdict(config.sqlite_retry),
-        "live": asdict(config.live),
+        "live": _live_snapshot(config.live),
         "maintenance": asdict(config.maintenance),
     }
     payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -306,6 +316,8 @@ def load_config_snapshot(
         raise ValueError(
             "c-val effective configuration snapshot lacks complete test_definitions"
         )
+    if isinstance(data.get("live"), dict) and not {"status_dir", "status_refresh_seconds"}.intersection(data["live"]):
+        data["live"].update(status_dir="", status_refresh_seconds=0)
     config = _build_config(
         data,
         repo_root=repo_root,
@@ -392,6 +404,7 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
             value = getattr(section, item.name)
             if isinstance(value, str) and not value and (section_name, item.name) not in {
                 ("cluster", "node_filter"), ("job", "source_configmap"), ("job", "source_sha256"),
+                ("live", "status_dir"),
             }:
                 raise ValueError(f"{section_name}.{item.name} must not be empty")
     for name, value in vars(config.storage).items():
@@ -401,6 +414,15 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
             _absolute_lexical_config_path(value, f"runtime.{name}")
     _absolute_lexical_config_path(config.live.runner_worktree, "live.runner_worktree")
     _absolute_lexical_config_path(config.live.log_dir, "live.log_dir")
+    if config.live.status_dir:
+        status_path = _absolute_lexical_config_path(config.live.status_dir, "live.status_dir")
+        state_path = Path(config.live.log_dir)
+        if status_path.is_relative_to(state_path) or state_path.is_relative_to(status_path):
+            raise ValueError("live.status_dir and live.log_dir must be separate directories")
+        if config.live.status_refresh_seconds <= 0:
+            raise ValueError("live.status_refresh_seconds must be positive")
+    elif config.live.status_refresh_seconds != 0:
+        raise ValueError("Disabled historical status transport requires a zero refresh interval")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", config.live.control_host):
         raise ValueError("live.control_host must be an explicit hostname")
     from urllib.parse import urlsplit

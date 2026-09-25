@@ -148,6 +148,29 @@ intents retain reservations until identity-bound terminal tracking permits relea
 Tracking release is not evidence acceptance. Actual lost replies, concurrent live submission
 and partial live batches remain unverified; this is not exactly-once delivery.
 
+### Compact Operational Status
+
+The public `run-logs` output is two updating CSVs: `node-status.csv` and
+`cluster-status.csv`. See [status settings and semantics](configuration.md#node-and-cluster-status-csvs).
+The default private controller path is `.cval-state/cval-live`; journals, approvals,
+locks, cooldowns and recovery artifacts remain there rather than in the public
+status directory. Old pinned sessions keep their old paths until approved turnover.
+
+The existing `cval-live-state.py status <active-session>` command performs one
+bounded read-only cluster observation and republishes the local CSV pair. The live
+loop owns its `--watch` mode, which uses the pinned 300-second TOML interval. Do not
+start a second refresher over a live writer or manually edit the CSVs to clear work.
+The refresher never creates, deletes or restarts a Kubernetes Job and never writes
+the raw databases. Admission continues to recheck actual eligibility before create.
+
+To clean historical local data, first inventory exact paths and active users. Retain
+current sessions, unresolved attempts, approval/rollback evidence, open watcher
+outputs and Git worktrees. Obtain approval for the exact archive/removal commands
+and restoration procedure; verify archived contents before removing original
+inactive directories. No automatic log pruning is enabled. Canonical PVC results,
+raw databases and existing backups are outside this cleanup scope. A directory
+rename or configuration change is not permission to restart or repoint a controller.
+
 ### Exact Evidence and Release
 
 Ordinary active/resumed/targeted tracking shares one bounded Job/pod/log observer.

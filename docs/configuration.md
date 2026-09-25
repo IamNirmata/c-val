@@ -32,7 +32,8 @@ and independent confirmations remain explicit command inputs.
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
 - `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace,
   log-tail size and explicit verification byte/file limits;
-- `[live]`: session name, absolute shared log directory, runner worktree, sleep,
+- `[live]`: session name, absolute private state and public status directories,
+  status refresh interval, runner worktree, sleep,
   plan limit, remote branch, designated `control_host` and credential-free HTTPS `cluster_server`;
 - `[maintenance]`: separately invoked backup/inventory/journal bounds and staging directory;
 - `[sqlite_retry]`: SQLite lock retry policy used by raw ingestion;
@@ -139,6 +140,8 @@ readable for status; this revision refuses to resume them silently.
 by all worktrees and supported submitters. It contains the existing `current-session`
 pointer and session records, plus `.cval-admission.lock`, separate from the loop's
 long-lived `.cval-live.lock`. Do not delete or replace a lock while writers exist.
+The checked-in path is now `.cval-state/cval-live` under the source repository;
+changing this value does not move or activate an existing session.
 Changing a prefix, namespace or evidence root is not permission to run independent
 submitters over overlapping nodes.
 
@@ -170,6 +173,50 @@ the same admission lock. It reconstructs the jobs projection from authoritative 
 state; missing CLI receipt files or a failed CSV write do not erase reservations.
 Missing/corrupt authoritative state still blocks. The reconciliation pass shares
 one `monitoring.ingestion_grace_seconds` deadline across retained intents.
+
+### Node and Cluster Status CSVs
+
+`live.status_dir` is a separate absolute directory, checked in as the repository's
+`run-logs` directory. New status output consists of `node-status.csv` and
+`cluster-status.csv`, readable in Excel without an Excel dependency. Both status
+and private state directories are Git-ignored. Historical directories are not
+automatically deleted or moved by a source or configuration update.
+
+`live.status_refresh_seconds = 300` controls the passive reader owned by the live
+loop. Startup checks existing CSVs against the authoritative submission journal
+and refreshes before submission. The reader then refreshes at this interval while
+the loop watches Jobs, scans candidates or waits between cycles. It stops with
+the controller. Intent/observation writes also republish from the latest collected
+snapshot, including prepared intent before Job creation. Data older than the
+interval is labeled stale; unavailable and forbidden reads are not empty results.
+
+The node CSV includes node name/UID, latest complete recorded run epoch and
+Los Angeles time, coverage and priority, current/latest Job name/UID/run epoch/phase,
+recording state, test outcome, cooldown deadline, separate Ready and scheduling
+states, GPU/CPU/memory/RDMA availability, blocked reason, observation timestamp,
+source SHA and configuration digest. Node creation time prevents inherited coverage
+from an earlier node incarnation. Missing coverage precedes the oldest expired
+coverage using the existing scheduler; fresh and unverified nodes have no rank.
+
+Coverage still means successful requested-test coverage. Recording is independent:
+`no_results`, `results_without_db_update`, `partial_db_update`, `fully_recorded`,
+or `unverified`. A fully recorded failure remains `fail`. A complete record requires
+a canonical terminal envelope, matching exact status rows and its digest-bound
+ingestion receipt. Legacy status-only evidence is not counted as fully recorded.
+These operational summaries do not replace the separate exact raw-row audit.
+
+The single cluster row counts unique nodes recorded in the last 24 hours, coverage
+states, known HGX nodes, Ready/NotReady/readiness-unknown nodes and scheduling-disabled
+nodes. Ready and scheduling-disabled counts may overlap. Generation timestamp,
+inventory state and observation completeness accompany the counts. This is cluster
+status, not health classification.
+
+Writers use the shared admission lock and atomic replacement. Both CSVs contain
+the same `snapshot_id`; readers must reject a mismatched pair. Neither CSV can
+authorize admission or replace durable intents, receipts, manifests, canonical
+logs or raw SQLite. An unresolved CSV attempt without its journal blocks startup.
+Historical snapshots lacking both new status settings retain their exact transport
+and digest with status refresh disabled; enabling it requires approved turnover.
 
 New initialization also requires `--approval-record <path>` on the existing state
 helper. The live launcher passes the explicit locator `CVAL_APPROVAL_RECORD`.

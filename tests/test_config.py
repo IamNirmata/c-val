@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import shutil
 import tempfile
 import tomllib
@@ -9,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from cval.config import config_to_dict, load_config
+from cval.config import config_to_dict, encode_config_snapshot, load_config, load_config_snapshot
 from cval.validation.operational_targets import (
     RESULTS_EXPORT,
     OperationalTarget,
@@ -19,6 +20,23 @@ from cval.validation.registry import load_test_registry, parse_resource_quantity
 
 
 class ConfigTests(unittest.TestCase):
+    def test_status_paths_are_separate_and_refresh_is_explicit(self) -> None:
+        config = load_config()
+        self.assertEqual(config.live.status_refresh_seconds, 300)
+        self.assertEqual(Path(config.live.status_dir).name, "run-logs")
+        self.assertFalse(Path(config.live.log_dir).is_relative_to(Path(config.live.status_dir)))
+        self.assertEqual(load_config_snapshot(encode_config_snapshot(config)), config)
+
+    def test_status_historical_snapshot_preserves_exact_transport(self) -> None:
+        data = json.loads(base64.b64decode(encode_config_snapshot(load_config())))
+        data["live"].pop("status_dir")
+        data["live"].pop("status_refresh_seconds")
+        payload = base64.b64encode(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).decode()
+        restored = load_config_snapshot(payload)
+        self.assertEqual(restored.live.status_dir, "")
+        self.assertEqual(encode_config_snapshot(restored), payload)
+        self.assertNotIn("status_dir", config_to_dict(restored)["live"])
+
     def test_loads_repository_default_config(self) -> None:
         config = load_config()
 

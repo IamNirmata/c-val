@@ -9,6 +9,9 @@ import json
 import os
 import re
 import sys
+import signal
+import threading
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -212,6 +215,38 @@ def _node(args: argparse.Namespace) -> None:
     )
 
 
+def _status(args: argparse.Namespace) -> None:
+    from cval.policy import PolicyViolation
+    from cval.storage.status import refresh_status_csvs
+
+    config = args.cval_config
+    if not config.live.status_dir:
+        return
+    if not args.watch:
+        print(json.dumps(refresh_status_csvs(args.session_dir), sort_keys=True))
+        return
+    stopping = threading.Event()
+    handlers = {kind: signal.signal(kind, lambda *_args: stopping.set()) for kind in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        while not stopping.is_set():
+            cache = args.session_dir / "status-observation.json"
+            observed_at = json.loads(cache.read_text()).get("observed_at_epoch", 0) if cache.exists() else 0
+            delay = max(0, observed_at + config.live.status_refresh_seconds - time.time())
+            if stopping.wait(delay):
+                break
+            try:
+                print(json.dumps(refresh_status_csvs(args.session_dir), sort_keys=True), flush=True)
+            except PolicyViolation as error:
+                if str(error) != "Another admission or session update holds the shared lock":
+                    raise
+                print("Status refresh deferred: admission lock is busy", file=sys.stderr, flush=True)
+                if stopping.wait(config.live.status_refresh_seconds):
+                    break
+    finally:
+        for kind, handler in handlers.items():
+            signal.signal(kind, handler)
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     subparsers = root.add_subparsers(dest="command", required=True)
@@ -258,6 +293,11 @@ def parser() -> argparse.ArgumentParser:
     node.add_argument("session_dir", type=Path)
     node.add_argument("--source", type=Path, required=True)
     node.set_defaults(handler=_node)
+
+    status = subparsers.add_parser("status", help="Refresh the node and cluster status CSV pair")
+    status.add_argument("session_dir", type=Path)
+    status.add_argument("--watch", action="store_true", help="Refresh at the pinned TOML interval until stopped")
+    status.set_defaults(handler=_status)
     return root
 
 
@@ -276,6 +316,10 @@ def main() -> int:
     if args.session_dir.parent != Path(config.live.log_dir) or not SAFE_NAME.fullmatch(args.session_dir.name):
         raise ValueError("Session must be inside the configured shared admission directory")
     admission_scope(config)
+    if args.command == "status":
+        args.cval_config = config
+        args.handler(args)
+        return 0
     if args.command == "init":
         if args.batch_size != config.scheduling.batch_size or args.plan_limit != config.live.plan_limit or args.branch != config.live.git_branch:
             raise ValueError("Session settings must match the pinned configuration")

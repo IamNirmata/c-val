@@ -31,6 +31,7 @@ LIVE_CONFIRM=${CVAL_LIVE_CONFIRM:-}
 PRUNE_CONFIRM=${CVAL_PRUNE_CONFIRM:-}
 STATE_HELPER="$SCRIPT_DIR/cval-live-state.py"
 SESSION_DIR=${CVAL_SESSION_DIR:-}
+STATUS_PID=""
 declare -A LAST_JOB_PHASES=()
 
 load_operational_settings() {
@@ -71,6 +72,7 @@ values = {
     "NODE_COOLDOWN_SECONDS": config.scheduling.node_cooldown_seconds,
     "NODE_COOLDOWN_STATE_FILE": str(log_dir / "node_cool_down.csv"),
     "NODE_COOLDOWN_HELPER": str(Path(source) / "scripts/cval-node-cooldown.py"),
+    "STATUS_DIR": config.live.status_dir,
     "WATCH_TIMEOUT_SECONDS": config.monitoring.timeout_seconds,
     "WATCH_POLL_SECONDS": config.monitoring.poll_interval_seconds,
     "PENDING_START_TIMEOUT_SECONDS": config.monitoring.pending_start_timeout_seconds,
@@ -137,6 +139,10 @@ session_update() {
     local state="$1"
     local message="$2"
     local cycle_id="${3:-}"
+    if [[ -n "$STATUS_PID" ]] && ! kill -0 "$STATUS_PID" 2>/dev/null; then
+        echo "Status refresher exited; refusing to continue controller updates" >&2
+        return 2
+    fi
     [[ -n "$SESSION_DIR" ]] || return 0
     local cycle_args=()
     [[ -z "$cycle_id" ]] || cycle_args+=(--cycle-id "$cycle_id")
@@ -1478,11 +1484,28 @@ run_submit_cycle() {
     log "cycle complete; artifacts in $cycle_dir"
 }
 
+stop_status_refresh() {
+    if [[ -n "$STATUS_PID" ]]; then
+        kill "$STATUS_PID" 2>/dev/null || true
+        wait "$STATUS_PID" 2>/dev/null || true
+        STATUS_PID=""
+    fi
+}
+
+start_status_refresh() {
+    [[ -n "$STATUS_DIR" ]] || return 0
+    python3 "$STATE_HELPER" status "$SESSION_DIR" || return "$?"
+    python3 "$STATE_HELPER" status "$SESSION_DIR" --watch &
+    STATUS_PID=$!
+    trap 'stop_status_refresh' EXIT
+}
+
 run_once() {
     require_command flock
     acquire_live_lock || return "$?"
     resolve_git_ref || return "$?"
     initialize_session "$RESOLVED_GIT_REF" || return "$?"
+    start_status_refresh || return "$?"
     session_update "running" "starting one cycle"
     local resume_rc=0
     resume_latest_cycle_if_needed || resume_rc=$?
@@ -1511,6 +1534,7 @@ run_loop() {
         fi
         initialize_session "$RESOLVED_GIT_REF" || return "$?"
     fi
+    start_status_refresh || return "$?"
     session_update "running" "loop started"
     trap 'session_update "stopped" "received stop signal" || true; log "received stop signal; exiting loop"; exit 0' INT TERM
     while true; do
