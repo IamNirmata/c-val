@@ -64,7 +64,7 @@ are not in this repository and are excluded from these numbers.
 | --- | --- | --- |
 | Critical | Test-owned settings/results, finite metrics, rank completeness, correct exit status | Preserve and contract-test. |
 | Good | HCA observations, retained raw artifacts, dependency preflight | Keep explicit cost/resource budgets. |
-| Not important | Four shell command aliases across runtime/workloads | Small compatibility surface; retire only after caller review. |
+| Retained | Four shell command aliases across runtime/workloads | External usage remains unknown; Phase 6 preserves them. |
 | Useless | Unused workload variants | None proven; do not invent removals or drop coverage for line count. |
 
 ## Current Issues
@@ -79,21 +79,16 @@ are not in this repository and are excluded from these numbers.
 4. Shared storage/network traffic can affect other workloads even when the selected
    node is idle. Serial in-pod tests do not eliminate fleet-wide interference.
 
-## Proposed Design
+## Design Disposition
 
-1. Keep one descriptor plus setup/run/summary code per test; reuse the runner for
-   process handling. Avoid a universal benchmark engine or forced rewrite of FIO/PyTorch.
-2. Preserve selectable images, CUDA/PyTorch environments and iteration settings:
-   varying them and recording their values is part of testing, not a defect.
-   Custom-image/FIO packaging is deferred. Phase 3.4 implements only run-local DL
-   source/plan isolation; source and plan remain selectable between runs, and no
-   identity is backfilled into historical records.
-3. Use existing setup, execution and ingestion events before adding measurements.
-   Add fields only for a demonstrated gap. Keep bounded controller concurrency as the initial
-   shared-resource budget rather than adding a new traffic-scheduling service.
-4. Preserve descriptor ordering and required resource checks. Future test-owned
-   persistence must reuse authorization and explicit destinations without changing
-   existing raw stores or expanding the plugin API silently.
+Implemented: run-local DL source/plan preparation and shared runtime environment
+projection. Retained: per-test descriptors, setup/run/summary ownership, test-owned
+persistence, existing timing events and selectable image/CUDA/PyTorch/iterations.
+Varying and recording environments remains part of testing, not a defect.
+
+Custom-image/FIO packaging, extra timing fields, a traffic-scheduling service and
+new persistence/plugin capabilities are deferred. No measured need justified
+them in Phases 3-6. The copy/compare and fresh GPU acceptance limits below remain.
 
 ## Phase 3.4 Run-Local DL Source
 

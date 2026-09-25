@@ -60,7 +60,7 @@ The PVC access template is C9; global configuration is C1.
 | --- | --- | --- |
 | Critical | Exact commit, archive hash/identity, immutable source, semantic template checks | Preserve. |
 | Good | Offline source delivery and one shared bootstrap | Already implemented; reuse rather than redesign again. |
-| Not important | Inline custom bootstrap compatibility | Review real callers before retirement. |
+| Retained | Inline custom bootstrap compatibility | External usage is unknown; no retirement in Phase 6. |
 | Removed from runtime bundle | Top-level host regression suite | Retained in the repository; excluded from the archive after isolated packaging checks. |
 
 ## Current Issues
@@ -75,19 +75,16 @@ The PVC access template is C9; global configuration is C1.
 4. Installation assumes a source checkout for descriptors/templates/scripts;
    editable-install behavior is not proof of a self-contained wheel.
 
-## Proposed Design
+## Design Disposition
 
-1. Keep the current source renderer, immutable ConfigMap transport and shared
-   bootstrap. Start with a small exclusion from the existing `SOURCE_PATHS`, not
-   per-file dependency machinery or new bundle modes. Retain uncertain dependencies.
-2. Retain repository-local installation as the supported model initially. Do not
-   add a wheel-distribution project solely to move files.
-3. Bind source SHA, archive hash, manifest hash and effective config digest in one
-   reviewed release receipt. Preserve C6's selectable test environments and existing
-   recorded image/dependency values; no fixed-version image requirement is added.
-4. Separate source preparation, create approval, single-node acceptance and loop
-   activation. Verify each observed identity; preserve previous artifacts and
-   approval records. Never automatically apply a rollback on failed acceptance.
+Implemented: exact-source rendering, immutable ConfigMap transport, shared bootstrap
+and the single Phase 5 archive exclusion. Repository-local installation, complete
+runtime directories and selectable environments remain supported. Wheel packaging,
+bundle variants and per-file dependency machinery are deferred without measured need.
+
+The identity chain below remains the release contract. Source creation, real-node
+acceptance and controller activation are separately approved steps; preparing a
+manifest does not perform any of them. Prior sources and evidence are retained.
 
 ### Phase 5 Packaging
 

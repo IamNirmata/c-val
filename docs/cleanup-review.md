@@ -1,5 +1,34 @@
 # Framework Simplification Review
 
+## Phase 6 Closeout Review
+
+Reviewed 2026-09-25 against published `62dcdeca982950dac9eb829765eba64f42ab1bf1`.
+This bounded review found no additional runtime deletion justified. Public
+interfaces remain supported under the updated
+[caller inventory](components_design/operator-interface-major-component.md#phase-0-compatibility-inventory).
+Source implementation and fresh runtime acceptance remain separate; the dated
+records below do not describe current deployment.
+
+| Candidate | Evidence and Disposition |
+| --- | --- |
+| Old observer, phase lister, receipt search and event-parser wrapper | Already absent: `observe_submission`, `list_job_phases`, `latest_cycle_dir_with_submits`, `_structured_progress_events`. Shared observation remains the owner; no second deletion credited. |
+| Old standalone reservation helpers | `_run_paths`, `_preflight_registry_paths` and `_create_run_marker` are gone. Retain current reservation validation and descriptor projections; they do not recreate directories. |
+| Shell aliases and ingestion launcher | Retain compatibility entry points and their existing tests. Production supervisor calls Python ingestion directly; unknown external usage is not proof of disuse. |
+| Lock/cooldown scripts and path-preflight entry point | Lock and cooldown are dynamically loaded by production owners. Path preflight has a standalone CLI and safety tests; external usage is unknown. Retain them and the renderer's rejection of unsafe legacy bootstrap markers. |
+| DL writer bodies | Both call `_write_metric_rows`; explicit schemas and independent authorization remain intentional, not another duplicate transaction implementation. |
+
+No modules, settings, raw schemas, test environments or runtime entry points were
+added, removed or moved. Documentation reconciliation removes stale proposals and
+links to the existing owners. The measured source/doc delta and final acceptance
+handoff belong to the [development plan](components_design/redesign-development-plan.md).
+
+Retained limits: fresh ingestion/resume/single-attempt acceptance is pending;
+local CSV writers can leave a partial destination on an interrupted write. Atomic
+CSV publication, public retirement, speculative adapter caching and new dependency
+provenance are deferred, not silently implemented. No cluster or PVC mutation was
+performed. Workspace customization is outside this phase and repository; stale
+skill wording about the compatibility ingestion launcher is not runtime authority.
+
 ## Phase 1–3 Retrospective
 
 Reviewed 2026-09-24 at `ebe5cae33b495984aa013fe2f3041d805bbb7286` against
@@ -86,9 +115,9 @@ from the continuous loop alone is not proof of non-use.
 ## Maintainability Re-audit
 
 The A-B removals reduce stale material, not active framework complexity. The
-next goal is fewer places to understand or change one behavior, not merely fewer
-files. Findings 1-2 are implemented and accepted; finding 3 is implemented,
-and finding 4 remains a proposal.
+next goal was fewer places to understand or change one behavior, not merely fewer
+files. At this earlier review, findings 1-2 were accepted, finding 3 was implemented,
+and finding 4 was proposed; Phase 4 subsequently implemented it as recorded below.
 The earlier retain inventory protected responsibilities and evidence; it did
 not mean every current implementation or abstraction should remain unchanged.
 
@@ -298,6 +327,6 @@ customization validator. The later approved bootstrap extraction has focused
 renderer/caller regressions; no live mutation was performed for either change.
 Publication alone does not deploy the shared bootstrap. Its exact published
 commit still needs separately approved cluster acceptance before rollout.
-DL transaction consolidation remains a proposal, and tested shell aliases remain
-supported. A future runtime refactor still needs its own approval and acceptance.
+DL transaction consolidation was subsequently source-implemented in Phase 4;
+tested shell aliases remain supported. Fresh runtime acceptance is still required.
 Source cleanup never authorizes live deletion or evidence removal.

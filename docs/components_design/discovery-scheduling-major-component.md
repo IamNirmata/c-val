@@ -128,7 +128,8 @@ Historical runs without current-format completion provenance can supply only
 set. This is the deliberate legacy age rule, not proof of canonical execution,
 current descriptors, image or external-DL compatibility. Missing current artifacts
 cannot use that fallback. Reports state `legacy_age_only`; stronger compatibility
-comparisons remain deferred until Phase 3 supplies immutable dependency identity.
+comparisons remain deferred. Phase 3's run-local source copy does not implement a
+complete dependency-comparison policy.
 
 Read denial/failure, malformed history or the configured per-node scan limit stops
 planning; none becomes an empty history. Queried history without a qualifying run
@@ -175,19 +176,13 @@ Fresh post-failure scheduling/cooldown behavior and live controller execution re
 unverified and require separate approval. This is a freshness rule, not node health
 classification or automatic remediation.
 
-## Proposed Design
+## Design Disposition
 
-1. Use one pure eligibility function over structured node/pod observations and
-   the effective config. Pass an explicit policy for automatic versus targeted
-   cordoned-node validation; neither allows active GPU work or unknown readiness.
-2. Inventory once per planning pass; check selected nodes again immediately before
-   create through the same function. C3 owns coverage-age rules; C4 owns observation
-   age at admission, cooldown and create timing. Identify nodes by `node_name` only.
-3. Keep the small pure priority function. Apply the coverage policy below before
-   ordering candidates. C7 supplies read-only history/provenance; do not add direct
-   SQL or a second result store to the scheduler.
-4. Keep snapshot inputs for offline inspection; they can never authorize submission.
-   Retain bounded calls and distinguish empty capacity from inaccessible evidence.
+Implemented: one eligibility function, explicit targeted-cordon policy, fresh
+per-create checks, `node_name` identity, successful-run coverage and the existing
+pure priority ordering. Snapshot inputs remain inspection-only; they do not
+authorize submission. Full dependency-based compatibility and a new scheduler or
+history store are deferred, not unfinished Phase 6 requirements.
 
 ## Coverage Policy
 
@@ -198,13 +193,15 @@ implemented but controller activation and fresh acceptance remain pending.
 | --- | --- |
 | One run passed the requested compatible test set with complete expected evidence | Use its timestamp for successful coverage; failed runs never refresh it. |
 | Setup failure, timeout, interruption or missing required test output | Not full coverage; cooldown still prevents immediate retry storms. |
-| Newly enabled test or changed execution-relevant test inputs | Previous coverage does not satisfy the new request. |
-| Docs-only or host polling change | Does not invalidate coverage when workload compatibility is established. |
-| Readable history without proven compatible evidence | Due with an explicit reason; never invent a compatible identity. |
+| Newly required test | A qualifying run must contain successful coverage for the requested test set. |
+| Changed image, dependency or workload inputs | Values remain recorded, but full cross-run compatibility comparisons are not implemented. |
+| Docs-only or host polling change | Does not itself invalidate the active age-based coverage. |
+| Readable legacy passing built-in status set | May qualify under `legacy_age_only`; this is not proof of canonical evidence or matching dependencies. |
 | Forbidden/unavailable history | Pause automatic admission; do not reinterpret it as never tested. |
 
-Use the newest single compatible run that passed every currently required test
-and has complete expected evidence. Do not combine unrelated runs.
+Use the newest single qualifying successful run under the documented canonical
+or legacy evidence rules. Do not combine unrelated runs or claim full dependency
+compatibility from the active age policy.
 An extra previously selected test does not invalidate coverage of the requested
 subset; a newly required test needs its own coverage in that same run.
 
@@ -218,23 +215,16 @@ Amended by the Phase 2.5 successful-freshness rule above.
 | Full workload reported fail | Never refreshes successful coverage; retain all raw failure evidence. |
 | Failed/incomplete latest attempt | Does not replace an older successful coverage timestamp. Retain the new outcome separately. |
 | No compatible successful run | Due with a reason; no history differs from readable but unsuccessful/incompatible history. |
-| Pending/uncertain Job or ingestion | C4 reconciles it before another workload is admitted for that node. A DB problem is not an automatic benchmark retry. |
+| Pending/uncertain Job | C4 reconciles identity and execution before releasing its reservation; failed ingestion is not an automatic benchmark retry. |
 | Cooldown | Preserve the configured submission cooldown independently of coverage; checked-in default is 14,400 seconds. |
 | Unknown history access | Pause automatic admission; a read failure is not permission to treat the node as never tested. |
 
-Compatibility inputs are required test IDs, per-test descriptor digest, workload/
-setup/summary code identity, image/dependency identity, and external DL source/plan
-identity where applicable. Global polling/cooldown settings and documentation do
-not affect workload compatibility. Source SHA always remains exact-run provenance;
-it is not a reason by itself to rerun unchanged workload content.
-
-The baseline envelope records Git ref, descriptor digests, image name and framework
-versions, but not a complete immutable external-DL identity. Decision: no backfill,
-invented digest or new compatibility database. Phase 1 can expose coverage/reasons
-from existing evidence; stronger dependency comparisons become active only after
-Phase 3 records their reviewed inputs. Until then retain the declared legacy
-timestamp policy with its provenance limitation, rather than silently claiming
-strict compatibility or causing repeated fleet-wide revalidation.
+Deferred strict compatibility would compare descriptor and workload code identity,
+image/dependencies and external DL source/plan, not polling settings or documentation.
+Current Git refs, descriptor digests, environment values and run-local copies are
+evidence, not that comparison engine. Phase 3 added isolation without new provenance
+fields or historical backfill. Retain the declared successful age policy and its
+limits; no new compatibility DB or fleet-wide revalidation was added in Phase 6.
 
 ## Observation Limits
 

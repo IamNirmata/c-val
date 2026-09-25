@@ -1,5 +1,8 @@
 # Architecture
 
+Implemented source behavior; fresh final-commit acceptance and activation remain
+pending under the [development plan](components_design/redesign-development-plan.md).
+
 ## Documentation Map
 
 Keep current contracts in the following references; design notes explain
@@ -11,9 +14,9 @@ rationale and label deferred proposals rather than repeating operating steps.
 | [Configuration](configuration.md) | Effective settings and configuration sources |
 | [Operations runbook](operations-runbook.md) | Planning contract and reviewed operational procedures |
 | [Result schema](result-schema.md) | Canonical evidence and raw database contracts |
-| [Operator interface](components_design/operator-interface-major-component.md#mode-inventory) | Current modes, migration inventory and proposed interface changes |
+| [Operator interface](components_design/operator-interface-major-component.md#mode-inventory) | Current modes, retained compatibility and output limits |
 | [Major components](components_design/major-components-overview.md) | Responsibility map, baseline measurements and component designs |
-| [Redesign proposal](components_design/Redesign.md) | Proposed architecture and phased implementation; not current behavior |
+| [Redesign contracts](components_design/Redesign.md) | Implemented design decisions, evidence contracts and deferred work |
 | [Cleanup review](cleanup-review.md) | Approved cleanup, recorded acceptance and remaining scope |
 
 Code and effective configuration define behavior. Dated acceptance and rollout
@@ -22,19 +25,21 @@ records describe the observed revision, not an assertion of present live state.
 ## Runtime flow
 
 1. Discover matching GPU nodes.
-2. Read each node's latest raw validation timestamp from
-   `metadata/validation.db`.
-3. Prioritize never-tested and stale nodes, applying submission cooldown,
-   without rendering Jobs during candidate inspection.
+2. Read coherent successful-run coverage from raw status and canonical summaries;
+   failed attempts remain evidence but do not refresh coverage. Legacy age-only
+   compatibility limits are explicit.
+3. Prioritize uncovered and stale nodes, applying submission cooldown, without
+   rendering Jobs during candidate inspection.
 4. Check prioritized nodes for current GPU, CPU, memory, RDMA, readiness, and
    scheduling eligibility.
-5. Render the selected eligible nodes' Volcano jobs from an exact published
-   commit and submit after explicit confirmation.
+5. Render exact-source Volcano Jobs, persist approved intents under shared admission,
+   recheck eligibility and submit once. Preserve unknown outcomes; never blindly recreate.
 6. Run enabled registry tests through the descriptor-anchored supervisor and
    generic runner.
-7. Validate canonical artifacts and write raw status and metric databases.
+7. Validate canonical artifacts, write required metrics, then publish raw status.
 8. Retain result JSON, logs, events, and test artifacts.
-9. Verify successful terminal Jobs and exact-run raw ingestion.
+9. Track bounded Job/pod status and compact logs. Run detailed exact-run raw
+   verification for separate acceptance/diagnosis, not every polling cycle.
 
 The framework ends at verified raw evidence. No downstream evaluator,
 classification, scoring or remediation service is part of this repository.

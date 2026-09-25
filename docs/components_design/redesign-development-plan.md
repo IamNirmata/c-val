@@ -1,16 +1,12 @@
 # Redesign Development Plan
 
-Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemented.
-Fresh exact-commit execution/ingestion acceptance and activation remain pending;
-Phase 3.1-3.4 cleanup source is implemented; Phase 3.5 evidence review is complete,
-but fresh accepted-run comparisons remain pending.
-Phase 4 source consolidation and preservation review are complete. Per the
-2026-09-25 decision, real-node testing waits until all phases are implemented;
-source completion is not cluster acceptance or activation approval.
-Phase 5 packaging and recovery review are source-complete; in-pod acceptance
-remains deferred until the remaining phases are implemented.
-Phase 6 scope/tasks were reviewed on 2026-09-25; implementation has not started.
-The live loop remains paused since 2026-09-24 UTC.
+Status: Phases 0-6 source work complete on 2026-09-25. Phase 6 reconciles the
+existing interfaces/docs; no additional runtime deletion was justified.
+Fresh final-commit real-node acceptance, comparisons and activation remain pending.
+Earlier unchecked tasks include those acceptance gates, not unfinished source work.
+The next operational step requires separate exact approval, not another source phase.
+The last controller operation was the 2026-09-24 pause; live state was not rechecked
+or changed in Phase 6. Publication never authorizes source creation or restart.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). The implementation and acceptance
 states above are separate; publication does not authorize live mutations.
 Shared contracts live in [Redesign.md](Redesign.md).
@@ -369,97 +365,68 @@ downloads. Keep old bundles and raw evidence; never run live recovery to tick a 
 
 ## Phase 6: Final Cleanup and Reconciliation
 
-**What it does:** Close the redesign against the code that now exists, remove only
-proven internal redundancy, and hand off one exact source candidate for acceptance.
-**Changes:** Bounded internal deletions if justified, corrections to existing docs,
-and a concise completion record in this plan. Zero runtime changes is a valid outcome.
+**Source complete:** The bounded review corrected current documentation and retained
+uncertain deletion candidates. Public interfaces, raw stores, historical readers,
+safety guards and selectable test environments are unchanged. No new module,
+setting, service, script, test file or runtime feature was needed.
 
-### Reviewed Scope
+### Completed Tasks
 
-This is not another architecture phase. Phases 2-5 already consolidated tracking,
-runtime setup and writer mechanics, removed dead helpers, and trimmed the bundle.
-Do not reopen those implementations, move files to meet a size target, or add a
-cleanup framework, compatibility layer, new settings, service or test-wrapper script.
+- [x] **6.1 Compatibility.** Rechecked parser/dispatch, known loop/workspace callers,
+  descriptors and shell entry points. The existing [inventory](operator-interface-major-component.md#phase-0-compatibility-inventory)
+  records current owners; unknown external usage means keep, not retire.
+- [x] **6.2 Leftovers.** Reviewed the replaced control, reservation and writer paths,
+  dynamic helpers and nearby tests. Old private paths were already removed; no
+  further safe deletion was demonstrated. See the [candidate decisions](../cleanup-review.md#phase-6-closeout-review).
+- [x] **6.3 Documentation.** Reconciled the architecture, improvement table and all
+  nine component pages. Config, schema and runbook already match the relevant
+  current contracts. Repeated proposals became implementation/defer decisions;
+  historical records remain dated. Links, help and source-claim checks passed.
+- [x] **6.4 Measurements.** Reproduced the baseline count method and separated source,
+  config, tests, docs and archive size. Counts below do not claim a runtime speedup
+  or credit earlier deletions twice.
+- [x] **6.5 Handoff.** This completion commit is the final source candidate. Its full
+  published SHA, source manifest/hash, pinned snapshot, checks and pending approvals
+  are retained in `run-logs/phase6-final-20260925/verification.json`; the existing
+  [acceptance checklist](../operations-runbook.md#real-node-development-procedure)
+  remains the only operational procedure. Preparation does not create or activate it.
 
-Public commands, JSON/CSV fields, exit behavior, shell aliases, compatibility writer
-hooks and maintenance entry points are retained. The
-[caller inventory](operator-interface-major-component.md#phase-0-compatibility-inventory)
-records unknown external usage; no repository reference is not proof of disuse.
-Public retirement needs a separately approved migration and is not a Phase 6 gate.
-Keep historical readers, raw stores, evidence/approval guards and selectable test
-environments. Do not delete tests merely because they are excluded from the bundle.
+### Measured Delta
 
-Source cleanup must be possible before the deferred real-node tests. An internal
-deletion needs an identified retained owner, reviewed repository and dynamic callers,
-and a focused check; if its safety depends on a fresh live run or unresolved usage,
-retain it and record the decision. That is a completed review, not accepted behavior.
-No cluster cleanup, source activation, backup, migration or raw-data change belongs
-to this phase. There is no deletion quota or required runtime performance gain.
+Phase 0 is `b79a5e04803277a261285556d014b2885e8c1868`; Phase 5 is
+`8d4f0ca06621197ffa4df79e34c110325c060d53`. Final counts refer to this completion
+commit, identified by the full SHA in its release record. Cells are files / physical
+lines using the [baseline method](major-components-overview.md#measurement-method).
 
-### Tasks
+| Kind | Phase 0 | Phase 5 | Final |
+| --- | ---: | ---: | ---: |
+| Runtime | 70 / 20,721 | 71 / 21,799 | 71 / 21,799 |
+| Configuration | 14 / 599 | 8 / 618 | 8 / 618 |
+| Tests | 33 / 14,077 | 33 / 14,412 | 33 / 14,412 |
+| Documentation | 27 / 3,568 | 27 / 5,384 | 27 / 5,439 |
 
-- [ ] **6.1 Freeze the compatibility boundary.** Recheck only the Phase 0 inventory
-  entries affected by Phases 1-5 against current parser/dispatch, descriptors,
-  shell entry points and known workspace callers. Update the existing inventory
-  with retained interfaces and their current owners; do not build a second catalog.
-  **Exit:** Every proposed deletion is private and bounded, or explicitly retained.
-  Unknown external use has a keep decision, not an open-ended caller hunt.
-- [ ] **6.2 Remove only demonstrated leftovers.** Inspect the replaced paths named
-  by the phase records for unreachable private helpers, duplicated decisions or
-  redundant process handoffs. For each candidate, name the old symbol/path, retained
-  owner, caller evidence and cheapest discriminating check before editing. Review
-  dynamic imports, shell/descriptor references and nearby tests; a text-search miss
-  alone is insufficient. Make one small deletion and validate immediately using
-  existing tests, actual local process/filesystem checks or retained read-only
-  evidence as appropriate. Remove obsolete tests only with the retired private path;
-  preserve coverage of the retained contract. Do not add fake workload acceptance.
-  **Exit:** Each candidate is removed with evidence or retained with a reason;
-  already completed cleanup is not counted again. A newly found behavior defect
-  requiring redesign is a separate decision, not automatic Phase 6 scope expansion.
-- [ ] **6.3 Make current documentation accurate.** Reconcile existing architecture,
-  configuration, runbook, result-schema and component docs with their controlling
-  code. Prioritize stale claims that admission can be bypassed, normal ingestion
-  needs the compatibility shell launcher, failed runs refresh successful coverage,
-  or all completed implementations are still merely proposed. Label each relevant
-  proposal implemented, superseded, retained or deferred; do not turn source work
-  into accepted/deployed claims. Keep one owner for each current rule and replace
-  repeated explanations with links. Preserve explicitly dated historical decisions
-  and evidence records rather than rewriting them as current policy.
-  **Exit:** Current claims agree, changed links/anchors resolve, and every remaining
-  proposal has a disposition. No new overview, summary file or duplicate runbook.
-- [ ] **6.4 Measure the actual change once.** Reuse the documented baseline method
-  to report Phase 6 delta versus `8d4f0ca` and cumulative delta versus `b79a5e0`,
-  naming exact revisions. Separate runtime, configuration, tests and documentation;
-  explain deleted duplication versus moves or added guards. Measure the final
-  compressed source archive independently: excluding tests is not deleting code.
-  Reuse retained API/subprocess/timing observations with their original identities;
-  unmeasured current operating costs stay unavailable. No new instrumentation,
-  benchmark Job or per-file accounting report just to populate the table.
-  **Exit:** One compact before/after record in existing docs, with comparable
-  measurements and explicit limits; no size or speed claim without evidence.
-- [ ] **6.5 Close the source plan and hand off acceptance.** Reconcile the existing
-  improvement table and task statuses using the dispositions from 6.1-6.4. Record
-  source completion, unresolved acceptance cases and activation separately here;
-  keep evidence in existing release artifacts, not a new status system. Publish
-  the final isolated commit, prepare and verify its source manifest/config snapshot
-  with the existing renderer and packaging check, and link the
-  [final acceptance checklist](../operations-runbook.md#real-node-development-procedure).
-  The handoff must identify the exact candidate, required checks, evidence locations
-  and pending approvals. Historical/local evidence cannot check off fresh runtime
-  acceptance; installed Volcano single-attempt behavior remains explicitly unverified.
-  **Exit:** No undecided in-scope source task; one candidate is ready for separately
-  approved source creation and real-node validation, without resuming the live loop.
+Documentation counts include tracked Markdown in `docs/`, workload readmes and the
+root README, excluding archives and generated evidence. Phase 6 has zero runtime,
+config or test delta. Cumulatively those lines grew by 1,078, 19 and 335 respectively;
+this is not an overall source-size reduction. The earlier added file is the exact-run
+verifier; six static FIO config files were removed earlier, not in this cleanup.
 
-**Source complete when:** All five tasks have a reviewed disposition, justified
-edits pass focused checks, current docs/links agree, and the exact published
-candidate plus pending gates are recorded. No GPU run is needed to declare this
-source milestone; unsafe or unproven deletion candidates remain in place.
-**Accepted when:** After all source phases, approved validation of the final exact
-commit meets the existing release/runbook contract. Unexercised failure, transport,
-placement and recovery paths remain explicitly unverified; activation is separate.
-**Risk/control:** Deletion is not the objective. Preserve public compatibility,
-historical evidence and safety boundaries; stop when the bounded review is closed.
-Do not use cleanup approval as permission to mutate Kubernetes or PVC data.
+The final archive retains the same 85 runtime files as Phase 5. Exact compressed
+bytes are in the release record because Git commit identity also changes archive
+bytes; member contents are compared separately. Excluding host tests is a packaging
+saving, not deleted source. New-source API/subprocess costs and runtime timings
+remain unavailable; [historical timing evidence](validation-runtime-major-component.md#phase-35-evidence-review)
+keeps its original node/source/settings identities. No instrumentation was added.
+
+### Remaining Gates
+
+All in-scope source decisions are closed. Separately approve exact source creation,
+one fully free Ready-node validation and raw evidence verification, then any controller
+activation. Installed Volcano single-attempt behavior, fresh ingestion/resume and
+unexercised failure/transport/placement paths remain unverified. Backup/restore are
+independent exercises, not required mutations to finish this phase. Atomic local CSV
+publication, full dependency compatibility and public retirement remain explicitly
+deferred; source completion does not claim those capabilities or runtime acceptance.
 
 ## Release Gate
 

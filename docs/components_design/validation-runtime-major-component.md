@@ -72,25 +72,20 @@ The registry/environment builder is C1; workload scripts are C6; ingestion is C7
    full in-pod runner-to-ingestion acceptance remains pending.
 3. Runtime success, test outcome and ingestion completion are different signals.
    A child exiting zero or a Completed Job cannot alone establish acceptance.
-4. Redundant result writes and legacy messages increase transitions to reason about;
-   changing them without evidence-order tests could lose failure diagnostics.
+4. Result transitions and legacy messages are retained: no safe redundant write
+   was demonstrated by Phase 6. Removing diagnostics needs a separate justified change.
 
-## Proposed Design
+## Design Disposition
 
-1. All production execution enters through the supervisor. Reuse its reservation
-   primitive for supported standalone callers before retiring alternate path creation.
-   Share existing secure/execution helpers; do not introduce a new adapter layer
-   unless it removes a real duplicate implementation.
-2. Reuse the existing immutable config snapshot, checked catalog and secure layout.
-   Map legacy child environment at one boundary; do not add another context framework.
-3. Keep phase and outcome separate. Preserve existing phases such as finished,
-   setup_failed, timed_out and interrupted, alongside pass/fail/incomplete and
-   timestamps/reasons. Disabled is never pass; do not invent replacement raw enums.
-4. Keep one process-group/deadline utility for setup and workload children. Signals
-   must retain incomplete evidence and terminate only owned descendants.
-5. Continue atomic canonical result transitions, immutable ingestion digest binding
-   and writer revalidation. Separate terminal test outcome from ingestion outcome
-   in reporting; preserve historical formats and paths unchanged.
+Implemented: shared secure reservation, snapshot-derived environment, process-group
+cleanup, explicit outer deadlines and compact progress. The implementation records
+below own these contracts. Production supervision starts Python ingestion directly;
+the standalone runner stays test-only and compatibility launchers remain available.
+
+Retained: separate phase/test/ingestion outcomes, atomic result transitions,
+immutable digest binding and writer revalidation. No replacement raw enum, context
+framework or extra instrumentation is needed. Further transition/message pruning
+is deferred; fresh runner-to-ingestion acceptance remains the outstanding gate.
 
 ## Phase 2 Compact Runtime Logs
 

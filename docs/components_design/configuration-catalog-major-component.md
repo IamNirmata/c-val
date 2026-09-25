@@ -1,6 +1,7 @@
 # C1: Configuration and Test Catalog
 
-Status: proposed redesign. Current baseline and counting rules:
+Status: Phase 1.1 strict config and Phase 3.2 environment projections implemented;
+fresh runtime acceptance remains pending. Historical baseline and counting rules:
 [component overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -62,33 +63,22 @@ Workload descriptors are counted under C6, not twice here.
 | Critical | Immutable snapshots, descriptor confinement, resource coverage, deterministic order | Preserve. |
 | Good | Descriptor-only inspection; optional config/raw-export adapters | Keep without eager imports for inspection. |
 | Not important | Multiple legacy environment spellings | Keep at one compatibility boundary until callers migrate. |
-| Useless | Re-resolving defaults after an effective config was supplied | Remove this conflicting behavior, not configuration validation. |
+| Removed | Re-resolving defaults after an effective config was supplied | Strict snapshots and explicit config propagation replaced this behavior. |
 
-## Current Issues
+## Design Disposition
 
-1. Downstream discovery reloads defaults instead of using the caller's config;
-   duplicate ownership can change eligibility without changing the displayed config.
-2. Snapshot, registry JSON and built-in environment aliases overlap. The runner
-   can reconstruct the registry separately; fewer independent representations
-   would reduce drift.
-3. [Adapter loading](../../cval/validation/plugins.py#L184) repeats imports and
-   config hooks. Cost should be measured before adding a cache.
+Implemented: one explicit effective config per command/session, complete strict
+snapshots and shared environment projections. Discovery receives that config;
+ingestion uses the run's original snapshot. The
+[strict configuration contract](../configuration.md#strict-two-level-contract)
+and [runtime projection](validation-runtime-major-component.md#phase-32-environment-projection)
+own the details; no second config/context layer was added.
 
-## Proposed Design
-
-1. Resolve config once per command and once at continuous-controller startup.
-   Freeze it across that session's cycles; changing source, tests or settings
-   requires a new reviewed session, not a hidden reload. Pass it explicitly.
-2. Keep the current snapshot/descriptor formats initially. Derive compatibility
-   environment values from that checked snapshot in one owner. Ingestion retries
-   must use the run's original snapshot, not the operator's current config.
-3. Separate descriptor validation from optional adapter execution. Reuse checked
-   adapter instances only within one operation; never cache across source changes.
-4. Keep configuration dataclasses and registry helpers. Do not introduce a DI
-   container, remote plugin marketplace, second config format or generic database API.
-5. Separate exact run provenance from [coverage compatibility](discovery-scheduling-major-component.md#coverage-policy).
-   A source SHA identifies a run; it does not by itself decide whether a docs-only
-   change invalidates previous workload coverage. Define the compared test inputs.
+Retained: configuration dataclasses, registry helpers, optional adapters and
+compatibility aliases. Adapter caching has no measured justification and is
+deferred. Full dependency-based freshness comparisons are also deferred under the
+[coverage policy](discovery-scheduling-major-component.md#coverage-policy); exact
+run provenance is not proof of compatibility between different experiments.
 
 ## Boundaries and Failure Cases
 

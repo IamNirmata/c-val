@@ -1,6 +1,8 @@
 # C2: Operator Interface
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phases 1-2 routing implemented; Phase 6 compatibility review complete.
+Fresh runtime acceptance remains pending. Counts below are the historical
+[baseline](major-components-overview.md#measurement-method), not current measurements.
 
 ## In Simple Terms
 
@@ -52,25 +54,21 @@ responsibilities today; this attribution does not imply they should keep doing s
 | Not important | Alias pairs and individual writer hooks no longer used by normal ingestion | Review external users before deprecation. |
 | Useless | New single-choice output selectors or duplicate config overrides | Do not reintroduce removed controls. |
 
-## Current Issues
+## Current Boundaries
 
-1. One parser mixes operators, ingestion compatibility and repair commands.
-2. `run` and `validate` use different orchestration paths; explicit node lists in
-   `run` can bypass discovery. CLI parsing cannot be the final safety boundary.
-3. JSON errors are not one stable contract, and some lower readers collapse
-   unavailable observations into empty output. Shared result/error handling is needed.
+`run` and `validate` both use `submit_workflow_plan` in
+[job control](../../cval/jobs/manager.py), including shared admission and fresh
+per-create eligibility checks. An explicit node list does not bypass submission
+safety. `validate` adds bounded observation and exact-run verification; `plan`
+remains read-only. The live loop delegates durable reconciliation and shared
+Job/pod/log observation to the same owners.
 
-## Proposed Design
-
-Keep the public names during migration. Route `run` and `validate` through one
-job-control operation and admission lock; `validate` adds watch and evidence verification. Keep
-`plan` strictly read-only. Move decisions out of handlers only when this removes
-duplicate behavior, not merely to create more files.
-
-Return structured operation outcomes, including partial submission receipts and
-forbidden/unavailable states. Keep diagnostics on stderr and automation data on
-stdout. Inventory external usage before retiring hidden hooks; retain required
-rebuild/recovery operations outside normal ingestion.
+The parser retains operator commands, guarded writer compatibility hooks and
+explicit repair entry points. This is a compatibility boundary, not a reason to
+split the CLI or add a new error framework. Partial submission receipts and
+unknown/forbidden/unavailable observations remain distinct from empty results.
+Command-specific JSON and exit behavior are retained; a universal output envelope
+is not implemented or required. External usage of hidden hooks is unknown.
 
 ### Reporting Contract
 
@@ -86,10 +84,11 @@ command execution is not a promise that the inspected validation passed.
 | Validation evidence complete but a selected test failed | Report the failure and complete evidence; validation acceptance is false. |
 | Export read failed | Do not publish an apparently complete CSV; retain diagnostics separately. |
 
-Normalize results internally, then adapt to existing command schemas. Do not wrap
-all current JSON outputs in a new envelope or change numeric exit codes without
-caller tests and migration notes. Buffer/atomically publish local exports only
-after a complete read; define any intentional partial export explicitly.
+Preserve existing command schemas and numeric exit behavior. Do not introduce a
+new envelope without a separate caller migration. Export reads complete before
+the local writer runs, but CSV files are written directly to their destination:
+an interrupted local write can leave a partial file. Atomic file publication is
+deferred, not an implemented guarantee or a Phase 6 writer change.
 
 ## Mode Inventory
 
@@ -116,24 +115,25 @@ and rebuild `--only-missing` are safety/data contracts, not cosmetic clutter.
 
 Source/caller review at `b79a5e0`; not usage telemetry. Scope: tracked runtime,
 scripts, descriptors/templates, runbook and workspace operational collectors.
-Private external callers are unknown, so Phase 1 preserves every interface below.
+Phase 6 rechecked the affected interfaces against current owners below. Private
+external callers remain unknown; every public interface is retained.
 
 | Retained Interface | Observed Caller / Evidence | Compatibility Decision |
 | --- | --- | --- |
-| `nodes`, `status`, `plan`, `run`, `jobs` | [Live loop](../../scripts/cval-live.sh#L775) consumes these commands and JSON. | Keep command/flag names, explicit empty node input and consumed JSON fields; fix decisions behind them. |
-| `validate` | [Targeted workflow](../../cval/orchestrator/validate.py#L351) and operator runbook. | Keep exact node/ref/timestamp, confirmation, watch and report semantics; no automatic cleanup. |
+| `nodes`, `status`, `plan`, `run`, `jobs` | [Live loop](../../scripts/cval-live.sh) consumes CLI output; discovery, scheduling and [job control](../../cval/jobs/manager.py) own decisions. | Keep command/flag names, explicit empty node input and consumed JSON fields. Shared admission rechecks each create. |
+| `validate` | [Targeted workflow](../../cval/orchestrator/validate.py) uses shared submission and [observation](../../cval/jobs/monitor.py), then exact-run verification. | Keep exact node/ref/timestamp, confirmation, watch and report semantics; no automatic cleanup. |
 | `config`, `tests list/describe/validate` | CLI operator interfaces; descriptor inspection is local, not GPU testing. | Keep effective config and catalog access without creating cluster work. |
-| `results` and plugin exports | [CLI export dispatch](../../cval/cli.py#L673) and registered config/export adapters. | Preserve CSV columns/aliases until an explicit migration; no new wrapper JSON envelope. |
-| Four `db-add-*` hooks and `db-rebuild-dltest-metrics` | [Parser](../../cval/cli.py#L287); normal ingestion calls writers directly. External use unknown. | Retain guarded compatibility/maintenance paths; not approved for retirement. |
-| Runner, environment and ingestion entry points | [Supervisor](../../cval/validation/supervisor.py#L495) and [DB launcher](../../validation-tests/db-update.sh). | Preserve child exit/signal behavior and authorized evidence handoff. |
+| `results` and plugin exports | [CLI export dispatch](../../cval/cli.py), [export writer](../../cval/storage/results_export.py) and registered adapters. | Preserve CSV columns, exact-run selectors and aliases; no new wrapper JSON envelope. |
+| Four `db-add-*` hooks and `db-rebuild-dltest-metrics` | [Parser](../../cval/cli.py); normal [ingestion](../../cval/storage/run_ingest.py) calls writers directly. External use unknown. | Retain guarded compatibility/maintenance paths; no retirement approved. |
+| Runner, environment and ingestion entry points | [Supervisor](../../cval/validation/supervisor.py) starts the runner and `python -m cval.storage.run_ingest`; [DB launcher](../../validation-tests/db-update.sh) remains a compatibility entry point. | Preserve child exit/signal behavior and authorized evidence handoff. Normal ingestion does not repeat shell environment/version detection. |
 | Top-level and per-test shell aliases | [Runner alias](../../validation-tests/run-test.sh), storage/NCCL/DL wrappers; descriptors select canonical per-test runners. | Keep aliases while external use is unknown; no new aliases. |
 | Live lifecycle, source and maintenance scripts | Runbook, workspace live-status collector and source-shipping workflow. | Preserve status/start/stop and independent mutation gates; helpers may be consolidated behind stable entry points. |
 
-Decision: no public command, output format, alias or writer hook is removed in
-Phase 1. C2 stays a thin adapter; retain existing implementation until its owner
-can replace it without stranding callers. Unknown external usage blocks retirement,
-not correctness fixes that preserve the interface. Python helpers are internal;
-all repository call sites must move together if an internal signature changes.
+Decision carried through Phase 6: no public command, output format, alias or writer
+hook is removed. C2 stays an adapter to existing owners. Unknown external usage
+blocks retirement, not correctness fixes that preserve the interface. Private
+helpers may be removed only with repository/dynamic caller review and a focused
+check. No command or maintenance invocation was executed to prove live acceptance.
 
 ## Removed Settings and Migration
 
@@ -155,5 +155,6 @@ submissions. Record partial receipts from real failures when available; do not
 manufacture a second-create failure with a fake client. Keep empty/unavailable and
 failed-test/failed-command distinctions under the
 [real-node policy](Redesign.md#real-node-validation-policy). Unobserved cases remain explicit.
-Priority P1 for interface cleanup, P0 for bypass
-closure; medium risk to external callers. No command retirement is authorized here.
+Admission bypass closure is source-implemented; exact-commit runtime acceptance is
+pending. Public retirement and a universal output redesign are deferred, not Phase 6
+requirements. No command retirement is authorized here.

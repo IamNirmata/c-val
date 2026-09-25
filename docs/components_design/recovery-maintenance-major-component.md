@@ -65,19 +65,19 @@ utilities are counted once under C5/C7.
 
 1. Tools have operation-specific plan/manifest structures. Different fields alone
    do not justify standardization; the runbook must explain which proof each needs.
-2. The old layout note described September 9 paths as current even after code
-   adopted consolidated log paths. Dated inventory must not guide new mutations.
+2. Historical layout inventories remain dated; the retained-path table below
+   describes source configuration, not fresh proof for a live mutation.
 3. Quiescence includes every consumer; a stopped loop or absent pod reference
    alone does not prove no process holds a file open.
 4. Whole-tree inventory/hashing can be costly. Partial counts must be labeled
    lower bounds, never evidence that a directory is empty or unused.
 
-## Proposed Design
+## Design Disposition
 
-Phase 5 reviews the existing tools, instructions and retained manifests read-only;
-it does not introduce recovery features. Keep separate schemas, tools and approval
-gates unless a demonstrated duplicate or defect warrants a smaller fix. No generic
-maintenance protocol, new receipt format, recovery framework or test harness.
+Phase 5 completed the read-only tool/instruction/manifest review; Phase 6 retains
+its result. No duplicate or defect justified changing maintenance implementations
+or their operation-specific schemas. Generic recovery protocols, new receipt formats
+and automated restore exercises are deferred, not source-completion requirements.
 
 Preserve existing identity, plan-hash, capacity, quiescence and verification checks.
 Any backup, migration, move, restore or rollback needs its own exact approval and

@@ -1,6 +1,7 @@
 # c-val Framework Redesign
 
-Status: design proposal, not implemented or approved for live mutation.
+Status: Phases 1-5 source implemented; Phase 6 reconciles contracts and remaining
+limits. Fresh runtime acceptance and live activation remain pending.
 Baseline: `647848a6279d992d4327aecadece3a4aaf3e7b7e`, 2026-09-23.
 Direction update after `301d109`: minimal component boundaries and real-node
 runtime validation; source-size baseline unchanged.
@@ -16,11 +17,10 @@ Simplification means fewer independent decisions, not fewer safety checks.
 
 ## Goal and Scope
 
-Build a small, deterministic framework that discovers eligible GPU capacity,
+c-val is a deterministic framework that discovers eligible GPU capacity,
 executes registered validation tests and proves that each run's logs, results
-and test-owned raw rows were retained correctly. Redesign ownership from first
-principles, but migrate working behavior incrementally rather than replacing
-the deployed framework in one rewrite.
+and test-owned raw rows were retained correctly. The redesign changed ownership
+incrementally; source publication has not replaced the deployed framework.
 
 The primary goal is clear ownership with less code: one decision in one place,
 few handoffs and no duplicate execution paths. The nine component labels are a
@@ -56,15 +56,16 @@ Reconsider a choice only with measured need and a separately reviewed scope chan
 
 ## Highest-Impact Gaps
 
-These are source-review findings, not evidence of a current cluster incident.
+Baseline findings reconciled during Phase 6. All responses below are implemented
+source, not fresh cluster acceptance or evidence of a current incident.
 
-| Area | Baseline Gap | Design Response |
+| Area | Baseline Gap | Implemented Response |
 | --- | --- | --- |
-| Safety | Eligibility differs by call path; batch failures can lose receipts | C3 decision function plus C4 fresh create gate and durable reconciliation. |
-| Correctness | Node-only metric joins and log/status-only acceptance | C7 exact-run verification reused by exports and acceptance. |
-| Efficiency | Shell conversions, repeated subprocesses and duplicated monitors | One bounded Python lifecycle pass with structured inputs/results. |
-| Maintainability | Dual evidence setup and repeated DL transaction bookkeeping | Reuse existing secure owners; consolidate mechanics without removing checks. |
-| Reproducibility | Mutable benchmark dependencies and implicit runtime packaging | Pin C6 dependency identity and test C8 archive dependency closure. |
+| Safety | Eligibility differs by call path; batch failures can lose receipts | Shared eligibility, fresh admission and durable intents in Phases 1.2-1.4. |
+| Correctness | Node-only metric joins and log/status-only acceptance | Exact-run verification/exports in Phases 1.5-1.6; successful coverage in 2.5. |
+| Efficiency | Shell conversions, repeated subprocesses and duplicated monitors | Shared bounded Job/pod/log observation in Phase 2; dead helpers and redundant ingestion shell removed. |
+| Maintainability | Dual evidence setup and repeated DL transaction bookkeeping | Shared reservation/environment/cleanup in Phase 3; one private DL helper in Phase 4. |
+| Reproducibility | Mutable DL inputs and unchecked bundle dependencies | Run-local DL copies and existing environment recording; isolated archive checks and test-suite exclusion in Phase 5. No fixed image/CUDA/PyTorch requirement. |
 
 ## Target Architecture
 
@@ -106,13 +107,13 @@ or full rank-metric scan is required for every scheduling pass.
 
 ## Component Contracts
 
-Names below describe proposed in-process data contracts, not new public schemas.
-Reuse existing dataclasses and serialization where possible.
+Names below describe logical data contracts implemented through existing models
+and serialization, not a new public schema for every row.
 
 | Contract | Owner | Minimum Contents | Consumer |
 | --- | --- | --- | --- |
 | Run definition | C1 | Exact source, immutable config/digests, selected test set, resource requirements | C3-C8 |
-| Observation/eligibility | C3 | Node name/UID, observation time, config identity, capacity, state/reasons | C4 and CLI |
+| Observation/eligibility | C3 | `node_name`, observation time, config identity, capacity, state/reasons; no node replacement/UID tracking | C4 and CLI |
 | Candidate | C3 | Node, compatible coverage timestamp, priority reason | C4 |
 | Intent/receipt | C4 | Scope, run/job/node identity, requested-manifest/config/source hashes, approval binding and observed UID | Resume and reporting |
 | Canonical result/events | C5 | Existing `cval.results` and `cval.event.v1`; paths, outcomes and provenance | C7 and operators |
@@ -241,9 +242,9 @@ Contradictions are reported, not resolved by selecting the most favorable source
    enabled tests in catalog order with bounded process-group cleanup.
 7. Bind the canonical result. Write required passing-test metrics, then the final
    built-in status transaction. Preserve partial evidence on failure.
-8. Observe terminal Job phase and run the C7 exact-run verifier. Report execution,
-   test outcome and evidence separately; derive acceptance using the
-   [outcome and evidence contract](#outcome-and-evidence-contract).
+8. Track bounded Job/pod status and compact runtime logs. For explicit acceptance
+   or diagnosis, invoke C7 exact-run verification separately; do not audit all raw
+   stores during ordinary polling. Report execution, tests and ingestion separately.
 9. Retain logs, receipts, failures and unresolved work; proceed to another candidate
    only when slot state is known. No automatic prune, repair or rollout follows.
 
@@ -253,6 +254,10 @@ the [coverage policy](discovery-scheduling-major-component.md#coverage-policy);
 C4 owns observation age at create and cooldown. No retry storm or hidden pass inference.
 
 ## Lifecycle and Failure Handling
+
+The diagram includes explicit acceptance. Routine tracking uses the
+[C4 completion rules](job-control-major-component.md#phase-23-implementation),
+without requiring a raw audit to release every terminal execution slot.
 
 ```mermaid
 stateDiagram-v2
@@ -296,9 +301,10 @@ rewrite a test outcome or authorize another Job for the same run.
 | Maintenance interruption | Retain transaction manifest; separately approve validated resume or rollback. |
 
 Use the [C4 admission protocol](job-control-major-component.md#admission-and-recovery-protocol),
-not separate `run`/`validate` locks. Unknown ownership, admission uncertainty and
-pending required verification retain tracked capacity within the existing inflight
-budget. No automatic ownership takeover follows a lost heartbeat or local lock.
+not separate `run`/`validate` locks. Unknown ownership or admission uncertainty
+retains tracked capacity. Identity-bound terminal tracking can release a slot
+while log/ingestion completion remains unconfirmed; that is not acceptance.
+No automatic ownership takeover follows a lost heartbeat or local lock.
 Reconciliation compares expected workload fields as well as identities, not raw
 object hashes after Kubernetes defaulting. Exactly-once creation is not promised.
 
@@ -352,11 +358,11 @@ Configuration, CLI and release tools support this path; they must not duplicate 
 ## Implementation Strategy
 
 The [redesign development plan](redesign-development-plan.md) owns the ordered
-phases, task checklists, changes, dependencies and completion criteria. Agree
-contracts first, close correctness gaps, then consolidate control, runtime and
-persistence before delivery hardening and approved compatibility retirement.
-The plan distinguishes preferred rollout order from actual prerequisites. Phase 0
-defines real-node checks through existing tools, not a new automated-test framework.
+phases, task checklists, changes, dependencies and completion criteria. Source work
+closed correctness gaps and consolidated control, runtime, persistence and delivery;
+Phase 6 reconciles documentation and retains uncertain deletion candidates.
+Public compatibility retirement is deferred. Fresh real-node testing waits until
+all source phases finish, using existing tools and the final exact commit.
 
 Each change is independently reviewable, not permission for a live action.
 Runtime changes must publish an isolated exact commit and pass the plan's
@@ -405,9 +411,9 @@ authorized by this policy; use the exact approval and rollback gates each time.
 | Document | Owns |
 | --- | --- |
 | [Major-component overview](major-components-overview.md) | Component map, baseline measurements and links. |
-| This document | Proposed architecture, contracts, process and migration principles. |
+| This document | Shared contracts, implemented design decisions and explicit limits. |
 | [Development plan](redesign-development-plan.md) | Ordered phases, task checklists, expected changes and completion gates. |
-| Individual component pages | Current responsibility, issues, ratings and proposed design. |
+| Individual component pages | Source ownership, baseline counts, implementation evidence and deferred work. |
 | [Current architecture](../architecture.md) | Implemented runtime, not future promises. |
 | [Configuration](../configuration.md), [runbook](../operations-runbook.md), [result schema](../result-schema.md) | Current settings, operating commands and data formats. |
 | [Cleanup review](../cleanup-review.md) | Dated accepted work and preserved historical evidence. |
@@ -418,9 +424,9 @@ do not read or modify conversation archives or user-owned untracked files.
 
 ## Phase 0 Decision Record
 
-Contracts are fixed below; implementing them is Phase 1 onward. Real host/node,
-source/config and mutation commands are bound by each separate operational approval,
-not inferred from this document or the local Git checkout.
+Contracts were fixed in Phase 0; the dispositions below reflect subsequent source
+work. Real host/node, source/config and mutation commands still need separate
+operational approval, not inference from this document or the local Git checkout.
 
 | Decision | Owner | Contract / Remaining Gate |
 | --- | --- | --- |
@@ -428,7 +434,7 @@ not inferred from this document or the local Git checkout.
 | Admission storage and ownership | C4 | [State contract](job-control-major-component.md#phase-0-state-contract); one approved host/session, serialized creates, v2 for new intent-bearing sessions and preserved v1 history. |
 | Resource-accounting limits | C3 | Accept only supported, observed node/pod resource forms; reject unknown accounting rather than claim scheduler-equivalence. Verify deployed cases during real acceptance. |
 | Dependency identity | C6/C8 | Preserve variable image/CUDA/PyTorch/iteration inputs and their existing recorded values. Review only necessary per-run DL source/plan consistency; no fixed-version image requirement, speculative provenance fields or historical backfill. |
-| Interface retirement | C2 | [Compatibility inventory](operator-interface-major-component.md#phase-0-compatibility-inventory): no retirement in Phase 1; unknown external callers keep interfaces supported. |
+| Interface retirement | C2 | [Compatibility inventory](operator-interface-major-component.md#phase-0-compatibility-inventory): retained through Phase 6; unknown external callers keep interfaces supported. |
 
 Do not silently choose a new service, database, public plugin capability or
 on-disk schema to resolve these decisions. Record the smallest compatible choice

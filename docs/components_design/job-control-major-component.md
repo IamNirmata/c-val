@@ -109,8 +109,8 @@ The shell loop alone is 1,871 lines; this is a concentration, not a deletion tar
 2. Phases 2.3-2.4 share observation identity/deadlines, batch inventories and read
    incremental logs. Phase 2.5 uses that batch path from both shell watchers;
    phase alone is not success.
-3. New-source submission, crash recovery and evidence-release transitions still
-   need separately approved live acceptance. Do not activate an incomplete Phase 1 stack.
+3. New-source submission, crash recovery and slot-release transitions still need
+   separately approved live acceptance of the final combined source candidate.
 
 ## Phase 1.3 Implementation
 
@@ -369,19 +369,14 @@ shell loop was not run; live durable writes, scheduling after failure, resume an
 pruning equivalence remain unverified. Retained real evidence validates the shared
 report boundary, not fresh source execution or live controller acceptance.
 
-## Proposed Design
+## Design Disposition
 
-### Phase 1 Integration Completion
-
-Implemented by the manager and state helper: one cooldown contract, retained v2
-intents and bounded reconciliation. Missing derived CSV can be rebuilt; missing
-authoritative state cannot. See the protocol below rather than a second roadmap.
-
-### Remaining Design
-
-Shared observation and shell consolidation are source-implemented, not future
-features. Remaining work is approved end-to-end acceptance, not another control
-framework. Detailed C7 verification stays outside routine polling.
+Implemented: shared admission, v2 intents, cooldown, bounded reconciliation and
+active/resumed Job/pod/log tracking. Missing derived CSV can be rebuilt; missing
+authoritative state cannot. Detailed C7 verification stays outside routine polling.
+Retain the shell's launch/selection/prune boundaries; no all-Python controller or
+cross-host failover is required. Those extensions are deferred, not unfinished
+Phase 6 tasks. Remaining work is approved end-to-end acceptance.
 
 ## Admission and Recovery Protocol
 

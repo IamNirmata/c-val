@@ -62,8 +62,8 @@ SQLite retry/URI and status. Workload plugins belong to C6; config paths to C1.
 | --- | --- | --- |
 | Critical | Writer-boundary authorization, idempotency, locks, receipts, status-last publication, read-only audits | Preserve. |
 | Good | Raw CSV, bounded exact-run queries, relocation-aware historical readers | Keep identity and missingness visible. |
-| Not important | Multiple display-time formats and convenience aliases | Keep only where callers need them. |
-| Useless | Independent latest metrics presented as belonging to newer status | Remove the misleading join, not historical metrics. |
+| Retained | Multiple display-time formats and convenience aliases | Public compatibility is unchanged in Phase 6. |
+| Removed | Independent latest metrics presented as belonging to newer status | Phase 1.6 uses exact-run joins; historical metrics remain. |
 
 ## Current Issues
 
@@ -75,7 +75,8 @@ SQLite retry/URI and status. Workload plugins belong to C6; config paths to C1.
 ## Phase 1.5 Implementation
 
 The [shared verifier](../../cval/storage/verification.py) is the read-only C7 owner
-used by targeted validation and terminal admission reconciliation. The caller
+used for targeted acceptance and diagnosis. Phase 2 replaced routine terminal
+admission audits with Job/pod/log observation. The verifier's caller
 supplies its retained intent and frozen configuration; expected values never come
 from the canonical result being checked. Job UID/controlled fields, submitted
 snapshot digest, test descriptors, destinations, owned pod/node/runtime and stable
@@ -103,8 +104,8 @@ and never invokes writer authorization. It reuses existing parsers and SQLite
 identity helpers. Explicit `monitoring.verification_max_bytes` and
 `monitoring.verification_max_files` bound artifact reads; exceeding either is
 unavailable, not missing. Reports retain per-source states, artifact hashes and
-the reader-source hash. Unreadable sources keep reservations even when another
-source is known to conflict.
+the reader-source hash. Unreadable sources block acceptance; execution-slot release
+is separately governed by [C4 tracking](job-control-major-component.md#admission-and-recovery-protocol).
 
 The `cval.verification.v1` report separates `complete`, `accepted` and `release`.
 Acceptance requires the verified successful terminal Job/pod and a nonempty set
@@ -188,22 +189,18 @@ retry, rollback and partial-generation behavior will be checked after all phases
 are implemented, under separate approval. Reader optimization has no measured
 need in this phase; no new cache, index or query path was added.
 
-## Proposed Design
+## Design Disposition
 
-1. Keep one coordinator and explicit test-owned writers. Share only private DL
-   transaction bookkeeping; keep fixed schemas/SQL visible. Do not build an ORM,
-   generic per-test DB or a second raw history store.
-2. Keep result/config/path revalidation at every writer boundary. Retry only bounded
-   BUSY/LOCKED operations; retain the same DL lock during retries. Never roll back
-   prior stores by deleting raw rows after a later store fails.
-3. Provide one read-only exact-run verifier for C2/C4 using the protocol below.
-   Return raw outcomes and evidence completeness separately; C4 applies acceptance.
-   Follow C6's test-owned requirements, including result-only custom tests.
-4. Query the requested run, not only `latest_status`; a newer completed run must
-   not hide evidence for the run being accepted. Export exact-run joins or expose
-   separate metric timestamps/age and missing values.
-5. Keep reads bounded with `mode=ro` and `query_only=ON`; measure query plans before
-   proposing additive indexes. Do not silently repair or migrate an audit target.
+Implemented: one ingestion coordinator, shared private DL bookkeeping, exact-run
+verification and exact-timestamp exports. Test-owned schemas, authorization,
+locking, bounded SQLite retries and status-last publication remain unchanged.
+No generic transaction spans stores, and partial raw rows are not deleted after
+a later failure. The protocols below are retained contracts, not new phase tasks.
+
+Reader optimization has no measured need and is deferred. Local CSV publication
+is not atomic; see the [export limitation](operator-interface-major-component.md#reporting-contract).
+Fresh write/rollback/generation acceptance remains pending; source equivalence and
+historical reads do not certify the final executable candidate.
 
 ## Exact-Run Verification Protocol
 
@@ -240,7 +237,9 @@ Use node/run keys and existing indexes, with explicit coverage limits.
 A failed required metric write cannot authorize final status. Failure after the
 final commit, such as writing a terminal log event, can leave committed rows without
 a completion acknowledgement. Retain both facts; never delete rows or claim no
-write occurred. C4 must stop automatic admission on unresolved storage failures.
+write occurred. C4 records ingestion failure independently of terminal slot release;
+it does not rerun that workload to repair storage. Unknown Job/pod ownership still
+blocks release, and unavailable coverage reads block automatic planning.
 
 Disk-full, permission and durability errors need explicit diagnosis, not evidence
 pruning. Retrying the same authorized ingestion is distinct from rerunning the

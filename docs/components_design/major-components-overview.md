@@ -1,7 +1,9 @@
 # Major Components Overview
 
 Design baseline: `647848a6279d992d4327aecadece3a4aaf3e7b7e` (2026-09-23).
-This is a proposed redesign, not implemented behavior or live-state evidence.
+Phases 1-5 source work is implemented; Phase 6 reconciles this map with the code.
+Fresh exact-commit acceptance and activation remain pending. Baseline counts below
+are historical; they are not current source counts or live-state evidence.
 
 ## In Simple Terms
 
@@ -16,22 +18,22 @@ logs, results and test-owned raw ingestion. It does not classify, rank, score,
 repair or automatically cordon nodes. Post-processing is outside this framework.
 
 Nine logical responsibilities are mapped below, not nine mandatory modules.
-They share one Python package and existing command-line entry points. Phase 0
-can merge forwarding-only boundaries; no new service or abstraction is implied.
+They share one Python package and existing command-line entry points; no new
+service or abstraction is implied.
 
 Read [Redesign.md](Redesign.md) for architecture and contracts, and the
 [development plan](redesign-development-plan.md) for phases and task checklists.
-Component pages describe the baseline first, then proposed changes.
+Component pages retain baseline counts and identify implemented work and limits.
 
 ## Reading Guide
 
 1. Use this page for boundaries and measured size.
 2. Read the [architecture](Redesign.md) for shared contracts and failure decisions.
-3. Read an individual component for its current issues and proposed changes.
+3. Read an individual component for its source implementation and remaining limits.
 4. Use the [development plan](redesign-development-plan.md) for tasks and gates.
 
-"Current" refers to the source baseline, not a live-cluster claim. "Proposed"
-requires implementation and verification. The task list is not rollout approval.
+Source implementation does not imply cluster acceptance. Remaining proposals are
+explicitly deferred or retained; the task list is not rollout approval.
 
 The main goal is one clear owner for each decision with minimal code. Prefer
 existing functions to new classes, layers or wrappers; remove duplicated logic
@@ -53,8 +55,8 @@ without building fake-cluster or synthetic-test infrastructure.
 
 ## Phase 0 Ownership Contract
 
-Development decisions, not a claim that all current paths already enforce them.
-Keep existing modules; no new service, directory split or forwarding wrapper is required.
+These decisions now have the source owners below; fresh runtime acceptance remains
+pending. No new service, directory split or forwarding wrapper was required.
 
 | Owner | Receives | Owns / Returns | Must Not Own |
 | --- | --- | --- | --- |
@@ -73,12 +75,13 @@ path but retain different responsibilities: process/evidence safety versus test
 meaning. C7 retains explicit per-test writers. Merge duplicate implementations
 inside these owners, not their safety boundaries.
 
-The current [plan handler](../../cval/cli.py#L552) and
-[submission manager](../../cval/jobs/manager.py#L43) demonstrate the planning/create
-split. Their shared caller's supplied node list is not fresh eligibility proof;
-closing that admission gap belongs to Phase 1, not this contract-only phase.
+The [plan handler](../../cval/cli.py) remains read-only; the
+[submission manager](../../cval/jobs/manager.py) owns shared admission and fresh
+eligibility for both batch and targeted callers. A supplied node list is not
+eligibility proof. Normal tracking uses shared Job/pod/log observation; detailed
+raw verification is reserved for explicit acceptance and diagnosis.
 
-## Proposed Flow
+## Source Flow
 
 ```mermaid
 flowchart LR
@@ -114,8 +117,9 @@ complete evidence and a passing validation are different results.
 
 ## Baseline Size
 
-Counts use current files assigned to their proposed primary owner. They are not
-estimates of the future implementation or a reason to discard tests.
+Counts use baseline files assigned to their primary owner. They are not current
+measurements or a reason to discard tests. Phase 6 final deltas are recorded in
+the [development plan](redesign-development-plan.md).
 
 | ID | Code Files | Code Lines | Config Files | Config Lines | Test Files | Test Lines |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
