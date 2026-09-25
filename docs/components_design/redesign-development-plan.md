@@ -298,28 +298,55 @@ delete partial raw rows, or use a generic transaction abstraction across stores.
 
 ## Phase 5: Harden Delivery
 
-**What it does:** Make lean packaging, regression checks and recovery repeatable.
-**Changes:** Runtime archive selection and approved real-environment verification;
-no automatic backup, migration or deployment.
+**What it does:** Trim the source bundle without breaking the existing delivery path.
+**Changes:** A small reviewed archive-selection change, if measurements justify it;
+reuse the current source renderer, bootstrap, release checks and recovery tools.
+
+### Reviewed Scope
+
+The Phase 1-4 retrospective favors one owner per behavior, not new frameworks or
+extra fields. Source hashing, embedded commit checks and immutable ConfigMap delivery
+already exist. Do not rebuild them or add a package manager, wheel-distribution
+workflow, bundle variants, new service or generated dependency-analysis system.
+
+Start with the top-level `tests/` archive entry as an exclusion candidate, not a
+repository deletion. Check actual imports, package data and dynamic helpers first:
+the ingestion lock and admission cooldown are loaded from `scripts/`. Preserve
+complete registered workload directories, descriptors, plugin support files,
+templates and the shared bootstrap. Do not blindly remove all scripts or inspect
+only static Python imports when deciding what the runtime needs.
+
+Images, CUDA, PyTorch and workload settings remain selectable test inputs. No new
+image, dependency version pin, automatic deployment, backup or cleanup is in scope.
+Real-node and recovery exercises remain deferred until all phases are implemented,
+with exact approval required for each live mutation.
 
 ### Tasks
 
-- [ ] **5.1** Identify runtime dependency closure, including dynamically loaded helpers;
-  exclude host-only tests/files from bundles only after proving they are not required.
-- [ ] **5.2** Verify archive identity/hash locally, then validate startup and required
-  helpers in real Jobs. Approve each placement workflow separately; measure bundle reduction.
-- [ ] **5.3** Review recovery using existing tools and retained real manifests. Any
-  backup, journal migration or isolated restore needs exact scope/rollback approval;
-  use verified real evidence, never fabricated data or overwrite of authoritative stores.
-- [ ] **5.4** Standardize shared maintenance identity/plan/verification fields only
-  where duplication is real; retain explicit action-specific gates and manifests.
-- [ ] **5.5** Keep the real-run verification procedure in the existing runbook and
-  retain source/config/evidence references. Do not add a parallel CI simulation suite.
+- [ ] **5.1** Measure a candidate bundle with confirmed host-only files excluded.
+  Change only the existing source renderer's selection; keep required files byte-identical
+  to the commit. Report compressed size, member count and missing dependencies.
+  Keep uncertain files rather than add wrappers or fallback downloads.
+- [ ] **5.2** Reuse existing archive/hash/commit and render checks on the prepared
+  bundle, independently of the host checkout. Preserve both source transports and
+  placement templates. Local import/render checks are packaging checks, not GPU
+  acceptance; actual in-pod startup/ingestion verification waits until all phases finish.
+- [ ] **5.3** Review recovery instructions against existing tools and retained
+  manifests, read-only. Fix only demonstrated inconsistencies. No backup, journal
+  migration, restore, PVC move or raw-data modification is part of implementation.
+- [ ] **5.4** Leave maintenance schemas and APIs unchanged by default. Different
+  operations do not need identical manifests. Consolidate only a proven duplicate
+  with a smaller replacement; otherwise record no change as the outcome.
+- [ ] **5.5** Link the existing runbook procedure and retain one concise acceptance
+  checklist for the final exact commit. No new script, test harness or duplicate
+  release document. Keep publication, source creation, acceptance and activation separate.
 
-**Done when:** A smaller bundle runs on a real node without undeclared dependencies;
-approved recovery checks verify preserved evidence, or their remaining gate is explicit.
-**Risk/control:** Medium delivery risk; high risk for live recovery operations,
-which remain separately approved and never run merely to complete a checklist.
+**Source complete when:** Justified exclusions and local packaging checks pass,
+recovery inconsistencies are resolved or documented, and deferred gates are explicit.
+**Accepted when:** After all phases, approved real Jobs run from the bundle without
+undeclared host files; any separately approved recovery exercise preserves evidence.
+**Risk/control:** Do not trade a few archive bytes for fragile startup or hidden
+downloads. Keep old bundles and raw evidence; never run live recovery to tick a box.
 
 ## Phase 6: Retire Redundancy
 

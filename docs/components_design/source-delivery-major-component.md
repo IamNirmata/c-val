@@ -1,6 +1,8 @@
 # C8: Source Delivery
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 5 scope reviewed on 2026-09-25; bundle exclusions are not implemented.
+Real-node acceptance waits until all phases are implemented. Baseline/counting:
+[overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -63,9 +65,11 @@ The PVC access template is C9; global configuration is C1.
 
 ## Current Issues
 
-1. The source archive includes host tests and all scripts; runtime dependency
-   closure is implicit, including the dynamically loaded DL lock helper.
-2. An exact c-val commit does not pin a container tag or shared DL source tree.
+1. The source archive includes the top-level test suite. Some scripts are runtime
+   dependencies, including dynamically loaded DL locking and admission cooldown;
+   excluding the entire scripts directory would break supported paths.
+2. Image/framework variation is intentional, not a delivery defect. DL uses a
+   checked run-local source copy; an exact c-val SHA alone does not fix all inputs.
 3. Source publication and runtime activation are distinct but easy to confuse.
    A new source object does not update existing Jobs or an already-running loop.
 4. Installation assumes a source checkout for descriptors/templates/scripts;
@@ -74,8 +78,8 @@ The PVC access template is C9; global configuration is C1.
 ## Proposed Design
 
 1. Keep the current source renderer, immutable ConfigMap transport and shared
-   bootstrap. Maintain a small explicit runtime file allowlist; validate it in a
-   real Job using the prepared bundle, without the host source checkout.
+   bootstrap. Start with a small exclusion from the existing `SOURCE_PATHS`, not
+   per-file dependency machinery or new bundle modes. Retain uncertain dependencies.
 2. Retain repository-local installation as the supported model initially. Do not
    add a wheel-distribution project solely to move files.
 3. Bind source SHA, archive hash, manifest hash and effective config digest in one
@@ -85,6 +89,23 @@ The PVC access template is C9; global configuration is C1.
    activation. Verify each observed identity; preserve previous artifacts and
    approval records. Never automatically apply a rollback on failed acceptance.
 
+### Reviewed Packaging Candidate
+
+At `31532cf41a482ad483ace37d3893528cec69231b`, the existing archive contained 118
+files and 307,048 compressed bytes. Removing only the top-level `tests/` entry in
+an in-memory comparison produced 85 files and 206,666 bytes: 100,382 bytes smaller
+(about 33%). All remaining file bytes and the embedded commit were unchanged;
+bootstrap, templates, main config, DL lock and cooldown helpers remained present.
+Measurement evidence: `run-logs/phase5-review-bundle-20260925.json`.
+
+This supports reviewing that one exclusion, not declaring dependency closure proved.
+Before changing the renderer, verify imports, config/descriptor loading, plugin
+support files and both template renders from the extracted candidate without the
+host checkout. Preserve the repository test suite; archive exclusion is not deletion.
+Real Jobs and ingestion remain deferred until all phases finish. Do not claim faster
+startup from archive size alone. No custom image or environment version pin is needed.
+The [Phase 5 plan](redesign-development-plan.md#phase-5-harden-delivery) owns task status.
+
 ## Identity Chain
 
 | Identity | What It Establishes | What It Does Not Establish |
@@ -93,7 +114,7 @@ The PVC access template is C9; global configuration is C1.
 | Archive SHA-256 and embedded Git identity | Exact prepared bundle bytes and declared revision | Trust if both payload and expected hash came from an unreviewed source. |
 | Config digest | The admitted effective test/settings definition | Compatibility of every prior run or permission to mutate. |
 | Requested-manifest digest | The reviewed create request | Byte-for-byte equality with Kubernetes' defaulted object. |
-| Image/DL artifact identities | Pinned workload inputs | Identical drivers, hardware conditions or timings. |
+| Recorded image/framework and run-local DL inputs | The selected experiment environment and prepared source | A fleet-wide fixed version, identical hardware conditions or timings. |
 | Observed Job UID | The concrete created resource | Passing tests or complete raw evidence. |
 
 Validate controlled workload fields as well as labels/annotations on readback.

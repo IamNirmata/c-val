@@ -61,8 +61,8 @@ utilities are counted once under C5/C7.
 
 ## Current Issues
 
-1. Tools have different plan/manifest structures. Reconstructing an end-to-end
-   restore from isolated successes requires operator knowledge.
+1. Tools have operation-specific plan/manifest structures. Different fields alone
+   do not justify standardization; the runbook must explain which proof each needs.
 2. The old layout note described September 9 paths as current even after code
    adopted consolidated log paths. Dated inventory must not guide new mutations.
 3. Quiescence includes every consumer; a stopped loop or absent pod reference
@@ -72,16 +72,16 @@ utilities are counted once under C5/C7.
 
 ## Proposed Design
 
-Keep the separate tools and approval gates. Standardize only shared identity,
-plan-hash and verification fields that reduce real duplication; do not create
-a universal destructive-operation engine. Use the existing tools and retained
-real manifests. Any new backup, migration or isolated restore verification needs
-its own exact approval; do not create synthetic recovery fixtures or a new harness.
+Phase 5 reviews the existing tools, instructions and retained manifests read-only;
+it does not introduce recovery features. Keep separate schemas, tools and approval
+gates unless a demonstrated duplicate or defect warrants a smaller fix. No generic
+maintenance protocol, new receipt format, recovery framework or test harness.
 
-Give every operation an explicit staged state and durable receipt. Resume or
-rollback must validate the recorded identities, backup manifest and destination
-collisions before touching data. No auto-prune, automatic restore or metadata
-rewrite belongs in the controller.
+Preserve existing identity, plan-hash, capacity, quiescence and verification checks.
+Any backup, migration, move, restore or rollback needs its own exact approval and
+destination-collision review. Real exercises wait until all phases are implemented;
+they are not actions to perform merely to finish the source work. No auto-prune,
+automatic restore or metadata rewrite belongs in the validation controller.
 
 ## Recovery Proof
 
