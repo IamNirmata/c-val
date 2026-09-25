@@ -9,6 +9,7 @@ Phase 4 source consolidation and preservation review are complete. Per the
 source completion is not cluster acceptance or activation approval.
 Phase 5 packaging and recovery review are source-complete; in-pod acceptance
 remains deferred until the remaining phases are implemented.
+Phase 6 scope/tasks were reviewed on 2026-09-25; implementation has not started.
 The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). The implementation and acceptance
 states above are separate; publication does not authorize live mutations.
@@ -17,9 +18,10 @@ Component IDs refer to the [major-component overview](major-components-overview.
 
 ## In Simple Terms
 
-First agree who owns each job and how to describe its results. Then make one small
-change, validate the exact published commit with real tests on real nodes, and
-remove replaced code after verification. Keep the framework and its tooling small.
+Agree who owns each job and how to describe its results. Make small source changes
+with focused local checks, finish the remaining source phases, then validate the
+final exact published commit with approved real tests on real nodes. Keep the
+framework and its tooling small; local checks do not establish runtime acceptance.
 
 ## Working Rules
 
@@ -28,7 +30,9 @@ remove replaced code after verification. Keep the framework and its tooling smal
 - Preserve public commands, canonical results and raw stores unless a migration is
   reviewed. No one-release rewrite, evaluator, generic per-test DB or new service.
 - Retain raw history, test-owned persistence and explicit mutation approvals.
-- Check off reviewed, published tasks with the required real-run evidence and concise docs.
+- Check off source-only review/cleanup tasks after publication and their stated
+  checks. Tasks that include runtime acceptance stay open until real-run evidence
+  supports them; the phase status must distinguish implemented from accepted.
 - Track **published**, **cluster-accepted** and **active** separately. Task completion
   never authorizes creation, restart, deletion or migration.
 - Use real workloads on eligible real nodes through existing commands. Do not
@@ -46,12 +50,14 @@ remove replaced code after verification. Keep the framework and its tooling smal
 | 2. Consolidate Control | One lifecycle implementation for manual and continuous runs | C2-C4 | Phase 1 | Lost resume/cooldown state |
 | 3. Simplify Runtime | One secure evidence setup and reproducible workloads | C1, C5-C6 | Phase 1; stable run-definition contract | Evidence integrity or changed measurements |
 | 4. Simplify Persistence | Shared writer mechanics with unchanged raw contracts | C6-C7 | Phase 1; fixed writer/evidence contract | Partial or divergent writes |
-| 5. Harden Delivery | Smaller verified bundles and approved real-environment recovery checks | C8-C9 | Phases 3-4 for final bundle/integration checks | Missing dependencies or incomplete recovery |
-| 6. Retire Redundancy | Approved interface removals and compact current documentation | C2; all documentation | Phases 2-5 and caller migration | Breaking external users |
+| 5. Harden Delivery | Smaller locally checked bundles and read-only recovery review | C8-C9 | Phases 3-4 source work; live acceptance deferred | Missing dependencies or incomplete recovery |
+| 6. Final Cleanup | Proven internal deletions, reconciled docs and final acceptance handoff | Existing owners; all documentation | Phases 1-5 source work; no prerequisite live run | Breaking compatibility or overstating acceptance |
 
 Controller consolidation is not a prerequisite for a private writer-helper change.
 Runtime and persistence changes can be prepared independently against fixed contracts;
-integrate and accept each exact commit separately before combining deployed changes.
+publish isolated changes, then accept the final combined exact commit after all
+source phases. Any subsequent runtime/config change needs acceptance at its new
+identity; earlier or historical runs cannot certify it.
 
 ## Phase 0: Agree Contracts
 
@@ -361,37 +367,110 @@ undeclared host files; any separately approved recovery exercise preserves evide
 **Risk/control:** Do not trade a few archive bytes for fragile startup or hidden
 downloads. Keep old bundles and raw evidence; never run live recovery to tick a box.
 
-## Phase 6: Retire Redundancy
+## Phase 6: Final Cleanup and Reconciliation
 
-**What it does:** Remove proven duplicate interfaces and documentation after migration.
-**Changes:** Approved compatibility hooks/aliases, obsolete branches and duplicate
-explanations. Do not remove safety checks or historical readers to meet a size target.
+**What it does:** Close the redesign against the code that now exists, remove only
+proven internal redundancy, and hand off one exact source candidate for acceptance.
+**Changes:** Bounded internal deletions if justified, corrections to existing docs,
+and a concise completion record in this plan. Zero runtime changes is a valid outcome.
+
+### Reviewed Scope
+
+This is not another architecture phase. Phases 2-5 already consolidated tracking,
+runtime setup and writer mechanics, removed dead helpers, and trimmed the bundle.
+Do not reopen those implementations, move files to meet a size target, or add a
+cleanup framework, compatibility layer, new settings, service or test-wrapper script.
+
+Public commands, JSON/CSV fields, exit behavior, shell aliases, compatibility writer
+hooks and maintenance entry points are retained. The
+[caller inventory](operator-interface-major-component.md#phase-0-compatibility-inventory)
+records unknown external usage; no repository reference is not proof of disuse.
+Public retirement needs a separately approved migration and is not a Phase 6 gate.
+Keep historical readers, raw stores, evidence/approval guards and selectable test
+environments. Do not delete tests merely because they are excluded from the bundle.
+
+Source cleanup must be possible before the deferred real-node tests. An internal
+deletion needs an identified retained owner, reviewed repository and dynamic callers,
+and a focused check; if its safety depends on a fresh live run or unresolved usage,
+retain it and record the decision. That is a completed review, not accepted behavior.
+No cluster cleanup, source activation, backup, migration or raw-data change belongs
+to this phase. There is no deletion quota or required runtime performance gain.
 
 ### Tasks
 
-- [ ] **6.1** Recheck Phase 0's caller inventory; obtain explicit retirement decisions
-  and publish replacements before removing any supported command or alias.
-- [ ] **6.2** Delete replaced implementations only after callers and regression tests
-  have been reviewed and real runs use the retained owner; preserve inspection versus mutation.
-- [ ] **6.3** Update current architecture, config, runbook and schema references to
-  implemented behavior; retain dated acceptance records and repair links.
-- [ ] **6.4** Remeasure source/config/test sizes and operating costs with the baseline
-  method. Explain reductions by removed duplication, not relocated or compressed code.
-- [ ] **6.5** Reconcile the improvement table and component proposals with completed
-  work; list remaining decisions and acceptance/activation status explicitly.
+- [ ] **6.1 Freeze the compatibility boundary.** Recheck only the Phase 0 inventory
+  entries affected by Phases 1-5 against current parser/dispatch, descriptors,
+  shell entry points and known workspace callers. Update the existing inventory
+  with retained interfaces and their current owners; do not build a second catalog.
+  **Exit:** Every proposed deletion is private and bounded, or explicitly retained.
+  Unknown external use has a keep decision, not an open-ended caller hunt.
+- [ ] **6.2 Remove only demonstrated leftovers.** Inspect the replaced paths named
+  by the phase records for unreachable private helpers, duplicated decisions or
+  redundant process handoffs. For each candidate, name the old symbol/path, retained
+  owner, caller evidence and cheapest discriminating check before editing. Review
+  dynamic imports, shell/descriptor references and nearby tests; a text-search miss
+  alone is insufficient. Make one small deletion and validate immediately using
+  existing tests, actual local process/filesystem checks or retained read-only
+  evidence as appropriate. Remove obsolete tests only with the retired private path;
+  preserve coverage of the retained contract. Do not add fake workload acceptance.
+  **Exit:** Each candidate is removed with evidence or retained with a reason;
+  already completed cleanup is not counted again. A newly found behavior defect
+  requiring redesign is a separate decision, not automatic Phase 6 scope expansion.
+- [ ] **6.3 Make current documentation accurate.** Reconcile existing architecture,
+  configuration, runbook, result-schema and component docs with their controlling
+  code. Prioritize stale claims that admission can be bypassed, normal ingestion
+  needs the compatibility shell launcher, failed runs refresh successful coverage,
+  or all completed implementations are still merely proposed. Label each relevant
+  proposal implemented, superseded, retained or deferred; do not turn source work
+  into accepted/deployed claims. Keep one owner for each current rule and replace
+  repeated explanations with links. Preserve explicitly dated historical decisions
+  and evidence records rather than rewriting them as current policy.
+  **Exit:** Current claims agree, changed links/anchors resolve, and every remaining
+  proposal has a disposition. No new overview, summary file or duplicate runbook.
+- [ ] **6.4 Measure the actual change once.** Reuse the documented baseline method
+  to report Phase 6 delta versus `8d4f0ca` and cumulative delta versus `b79a5e0`,
+  naming exact revisions. Separate runtime, configuration, tests and documentation;
+  explain deleted duplication versus moves or added guards. Measure the final
+  compressed source archive independently: excluding tests is not deleting code.
+  Reuse retained API/subprocess/timing observations with their original identities;
+  unmeasured current operating costs stay unavailable. No new instrumentation,
+  benchmark Job or per-file accounting report just to populate the table.
+  **Exit:** One compact before/after record in existing docs, with comparable
+  measurements and explicit limits; no size or speed claim without evidence.
+- [ ] **6.5 Close the source plan and hand off acceptance.** Reconcile the existing
+  improvement table and task statuses using the dispositions from 6.1-6.4. Record
+  source completion, unresolved acceptance cases and activation separately here;
+  keep evidence in existing release artifacts, not a new status system. Publish
+  the final isolated commit, prepare and verify its source manifest/config snapshot
+  with the existing renderer and packaging check, and link the
+  [final acceptance checklist](../operations-runbook.md#real-node-development-procedure).
+  The handoff must identify the exact candidate, required checks, evidence locations
+  and pending approvals. Historical/local evidence cannot check off fresh runtime
+  acceptance; installed Volcano single-attempt behavior remains explicitly unverified.
+  **Exit:** No undecided in-scope source task; one candidate is ready for separately
+  approved source creation and real-node validation, without resuming the live loop.
 
-**Done when:** No known caller or operational contract is stranded; required real-run
-evidence and links verify; measurements and remaining backlog are recorded.
-**Risk/control:** Medium compatibility risk; retain rollback source and defer
-retirement when external usage is unknown.
+**Source complete when:** All five tasks have a reviewed disposition, justified
+edits pass focused checks, current docs/links agree, and the exact published
+candidate plus pending gates are recorded. No GPU run is needed to declare this
+source milestone; unsafe or unproven deletion candidates remain in place.
+**Accepted when:** After all source phases, approved validation of the final exact
+commit meets the existing release/runbook contract. Unexercised failure, transport,
+placement and recovery paths remain explicitly unverified; activation is separate.
+**Risk/control:** Deletion is not the objective. Preserve public compatibility,
+historical evidence and safety boundaries; stop when the bounded review is closed.
+Do not use cleanup approval as permission to mutate Kubernetes or PVC data.
 
 ## Release Gate
 
-Gate each runtime change, not just phase completion. Documentation-only changes
-need content/link checks and publication, not GPU jobs.
+Gate source publication, runtime acceptance and activation separately. Under the
+reviewed schedule, complete all source phases before fresh real-node testing; no
+intermediate commit is implicitly accepted. Documentation-only changes need
+content/link checks and publication, not GPU jobs.
 
-1. Review only task changes; use lightweight syntax/content checks as needed and
-  publish an isolated exact commit. Runtime acceptance always uses real-node tests.
+1. Review only task changes; use focused checks and publish an isolated exact
+  commit. After all source phases, runtime acceptance uses the final combined
+  exact commit on real nodes, not an earlier phase's source or historical results.
 2. Render the exact source ConfigMap offline; verify archive identity/hash and
    source/config/manifest references against trusted expectations. Retain previous artifacts.
 3. Obtain exact create/rollback approval; create and read back the immutable source
@@ -412,8 +491,11 @@ writes or second controller against unresolved work.
 ## Review Before Closing a Task
 
 1. Name the behavior being preserved or deliberately changed, and its owning component.
-2. Link real-run evidence for the behavior; label failure cases not safely exercised.
+2. Link the checks appropriate to the task: content/links for docs, focused local
+  evidence for source cleanup, real-run evidence for runtime acceptance. Keep the
+  latter pending until exercised; label failure cases not safely tested.
 3. Compare public outputs, raw schemas/rows and historical readability where affected.
 4. Record exact commit/config, focused checks and remaining acceptance/activation gates.
-5. Delete the old path only after caller migration; a file move or added wrapper
-  alone is not a reduction in complexity.
+5. Delete a private old path only with caller/ownership evidence and focused checks;
+  defer uncertain candidates. Public retirement requires separate migration approval.
+  A file move or added wrapper alone is not a reduction in complexity.
