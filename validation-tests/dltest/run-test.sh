@@ -116,8 +116,8 @@ echo "DL iterations: $CVAL_DL_ITERATIONS"
 echo "DL GPU count: $GPU_COUNT"
 
 (
-    cd "$DLTEST_WORK_DIR" || exit 1
-    PYTHONPATH="$DLTEST_WORK_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+    cd -P "$DLTEST_WORK_DIR" || exit 1
+    PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}" \
         torchrun --nnodes=1 --nproc_per_node="$GPU_COUNT" -m dl_unit_test \
             --test_plan "$CVAL_DL_TEST_PLAN" \
             --iterations "$CVAL_DL_ITERATIONS"

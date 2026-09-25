@@ -2,9 +2,11 @@
 
 Runs six FIO profiles from [test_config.toml](test_config.toml) against the shared validation PVC. Setup
 verifies `fio`; `run-test.sh` executes the workload and retains each JSON result
-under `STORAGE_OUTPUT_DIR`.
+under `STORAGE_OUTPUT_DIR`. Each FIO child enters that reserved directory before
+execution and uses relative data/output names. Its launcher may close inherited
+descriptors, so child arguments must not depend on `/proc/self/fd/...` aliases.
 
-For a passing phase, `db-update.sh` validates all six artifacts and writes one
+For a passing phase, `cval.storage.run_ingest` validates all six artifacts and writes one
 raw `metadata/test-storage.db` row containing IOPS and bandwidth measurements.
 The plugin validates explicit setup and FIO settings and provides read-only raw export rows.
 

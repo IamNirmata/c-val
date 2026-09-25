@@ -86,6 +86,7 @@ spec:
               ports:
                 - name: rdma
                   containerPort: 18515
+                  protocol: TCP
               command: ["/bin/bash", "-lc"]
               args:
                 - |

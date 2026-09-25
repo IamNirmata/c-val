@@ -79,6 +79,7 @@ class RendererTests(unittest.TestCase):
                     )
                     pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
                     self.assertEqual(pod["containers"][0]["args"], [_RUNTIME_BOOTSTRAP])
+                    self.assertEqual(pod["containers"][0]["ports"][0]["protocol"], "TCP")
                     self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
                     subprocess.run(["bash", "-n"], input=_RUNTIME_BOOTSTRAP, text=True, check=True)
 

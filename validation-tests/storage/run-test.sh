@@ -53,12 +53,11 @@ trap cleanup_fio_data EXIT
 trap 'cleanup_fio_data; exit 130' INT TERM
 
 echo "Starting storage tests..."
-python3 - "$STORAGE_DATA_DIR" "$STORAGE_OUTPUT_DIR" <<'PY'
+python3 - "$STORAGE_OUTPUT_DIR" <<'PY'
 import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 settings = json.loads(os.environ["CVAL_STORAGE_SETTINGS_JSON"])
 for name in ("randwrite", "randread", "iodepth_write_1file", "iodepth_read_1file", "numjobs_write_nfiles", "numjobs_read_nfiles"):
@@ -66,9 +65,9 @@ for name in ("randwrite", "randread", "iodepth_write_1file", "iodepth_read_1file
     command = ["fio", f"--name={options.pop('name')}"]
     for key, value in options.items():
         command.append(f"--{key}={int(value) if isinstance(value, bool) else value}")
-    command.extend(["--output-format=json", f"--directory={sys.argv[1]}", f"--output={Path(sys.argv[2]) / (name + '.json')}"])
+    command.extend(["--output-format=json", "--directory=fio-data", f"--output={name}.json"])
     print(f"Running storage workload: {name}", flush=True)
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, cwd=sys.argv[1])
 PY
 echo "Storage tests completed. Results saved in $STORAGE_OUTPUT_DIR"
 

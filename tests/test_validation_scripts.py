@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import unittest
 import subprocess
 import json
 import os
 import hashlib
 import importlib.machinery
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -16,6 +18,7 @@ import tomllib
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from cval.config import load_config
 from cval.validation.registry import load_test_registry, validation_test_config_digest
@@ -38,19 +41,46 @@ class DlRunLocalSourceTests(unittest.TestCase):
         self.script = (REPO_ROOT / "validation-tests/dltest/run-test.sh").read_text()
         self.functions = self.script[self.script.index("find_source_plan_dir() {"):self.script.index("write_summary() {")]
 
-    def _prepare(self, source: Path, output: Path, before: str = "") -> subprocess.CompletedProcess:
+    def _prepare(self, source: Path, output: Path, before: str = "", *, pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess:
         environment = os.environ | {
             "CVAL_DL_UNIT_TEST_DIR": str(source), "CVAL_DL_TEST_PLAN": self.plan,
             "DLTEST_OUTPUT_DIR": str(output), "DLTEST_WORK_DIR": str(output / "workdir"),
         }
         return subprocess.run(
             ["bash", "-u", "-o", "pipefail", "-s"], input=self.functions + before + "\nprepare_workdir\n",
-            env=environment, text=True, capture_output=True, timeout=30,
+            env=environment, text=True, capture_output=True, timeout=30, pass_fds=pass_fds,
         )
 
     def _hashes(self, root: Path) -> dict[str, str]:
         return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                 for path in root.rglob("*") if path.is_file()}
+
+    def test_real_source_import_survives_nested_descriptor_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "artifacts"
+            output.mkdir()
+            descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                alias = Path(f"/proc/self/fd/{descriptor}")
+                prepared = self._prepare(self.source, alias, pass_fds=(descriptor,))
+                self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                launch = self.script.split("\n(\n", 1)[1].split("        torchrun ", 1)[0]
+                probe = (
+                    "import importlib.util; from pathlib import Path; "
+                    "spec = importlib.util.find_spec('dl_unit_test'); assert spec is not None; "
+                    "assert Path(spec.origin).resolve().is_relative_to(Path.cwd()); print(spec.origin)"
+                )
+                launcher = f"import subprocess, sys; subprocess.run([sys.executable, '-B', '-c', {probe!r}], check=True)"
+                result = subprocess.run(
+                    ["bash", "-u", "-o", "pipefail", "-s"],
+                    input=launch + f"{shlex.quote(sys.executable)} -B -c {shlex.quote(launcher)}\n",
+                    env=os.environ | {"DLTEST_WORK_DIR": str(alias / "workdir"), "PYTHONPATH": ""},
+                    pass_fds=(descriptor,), text=True, capture_output=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(str(output / "workdir/src/dl_unit_test"), result.stdout)
+            finally:
+                os.close(descriptor)
 
     def test_real_source_copy_is_independent_and_not_reused(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -81,7 +111,7 @@ class DlRunLocalSourceTests(unittest.TestCase):
             spec = importlib.machinery.PathFinder.find_spec("dl_unit_test", [str(workdir / "src")])
             self.assertIsNotNone(spec)
             self.assertTrue(all(Path(path).is_relative_to(workdir) for path in spec.submodule_search_locations))
-            self.assertIn('PYTHONPATH="$DLTEST_WORK_DIR/src${PYTHONPATH:+:$PYTHONPATH}"', self.script)
+            self.assertIn('PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"', self.script)
             self.assertIn('--source-dir "$DLTEST_WORK_DIR"', self.script)
 
     def test_source_change_during_copy_is_rejected(self) -> None:
@@ -103,6 +133,33 @@ trap 'if [[ "$BASH_COMMAND" == "diff -qr --"* ]]; then trap - DEBUG; rm -- "$CVA
 
 
 class ValidationScriptTests(unittest.TestCase):
+    def test_storage_child_uses_reserved_working_directory(self) -> None:
+        script = (REPO_ROOT / "validation-tests/storage/run-test.sh").read_text()
+        program = script.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        launch = next(node for node in ast.walk(ast.parse(program))
+                      if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            output.mkdir()
+            (output / "fio-data").mkdir()
+            descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                retained = root / "retained"
+                output.rename(retained)
+                output.symlink_to(root, target_is_directory=True)
+                alias = f"/proc/self/fd/{descriptor}"
+                probe = "from pathlib import Path; assert Path('fio-data').is_dir(); Path('probe.txt').write_text('child')"
+                eval(compile(ast.Expression(launch), "storage-launch", "eval"), {
+                    "subprocess": subprocess,
+                    "command": [sys.executable, "-B", "-c", probe],
+                    "sys": SimpleNamespace(argv=["-", alias]),
+                })
+                self.assertEqual((retained / "probe.txt").read_text(), "child")
+                self.assertFalse((root / "probe.txt").exists())
+            finally:
+                os.close(descriptor)
+
     def test_dl_metric_lock_holds_posix_lock_until_child_exits(self) -> None:
         import fcntl
 
