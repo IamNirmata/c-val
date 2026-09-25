@@ -13,7 +13,7 @@ import yaml
 
 
 REPO = Path(__file__).resolve().parents[1]
-SOURCE_PATHS = ("cval", "config", "validation-tests", "ymls", "scripts", "pyproject.toml", "tests")
+SOURCE_PATHS = ("cval", "config", "validation-tests", "ymls", "scripts", "pyproject.toml")
 
 
 def source_manifest(revision: str, bundle: bytes, namespace: str) -> dict:

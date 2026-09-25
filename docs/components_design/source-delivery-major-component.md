@@ -1,6 +1,6 @@
 # C8: Source Delivery
 
-Status: Phase 5 scope reviewed on 2026-09-25; bundle exclusions are not implemented.
+Status: Phase 5 bundle trimming and local packaging checks implemented on 2026-09-25.
 Real-node acceptance waits until all phases are implemented. Baseline/counting:
 [overview](major-components-overview.md#measurement-method).
 
@@ -61,11 +61,11 @@ The PVC access template is C9; global configuration is C1.
 | Critical | Exact commit, archive hash/identity, immutable source, semantic template checks | Preserve. |
 | Good | Offline source delivery and one shared bootstrap | Already implemented; reuse rather than redesign again. |
 | Not important | Inline custom bootstrap compatibility | Review real callers before retirement. |
-| Useless | Host-only regression files in every runtime archive, once dependency closure proves non-use | Exclude after proof; do not delete the tests. |
+| Removed from runtime bundle | Top-level host regression suite | Retained in the repository; excluded from the archive after isolated packaging checks. |
 
 ## Current Issues
 
-1. The source archive includes the top-level test suite. Some scripts are runtime
+1. The source archive excludes the top-level test suite. Some scripts remain runtime
    dependencies, including dynamically loaded DL locking and admission cooldown;
    excluding the entire scripts directory would break supported paths.
 2. Image/framework variation is intentional, not a delivery defect. DL uses a
@@ -89,7 +89,7 @@ The PVC access template is C9; global configuration is C1.
    activation. Verify each observed identity; preserve previous artifacts and
    approval records. Never automatically apply a rollback on failed acceptance.
 
-### Reviewed Packaging Candidate
+### Phase 5 Packaging
 
 At `31532cf41a482ad483ace37d3893528cec69231b`, the existing archive contained 118
 files and 307,048 compressed bytes. Removing only the top-level `tests/` entry in
@@ -98,12 +98,28 @@ an in-memory comparison produced 85 files and 206,666 bytes: 100,382 bytes small
 bootstrap, templates, main config, DL lock and cooldown helpers remained present.
 Measurement evidence: `run-logs/phase5-review-bundle-20260925.json`.
 
-This supports reviewing that one exclusion, not declaring dependency closure proved.
-Before changing the renderer, verify imports, config/descriptor loading, plugin
-support files and both template renders from the extracted candidate without the
-host checkout. Preserve the repository test suite; archive exclusion is not deletion.
-Real Jobs and ingestion remain deferred until all phases finish. Do not claim faster
-startup from archive size alone. No custom image or environment version pin is needed.
+The renderer now excludes only that top-level test entry. All scripts, complete
+workload directories, descriptors, plugin support files, package metadata and
+templates remain. One test in the existing renderer suite builds actual Git
+archives, checks that excluded members are tests only, and compares all remaining
+file bytes at the same commit. It validates immutable manifest/embedded commit
+identity and runs imports, config/plugin loading, dynamic helpers, four render
+combinations and bootstrap syntax from a temporary extracted tree.
+
+The child Python process runs with isolated import settings and asserts all 43
+`cval` modules come from the extracted tree, not the host checkout. Local installed
+Python/PyYAML and Bash are still prerequisites; this is not a container execution
+or a wheel-installation check. Targeted render inputs use a retained real node/run
+identity without claiming its current eligibility. No workload or writer runs.
+
+Retained check: `run-logs/phase5-isolated-bundle-20260925.json`. Reproducible command:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_renderer.py -k test_committed_runtime_bundle_is_self_contained -v
+```
+
+Real Jobs and ingestion remain deferred until all phases finish. Archive size alone
+does not establish faster startup. No custom image or environment version pin is needed.
 The [Phase 5 plan](redesign-development-plan.md#phase-5-harden-delivery) owns task status.
 
 ## Identity Chain

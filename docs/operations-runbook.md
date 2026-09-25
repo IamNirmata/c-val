@@ -280,6 +280,12 @@ checkout directory. It then runs the same descriptor-anchored supervisor.
 Publishing the ConfigMap and submitting the Job remain separate gated operations.
 Do not put personal Git credentials in a ConfigMap, Pod environment, or manifest.
 
+Phase 5 excludes only the repository's top-level test suite from the source archive;
+tests stay in Git. Runtime code, full workload directories, scripts, descriptors,
+templates and bootstrap remain. Isolated local import/render checks passed; actual
+container startup and ingestion remain deferred until all phases are implemented.
+See [packaging verification](components_design/source-delivery-major-component.md#phase-5-packaging).
+
 ### Standalone Runner Evidence
 
 Production Jobs continue to enter through the descriptor-anchored supervisor.
@@ -338,7 +344,9 @@ records those limits. Fresh experiments keep the separate submission gates below
 
 ### Real-node development procedure
 
-Phase 0 procedure; the templates below are not approval to execute a mutation.
+The table below is the final acceptance checklist, to execute only after all phases
+are implemented and exact live commands are separately approved. Local checks and
+publication do not authorize these mutations or establish runtime acceptance.
 Use existing commands only, from the exact published checkout. Retain one local
 record containing source SHA, reviewed config/snapshot digest, node, unused run
 timestamp, selected tests/settings, source/manifest identity, approval and rollback.
@@ -346,12 +354,17 @@ Expected successful category: `Fully recorded`, required tests `pass`.
 
 | Step | Required Action / Evidence | Gate |
 | --- | --- | --- |
-| 1. Prepare | Verify published source, effective config, dependency identities and immutable source object if used. | Source creation needs its own exact approval; preparation is not activation. |
+| 1. Prepare | Bind the final published commit, effective config, archive/manifest hashes and selected experiment inputs. Validate the extracted bundle without host-checkout files; review both source/placement paths. | Source creation needs its own exact approval and readback; preparation is not activation. |
 | 2. Observe | Inspect existing controller/Jobs and the selected node. Require Ready, all GPUs free, CPU/memory/RDMA sufficiency and known ownership. | A drained cordon may be explicitly targeted; unknown/busy state blocks submission. |
 | 3. Submit | Approve the literal command, node, timestamp, inputs and rollback; recheck volatile conditions immediately before create. | One approved real Job, no fake workload or silent retry. |
-| 4. Observe completion | Retain Job/pod UID and assigned node, phase, container exit, CLI output/error/exit status, logs and events. | A timeout or lost reply means reconcile the same identity, not submit again. |
+| 4. Observe completion | Retain Job/pod UID, assigned node, container exit/restart count, source identity, logs/events and phase. Confirm startup from the approved bundle and required runtime helpers. | A timeout or lost reply means reconcile the same identity, not submit again. |
 | 5. Verify evidence | Canonical run/test identity and digests, selected-test outcomes, terminal ingestion and exact-run raw rows/receipts. | Successful terminal Job plus all required evidence; never latest-row substitution. |
 | 6. Record outcome | Use the result categories, keeping test outcome and DB state separate; retain any incomplete/unavailable evidence. | Activation, cancellation and another run each retain separate approval gates. |
+
+Report unexercised failure, transport or placement paths explicitly. Backup, journal
+migration and restore are separate recovery exercises, not steps in validation
+acceptance. A historical plan or a checksum alone does not prove current recovery;
+follow the existing recovery sections with their own approvals and quiescence checks.
 
 Read-only targeted check, using `cluster.kubectl_timeout_seconds` from the reviewed TOML:
 

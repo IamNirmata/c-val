@@ -7,6 +7,8 @@ but fresh accepted-run comparisons remain pending.
 Phase 4 source consolidation and preservation review are complete. Per the
 2026-09-25 decision, real-node testing waits until all phases are implemented;
 source completion is not cluster acceptance or activation approval.
+Phase 5 packaging and recovery review are source-complete; in-pod acceptance
+remains deferred until the remaining phases are implemented.
 The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). The implementation and acceptance
 states above are separate; publication does not authorize live mutations.
@@ -299,7 +301,7 @@ delete partial raw rows, or use a generic transaction abstraction across stores.
 ## Phase 5: Harden Delivery
 
 **What it does:** Trim the source bundle without breaking the existing delivery path.
-**Changes:** A small reviewed archive-selection change, if measurements justify it;
+**Changes:** One archive-selection exclusion with measured savings;
 reuse the current source renderer, bootstrap, release checks and recovery tools.
 
 ### Reviewed Scope
@@ -309,8 +311,8 @@ extra fields. Source hashing, embedded commit checks and immutable ConfigMap del
 already exist. Do not rebuild them or add a package manager, wheel-distribution
 workflow, bundle variants, new service or generated dependency-analysis system.
 
-Start with the top-level `tests/` archive entry as an exclusion candidate, not a
-repository deletion. Check actual imports, package data and dynamic helpers first:
+The top-level `tests/` archive entry is now excluded, not deleted from the
+repository. Extracted-bundle checks cover imports, package data and dynamic helpers:
 the ingestion lock and admission cooldown are loaded from `scripts/`. Preserve
 complete registered workload directories, descriptors, plugin support files,
 templates and the shared bootstrap. Do not blindly remove all scripts or inspect
@@ -323,23 +325,34 @@ with exact approval required for each live mutation.
 
 ### Tasks
 
-- [ ] **5.1** Measure a candidate bundle with confirmed host-only files excluded.
+- [x] **5.1** Measure a candidate bundle with confirmed host-only files excluded.
   Change only the existing source renderer's selection; keep required files byte-identical
   to the commit. Report compressed size, member count and missing dependencies.
   Keep uncertain files rather than add wrappers or fallback downloads.
+  Implemented: only top-level tests are excluded; 33 fewer files and about 33%
+  smaller compressed archive. All other archived bytes match the same commit.
 - [ ] **5.2** Reuse existing archive/hash/commit and render checks on the prepared
   bundle, independently of the host checkout. Preserve both source transports and
   placement templates. Local import/render checks are packaging checks, not GPU
   acceptance; actual in-pod startup/ingestion verification waits until all phases finish.
-- [ ] **5.3** Review recovery instructions against existing tools and retained
+  Local checks passed: 43 modules imported from an isolated extracted tree, both
+  dynamic helpers loaded, and both templates rendered with both source transports.
+  One real-archive regression is retained in the existing renderer suite; this
+  checkbox stays open for in-pod acceptance. See [packaging checks](source-delivery-major-component.md#phase-5-packaging).
+- [x] **5.3** Review recovery instructions against existing tools and retained
   manifests, read-only. Fix only demonstrated inconsistencies. No backup, journal
   migration, restore, PVC move or raw-data modification is part of implementation.
-- [ ] **5.4** Leave maintenance schemas and APIs unchanged by default. Different
+  Help flags and operation-specific guards agree; a retained consolidation plan
+  digest passed. Failed/empty historical records were not treated as verified backups.
+- [x] **5.4** Leave maintenance schemas and APIs unchanged by default. Different
   operations do not need identical manifests. Consolidate only a proven duplicate
   with a smaller replacement; otherwise record no change as the outcome.
-- [ ] **5.5** Link the existing runbook procedure and retain one concise acceptance
+  No demonstrated defect or useful common schema: maintenance code is unchanged.
+- [x] **5.5** Link the existing runbook procedure and retain one concise acceptance
   checklist for the final exact commit. No new script, test harness or duplicate
   release document. Keep publication, source creation, acceptance and activation separate.
+  The [existing runbook table](../operations-runbook.md#real-node-development-procedure)
+  is the final acceptance checklist; it records the separate post-phase approval gates.
 
 **Source complete when:** Justified exclusions and local packaging checks pass,
 recovery inconsistencies are resolved or documented, and deferred gates are explicit.

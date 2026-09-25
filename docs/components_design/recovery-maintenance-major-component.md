@@ -1,6 +1,8 @@
 # C9: Recovery and Maintenance
 
-Status: proposed redesign. Baseline/counting: [overview](major-components-overview.md#measurement-method).
+Status: Phase 5 read-only contract review complete; maintenance code and schemas
+unchanged. Live recovery acceptance is deferred. Baseline/counting:
+[overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
 
@@ -84,6 +86,16 @@ they are not actions to perform merely to finish the source work. No auto-prune,
 automatic restore or metadata rewrite belongs in the validation controller.
 
 ## Recovery Proof
+
+Phase 5 checked current help/approval guards and retained local evidence, without
+running inventory, backup, migration or restore. The `66049e7` consolidation plan
+has a valid recorded digest; its failed-backup record states no completed backup
+manifest was published. The retained September 9 archive-manifest file is empty,
+not recovery proof. Existing quiescence, plan/backup identity and no-overwrite
+rollback requirements need no new shared manifest schema. Review evidence:
+`run-logs/phase5-recovery-help-20260925.json` and
+`run-logs/phase5-recovery-review-20260925.json`. This does not verify any current
+backup's contents or establish that a restore succeeds.
 
 | Stage | Proof Needed |
 | --- | --- |

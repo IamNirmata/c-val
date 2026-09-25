@@ -5,6 +5,7 @@ import base64
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 import select
@@ -608,6 +609,83 @@ class SourceConfigMapTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("cval_source", path)
         cls.source = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.source)
+
+    def test_committed_runtime_bundle_is_self_contained(self) -> None:
+        repo = self.source.REPO
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                  capture_output=True, text=True, timeout=15).stdout.strip()
+        archives = {}
+        bundles = {}
+        for label, paths in (("runtime", self.source.SOURCE_PATHS),
+                             ("with_tests", (*self.source.SOURCE_PATHS, "tests"))):
+            bundles[label] = subprocess.run(
+                ["git", "archive", "--format=tar.gz", revision, *paths], cwd=repo,
+                check=True, capture_output=True, timeout=30,
+            ).stdout
+            with tarfile.open(fileobj=io.BytesIO(bundles[label]), mode="r:gz") as archive:
+                self.assertEqual(archive.pax_headers["comment"], revision)
+                archives[label] = {item.name: archive.extractfile(item).read()
+                                   for item in archive.getmembers() if item.isfile()}
+        removed = set(archives["with_tests"]) - set(archives["runtime"])
+        self.assertTrue(removed)
+        self.assertTrue(all(name.startswith("tests/") for name in removed))
+        self.assertFalse(any(name.startswith("tests/") for name in archives["runtime"]))
+        self.assertTrue(all(content == archives["with_tests"][name]
+                            for name, content in archives["runtime"].items()))
+        self.assertLess(len(bundles["runtime"]), len(bundles["with_tests"]))
+        manifest = self.source.source_manifest(revision, bundles["runtime"], "gcr-admin")
+        self.assertTrue(manifest["immutable"])
+        self.assertEqual(base64.b64decode(manifest["binaryData"]["source.tar.gz"]), bundles["runtime"])
+        with self.assertRaisesRegex(ValueError, "exact nonzero"):
+            self.source.source_manifest("main", bundles["runtime"], "gcr-admin")
+        check = textwrap.dedent("""
+            import importlib, json, runpy, subprocess, sys
+            from dataclasses import replace
+            from pathlib import Path
+            root = Path(sys.argv[1])
+            sys.path.insert(0, str(root))
+            from cval.config import load_config, encode_config_snapshot, load_config_snapshot
+            from cval.cli import build_parser
+            from cval.jobs.renderer import render_validation_job_from_file, _RUNTIME_BOOTSTRAP
+            import yaml
+            config = load_config(root / 'config/cval.toml')
+            build_parser(config)
+            for path in (root / 'cval').rglob('*.py'):
+                relative = path.relative_to(root).with_suffix('')
+                parts = relative.parts[:-1] if path.name == '__init__.py' else relative.parts
+                module = importlib.import_module('.'.join(parts))
+                assert Path(module.__file__).is_relative_to(root)
+            for helper in ('dl-metric-lock.py', 'cval-node-cooldown.py'):
+                runpy.run_path(str(root / 'scripts' / helper), run_name='bundle_check')
+            assert not (root / 'tests').exists()
+            count = 0
+            for offline in (False, True):
+                selected = replace(config, job=replace(config.job, git_ref=sys.argv[2],
+                    source_configmap=sys.argv[3] if offline else '', source_sha256=sys.argv[4] if offline else ''))
+                for template, node in (('specific-node-job.yml', 'slc01-cl02-hgx-0359'), ('test-job.yml', None)):
+                    rendered = render_validation_job_from_file(root / 'ymls' / template,
+                        node_name=node, timestamp=1790277187, git_ref=sys.argv[2], cval_config=selected)
+                    pod = yaml.safe_load(rendered.yaml_text)['spec']['tasks'][0]['template']['spec']
+                    assert pod['containers'][0]['args'] == [_RUNTIME_BOOTSTRAP]
+                    assert ('nodeSelector' in pod) == (node is not None)
+                    snapshot = encode_config_snapshot(selected)
+                    assert encode_config_snapshot(load_config_snapshot(snapshot, repo_root=root)) == snapshot
+                    count += 1
+            subprocess.run(['bash', '-n'], input=_RUNTIME_BOOTSTRAP, text=True, check=True, timeout=10)
+            print(json.dumps({'renders': count, 'dynamic_helpers': 2}))
+        """)
+        with TemporaryDirectory() as directory:
+            with tarfile.open(fileobj=io.BytesIO(bundles["runtime"]), mode="r:gz") as archive:
+                archive.extractall(directory, filter="data")
+            environment = {name: value for name, value in os.environ.items()
+                           if not name.startswith(("CVAL_", "PYTHON"))}
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", check, directory, revision,
+                 manifest["metadata"]["name"], hashlib.sha256(bundles["runtime"]).hexdigest()],
+                cwd=directory, env=environment, text=True, capture_output=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"renders": 4, "dynamic_helpers": 2})
 
     @staticmethod
     def bundle(revision: str) -> bytes:
