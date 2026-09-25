@@ -777,28 +777,16 @@ def write_standard_db(
         connection.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table_name}_metric ON {table_name}(task_name, metric_name)"
         )
-        _ensure_ingested_runs_table(connection, table_name)
-        run_keys = set(replace_run_keys or set())
-        if reconcile_root is not None:
-            run_keys.update(_run_keys_in_scope(connection, table_name, reconcile_root))
-        _delete_run_keys(connection, table_name, run_keys)
-        _delete_ingested_run_keys(connection, run_keys)
-        connection.executemany(
+        _write_metric_rows(
+            connection, table_name, rows,
             f"""
             INSERT OR REPLACE INTO {table_name} (
                 run_key, node, cval_timestamp, iterations, sample_dir, test_plan, dltest_run_id,
                 rank, task_group, task_name, status, metric_name, metric_value, source_file
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [tuple(row.__dict__.values()) for row in rows],
+            replace_run_keys, reconcile_root, generation_id, generation_state, run_receipts,
         )
-        receipts = dict(run_receipts or {})
-        for row in rows:
-            receipts.setdefault(row.run_key, row.sample_dir)
-        _write_ingested_run_receipts(connection, receipts)
-        if generation_id:
-            _write_ingest_generation(connection, generation_id, generation_state)
-        connection.commit()
 
 
 def write_overlap_db(
@@ -845,13 +833,8 @@ def write_overlap_db(
         connection.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{table_name}_pair ON {table_name}(coll_name, layer_name)"
         )
-        _ensure_ingested_runs_table(connection, table_name)
-        run_keys = set(replace_run_keys or set())
-        if reconcile_root is not None:
-            run_keys.update(_run_keys_in_scope(connection, table_name, reconcile_root))
-        _delete_run_keys(connection, table_name, run_keys)
-        _delete_ingested_run_keys(connection, run_keys)
-        connection.executemany(
+        _write_metric_rows(
+            connection, table_name, rows,
             f"""
             INSERT OR REPLACE INTO {table_name} (
                 run_key, node, cval_timestamp, iterations, sample_dir, test_plan, dltest_run_id,
@@ -859,15 +842,32 @@ def write_overlap_db(
                 metric_name, metric_value, source_file
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [tuple(row.__dict__.values()) for row in rows],
+            replace_run_keys, reconcile_root, generation_id, generation_state, run_receipts,
         )
-        receipts = dict(run_receipts or {})
-        for row in rows:
-            receipts.setdefault(row.run_key, row.sample_dir)
-        _write_ingested_run_receipts(connection, receipts)
-        if generation_id:
-            _write_ingest_generation(connection, generation_id, generation_state)
-        connection.commit()
+
+
+def _write_metric_rows(
+    connection: sqlite3.Connection, table_name: str,
+    rows: list[StandardMetricRow] | list[OverlapMetricRow], insert_sql: str,
+    replace_run_keys: set[str] | None, reconcile_root: Path | None,
+    generation_id: str | None, generation_state: str, run_receipts: dict[str, str] | None,
+) -> None:
+    """Apply the shared DL transaction tail after the caller creates its schema."""
+
+    _ensure_ingested_runs_table(connection, table_name)
+    run_keys = set(replace_run_keys or set())
+    if reconcile_root is not None:
+        run_keys.update(_run_keys_in_scope(connection, table_name, reconcile_root))
+    _delete_run_keys(connection, table_name, run_keys)
+    _delete_ingested_run_keys(connection, run_keys)
+    connection.executemany(insert_sql, [tuple(row.__dict__.values()) for row in rows])
+    receipts = dict(run_receipts or {})
+    for row in rows:
+        receipts.setdefault(row.run_key, row.sample_dir)
+    _write_ingested_run_receipts(connection, receipts)
+    if generation_id:
+        _write_ingest_generation(connection, generation_id, generation_state)
+    connection.commit()
 
 
 def _delete_run_keys(

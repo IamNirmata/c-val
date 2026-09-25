@@ -4,6 +4,9 @@ Status: Phase 0 contracts complete; Phases 1.1-1.6 and 2.1-2.5 source implemente
 Fresh exact-commit execution/ingestion acceptance and activation remain pending;
 Phase 3.1-3.4 cleanup source is implemented; Phase 3.5 evidence review is complete,
 but fresh accepted-run comparisons remain pending.
+Phase 4 source consolidation and preservation review are complete. Per the
+2026-09-25 decision, real-node testing waits until all phases are implemented;
+source completion is not cluster acceptance or activation approval.
 The live loop remains paused since 2026-09-24 UTC.
 Phase 0 source baseline: `b79a5e0` (2026-09-23). The implementation and acceptance
 states above are separate; publication does not authorize live mutations.
@@ -264,20 +267,28 @@ Keep runtime fixes separate from environment changes so comparisons remain inter
 ## Phase 4: Simplify Persistence
 
 **What it does:** Remove duplicated writer mechanics without changing data ownership.
-**Changes:** Private DL transaction helper and bounded read implementations, building
-on Phase 1's verifier. Keep all seven raw stores and their public writer contracts.
+**Changes:** One private helper in the existing DL module. Keep all seven raw
+stores, explicit schemas/SQL and public writer contracts; no reader rewrite or
+new configuration, persistence framework, script or database.
 
 ### Tasks
 
 - [ ] **4.1** Extract common DL receipt/replacement/generation/commit mechanics;
   leave fixed schemas, columns and test-specific validation explicit.
+  Source implemented. Expanding the helper reproduces both original writer ASTs
+  exactly. See [transaction ownership and verification](raw-evidence-major-component.md#phase-4-writer-consolidation).
 - [ ] **4.2** Preserve independent writer authorization, persistent POSIX locking,
   idempotent retries and final status publication only after required metrics.
-- [ ] **4.3** Optimize the shared readers after measuring query plans; scheduling
-  must not scan every rank's metrics each cycle. Preserve exact-run verification semantics.
+  Preservation review complete: these paths, receipt comparison and cross-store
+  finalization are unchanged. Commit/rollback behavior remains to be exercised.
+- [x] **4.3** Review reader optimization only for a measured need. No change is
+  justified in this phase: scheduling uses status history and canonical summaries,
+  not per-rank metric scans. Keep existing read bounds and exact-run verification.
 - [ ] **4.4** Compare exact-run rows/receipts and publication behavior from approved
   real runs. Inspect retained real failures read-only; any controlled interruption
   needs separate approval. Do not corrupt records to manufacture test cases.
+  Deferred until all phases are implemented; no DB writes or node tests were run
+  for the extraction. The unchecked implementation tasks retain this acceptance gate.
 
 **Done when:** Rows, schemas, receipts and complete-generation semantics match the
 contract on real-run evidence and historical readers work. Unobserved failure paths

@@ -162,20 +162,12 @@ verification does not replace exact-commit cluster acceptance for the refactor.
 
 ### 4. Share DL Transaction Bookkeeping
 
-**Deferred proposal; not implemented.**
-[write_standard_db](../cval/storage/dltest_ingest.py#L738) and
-[write_overlap_db](../cval/storage/dltest_ingest.py#L804) occupy 64 and 67 lines.
-They repeat receipt setup, scoped replacement, insertion, generation writes and
-commit handling; their columns and indexes genuinely differ.
-
-Extract only common transaction mechanics into a private helper, leaving fixed
-schemas/columns explicit. Keep the existing databases and public writer APIs;
-do not replace them with a configurable database framework or combine the four
-stores. Moving historical rebuild code to another file alone is not a reduction.
-
-Gate: unchanged rows, schemas, receipts and idempotency;
-[generation stays incomplete until finalization](../tests/test_dltest_ingest.py#L1089)
-and divergent receipts still block publication. Retain symlink/identity checks.
+**Phase 4 source implemented on 2026-09-25; real acceptance deferred.**
+The two DL writers now share one private transaction helper, retaining explicit
+schemas/columns, APIs and generation finalization. Source expansion is identical
+to the original writer bodies. This removes a duplicate ownership path without
+claiming fewer physical lines or adding a generic persistence framework.
+See [verification and remaining gates](components_design/raw-evidence-major-component.md#phase-4-writer-consolidation).
 
 ### 5. Give Current Behavior One Documentation Home
 

@@ -1,7 +1,8 @@
 # C7: Raw Evidence
 
 Status: Phase 1.5 verification and Phase 1.6 exact exports/coverage reads implemented;
-fresh execution acceptance pending. Writer consolidation remains proposed.
+Phase 4 writer consolidation source implemented. Real-node acceptance is deferred
+until all phases are implemented, as requested on 2026-09-25.
 Baseline/counting: [overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -66,8 +67,8 @@ SQLite retry/URI and status. Workload plugins belong to C6; config paths to C1.
 
 ## Current Issues
 
-1. [Standard/overlap DL writers](../../cval/storage/dltest_ingest.py#L738) repeat
-   receipt, replacement, generation and commit mechanics.
+1. [Standard/overlap DL writers](../../cval/storage/dltest_ingest.py#L738) now share
+   transaction bookkeeping; fresh write/rollback acceptance remains pending.
 2. Historical runs may lack current provenance. Readable legacy rows are not
    equivalent to canonical verification or current dependency compatibility.
 
@@ -157,6 +158,35 @@ NCCL and DL status. The absent approved `0307-1790221580` run produced no CSV;
 the formatter rejected a real newer metric against an older `0307` status. No raw
 schema, metric unit or stored value changed. Evidence is retained under
 `run-logs/phase16-exact-*-20260924/` and `phase16-export-final-check-20260924.json`.
+
+## Phase 4 Writer Consolidation
+
+Both DL writers retain their public signatures, connection lifetime, table/index
+definitions, iteration migration and INSERT columns. One private `_write_metric_rows`
+helper in the same module owns the previously duplicated sequence: receipt-table
+setup, scoped row/receipt replacement, insertion, receipt writing, generation state
+and commit. No new transaction boundary or exception handler was introduced;
+connection closure still rolls back an uncommitted transaction on failure.
+
+Cross-store completion remains outside this helper. Current ingestion authorizes
+the run, writes all four stores as in-progress, compares receipts, then finalizes
+the generation. The coordinator retains its POSIX lock through retries and writes
+final validation status only after required metric writers return. Authorization,
+SQLite durability, readers, configuration and test environment values are unchanged.
+
+Local verification expanded the extracted helper in memory and compared both
+writer ASTs with published baseline `5dd2a0ff5de66604fe659686bd4e90766cc9ef83`:
+identical signatures, SQL, serialization and statement order. All other code in the
+module is AST-identical; eight surrounding protection/reader/config files are
+byte-identical. Import and editor checks passed. Evidence is retained in
+`run-logs/phase4-equivalence-20260925.json` and
+`run-logs/phase4-preservation-20260925.json`.
+
+This is source-equivalence evidence, not an executed DB transaction test. No
+synthetic DB, live write, row migration or node test was used. Real row/receipt,
+retry, rollback and partial-generation behavior will be checked after all phases
+are implemented, under separate approval. Reader optimization has no measured
+need in this phase; no new cache, index or query path was added.
 
 ## Proposed Design
 
