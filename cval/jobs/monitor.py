@@ -290,40 +290,6 @@ class MonitoredJob:
     elapsed_seconds: float
 
 
-def get_job_phase(
-    job_name: str,
-    namespace: str | None = None,
-    client: KubectlClient | None = None,
-    timeout: float | None = None,
-    config: CvalConfig | None = None,
-) -> JobPhase:
-    """Read one Volcano job phase using a non-mutating kubectl get."""
-
-    active_config = config or load_config()
-    kubectl = client or KubectlClient(config=active_config)
-    resolved_namespace = active_config.cluster.namespace if namespace is None else namespace
-    args = [
-        "get",
-        "vcjob",
-        "-n",
-        resolved_namespace,
-        job_name,
-        "-o",
-        "jsonpath={.status.state.phase}",
-    ]
-    if timeout is None:
-        result = kubectl.run(args, check=False)
-    else:
-        result = kubectl.run(args, check=False, timeout=timeout)
-    if result.returncode == 0:
-        phase = result.stdout.strip() or "Unknown"
-    elif "(notfound)" in result.stderr.lower():
-        phase = "Missing"
-    else:
-        phase = "Unknown"
-    return JobPhase(job_name=job_name, phase=phase or "Unknown")
-
-
 def get_job_phases(
     job_names: Sequence[str],
     namespace: str | None = None,

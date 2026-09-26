@@ -1,5 +1,34 @@
 # Framework Simplification Review
 
+## C2-C9 Source Cleanup
+
+The 2026-09-26 follow-up starts at published C1 `f9837ab`. Source cleanup is
+separate from exact-commit cluster acceptance and activation. It does not modify
+the running checkout, canonical PVC evidence, historical snapshots or raw schemas.
+
+| Component | Implemented / Retained |
+| --- | --- |
+| C2 | Retired the four `db-add-*` CLI commands and CLI-only writer wrappers. Automatic Python ingestion and the separately authorized DL rebuild command remain. |
+| C3 | Retired GPU-only/text-table helper APIs; structured node/pod inventory and shared GPU/CPU/memory/RDMA eligibility remain. |
+| C4 | Removed unused receipt/cooldown recovery and legacy log parsers. Plans now consume the original validated coverage JSON, without a duplicate map file. Shared batch observation, durable intents, cooldowns and pruning gates remain. |
+| C5 | Retired the standalone path-only preflight and unused env-line formatter. Actual ID validation stays with descriptor-bound reservation. The supervisor/runner process boundaries, legacy result readers and reserved result/environment files remain. |
+| C6 | Retired the three per-test shell aliases; descriptors still select their unchanged `run-test.sh`. Top-level runner/environment/ingestion compatibility launchers remain. |
+| C7 | Node fallback, counts and snapshot hash are calculated once per projection. Both CSVs, their fields, atomic replacement, 300-second refresh, seven raw stores and exact-run verification remain. |
+| C8 | Replaced the textual bootstrap scanner with semantic YAML checks and equality with the packaged startup program. Canonical inline startup is accepted; customized inline programs are not. Git/ConfigMap transports and both placement templates remain. |
+| C9 | Reviewed and retained backup, layout and journal tools. Layout recovery dynamically loads the backup implementation; unknown rollback obligations are not evidence that these tools are disposable. |
+
+Migration: use `get_job_phases([name])` instead of `get_job_phase`,
+`discover_gpu_node_names` instead of the capacity-table parser, and
+`describe_nodes_from_outputs` for scheduling/resource decisions. Legacy log strings
+are not evidence APIs; consume the shared run-bound observer or canonical result.
+Use the canonical per-test runners rather than the three retired aliases. The
+path-only preflight command is gone; startup reservation still rejects unsafe paths.
+
+This batch does not rewrite the live loop into another controller, remove the
+independent status refresher, retire Git startup/pruning, or delete maintenance
+recovery tools. Those larger choices remain separate from demonstrated redundancy.
+The earlier reviews below are dated records, not current interface inventories.
+
 ## Phase 6 Closeout Review
 
 Reviewed 2026-09-25 against published `62dcdeca982950dac9eb829765eba64f42ab1bf1`.
@@ -256,7 +285,7 @@ or conversion path, not just rename, relocate or compress it.
 | A: retired evaluation prototypes | Published in `1abde89` | 3 files, 554 text lines, 23,924 bytes |
 | B: historical planning bundle | Published in `1abde89` | 7 files, 427 text lines plus PNG, 147,067 bytes |
 | C: all-files publish wrapper | Approved and removed in this follow-up | 1 file, 61 lines, 1,422 bytes |
-| D: shell compatibility aliases | Deferred unless explicitly retired | 4 files, only 26 lines total |
+| D: shell compatibility aliases | Three per-test aliases retired in C6 above; top-level runner retained | Historical candidate: 4 files, 26 lines total |
 
 A-B total: 10 files, 981 text lines plus one PNG, 170,991 bytes. Gross source
 removals exclude documentation edits. Exact removed paths remain recoverable at
@@ -281,16 +310,10 @@ chosen target. The workspace shipping skill now requires explicit reviewed
 paths, staged-diff inspection and destination verification. No replacement
 wrapper was added. C is safety cleanup, not the main runtime simplification.
 
-D's exact paths remain:
-
-- [validation-tests/run-test.sh](../validation-tests/run-test.sh)
-- [validation-tests/storage/storage.sh](../validation-tests/storage/storage.sh)
-- [validation-tests/nccl/run-nccl-allreduce.sh](../validation-tests/nccl/run-nccl-allreduce.sh)
-- [validation-tests/dltest/dltest.sh](../validation-tests/dltest/dltest.sh)
-
-These are tested operator interfaces, not unreferenced code. The supervisor
-already bypasses the top-level alias, and descriptors select canonical per-test
-runners. Removal needs an external-usage decision and retained behavior coverage.
+The [top-level runner](../validation-tests/run-test.sh) remains. The retired
+per-test aliases were `storage/storage.sh`, `nccl/run-nccl-allreduce.sh`, and
+`dltest/dltest.sh` under the workload directory. Their canonical per-test runners
+and descriptor selection are covered by the C6 checks above.
 
 ## Keep These Guarantees
 
@@ -328,5 +351,5 @@ renderer/caller regressions; no live mutation was performed for either change.
 Publication alone does not deploy the shared bootstrap. Its exact published
 commit still needs separately approved cluster acceptance before rollout.
 DL transaction consolidation was subsequently source-implemented in Phase 4;
-tested shell aliases remain supported. Fresh runtime acceptance is still required.
+the later alias retirement is recorded above. Fresh runtime acceptance is still required.
 Source cleanup never authorizes live deletion or evidence removal.

@@ -39,18 +39,6 @@ def parse_memory_bytes(value: object) -> int:
     return int(parse_resource_quantity(str(value)).to_integral_value(rounding=ROUND_CEILING))
 
 
-def pod_effective_gpu_request(pod: Mapping[str, object]) -> int:
-    """Return a pod's request for the configured GPU resource."""
-
-    return pod_effective_resource_request(pod, load_config().job_template.gpu_resource_name, parse_gpu_quantity)
-
-
-def pod_gpu_usage_by_node(pods_json: Mapping[str, object]) -> dict[str, int]:
-    """Aggregate active pod GPU requests by node name."""
-
-    return pod_resource_usage_by_node(pods_json, load_config().job_template.gpu_resource_name, parse_gpu_quantity)
-
-
 def pod_resource_usage_by_node(
     pods_json: Mapping[str, object],
     resource_name: str,
@@ -106,45 +94,6 @@ def pod_effective_resource_request(pod: Mapping[str, object], resource_name: str
     return max(app_request + restartable_request, init_request) + overhead
 
 
-def parse_node_resources(
-    nodes_output: str,
-    usage_by_node: Mapping[str, int] | None = None,
-    node_name_filter: str | None = None,
-    excluded_node_names: set[str] | None = None,
-    resource_blocked_node_names: set[str] | None = None,
-) -> list[NodeResource]:
-    """Parse the compact node GPU table into schedulable resource records."""
-
-    usage = usage_by_node or {}
-    excluded = excluded_node_names or set()
-    resource_blocked = resource_blocked_node_names or set()
-    nodes: list[NodeResource] = []
-    for line in nodes_output.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        node_name = parts[0]
-        if node_name_filter and node_name_filter not in node_name:
-            continue
-        # Excluded nodes may look GPU-free but cannot accept this validation pod.
-        if node_name in excluded:
-            continue
-        capacity = parse_gpu_quantity(parts[1])
-        allocatable = parse_gpu_quantity(parts[2])
-        nodes.append(
-            NodeResource(
-                name=node_name,
-                capacity=capacity,
-                allocatable=allocatable,
-                used=parse_gpu_quantity(usage.get(node_name, 0)),
-                resource_ready=node_name not in resource_blocked,
-            )
-        )
-    return nodes
-
-
 def summarize_node_resources(nodes: list[NodeResource]) -> dict[str, int]:
     """Return aggregate capacity, allocatable, used, and free GPUs."""
 
@@ -178,55 +127,10 @@ def discover_free_nodes_from_outputs(
     return nodes, summarize_node_resources(nodes)
 
 
-def resource_insufficient_node_names(
-    pods_json: Mapping[str, object],
-    nodes_json: Mapping[str, object],
-    config: CvalConfig | None = None,
-) -> set[str]:
-    """Return nodes without enough free resources for the validation pod."""
-
-    return {status.name for status in describe_nodes_from_outputs(pods_json, nodes_json, config) if not status.resource_ready}
-
-
-def unschedulable_node_names(
-    nodes_json: Mapping[str, object],
-    tolerated_no_schedule_taints: set[str] | None = None,
-) -> set[str]:
-    """Return nodes that should not be considered validation candidates."""
-
-    tolerated = (set(load_config().cluster.tolerated_no_schedule_taints)
-                 if tolerated_no_schedule_taints is None else tolerated_no_schedule_taints)
-    return {
-        node["metadata"]["name"] for node in _objects(nodes_json, "node")
-        if node_is_cordoned(node) or node_has_blocking_no_schedule_taint(node, tolerated)
-    }
-
-
 def fully_free_node_names(nodes: list[NodeResource]) -> list[str]:
     """Return node names whose allocatable GPUs are entirely free."""
 
     return [node.name for node in nodes if node.is_fully_free]
-
-
-def gpu_node_names_from_capacity_table(
-    nodes_output: str, node_name_filter: str | None = None
-) -> list[str]:
-    """Return all matching nodes with positive GPU capacity, preserving order."""
-
-    names: list[str] = []
-    for line in nodes_output.splitlines():
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        name = parts[0]
-        if node_name_filter and node_name_filter not in name:
-            continue
-        if parse_gpu_quantity(parts[1]) <= 0:
-            continue
-        names.append(name)
-    if len(names) != len(set(names)):
-        raise ValueError("Kubernetes GPU node inventory contains duplicate names")
-    return names
 
 
 def discover_gpu_node_names(

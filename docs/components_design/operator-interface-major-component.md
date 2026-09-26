@@ -63,12 +63,14 @@ safety. `validate` adds bounded observation and exact-run verification; `plan`
 remains read-only. The live loop delegates durable reconciliation and shared
 Job/pod/log observation to the same owners.
 
-The parser retains operator commands, guarded writer compatibility hooks and
-explicit repair entry points. This is a compatibility boundary, not a reason to
+The parser retains operator commands and explicit repair entry points. The C2
+cleanup retires the four individual `db-add-*` commands; automatic ingestion calls
+the independently authorized Python writers directly. This is not a reason to
 split the CLI or add a new error framework. Partial submission receipts and
 unknown/forbidden/unavailable observations remain distinct from empty results.
-Command-specific JSON and exit behavior are retained; a universal output envelope
-is not implemented or required. External usage of hidden hooks is unknown.
+Remaining command-specific JSON and exit behavior are retained; a universal output
+envelope is not implemented or required. Operators of retired writer commands must
+migrate explicitly rather than bypass per-run authorization.
 
 ### Reporting Contract
 
@@ -104,14 +106,17 @@ Current supported contracts carried forward from the former CLI design note:
 | `jobs`; `status` | Snapshot/watch of named Jobs; read-only latest raw status. |
 | `results` | Raw CSV; test selection, `all`/`overall` alias and status-only option. |
 | Live-loop commands | Start, stop, status, attach, run-once and internal run-loop; separate prune approval. |
-| Hidden writer hooks | `db-add-run-results`, `db-add-storage-result`, `db-add-nccl-health`, `db-add-dltest-run`. |
+| Retired writer hooks | `db-add-run-results`, `db-add-storage-result`, `db-add-nccl-health`, `db-add-dltest-run` are no longer parseable. Normal ingestion uses `python -m cval.storage.run_ingest`. |
 | Maintenance hook | `db-rebuild-dltest-metrics`; explicit repair rather than normal execution. |
 
-Exact source, run timestamp, deadlines, selection filters and export destination
-remain purposeful inputs. NCCL recovery confirmation, immutable-result arguments
-and rebuild `--only-missing` are safety/data contracts, not cosmetic clutter.
+Exact source, run timestamp, selection and export destination remain purposeful
+inputs. Monitoring settings now come from TOML. Rebuild `--only-missing` and the
+writers' immutable-result authorization remain safety/data contracts.
 
 ## Phase 0 Compatibility Inventory
+
+This dated inventory predates the approved C2-C8 retirements in
+[the current cleanup review](../cleanup-review.md#c2-c9-source-cleanup).
 
 Source/caller review at `b79a5e0`; not usage telemetry. Scope: tracked runtime,
 scripts, descriptors/templates, runbook and workspace operational collectors.

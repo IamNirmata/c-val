@@ -138,26 +138,6 @@ class KubectlClient:
 
         return self.get_json(["get", "node", node_name])
 
-    def get_nodes_capacity_table(self, resource_name: str) -> str:
-        """Return a compact node table containing GPU capacity and allocatable values."""
-
-        resource = resource_name.replace(".", "\\.")
-        columns = (
-            "custom-columns=NAME:.metadata.name,"
-            f"CAP:.status.capacity.{resource},"
-            f"ALLOC:.status.allocatable.{resource}"
-        )
-        return self.run(
-            [
-                "get",
-                "nodes",
-                "--no-headers",
-                "-o",
-                columns,
-            ]
-        ).stdout
-
-
 def _timeout_text(value: str | bytes | None) -> str:
     if value is None:
         return ""

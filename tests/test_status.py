@@ -45,6 +45,31 @@ class FakeKubectlClient:
 
 
 class StatusParsingTests(unittest.TestCase):
+    def test_operational_status_preserves_then_counts_and_hashes_one_generation(self) -> None:
+        now = 1790370000
+        previous = [{"node_name": "hgx-a", "node_uid": "uid-a", "latest_record_epoch": str(now - 60),
+                     "latest_record_la": "2026-09-25T13:59:00-07:00", "job_name": "old-job", "job_uid": "old-uid",
+                     "job_run_epoch": str(now - 60), "job_phase": "Completed", "source_sha": "a" * 40,
+                     "config_digest": "sha256:retained", "cooldown_until_epoch": str(now + 100)}]
+        observations = [{"node_name": "hgx-a", "node_uid": "uid-a", "observation_state": "stale"}]
+        config = load_config()
+        with patch("cval.storage.status.hashlib.sha256", wraps=hashlib.sha256) as digest:
+            rows, cluster = build_status_snapshot(observations, {"state": "stale"}, {}, config,
+                now=now, previous=previous, inventory_state="unavailable")
+        self.assertEqual(digest.call_count, 1)
+        self.assertEqual(rows[0]["latest_record_epoch"], now - 60)
+        self.assertEqual(rows[0]["job_name"], "old-job")
+        self.assertEqual(rows[0]["coverage_state"], "unverified")
+        self.assertEqual(cluster["complete_recorded_24h_nodes"], 1)
+        self.assertFalse(cluster["observation_complete"])
+        self.assertEqual(rows[0]["snapshot_id"], cluster["snapshot_id"])
+        self.assertEqual(list(cluster)[-2:], ["snapshot_id", "inventory_state"])
+        observations[0]["node_uid"] = "replacement-uid"
+        rows, cluster = build_status_snapshot(observations, {"state": "stale"}, {}, config, now=now, previous=previous)
+        self.assertEqual(rows[0]["latest_record_epoch"], "")
+        self.assertEqual(rows[0]["job_name"], "")
+        self.assertEqual(cluster["complete_recorded_24h_nodes"], 0)
+
     def test_operational_status_recorded_failure_keeps_older_successful_coverage(self) -> None:
         from cval.validation.results import parse_validation_result_v2, validation_result_digest
         from test_results_v2 import payload

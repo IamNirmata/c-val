@@ -180,29 +180,15 @@ def project_status_csvs(session_dir: Path, state: dict) -> None:
         coverage = {"state": "stale"}
         for observation in observations.values():
             observation["observation_state"] = "stale"
-    previous_by_name = {row["node_name"]: row for row in previous}
     if not observations:
         for row in previous:
             observations[row["node_name"]] = {**row, "observation_state": "stale"}
     for intent in state.get("intents", {}).values():
         observations.setdefault(intent["node_name"], {"node_name": intent["node_name"], "observation_state": "unavailable"})
-    rows, cluster = build_status_snapshot(list(observations.values()), coverage, state, config, now=now)
-    for row in rows:
-        old = previous_by_name.get(row["node_name"], {})
-        same_node = not old.get("node_uid") or row["node_uid"] == old["node_uid"]
-        if same_node and row["coverage_state"] == "unverified" and not row["latest_record_epoch"] and old.get("latest_record_epoch"):
-            row["latest_record_epoch"] = int(old["latest_record_epoch"])
-            row["latest_record_la"] = old["latest_record_la"]
-        if same_node and not row["job_name"] and old.get("job_name"):
-            for field in ("job_name", "job_uid", "job_run_epoch", "job_phase", "source_sha", "config_digest", "cooldown_until_epoch"):
-                row[field] = old[field]
-    cluster["complete_recorded_24h_nodes"] = sum(bool(row["latest_record_epoch"]) and 0 <= now - int(row["latest_record_epoch"]) <= 86400 for row in rows)
-    if snapshot.get("inventory_state") != "queried":
-        cluster["observation_complete"] = False
-    cluster["inventory_state"] = snapshot.get("inventory_state", "unavailable")
-    snapshot_id = hashlib.sha256(json.dumps([rows, cluster], sort_keys=True).encode()).hexdigest()
-    for row in [*rows, cluster]:
-        row["snapshot_id"] = snapshot_id
+    rows, cluster = build_status_snapshot(
+        list(observations.values()), coverage, state, config, now=now,
+        previous=previous, inventory_state=snapshot.get("inventory_state", "unavailable"),
+    )
     directory.mkdir(parents=True, exist_ok=True)
     for filename, entries, fields in (("node-status.csv", rows, NODE_STATUS_FIELDS), ("cluster-status.csv", [cluster], tuple(cluster))):
         output = io.StringIO()
@@ -212,7 +198,8 @@ def project_status_csvs(session_dir: Path, state: dict) -> None:
         atomic_session_text(directory / filename, output.getvalue())
 
 
-def build_status_snapshot(observations: list[dict], coverage: dict, state: dict, config, *, now: int) -> tuple[list[dict], dict]:
+def build_status_snapshot(observations: list[dict], coverage: dict, state: dict, config, *, now: int,
+                          previous: list[dict] | None = None, inventory_state: str = "queried") -> tuple[list[dict], dict]:
     """Project node and cluster CSV rows without making them admission authority."""
 
     from cval.jobs.manager import intent_finished
@@ -224,6 +211,7 @@ def build_status_snapshot(observations: list[dict], coverage: dict, state: dict,
     except (RuntimeError, ValueError):
         timestamps, coverage_available = {}, False
     history = {item["node"]: item for item in coverage.get("nodes", [])}
+    previous_by_name = {row["node_name"]: row for row in previous or []}
     node_rows = []
     for observation in sorted(observations, key=lambda item: item["node_name"]):
         name = observation["node_name"]
@@ -309,6 +297,14 @@ def build_status_snapshot(observations: list[dict], coverage: dict, state: dict,
         if replaced or (intent and intent["timestamp"] < created):
             row.update(recording_state="unverified", test_outcome="unknown", observation_state="unverified",
                        blocked_reason="node UID changed; retained attempt belongs to the previous node identity")
+        old = previous_by_name.get(name, {})
+        same_node = not old.get("node_uid") or row["node_uid"] == old["node_uid"]
+        if same_node and row["coverage_state"] == "unverified" and not row["latest_record_epoch"] and old.get("latest_record_epoch"):
+            row["latest_record_epoch"] = int(old["latest_record_epoch"])
+            row["latest_record_la"] = old["latest_record_la"]
+        if same_node and not row["job_name"] and old.get("job_name"):
+            for field in ("job_name", "job_uid", "job_run_epoch", "job_phase", "source_sha", "config_digest", "cooldown_until_epoch"):
+                row[field] = old[field]
         node_rows.append(row)
     known_rows = {row["node_name"]: row for row in node_rows if row["coverage_state"] in {"missing", "expired"}}
     ranked = build_priority_queue(
@@ -326,11 +322,12 @@ def build_status_snapshot(observations: list[dict], coverage: dict, state: dict,
         "readiness_unknown_nodes": sum(row["k8s_ready"] == "unknown" for row in node_rows),
         "scheduling_disabled_nodes": sum(row["scheduling_enabled"] == "false" for row in node_rows),
         "generated_at_epoch": now,
-        "observation_complete": coverage_available and all(row["observation_state"] == "queried" for row in node_rows),
+        "observation_complete": inventory_state == "queried" and coverage_available and all(row["observation_state"] == "queried" for row in node_rows),
     }
-    snapshot_id = hashlib.sha256(json.dumps([node_rows, cluster], sort_keys=True).encode()).hexdigest()
+    snapshot_id = hashlib.sha256(json.dumps([node_rows, cluster | {"inventory_state": inventory_state}], sort_keys=True).encode()).hexdigest()
     for row in [*node_rows, cluster]:
         row["snapshot_id"] = snapshot_id
+    cluster["inventory_state"] = inventory_state
     return node_rows, cluster
 
 

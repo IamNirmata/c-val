@@ -6,7 +6,7 @@ validation, read-only monitoring, and structured result inspection. Handlers are
 they parse arguments, call package modules, and format output.
 
 Public commands: config, tests, nodes, validate, status, plan, run, jobs, and results.
-The db-add-* commands are in-pod ingestion hooks and stay out of --help.
+The separately authorized DL rebuild command stays out of --help.
 """
 
 from __future__ import annotations
@@ -39,16 +39,6 @@ from cval.policy import ExecutionPolicy, PolicyViolation
 from cval.storage.status import (
     get_latest_status_rows,
     latest_status_rows_to_node_map,
-)
-from cval.storage.ingest import (
-    add_nccl_health_from_summary,
-    add_storage_result,
-    add_validation_run_results,
-    parse_timestamp,
-)
-from cval.validation.results import (
-    ValidationResultV2,
-    validation_result_to_env,
 )
 from cval.validation.operational_targets import (
     RESULTS_EXPORT,
@@ -256,62 +246,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         help="Do not join NCCL/storage metric columns into the CSV",
     )
     results.set_defaults(handler=handle_results)
-
-    # In-pod ingestion commands; added without `help` so they stay out of --help.
-    db_add_run = subparsers.add_parser("db-add-run-results")
-    db_add_run.add_argument("node")
-    db_add_run.add_argument("timestamp")
-    db_add_run.add_argument("--storage-result", required=True, choices=["pass", "fail", "incomplete"])
-    db_add_run.add_argument("--nccl-result", required=True, choices=["pass", "fail", "incomplete"])
-    db_add_run.add_argument("--dltest-result", required=True, choices=["pass", "fail", "incomplete"])
-    db_add_run.add_argument("--overall-result", required=True, choices=["pass", "fail", "incomplete"])
-    db_add_run.add_argument("--image-name", default="")
-    db_add_run.add_argument("--pytorch-version", default="")
-    db_add_run.add_argument("--cuda-version", default="")
-    db_add_run.add_argument("--result-json", type=Path, required=True)
-    db_add_run.add_argument("--result-digest", default="")
-    db_add_run.add_argument("--db-path", default=active_config.storage.validation_db_path)
-    db_add_run.set_defaults(handler=handle_db_add_run_results)
-
-    db_add_storage = subparsers.add_parser("db-add-storage-result")
-    db_add_storage.add_argument("node")
-    db_add_storage.add_argument("timestamp")
-    db_add_storage.add_argument("results_dir", type=Path)
-    db_add_storage.add_argument("--image-name", default="")
-    db_add_storage.add_argument("--run-id", default="")
-    db_add_storage.add_argument("--immutable", action="store_true")
-    db_add_storage.add_argument("--result-json", type=Path, required=True)
-    db_add_storage.add_argument("--result-digest", default="")
-    db_add_storage.add_argument("--db-path", default=active_config.storage.storage_db_path)
-    db_add_storage.set_defaults(handler=handle_db_add_storage_result)
-
-    db_add_nccl_health = subparsers.add_parser("db-add-nccl-health")
-    db_add_nccl_health.add_argument("node")
-    db_add_nccl_health.add_argument("timestamp")
-    db_add_nccl_health.add_argument("summary_json", type=Path)
-    db_add_nccl_health.add_argument("--iterations", type=int)
-    db_add_nccl_health.add_argument("--image-name", default="")
-    db_add_nccl_health.add_argument("--cuda-version", default="")
-    db_add_nccl_health.add_argument("--pytorch-version", default="")
-    db_add_nccl_health.add_argument("--run-id", default="")
-    db_add_nccl_health.add_argument("--immutable", action="store_true")
-    db_add_nccl_health.add_argument("--ibbw-log", type=Path)
-    db_add_nccl_health.add_argument("--recover-descriptor-ibbw-log", action="store_true")
-    db_add_nccl_health.add_argument("--confirm-recovery")
-    db_add_nccl_health.add_argument("--require-hca-samples", action="store_true")
-    db_add_nccl_health.add_argument("--result-json", type=Path, required=True)
-    db_add_nccl_health.add_argument("--result-digest", default="")
-    db_add_nccl_health.add_argument("--db-path", default=active_config.storage.nccl_db_path)
-    db_add_nccl_health.set_defaults(handler=handle_db_add_nccl_health)
-
-    db_add_dltest = subparsers.add_parser("db-add-dltest-run")
-    db_add_dltest.add_argument("node")
-    db_add_dltest.add_argument("timestamp")
-    db_add_dltest.add_argument("results_root", type=Path)
-    db_add_dltest.add_argument("--result-json", type=Path, required=True)
-    db_add_dltest.add_argument("--result-digest", required=True)
-    db_add_dltest.add_argument("--output", choices=["table", "json"], default="table")
-    db_add_dltest.set_defaults(handler=handle_db_add_dltest_run)
 
     db_rebuild_dltest = subparsers.add_parser("db-rebuild-dltest-metrics")
     db_rebuild_dltest.add_argument(
@@ -755,173 +689,6 @@ def handle_validate(args: argparse.Namespace) -> int:
     if args.output == "json":
         print(json.dumps(report, indent=2))
     return 0 if report.get("ok", False) else 1
-
-
-def _raw_write_authorization(args: argparse.Namespace):
-    from cval.storage.write_provenance import authorize_result_write
-
-    authorization = authorize_result_write(
-        args.result_json,
-        result_digest=args.result_digest,
-        config_snapshot_b64=os.environ.get("CVAL_CONFIG_SNAPSHOT_B64", ""),
-        config=args.cval_config,
-    )
-    result = authorization.result
-    if args.node != result.node or parse_timestamp(args.timestamp) != parse_timestamp(
-        result.timestamp
-    ):
-        raise ValueError("Raw DB writer identity does not match validated result")
-    for argument_name, result_value in (
-        ("image_name", result.image_name),
-        ("pytorch_version", result.pytorch_version),
-        ("cuda_version", result.cuda_version),
-    ):
-        if hasattr(args, argument_name) and getattr(args, argument_name) != result_value:
-            raise ValueError(
-                f"Raw DB writer {argument_name} does not match validated result"
-            )
-    if (
-        isinstance(result, ValidationResultV2)
-        and hasattr(args, "run_id")
-        and args.run_id
-        and args.run_id != result.run_id
-    ):
-        raise ValueError("Raw DB writer run_id does not match validated result")
-    return authorization
-
-
-def _require_v2_db_target(authorization, db_path: str | Path, config_field: str) -> None:
-    if not isinstance(authorization.result, ValidationResultV2):
-        return
-    expected = Path(getattr(authorization.config.storage, config_field)).expanduser()
-    if Path(db_path).expanduser() != expected:
-        raise ValueError(
-            f"Raw DB target does not match snapshot storage.{config_field}"
-        )
-
-
-def handle_db_add_run_results(args: argparse.Namespace) -> int:
-    """Atomically append fixed built-in status rows for one run."""
-
-    authorization = _raw_write_authorization(args)
-    projected = validation_result_to_env(authorization.result)
-    from cval.validation.builtins import (
-        BUILTIN_AGGREGATE_TEST_ID,
-        BUILTIN_TEST_PROJECTIONS,
-        project_builtin_statuses,
-    )
-
-    expected_results = project_builtin_statuses(projected)
-    actual_results = {
-        item.test_id: getattr(args, f"{item.test_id}_result")
-        for item in BUILTIN_TEST_PROJECTIONS
-    } | {
-        BUILTIN_AGGREGATE_TEST_ID: args.overall_result,
-    }
-    if actual_results != expected_results:
-        raise ValueError("Raw DB status set does not match validated result")
-    _require_v2_db_target(authorization, args.db_path, "validation_db_path")
-    timestamp = add_validation_run_results(
-        args.node,
-        args.timestamp,
-        actual_results,
-        image_name=args.image_name,
-        pytorch_version=args.pytorch_version,
-        cuda_version=args.cuda_version,
-        db_path=args.db_path,
-        _authorization=authorization,
-    )
-    print(f"Added atomic validation run results: {args.node} {timestamp}")
-    return 0
-
-
-
-def handle_db_add_storage_result(args: argparse.Namespace) -> int:
-    """Parse storage artifacts and write one storage metrics row."""
-
-    authorization = _raw_write_authorization(args)
-    if isinstance(authorization.result, ValidationResultV2):
-        test = authorization.result.tests.get("storage")
-        if test is None or test.status != "pass" or Path(test.artifacts) != args.results_dir:
-            raise ValueError("Storage command does not match validated v2 evidence")
-    _require_v2_db_target(authorization, args.db_path, "storage_db_path")
-    timestamp = add_storage_result(
-        args.node,
-        args.timestamp,
-        args.results_dir,
-        image_name=args.image_name,
-        run_id=args.run_id,
-        immutable=args.immutable,
-        db_path=args.db_path,
-        _authorization=authorization,
-    )
-    print(f"Added storage result: {args.node} {timestamp}")
-    return 0
-
-
-def handle_db_add_nccl_health(args: argparse.Namespace) -> int:
-    """Ingest one consolidated NCCL/IB health row from a summary JSON."""
-
-    if args.recover_descriptor_ibbw_log:
-        if args.confirm_recovery != "recover-descriptor-ibbw":
-            raise ValueError(
-                "descriptor IBBW recovery requires exact --confirm-recovery "
-                "recover-descriptor-ibbw"
-            )
-    elif args.confirm_recovery is not None:
-        raise ValueError(
-            "--confirm-recovery is valid only with --recover-descriptor-ibbw-log"
-        )
-    authorization = _raw_write_authorization(args)
-    if not args.summary_json.exists():
-        print(f"NCCL summary JSON not found: {args.summary_json}", file=sys.stderr)
-        return 1
-    if isinstance(authorization.result, ValidationResultV2):
-        test = authorization.result.tests.get("nccl")
-        if test is None or test.status != "pass" or Path(test.summary) != args.summary_json:
-            raise ValueError("NCCL command does not match validated v2 evidence")
-    _require_v2_db_target(authorization, args.db_path, "nccl_db_path")
-    timestamp = add_nccl_health_from_summary(
-        args.node,
-        args.timestamp,
-        args.summary_json,
-        iterations=args.iterations,
-        image_name=args.image_name,
-        cuda_version=args.cuda_version,
-        pytorch_version=args.pytorch_version,
-        run_id=args.run_id,
-        immutable=args.immutable,
-        ibbw_log_path=args.ibbw_log,
-        recover_descriptor_ibbw_log=args.recover_descriptor_ibbw_log,
-        require_hca_samples=args.require_hca_samples,
-        db_path=args.db_path,
-        _authorization=authorization,
-    )
-    print(f"Added consolidated IB_HEALTH result: {args.node} {timestamp}")
-    return 0
-
-
-def handle_db_add_dltest_run(args: argparse.Namespace) -> int:
-    """Ingest one complete passing DL run into all four metric DBs."""
-
-    from cval.storage.dltest_ingest import ingest_dltest_run
-
-    authorization = _raw_write_authorization(args)
-    summary = ingest_dltest_run(
-        args.results_root,
-        node=args.node,
-        timestamp=args.timestamp,
-        config=args.cval_config,
-        _authorization=authorization,
-    )
-    if args.output == "json":
-        print(json.dumps(summary, indent=2))
-    else:
-        print(
-            f"Ingested current DL run from {summary['rank_files']} rank file(s): "
-            f"{summary['results_root']}"
-        )
-    return 0
 
 
 def handle_db_rebuild_dltest_metrics(args: argparse.Namespace) -> int:

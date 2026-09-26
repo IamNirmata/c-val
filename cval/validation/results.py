@@ -392,16 +392,6 @@ def validation_result_digest(result: ValidationResultLike) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
-def validation_result_to_env_lines(result: ValidationResultLike) -> list[str]:
-    """Render env-style lines consumed by shell process substitution."""
-
-    values = validation_result_to_env(result)
-    for key, value in values.items():
-        if any(character in value for character in ("\x00", "\r", "\n")):
-            raise ValueError(f"Result projection value contains a control character: {key}")
-    return [f"{key}={value}" for key, value in values.items()]
-
-
 def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
     allowed = {
         "display_name",

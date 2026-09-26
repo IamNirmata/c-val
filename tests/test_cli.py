@@ -21,6 +21,19 @@ from cval.validation.plugins import ExportRows
 
 
 class CliTests(unittest.TestCase):
+    def test_retired_ingestion_commands_leave_coordinator_and_rebuild_available(self) -> None:
+        from cval.storage.run_ingest import ingest_run
+
+        parser = build_parser(load_config())
+        for command in ("db-add-run-results", "db-add-storage-result", "db-add-nccl-health", "db-add-dltest-run"):
+            with self.subTest(command=command), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                parser.parse_args([command])
+            self.assertEqual(error.exception.code, 2)
+        rebuild = parser.parse_args(["db-rebuild-dltest-metrics", "--only-missing"])
+        self.assertEqual(rebuild.handler.__name__, "handle_db_rebuild_dltest_metrics")
+        self.assertTrue(rebuild.only_missing)
+        self.assertEqual(ingest_run.__module__, "cval.storage.run_ingest")
+
     def test_c1_redundant_toml_setting_flags_are_removed(self) -> None:
         parser = build_parser(load_config())
         cases = (

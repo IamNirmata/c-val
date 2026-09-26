@@ -5,158 +5,28 @@ the cluster-first development path. It submits one validation job for a
 specific eligible node, streams progress while the in-pod tests run, and
 reports the canonical raw evidence written by that job.
 
-The pure helpers (`parse_test_progress`, `build_validation_report`,
-`render_validation_report`) are import-only and
-unit-tested; the orchestration in `run_node_validation` wires them to the live
-cluster through a `KubectlClient`.
+Report helpers are import-only; orchestration uses the shared Job/pod/log observer
+and exact evidence verifier through a `KubectlClient`.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import replace
-import re
 import time
 from typing import Any, Callable
 
 from cval.config import CvalConfig, is_exact_commit, load_config
 from cval.jobs.manager import admission_lock, read_admission_session, retain_submission_event, submit_workflow_plan
-from cval.jobs.monitor import TERMINAL_PHASES, observe_validation_job, structured_progress_events
+from cval.jobs.monitor import TERMINAL_PHASES, observe_validation_job
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import KubectlClient
 from cval.k8s.discovery import NodeStatus, describe_node
 from cval.models import PlannedJob, QueueCandidate, WorkflowPlan
 from cval.policy import ExecutionPolicy, PolicyViolation
 from cval.storage.verification import verify_run_evidence
-from cval.validation.builtins import (
-    BUILTIN_DB_UPDATE_DONE_MARKER,
-    BUILTIN_DONE_MARKERS,
-    BUILTIN_FINAL_RESULT_PREFIX,
-    BUILTIN_RUNNING_MARKERS,
-    BUILTIN_SKIPPED_MARKERS,
-    BUILTIN_TEST_IDS,
-)
-
-# In-pod run-test.sh log markers that signal each phase finished.
-_FINAL_RESULT_RE = re.compile(
-    re.escape(BUILTIN_FINAL_RESULT_PREFIX)
-    + "".join(rf"\s*{re.escape(test_id)}=(\w+)" for test_id in BUILTIN_TEST_IDS)
-)
 
 SUCCESS_PHASES = frozenset({"Completed", "Succeeded"})
-
-
-def _normalize_result(value: str) -> str:
-    text = (value or "").strip().lower()
-    return text if text in {"pass", "fail", "incomplete"} else "fail"
-
-
-def parse_test_progress(log_text: str) -> dict[str, str]:
-    """Map each test to its observed state from in-pod logs.
-
-    States: ``running`` (started, not finished), ``pass``/``fail`` (finished).
-    The authoritative ``Final c-val test results:`` line wins when present.
-    """
-
-    progress: dict[str, str] = {}
-    if not log_text:
-        return progress
-
-    for test, (done_marker, fail_marker) in BUILTIN_DONE_MARKERS.items():
-        if done_marker in log_text:
-            progress[test] = "pass"
-        elif fail_marker in log_text:
-            progress[test] = "fail"
-
-    for test, running_marker in BUILTIN_RUNNING_MARKERS.items():
-        if running_marker in log_text and test not in progress:
-            progress[test] = "running"
-
-    for test, skipped_marker in BUILTIN_SKIPPED_MARKERS.items():
-        if skipped_marker in log_text:
-            progress[test] = "incomplete"
-
-    match = _FINAL_RESULT_RE.search(log_text)
-    if match:
-        progress.update(
-            {
-                test_id: _normalize_result(value)
-                for test_id, value in zip(BUILTIN_TEST_IDS, match.groups(), strict=True)
-            }
-        )
-
-    for event in structured_progress_events(log_text):
-        test = event.get("test")
-        if not isinstance(test, str) or not test:
-            continue
-        event_name = event.get("event")
-        if event_name in {"test_setup_started", "test_started"}:
-            progress[test] = "running"
-        elif event_name in {"test_finished", "test_timed_out"}:
-            progress[test] = _normalize_result(str(event.get("status", "fail")))
-        elif event_name == "test_skipped":
-            progress[test] = "incomplete"
-
-    return progress
-
-
-def raw_results_from_log(
-    log_text: str,
-    enabled_tests: set[str] | None = None,
-) -> dict[str, str]:
-    """Extract per-test results and aggregate across enabled phases."""
-
-    results: dict[str, str] = {}
-    for test, skipped_marker in BUILTIN_SKIPPED_MARKERS.items():
-        if skipped_marker in (log_text or ""):
-            results[test] = "incomplete"
-    for event in structured_progress_events(log_text or ""):
-        test = event.get("test")
-        event_name = event.get("event")
-        if isinstance(test, str) and event_name in {
-            "test_finished",
-            "test_timed_out",
-            "test_skipped",
-        }:
-            results[test] = _normalize_result(str(event.get("status", "incomplete")))
-        if event_name == "run_finished":
-            results["all"] = _normalize_result(
-                str(event.get("overall", event.get("status", "incomplete")))
-            )
-
-    match = _FINAL_RESULT_RE.search(log_text or "")
-    if match:
-        results.update(
-            {
-                test_id: _normalize_result(value)
-                for test_id, value in zip(BUILTIN_TEST_IDS, match.groups(), strict=True)
-            }
-        )
-    if not results:
-        return {}
-    enabled = enabled_tests if enabled_tests is not None else set(BUILTIN_TEST_IDS)
-    if "all" in results:
-        return results
-    if not enabled:
-        results["all"] = "incomplete"
-    else:
-        results["all"] = (
-            "pass" if all(results.get(test) == "pass" for test in enabled) else "fail"
-        )
-    return results
-
-
-def log_signals_db_updated(log_text: str) -> bool:
-    """Return True once the in-pod DB ingestion has finished."""
-
-    ingestion_events = [
-        event
-        for event in structured_progress_events(log_text or "")
-        if event.get("event") == "ingestion_finished"
-    ]
-    if ingestion_events:
-        return ingestion_events[-1].get("status") == "pass"
-    return bool(log_text) and BUILTIN_DB_UPDATE_DONE_MARKER in log_text
 
 
 def render_test_progress_line(

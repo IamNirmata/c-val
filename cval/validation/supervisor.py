@@ -17,8 +17,8 @@ from typing import BinaryIO, Callable, Mapping, Sequence
 from cval.config import CvalConfig, load_config_snapshot
 from cval.validation.builtins import BUILTIN_TEST_IDS
 from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload, process_group_exists, terminate_process_group
-from cval.validation.path_preflight import SAFE_SEGMENT, _registry_test_ids
 from cval.validation.results import (
+    RUN_ID_PATTERN as SAFE_SEGMENT,
     ValidationResultV2,
     load_validation_result,
     validation_result_digest,
@@ -652,6 +652,21 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - top-level pod boundary
         print(f"c-val secure supervisor failed: {exc}", file=sys.stderr)
         return 1
+
+
+def _registry_test_ids(payload: str) -> tuple[str, ...]:
+    if not payload:
+        raise ValueError("runtime test registry is required")
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("runtime test registry is invalid JSON") from exc
+    if not isinstance(data, dict) or not data:
+        raise ValueError("runtime test registry must be a non-empty object")
+    for test_id in data:
+        if not isinstance(test_id, str) or not SAFE_SEGMENT.fullmatch(test_id):
+            raise ValueError(f"Invalid test ID path segment: {test_id!r}")
+    return tuple(sorted(data))
 
 
 def _enabled_test_ids(payload: str, test_ids: tuple[str, ...]) -> tuple[str, ...]:

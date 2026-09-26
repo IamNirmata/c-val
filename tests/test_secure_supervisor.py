@@ -683,6 +683,14 @@ mkdir -m 700 "$canonical"
             finally:
                 layout.close()
 
+    def test_reservation_rejects_invalid_registry_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            for registry in ("", "{}", "[]", '{"../escape":{"enabled":true}}', "{invalid"):
+                with self.subTest(registry=registry), self.assertRaises(ValueError):
+                    reserve_secure_run_layout(root, "node-a", "node-a-123", registry_json=registry)
+                self.assertFalse(root.exists())
+
     def test_reservation_uses_deterministic_owner_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             validation_root = Path(tmpdir) / "data"

@@ -46,13 +46,14 @@ flowchart LR
 | Tests | 5 | 1,973 |
 
 Counted: validation package initialization, [execution](../../cval/validation/execution.py),
-[path preflight](../../cval/validation/path_preflight.py),
 [results](../../cval/validation/results.py), [runner](../../cval/validation/runner.py),
 [secure filesystem](../../cval/validation/secure_fs.py),
 [supervisor](../../cval/validation/supervisor.py),
 [environment launcher](../../validation-tests/0-env.sh), and
 [runner alias](../../validation-tests/run-test.sh).
-Tests: runner, results v2, secure supervisor, path preflight and generic registry scaffold.
+The historical count also included the now-retired standalone path-preflight module.
+Its ID checks now live in the supervisor; real reservation/symlink checks remain
+covered by secure-supervisor tests. Other tests cover runner, results v2 and generic registry behavior.
 The registry/environment builder is C1; workload scripts are C6; ingestion is C7.
 
 ## Functionality Assessment

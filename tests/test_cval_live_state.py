@@ -23,6 +23,25 @@ GIT_REF = "a" * 40
 
 
 class StatusCsvTests(unittest.TestCase):
+    def test_plan_coverage_summary_does_not_write_a_duplicate_snapshot(self) -> None:
+        script = (REPO_ROOT / "scripts/cval-live.sh").read_text()
+        function = "json_coverage_summary_tsv() {" + script.split("json_coverage_summary_tsv() {", 1)[1].split("\ncollect_plan_inputs()", 1)[0]
+        self.assertNotIn("latest-status-map.json", script)
+        self.assertNotIn("repair_cycle_cooldowns", script)
+        self.assertNotIn("json_submitted_jobs_csv_from_dir", script)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "coverage.json"
+            source.write_text(json.dumps({"schema_version": "cval.coverage.v1", "state": "empty",
+                "policy": "successful_complete_run", "nodes": [{"node": "node-a", "state": "empty", "coverage_timestamp": None}], "timestamps": {}}))
+            before = source.read_bytes()
+            result = subprocess.run(["bash", "-s", "--", str(source)],
+                input=function + '\njson_coverage_summary_tsv "$1"\n', cwd=REPO_ROOT,
+                env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "1\t0")
+            self.assertEqual(source.read_bytes(), before)
+            self.assertEqual(list(Path(directory).iterdir()), [source])
+
     def test_watch_refresh_uses_pinned_interval_and_stops_with_its_owner(self) -> None:
         from cval.config import load_config
 

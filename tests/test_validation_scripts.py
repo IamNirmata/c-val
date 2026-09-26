@@ -902,18 +902,21 @@ printf '%s\n' \
         self.assertIn("CVAL_IBBW_END_DEVICE=${CVAL_IBBW_END_DEVICE:-}", run_test)
         self.assertIn("auto-detect", run_test)
 
-    def test_compatibility_entrypoints_delegate_to_canonical_runners(self) -> None:
+    def test_retired_aliases_leave_canonical_descriptor_runners(self) -> None:
         wrappers = {
             "storage/storage.sh": "storage/run-test.sh",
             "nccl/run-nccl-allreduce.sh": "nccl/run-test.sh",
             "dltest/dltest.sh": "dltest/run-test.sh",
         }
+        registry = load_test_registry(
+            {name: {"enabled": True, "config_path": f"validation-tests/{name}/test_config.toml"}
+             for name in ("storage", "nccl", "dltest")}, repo_root=REPO_ROOT,
+        )
         for wrapper, canonical in wrappers.items():
-            text = (REPO_ROOT / "validation-tests" / wrapper).read_text(
-                encoding="utf-8"
-            )
-            self.assertIn('exec bash "$SCRIPT_DIR/run-test.sh" "$@"', text)
+            self.assertFalse((REPO_ROOT / "validation-tests" / wrapper).exists())
             self.assertTrue((REPO_ROOT / "validation-tests" / canonical).is_file())
+            self.assertEqual(registry.require(canonical.split("/")[0]).definition.metadata.entrypoint, "run-test.sh")
+            subprocess.run(["bash", "-n", str(REPO_ROOT / "validation-tests" / canonical)], check=True)
 
     def test_top_level_runner_delegates_enabled_storage_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

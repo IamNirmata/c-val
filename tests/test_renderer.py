@@ -121,6 +121,13 @@ class RendererTests(unittest.TestCase):
         rendered = render_validation_job(inline, "node-a", timestamp=12345, git_ref=COMMIT)
         self.assertEqual(rendered.yaml_text, shared.yaml_text)
 
+    def test_inline_bootstrap_rejects_extra_commands(self) -> None:
+        for script in ("echo unexpected\n" + _RUNTIME_BOOTSTRAP, _RUNTIME_BOOTSTRAP + "\necho unexpected\n"):
+            inline = TEMPLATE.replace("                  runtime-bootstrap-placeholder",
+                                      textwrap.indent(script.rstrip("\n"), "                  "))
+            with self.subTest(script=script), self.assertRaisesRegex(ValueError, "canonical runtime bootstrap"):
+                render_validation_job(inline, "node-a", timestamp=12345, git_ref=COMMIT)
+
     def test_scheduler_selected_template_uses_assigned_node_and_standard_runner(self) -> None:
         config = load_config()
         config = replace(config, job=replace(config.job, source_configmap="cval-exact-source", source_sha256="b" * 64))

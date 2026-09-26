@@ -11,11 +11,9 @@ from tempfile import TemporaryDirectory
 from cval.config import CvalConfig, JobTemplateConfig, load_config
 from cval.k8s.client import CommandResult
 from cval.k8s.discovery import describe_node_from_outputs
+from cval.jobs.monitor import _runtime_progress
 from cval.orchestrator.validate import (
     build_validation_report,
-    log_signals_db_updated,
-    parse_test_progress,
-    raw_results_from_log,
     render_test_progress_line,
     render_validation_report,
     run_node_validation,
@@ -29,27 +27,22 @@ NCCL_DONE = "NCCL test is complete. Log file: x Summary file: y"
 FINAL_LINE = "Final c-val test results: storage=pass nccl=pass dltest=fail"
 
 
-class TestParseProgress(unittest.TestCase):
-    def test_individual_markers(self):
-        text = "\n".join([STORAGE_DONE, "Running DL Test..."])
-        progress = parse_test_progress(text)
-        self.assertEqual(progress["storage"], "pass")
-        self.assertEqual(progress["dltest"], "running")
-        self.assertNotIn("nccl", progress)
+class TestStructuredProgress(unittest.TestCase):
+    def setUp(self):
+        self.config = load_config()
+        self.intent = {"node_name": "node-a", "run_id": "node-a-123", "config_digest": "sha256:" + "a" * 64}
 
-    def test_final_line_is_authoritative(self):
-        text = "\n".join([STORAGE_DONE, NCCL_DONE, FINAL_LINE])
-        progress = parse_test_progress(text)
-        self.assertEqual(progress, {"storage": "pass", "nccl": "pass", "dltest": "fail"})
-
-    def test_failed_marker(self):
-        progress = parse_test_progress("Storage test FAILED. Log file: x Summary file: y")
-        self.assertEqual(progress["storage"], "fail")
-
-    def test_empty_log(self):
-        self.assertEqual(parse_test_progress(""), {})
+    def test_legacy_messages_do_not_authorize_completion(self):
+        runtime = _runtime_progress("\n".join([STORAGE_DONE, NCCL_DONE, FINAL_LINE, "Main DB update completed."]), self.intent, self.config)
+        self.assertEqual(runtime["progress"], {})
+        self.assertEqual(runtime["tests_outcome"], "unconfirmed")
+        self.assertEqual(runtime["ingestion_outcome"], "unconfirmed")
+        self.assertFalse(runtime["completion_confirmed"])
 
     def test_structured_events_support_dynamic_test_ids(self):
+        source = self.config.tests.registry.require("storage")
+        test = replace(source, definition=replace(source.definition, metadata=replace(source.definition.metadata, id="smoke")))
+        config = replace(self.config, tests=replace(self.config.tests, registry=ValidationTestRegistry((test,))))
         started = {
             "schema_version": "cval.event.v1",
             "event": "test_started",
@@ -68,10 +61,14 @@ class TestParseProgress(unittest.TestCase):
             f"CVAL_EVENT {json.dumps(event)}" for event in (started, finished)
         )
 
-        self.assertEqual(parse_test_progress(text), {"smoke": "pass"})
+        runtime = _runtime_progress(text, self.intent, config)
+        self.assertEqual(runtime["progress"], {"smoke": "pass"})
+        self.assertFalse(runtime["completion_confirmed"])
+        other_run = text.replace("node-a-123", "node-a-124")
+        self.assertEqual(_runtime_progress(other_run, self.intent, config)["progress"], {})
 
     def test_malformed_structured_event_is_ignored(self):
-        self.assertEqual(parse_test_progress("CVAL_EVENT {not-json}"), {})
+        self.assertEqual(_runtime_progress("CVAL_EVENT {not-json}", self.intent, self.config)["progress"], {})
 
     def test_dynamic_progress_line_uses_registry_order(self):
         line = render_test_progress_line(
@@ -84,56 +81,6 @@ class TestParseProgress(unittest.TestCase):
         self.assertIn("storage=PASS smoke=RUNNING", line)
 
 
-class TestRawResults(unittest.TestCase):
-    def test_raw_results_from_final_line(self):
-        raw = raw_results_from_log(FINAL_LINE)
-        self.assertEqual(raw["storage"], "pass")
-        self.assertEqual(raw["dltest"], "fail")
-        self.assertEqual(raw["all"], "fail")
-
-    def test_all_pass(self):
-        raw = raw_results_from_log("Final c-val test results: storage=pass nccl=pass dltest=pass")
-        self.assertEqual(raw["all"], "pass")
-
-    def test_disabled_phase_is_ignored_for_aggregate(self):
-        raw = raw_results_from_log(
-            "Final c-val test results: storage=pass nccl=pass dltest=incomplete",
-            enabled_tests={"storage", "nccl"},
-        )
-        self.assertEqual(raw["all"], "pass")
-
-    def test_missing_line(self):
-        self.assertEqual(raw_results_from_log("nothing here"), {})
-
-    def test_raw_results_from_structured_events(self):
-        events = [
-            {
-                "schema_version": "cval.event.v1",
-                "event": "test_finished",
-                "run_id": "node-a-123",
-                "test": "smoke",
-                "timestamp": "2026-07-28T16:00:01Z",
-                "status": "pass",
-                "message": "",
-            },
-            {
-                "schema_version": "cval.event.v1",
-                "event": "run_finished",
-                "run_id": "node-a-123",
-                "test": None,
-                "timestamp": "2026-07-28T16:00:01Z",
-                "status": "pass",
-                "overall": "pass",
-                "message": "",
-            },
-        ]
-        text = "\n".join(f"CVAL_EVENT {json.dumps(event)}" for event in events)
-
-        self.assertEqual(
-            raw_results_from_log(text, enabled_tests={"smoke"}),
-            {"smoke": "pass", "all": "pass"},
-        )
-
     def test_structured_ingestion_failure_overrides_legacy_marker(self):
         event = {
             "schema_version": "cval.event.v1",
@@ -143,10 +90,17 @@ class TestRawResults(unittest.TestCase):
             "timestamp": "2026-07-28T16:00:01Z",
             "status": "fail",
             "message": "write failed",
+            "producer": "ingestion",
+            "node_name": "node-a",
+            "config_digest": self.intent["config_digest"],
+            "result_digest": "sha256:" + "b" * 64,
+            "stores": {name: "unconfirmed" for name in ("storage", "nccl", "validation", "numerical_correctness", "compute_performance", "collective_performance", "overlap_performance")},
         }
         text = "Main DB update completed.\nCVAL_EVENT " + json.dumps(event)
 
-        self.assertFalse(log_signals_db_updated(text))
+        runtime = _runtime_progress(text, self.intent, self.config)
+        self.assertEqual(runtime["ingestion_outcome"], "fail")
+        self.assertFalse(runtime["completion_confirmed"])
 
 
 

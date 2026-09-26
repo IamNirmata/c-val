@@ -39,6 +39,12 @@ Git checkout remains a supported alternate source transport; a branch name is
 never an acceptable submitted revision. ConfigMap and Git startup converge on
 the same checked runtime contract.
 
+The C8 cleanup validates structured YAML and requires the actual container script
+to match the packaged `bootstrap.sh`. Prefer the shared placeholder; an exact
+inline copy is also accepted. Extra or modified inline commands are rejected.
+This replaces the duplicate textual YAML/ordered-line scanner without removing
+source hashes, semantic workload checks or the single-attempt policy.
+
 ## Codebase Size
 
 | Kind | Files | Physical Lines |
@@ -60,7 +66,7 @@ The PVC access template is C9; global configuration is C1.
 | --- | --- | --- |
 | Critical | Exact commit, archive hash/identity, immutable source, semantic template checks | Preserve. |
 | Good | Offline source delivery and one shared bootstrap | Already implemented; reuse rather than redesign again. |
-| Retained | Inline custom bootstrap compatibility | External usage is unknown; no retirement in Phase 6. |
+| Retired in C8 | Customized inline bootstrap programs | Use the shared placeholder or an exact copy of the packaged startup program. |
 | Removed from runtime bundle | Top-level host regression suite | Retained in the repository; excluded from the archive after isolated packaging checks. |
 
 ## Current Issues

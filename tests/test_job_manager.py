@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import tempfile
+import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 from cval.jobs.manager import submit_workflow_plan
-from cval.jobs.monitor import get_job_phase, monitor_jobs_until_terminal
+from cval.jobs.monitor import get_job_phases, monitor_jobs_until_terminal
 from cval.k8s.client import CommandResult
 from cval.orchestrator.workflow import build_workflow_plan
 from cval.policy import ExecutionPolicy, PolicyViolation
@@ -30,7 +31,7 @@ class FakeKubectlClient:
         self.returncode = returncode
         self.calls: list[tuple[list[str], str | None]] = []
 
-    def run(self, args, check=True, input_text=None):
+    def run(self, args, check=True, input_text=None, timeout=None):
         self.calls.append((list(args), input_text))
         return CommandResult(
             args=list(args),
@@ -99,25 +100,22 @@ class JobManagerTests(unittest.TestCase):
         self.assertIn("slc01-cl02-hgx-0001", client.calls[0][1])
 
     def test_get_job_phase_is_read_only(self) -> None:
-        client = FakeKubectlClient(stdout="Running")
+        client = FakeKubectlClient(stdout=json.dumps({"items": [{"metadata": {"name": "hari-gcr-ceval-node-123"}, "status": {"state": {"phase": "Running"}}}]}))
 
-        phase = get_job_phase("hari-gcr-ceval-node-123", client=client)
+        phase = get_job_phases(["hari-gcr-ceval-node-123"], client=client)[0]
 
         self.assertEqual(phase.phase, "Running")
         self.assertEqual(client.calls[0][0][:3], ["get", "vcjob", "-n"])
 
     def test_get_job_phase_distinguishes_missing_from_observation_failure(self) -> None:
-        missing = FakeKubectlClient(
-            stderr='Error from server (NotFound): jobs.batch.volcano.sh "job" not found',
-            returncode=1,
-        )
+        missing = FakeKubectlClient(stdout='{"items": []}')
         unavailable = FakeKubectlClient(
             stderr="Unable to connect to the server",
             returncode=1,
         )
 
-        self.assertEqual(get_job_phase("job", client=missing).phase, "Missing")
-        self.assertEqual(get_job_phase("job", client=unavailable).phase, "Unknown")
+        self.assertEqual(get_job_phases(["job"], client=missing)[0].phase, "Missing")
+        self.assertEqual(get_job_phases(["job"], client=unavailable)[0].phase, "Unknown")
 
     def test_monitor_jobs_marks_nonterminal_timeout(self) -> None:
         client = FakeKubectlClient(stdout="Running")
@@ -129,12 +127,13 @@ class JobManagerTests(unittest.TestCase):
             poll_interval_seconds=0,
         )
 
-        self.assertEqual(jobs[0].phase, "Running")
+        self.assertEqual(jobs[0].phase, "Unknown")
+        self.assertEqual(client.calls, [])
         self.assertFalse(jobs[0].terminal)
         self.assertTrue(jobs[0].timed_out)
 
     def test_monitor_jobs_stops_on_terminal_phase(self) -> None:
-        client = FakeKubectlClient(stdout="Completed")
+        client = FakeKubectlClient(stdout=json.dumps({"items": [{"metadata": {"name": "hari-gcr-ceval-node-123"}, "status": {"state": {"phase": "Completed"}}}]}))
 
         jobs = monitor_jobs_until_terminal(
             ["hari-gcr-ceval-node-123"],

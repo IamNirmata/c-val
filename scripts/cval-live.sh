@@ -436,63 +436,6 @@ leave_runner_worktree() {
     fi
 }
 
-json_submitted_jobs_csv_from_dir() {
-    local cycle_dir="$1"
-    python - "$cycle_dir" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-cycle_dir = Path(sys.argv[1])
-pruned_path = cycle_dir / "pruned-jobs.csv"
-pruned = set()
-if pruned_path.exists():
-    import csv
-    with pruned_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != ["job_name", "deleted_at"]:
-            raise ValueError("pruned-jobs.csv has an invalid header")
-        for row in reader:
-            name = row.get("job_name", "")
-            deleted_at = row.get("deleted_at", "")
-            if not name or not deleted_at.isdigit() or name in pruned:
-                raise ValueError("pruned-jobs.csv has an invalid row")
-            pruned.add(name)
-legacy_deleted_path = cycle_dir / "deleted-jobs.log"
-if legacy_deleted_path.exists():
-    patterns = (
-        re.compile(
-            r'^job\.batch\.volcano\.sh/([^ ]+) deleted'
-            r'(?: from [a-z0-9.-]+ namespace)?$'
-        ),
-        re.compile(
-            r'^job\.batch\.volcano\.sh "([^"]+)" deleted'
-            r'(?: from [a-z0-9.-]+ namespace)?$'
-        ),
-    )
-    for raw_line in legacy_deleted_path.read_text(encoding="utf-8").splitlines():
-        matches = [pattern.fullmatch(raw_line) for pattern in patterns]
-        match = next((value for value in matches if value is not None), None)
-        if match is not None:
-            pruned.add(match.group(1))
-jobs = []
-for path in sorted(cycle_dir.glob("submit*.json")):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        continue
-    for job in data.get("jobs", []):
-        if (
-            job.get("submitted")
-            and job.get("job_name") not in pruned
-            and job.get("job_name") not in jobs
-        ):
-            jobs.append(job["job_name"])
-print(",".join(jobs))
-PY
-}
-
 json_submitted_job_tsv() {
     python - "$1" "$2" "$3" <<'PY'
 import json
@@ -555,59 +498,6 @@ record_node_submission() {
         --state-file "$NODE_COOLDOWN_STATE_FILE" \
         --node "$node" \
         --timestamp "$timestamp"
-}
-
-repair_cycle_cooldowns() {
-    local cycle_dir="$1"
-    local rows
-    if ! rows=$(python - "$cycle_dir" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-cycle_dir = Path(sys.argv[1])
-for path in sorted(cycle_dir.glob("submit-*.json")):
-    match = re.fullmatch(r"submit-([0-9]+)\.json", path.name)
-    if match is None:
-        continue
-    timestamp = int(match.group(1))
-    if timestamp <= 0:
-        raise ValueError("submission artifact has an invalid timestamp")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
-        raise ValueError("submission artifact has an invalid shape")
-    for job in payload["jobs"]:
-        if not isinstance(job, dict):
-            raise ValueError("submission artifact has an invalid job row")
-        if job.get("submitted") is not True:
-            continue
-        node = job.get("node")
-        job_name = job.get("job_name")
-        git_ref = job.get("git_ref")
-        if (
-            not isinstance(node, str)
-            or not node
-            or not isinstance(job_name, str)
-            or not job_name
-            or not isinstance(git_ref, str)
-            or re.fullmatch(r"[0-9a-f]{40}", git_ref) is None
-            or git_ref == "0" * 40
-        ):
-            raise ValueError("submission artifact has an invalid submitted job identity")
-        print(f"{node}\t{timestamp}")
-PY
-); then
-        log "cooldown repair failed for saved cycle $cycle_dir" >&2
-        return 2
-    fi
-    while IFS=$'\t' read -r node timestamp; do
-        [[ -n "$node" ]] || continue
-        if ! record_node_submission "$node" "$timestamp"; then
-            log "cooldown repair write failed for node $node" >&2
-            return 2
-        fi
-    done <<<"$rows"
 }
 
 json_plan_summary_tsv() {
@@ -728,19 +618,15 @@ print(f"{len(nodes)}\t{','.join(nodes)}")
 PY
 }
 
-json_status_to_map_tsv() {
-    python - "$1" "$2" <<'PY'
+json_coverage_summary_tsv() {
+    python - "$1" <<'PY'
 import json
 import sys
 
-status_path, map_path = sys.argv[1:]
-with open(status_path, encoding="utf-8") as handle:
+with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 from cval.storage.status import coverage_timestamps
 latest = coverage_timestamps(data)
-with open(map_path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, sort_keys=True)
-    handle.write("\n")
 print(f"{len(data['nodes'])}\t{len(latest)}")
 PY
 }
@@ -753,7 +639,6 @@ collect_plan_inputs() {
     local nodes_error="$cycle_dir/$stem-nodes.stderr"
     local status_file="$cycle_dir/$stem-latest-status.json"
     local status_error="$cycle_dir/$stem-latest-status.stderr"
-    local status_map="$cycle_dir/$stem-latest-status-map.json"
     local failed=0
 
     local nodes_rc=0
@@ -790,10 +675,10 @@ collect_plan_inputs() {
     if (( status_rc == 0 )); then
         local status_summary
         local status_parse_rc=0
-        status_summary=$(json_status_to_map_tsv "$status_file" "$status_map") || status_parse_rc=$?
+        status_summary=$(json_coverage_summary_tsv "$status_file") || status_parse_rc=$?
         if (( status_parse_rc == 0 )); then
             IFS=$'\t' read -r PLAN_STATUS_ROW_COUNT PLAN_STATUS_NODE_COUNT <<<"$status_summary"
-            PLAN_STATUS_MAP="$status_map"
+            PLAN_STATUS_MAP="$status_file"
             log "component=coverage status=ok row_count=$PLAN_STATUS_ROW_COUNT node_count=$PLAN_STATUS_NODE_COUNT source=validation.db/runs policy=successful_complete_run"
         else
             log "component=latest-status status=invalid-json exit_code=$status_parse_rc artifact=$status_file"
