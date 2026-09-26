@@ -13,6 +13,10 @@ The framework's scope ends with successful Job execution and verified logs,
 results and raw SQLite ingestion on the PVC. It does not build performance
 baselines, classify or score nodes, or run downstream evaluation or remediation.
 
+Start with the [process flow guide](docs/architecture.md) for diagrams and the
+[features and functionality guide](docs/cval-technical-overview.md) for the full
+capability inventory.
+
 ## How It Works
 
 ```mermaid
