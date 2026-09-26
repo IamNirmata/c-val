@@ -13,6 +13,7 @@ import json
 import math
 import re
 import tomllib
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal, InvalidOperation
@@ -27,6 +28,7 @@ RESOURCE_QUANTITY_PATTERN = re.compile(
     r"(?P<suffix>m|u|n|[EPTGMK]i?|[eE][+-]?\d+)?$"
 )
 ALLOWED_PLUGIN_CAPABILITIES = frozenset({"config", "export"})
+RESERVED_TEST_NAMES = frozenset({"all", "overall"})
 
 class FrozenMapping(Mapping[str, Any]):
     """Pickle-safe immutable mapping used for descriptor-owned settings."""
@@ -161,6 +163,15 @@ class ValidationTestRegistry:
 
     tests: tuple[RegisteredValidationTest, ...] = ()
 
+    def __post_init__(self) -> None:
+        names = Counter(test.id for test in self.tests)
+        duplicates = sorted(name for name, count in names.items() if count > 1)
+        if duplicates:
+            raise ValueError("Operational target canonical names collide: " + ", ".join(duplicates))
+        reserved = sorted(names.keys() & RESERVED_TEST_NAMES)
+        if reserved:
+            raise ValueError("Validation test IDs use reserved operational target names: " + ", ".join(reserved))
+
     def get(self, test_id: str) -> RegisteredValidationTest | None:
         """Return one registered test by ID, if present."""
 
@@ -179,6 +190,13 @@ class ValidationTestRegistry:
         """Return enabled tests in deterministic execution order."""
 
         return tuple(test for test in self.tests if test.enabled)
+
+    @property
+    def exportable(self) -> tuple[RegisteredValidationTest, ...]:
+        """Return enabled export adapters in registry order without importing them."""
+
+        return tuple(test for test in self.enabled
+                     if test.definition.plugin and "export" in test.definition.plugin.capabilities)
 
     def to_dict(self) -> dict[str, Any]:
         """Return an ID-keyed JSON-ready effective registry."""

@@ -52,7 +52,6 @@ from cval.validation.results import (
 )
 from cval.validation.operational_targets import (
     RESULTS_EXPORT,
-    build_operational_target_catalog,
 )
 
 
@@ -87,19 +86,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser(config)
     args = parser.parse_args(raw_argv)
     args.cval_config = config
-    settings = {
-        "node_filter": config.cluster.node_filter,
-        "threshold_days": config.scheduling.days_threshold,
-        "timeout_seconds": config.monitoring.timeout_seconds,
-        "poll_interval": config.monitoring.validation_poll_seconds,
-        "poll_interval_seconds": config.monitoring.poll_interval_seconds,
-        "pending_timeout": config.monitoring.validation_pending_seconds,
-    }
-    if args.command == "run":
-        settings["batch_size"] = config.scheduling.batch_size
-    for name, expected in settings.items():
-        if hasattr(args, name) and getattr(args, name) != expected:
-            parser.error(f"--{name.replace('_', '-')} disagrees with TOML; change the reviewed config")
     os.environ["CVAL_CONFIG_SNAPSHOT_B64"] = encode_config_snapshot(config)
     try:
         if args.command.startswith("db-"):
@@ -136,7 +122,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     """Build the top-level parser and subcommands."""
 
     active_config = config or load_config()
-    target_catalog = build_operational_target_catalog(active_config.tests.registry)
     parser = argparse.ArgumentParser(prog="cval", description="c-val orchestration CLI")
     parser.add_argument(
         "--config",
@@ -180,11 +165,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     tests_validate.set_defaults(handler=handle_tests_validate)
 
     nodes = subparsers.add_parser("nodes", help="List schedulable GPU nodes and free capacity")
-    nodes.add_argument(
-        "--node-filter",
-        default=active_config.cluster.node_filter,
-        help="Substring filter for GPU nodes",
-    )
     nodes_mode = nodes.add_mutually_exclusive_group()
     nodes_mode.add_argument(
         "--inventory-only",
@@ -217,21 +197,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     validate.add_argument(
         "--timestamp", type=int, help="Override the run timestamp (defaults to now)"
     )
-    validate.add_argument(
-        "--poll-interval", type=float, default=active_config.monitoring.validation_poll_seconds, help="Live status poll seconds"
-    )
-    validate.add_argument(
-        "--timeout-seconds",
-        type=float,
-        default=active_config.monitoring.timeout_seconds,
-        help="Overall live-tracking timeout",
-    )
-    validate.add_argument(
-        "--pending-timeout",
-        type=float,
-        default=active_config.monitoring.validation_pending_seconds,
-        help="Warn if the job is still Pending after N seconds (it stays queued)",
-    )
     validate.add_argument("--output", choices=["table", "json"], default="table")
     validate.set_defaults(handler=handle_validate)
 
@@ -247,6 +212,8 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         "plan", help="Inspect prioritized candidates without rendering jobs"
     )
     _add_plan_inputs(plan, active_config)
+    plan.add_argument("--batch-size", type=int, default=active_config.scheduling.batch_size,
+                      help="Limit inspected candidates; submission concurrency is configured in TOML")
     plan.add_argument("--output", choices=["table", "json"], default="table")
     plan.set_defaults(handler=handle_plan)
 
@@ -264,16 +231,6 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
     jobs = subparsers.add_parser("jobs", help="Read or watch Volcano job phases")
     jobs.add_argument("--jobs", required=True, help="Comma-separated vcjob names")
     jobs.add_argument("--watch", action="store_true", help="Poll until terminal or timeout")
-    jobs.add_argument(
-        "--timeout-seconds",
-        type=float,
-        default=active_config.monitoring.timeout_seconds,
-    )
-    jobs.add_argument(
-        "--poll-interval-seconds",
-        type=float,
-        default=active_config.monitoring.poll_interval_seconds,
-    )
     jobs.add_argument("--output", choices=["table", "json"], default="table")
     jobs.set_defaults(handler=handle_jobs)
 
@@ -286,7 +243,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
         choices=[
             "overall",
             "all",
-            *target_catalog.names_for(RESULTS_EXPORT),
+            *(test.id for test in active_config.tests.registry.exportable),
         ],
         required=True,
     )
@@ -387,7 +344,7 @@ def handle_nodes(args: argparse.Namespace) -> int:
     """Run read-only GPU node discovery and print table or JSON output."""
 
     if args.inventory_only:
-        names = discover_gpu_node_names(node_name_filter=args.node_filter, config=args.cval_config)
+        names = discover_gpu_node_names(config=args.cval_config)
         if args.output == "json":
             print(json.dumps({"nodes": names, "node_count": len(names)}, indent=2))
         else:
@@ -408,7 +365,7 @@ def handle_nodes(args: argparse.Namespace) -> int:
             )
         return 0
 
-    nodes, totals = discover_free_nodes(node_name_filter=args.node_filter, config=args.cval_config)
+    nodes, totals = discover_free_nodes(config=args.cval_config)
     if args.output == "json":
         # JSON output is meant for Hermes, scripts, and tests.
         print(
@@ -585,8 +542,9 @@ def handle_plan(args: argparse.Namespace) -> int:
     if args.batch_size < 1:
         raise ValueError("batch_size must be >= 1")
     free_nodes, db_status = _load_plan_inputs(args)
+    threshold_days = args.cval_config.scheduling.days_threshold
     queue = build_priority_queue(
-        free_nodes, db_status, days_threshold=args.threshold_days,
+        free_nodes, db_status, days_threshold=threshold_days,
         coverage_reasons=getattr(args, "coverage_reasons", None),
     )
     candidates = queue[:args.batch_size]
@@ -595,7 +553,7 @@ def handle_plan(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "batch_size": args.batch_size,
-                    "days_threshold": args.threshold_days,
+                    "days_threshold": threshold_days,
                     "free_nodes_count": len(free_nodes),
                     "queue_count": len(queue),
                     "git_ref": args.git_ref,
@@ -611,7 +569,7 @@ def handle_plan(args: argparse.Namespace) -> int:
         f"Input nodes: {len(free_nodes)} | Queue: {len(queue)} | "
         f"Candidates: {len(candidates)}"
     )
-    print(f"Threshold days: {args.threshold_days} | Batch size: {args.batch_size}")
+    print(f"Threshold days: {threshold_days} | Batch size: {args.batch_size}")
     print(f"{'PRI':>3} {'NODE':<32} REASON")
     for candidate in candidates:
         print(f"{candidate.priority:>3} {candidate.node:<32} {candidate.reason}")
@@ -674,8 +632,6 @@ def handle_jobs(args: argparse.Namespace) -> int:
             _parse_csv(args.jobs),
             config=args.cval_config,
             namespace=args.cval_config.cluster.namespace,
-            timeout_seconds=args.timeout_seconds,
-            poll_interval_seconds=args.poll_interval_seconds,
         )
         if args.output == "json":
             print(json.dumps(monitored_jobs_to_dict(jobs), indent=2))
@@ -787,9 +743,6 @@ def handle_validate(args: argparse.Namespace) -> int:
             config=args.cval_config,
             git_ref=args.git_ref,
             timestamp=args.timestamp,
-            poll_interval=args.poll_interval,
-            overall_timeout=args.timeout_seconds,
-            pending_timeout=args.pending_timeout,
             submit=args.submit,
             confirmation=args.confirm,
             verbose=(args.output == "table"),
@@ -1030,7 +983,7 @@ def _load_plan_inputs(args: argparse.Namespace) -> tuple[list[str], dict[str, in
         free_nodes = _parse_csv(args.free_nodes)
     else:
         # No explicit nodes means live read-only discovery is part of the plan.
-        nodes, _ = discover_free_nodes(node_name_filter=args.node_filter, config=args.cval_config)
+        nodes, _ = discover_free_nodes(config=args.cval_config)
         free_nodes = fully_free_node_names(nodes)
 
     return free_nodes, db_status
@@ -1045,8 +998,8 @@ def _build_plan_from_args(args: argparse.Namespace):
     return build_workflow_plan(
         free_nodes,
         db_status,
-        days_threshold=args.threshold_days,
-        batch_size=args.batch_size,
+        days_threshold=args.cval_config.scheduling.days_threshold,
+        batch_size=args.cval_config.scheduling.batch_size,
         timestamp=args.timestamp,
         git_ref=args.git_ref,
         config=args.cval_config,
@@ -1067,10 +1020,7 @@ def _add_plan_inputs(parser: argparse.ArgumentParser, config: CvalConfig) -> Non
         action="store_true",
         help="Read latest status from the PVC access pod in read-only mode",
     )
-    parser.add_argument("--threshold-days", type=float, default=config.scheduling.days_threshold)
-    parser.add_argument("--batch-size", type=int, default=config.scheduling.batch_size)
     parser.add_argument("--git-ref", default=config.job.git_ref)
-    parser.add_argument("--node-filter", default=config.cluster.node_filter, help="Live discovery substring filter")
 
 
 def _parse_csv(value: str) -> list[str]:

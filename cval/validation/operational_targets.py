@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from cval.validation.registry import TEST_ID_PATTERN, ValidationTestRegistry
+from cval.validation.registry import RESERVED_TEST_NAMES, TEST_ID_PATTERN, ValidationTestRegistry
+
+if TYPE_CHECKING:
+    from cval.config import CvalConfig
 
 RESULTS_EXPORT = "results-export"
 OPERATION_ORDER = (RESULTS_EXPORT,)
-RESERVED_TARGET_NAMES = frozenset({"all", "overall"})
+RESERVED_TARGET_NAMES = RESERVED_TEST_NAMES
 
 
 @dataclass(frozen=True)
@@ -81,39 +85,21 @@ class OperationalTargetCatalog:
 def build_operational_target_catalog(
     registry: ValidationTestRegistry,
 ) -> OperationalTargetCatalog:
-    """Build the raw export catalog from enabled plugin capabilities."""
+    """Preserve the catalog API as a view of the registry's export selection."""
 
-    registered_names = [test.id for test in registry.tests]
-    duplicate_names = _duplicates(registered_names)
-    if duplicate_names:
-        raise ValueError(
-            "Operational target canonical names collide: "
-            + ", ".join(duplicate_names)
-        )
-    reserved = sorted(set(registered_names) & RESERVED_TARGET_NAMES)
-    if reserved:
-        raise ValueError(
-            "Validation test IDs use reserved operational target names: "
-            + ", ".join(reserved)
-        )
+    return OperationalTargetCatalog(tuple(
+        OperationalTarget(test.id, test.id, test.id, frozenset({RESULTS_EXPORT}))
+        for test in registry.exportable
+    ))
 
-    targets: list[OperationalTarget] = []
-    for registered in registry.tests:
-        if not registered.enabled:
-            continue
-        declaration = registered.definition.plugin
-        capabilities = frozenset(declaration.capabilities) if declaration else frozenset()
-        if "export" not in capabilities:
-            continue
-        targets.append(
-            OperationalTarget(
-                name=registered.id,
-                owner_test_id=registered.id,
-                status_test=registered.id,
-                operations=frozenset({RESULTS_EXPORT}),
-            )
-        )
-    return OperationalTargetCatalog(tuple(targets))
+
+def resolve_operational_target(config: CvalConfig, name: str, operation: str) -> OperationalTarget:
+    """Resolve an enabled exporter directly without constructing another catalog."""
+
+    _require_operation(operation)
+    if not any(test.id == name for test in config.tests.registry.exportable):
+        raise ValueError(f"Operational target is not enabled or registered: {name}")
+    return OperationalTarget(name, name, name, frozenset({RESULTS_EXPORT}))
 
 
 def validate_operational_target_name(name: str) -> str:
@@ -132,16 +118,6 @@ def _require_operation(operation: str) -> None:
         raise ValueError(f"Unknown operational target operation: {operation!r}")
 
 
-def _duplicates(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for value in values:
-        if value in seen:
-            duplicates.add(value)
-        seen.add(value)
-    return sorted(duplicates)
-
-
 __all__ = [
     "OPERATION_ORDER",
     "OperationalTarget",
@@ -149,5 +125,6 @@ __all__ = [
     "RESERVED_TARGET_NAMES",
     "RESULTS_EXPORT",
     "build_operational_target_catalog",
+    "resolve_operational_target",
     "validate_operational_target_name",
 ]

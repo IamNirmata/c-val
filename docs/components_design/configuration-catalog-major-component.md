@@ -1,7 +1,8 @@
 # C1: Configuration and Test Catalog
 
-Status: Phase 1.1 strict config and Phase 3.2 environment projections implemented;
-fresh runtime acceptance remains pending. Historical baseline and counting rules:
+Status: strict config, shared projections and the 2026-09-26 C1 simplification are
+source-implemented; new-source cluster acceptance and activation are separate gates.
+Historical baseline and counting rules:
 [component overview](major-components-overview.md#measurement-method).
 
 ## In Simple Terms
@@ -69,10 +70,19 @@ Workload descriptors are counted under C6, not twice here.
 
 Implemented: one explicit effective config per command/session, complete strict
 snapshots and shared environment projections. Discovery receives that config;
-ingestion uses the run's original snapshot. The
+ingestion uses the run's original snapshot. The registry now owns duplicate/reserved
+ID checks and enabled export selection. Configuration and CLI parsing no longer
+build a second export catalog, and adapter dispatch lives with the plugin owner.
+Existing target objects, catalog methods and operation imports remain compatible;
+their import paths do not contain a second implementation. The
 [strict configuration contract](../configuration.md#strict-two-level-contract)
 and [runtime projection](validation-runtime-major-component.md#phase-32-environment-projection)
 own the details; no second config/context layer was added.
+
+Redundant fixed-setting CLI flags are retired as listed in
+[configuration migration](../configuration.md#retired-setting-flags). Workload
+settings, raw export names/columns, descriptor inspection and snapshot identity
+are unchanged. This does not retire the C2 ingestion commands or C3-C9 features.
 
 Retained: configuration dataclasses, registry helpers, optional adapters and
 compatibility aliases. Adapter caching has no measured justification and is

@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from cval.cli import main
+from cval.cli import build_parser, main
+from cval.config import encode_config_snapshot, load_config
+from cval.jobs.manager import JobSubmissionResult
 from cval.jobs.renderer import render_validation_job_from_file
 from cval.k8s.client import CommandResult
 from cval.k8s.discovery import NodeStatus
@@ -17,6 +21,54 @@ from cval.validation.plugins import ExportRows
 
 
 class CliTests(unittest.TestCase):
+    def test_c1_redundant_toml_setting_flags_are_removed(self) -> None:
+        parser = build_parser(load_config())
+        cases = (
+            (["nodes"], ("--node-filter=hgx",)),
+            (["plan"], ("--node-filter=hgx", "--threshold-days=7")),
+            (["run"], ("--node-filter=hgx", "--threshold-days=7", "--batch-size=3")),
+            (["jobs", "--jobs", "job-a"], ("--timeout-seconds=6000", "--poll-interval-seconds=60")),
+            (["validate", "--node", "node-a", "--git-ref", "a" * 40],
+             ("--poll-interval=3", "--timeout-seconds=6000", "--pending-timeout=600")),
+        )
+        for command, flags in cases:
+            for flag in flags:
+                with self.subTest(command=command, flag=flag), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    parser.parse_args([*command, flag])
+                self.assertEqual(error.exception.code, 2)
+        self.assertEqual(parser.parse_args(["plan", "--batch-size", "1"]).batch_size, 1)
+
+    def test_c1_commands_use_pinned_settings_without_duplicate_arguments(self) -> None:
+        base = load_config()
+        config = replace(base, cluster=replace(base.cluster, node_filter="reviewed-hgx"),
+                         scheduling=replace(base.scheduling, days_threshold=9, batch_size=2),
+                         monitoring=replace(base.monitoring, timeout_seconds=7000, poll_interval_seconds=30,
+                                            validation_poll_seconds=5, validation_pending_seconds=900))
+        with patch.dict(os.environ, {"CVAL_CONFIG_SNAPSHOT_B64": encode_config_snapshot(config)}, clear=True):
+            with patch("cval.cli.discover_gpu_node_names", return_value=[]) as inventory, redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["nodes", "--inventory-only", "--output", "json"]), 0)
+                inventory.assert_called_once_with(config=config)
+            with patch("cval.cli.monitor_jobs_until_terminal", return_value=[]) as watch, redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["jobs", "--jobs", "job-a", "--watch", "--output", "json"]), 0)
+                watch.assert_called_once_with(["job-a"], config=config, namespace=config.cluster.namespace)
+            with patch("cval.orchestrator.validate.run_node_validation", return_value={"ok": True}) as validate, redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["validate", "--node", "node-a", "--git-ref", "a" * 40,
+                                       "--submit", "--confirm", "submit", "--output", "json"]), 0)
+                self.assertEqual(validate.call_args.kwargs["config"], config)
+                self.assertTrue(validate.call_args.kwargs["submit"])
+                self.assertFalse({"poll_interval", "overall_timeout", "pending_timeout"} & validate.call_args.kwargs.keys())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["plan", "--free-nodes", "node-a,node-b,node-c", "--batch-size", "1",
+                                       "--git-ref", "a" * 40, "--output", "json"]), 0)
+            plan = json.loads(output.getvalue())
+            self.assertEqual((plan["days_threshold"], plan["batch_size"], len(plan["candidates"])), (9, 1, 1))
+            with patch("cval.cli.submit_workflow_plan", return_value=JobSubmissionResult(config.cluster.namespace, [])) as submit, redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["run", "--free-nodes", "node-a,node-b,node-c", "--git-ref", "a" * 40,
+                                       "--timestamp", "123", "--submit", "--confirm", "submit", "--output", "json"]), 0)
+                self.assertEqual(len(submit.call_args.args[0].planned_jobs), 2)
+                self.assertEqual(submit.call_args.kwargs["config"], config)
+
     def test_nodes_inventory_only_lists_gpu_names_without_full_discovery(self) -> None:
         output = io.StringIO()
         with (

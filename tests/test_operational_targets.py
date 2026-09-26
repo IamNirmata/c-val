@@ -6,6 +6,7 @@ import io
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import FrozenInstanceError, replace
+from unittest.mock import patch
 
 from cval.cli import build_parser
 from cval.config import load_config
@@ -15,6 +16,7 @@ from cval.validation.operational_targets import (
     build_operational_target_catalog,
 )
 from cval.validation.registry import ValidationTestRegistry
+from cval.validation.operations import resolve_operational_target
 
 
 class OperationalTargetCatalogTests(unittest.TestCase):
@@ -53,6 +55,17 @@ class OperationalTargetCatalogTests(unittest.TestCase):
         self.assertEqual(target.owner_test_id, "dltest")
         self.assertEqual(target.status_test, "dltest")
         self.assertEqual(target.to_dict()["format_version"], "cval.operational-target.v2")
+
+    def test_config_parser_and_resolution_do_not_rebuild_export_catalog(self) -> None:
+        with patch("cval.validation.operational_targets.build_operational_target_catalog",
+                   side_effect=AssertionError("secondary catalog construction")):
+            config = load_config()
+            parser = build_parser(config)
+            target = resolve_operational_target(config, "nccl", RESULTS_EXPORT)
+            self.assertEqual(parser.parse_args(["results", "--test", "nccl"]).test, "nccl")
+            self.assertEqual(target.status_test, "nccl")
+            with self.assertRaisesRegex(ValueError, "Unknown operational target operation"):
+                resolve_operational_target(config, "nccl", "removed-operation")
 
     def test_export_capability_selects_targets_and_keeps_registry_order(self) -> None:
         export_only = self._test(
@@ -108,9 +121,12 @@ class OperationalTargetCatalogTests(unittest.TestCase):
                     order=99,
                     enabled=False,
                 )
-                registry = ValidationTestRegistry((*self.registry.tests, colliding))
                 with self.assertRaisesRegex(ValueError, "reserved"):
-                    build_operational_target_catalog(registry)
+                    ValidationTestRegistry((*self.registry.tests, colliding))
+
+    def test_registry_rejects_duplicate_ids_before_catalog_or_parser(self) -> None:
+        with self.assertRaisesRegex(ValueError, "canonical names collide"):
+            ValidationTestRegistry((*self.registry.tests, self.registry.require("storage")))
 
     def test_catalog_and_targets_are_immutable(self) -> None:
         catalog = build_operational_target_catalog(self.registry)

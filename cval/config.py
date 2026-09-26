@@ -24,7 +24,6 @@ from cval.validation.registry import (
     load_test_registry,
     parse_resource_quantity,
 )
-from cval.validation.operational_targets import build_operational_target_catalog
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "cval.toml"
@@ -464,9 +463,6 @@ def _validate_config(config: CvalConfig, *, validate_plugins: bool = True) -> No
         raise ValueError("live.plan_limit must be all or a positive integer string")
     if not tests.registry.enabled:
         raise ValueError("At least one test must be enabled under [tests.*]")
-    # Reject reserved/colliding operator-facing names during config loading,
-    # before argparse or a background loop can observe an ambiguous catalog.
-    build_operational_target_catalog(tests.registry)
     if (
         isinstance(config.scheduling.node_cooldown_seconds, bool)
         or config.scheduling.node_cooldown_seconds < 0

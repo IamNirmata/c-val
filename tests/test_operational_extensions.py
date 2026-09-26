@@ -66,10 +66,22 @@ schema_version = "cval.test.v1"
 [test]
 id = "synthetic"
 display_name = "Synthetic metric"
+description = "Local export extension fixture"
 order = 15
 entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
+continue_on_failure = true
+
+[requirements]
+cpu = "1"
+memory = "1Gi"
+gpu_count = 0
+rdma_count = 0
+shared_memory = "1Gi"
+read_sysfs = false
+
+[settings]
 
 [artifacts]
 summary_filename = "summary.json"
@@ -78,6 +90,7 @@ summary_filename = "summary.json"
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
 capabilities = ["export"]
+support_files = []
 ''',
             encoding="utf-8",
         )

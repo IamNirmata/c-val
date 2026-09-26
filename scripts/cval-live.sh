@@ -1242,7 +1242,6 @@ run_submit_cycle() {
     python -m cval.cli --config "$CONFIG_PATH" plan \
         --free-nodes "$PLAN_FREE_NODES" \
         --db-status-json "$PLAN_STATUS_MAP" \
-        --threshold-days "$DAYS_THRESHOLD" \
         --batch-size "$PLAN_LIMIT" \
         --git-ref "$git_ref" \
         --output json >"$preflight_plan" 2>"$preflight_error" || preflight_rc=$?
@@ -1323,7 +1322,6 @@ run_submit_cycle() {
             python -m cval.cli --config "$CONFIG_PATH" plan \
                 --free-nodes "$PLAN_FREE_NODES" \
                 --db-status-json "$PLAN_STATUS_MAP" \
-                --threshold-days "$DAYS_THRESHOLD" \
                 --batch-size "$PLAN_LIMIT" \
                 --git-ref "$git_ref" \
                 --output json > "$plan_file" 2>&1 || plan_rc=$?
@@ -1384,8 +1382,6 @@ run_submit_cycle() {
                 }
                 python -m cval.cli --config "$CONFIG_PATH" run \
                     --free-nodes "$nodes_csv" \
-                    --threshold-days "$DAYS_THRESHOLD" \
-                    --batch-size "$BATCH_SIZE" \
                     --timestamp "$run_timestamp" \
                     --git-ref "$git_ref" \
                     --submit \

@@ -3,8 +3,28 @@
 The operator configuration is [config/cval.toml](../config/cval.toml). Select a
 reviewed alternative with `cval --config <path> <command>` or `CVAL_CONFIG`.
 Public commands use that configuration for namespace, PVC reader, database paths,
-job template/repository/prefix, namespace allowlist and maximum batch size;
+job template/repository/prefix, namespace allowlist, node filter, scheduling and monitoring;
 duplicate command-line overrides for those settings have been removed.
+
+## Retired Setting Flags
+
+C1 removes flags that previously had to equal the reviewed TOML values. Remove
+them from scripts; use a complete `--config` file to select different settings.
+
+| Removed CLI Flag | Configuration Owner |
+| --- | --- |
+| `nodes/plan/run --node-filter` | `cluster.node_filter` |
+| `plan/run --threshold-days` | `scheduling.days_threshold` |
+| `run --batch-size` | `scheduling.batch_size` |
+| `jobs/validate --timeout-seconds` | `monitoring.timeout_seconds` |
+| `jobs --poll-interval-seconds` | `monitoring.poll_interval_seconds` |
+| `validate --poll-interval` | `monitoring.validation_poll_seconds` |
+| `validate --pending-timeout` | `monitoring.validation_pending_seconds` |
+
+`plan --batch-size` remains a read-only inspection limit, not a submission override.
+Node/run identity, exact Git ref, export selection/output and confirmation inputs
+remain explicit. Existing pinned snapshots retain the same encoding and digest;
+editing TOML never changes an already running session.
 
 ## Strict Two-Level Contract
 
@@ -49,8 +69,8 @@ have been removed; this repository does not classify, score or rank nodes.
 
 The checked-in values are `batch_size = 3`, `node_cooldown_seconds = 14400` and
 `live.plan_limit = "all"`. These are TOML values, never fallback values. Set a positive
-integer string for a bounded `live.plan_limit`. Operational CLI tuning flags must
-agree with TOML; the read-only plan's candidate count remains an inspection limit.
+integer string for a bounded `live.plan_limit`. Commands read operational settings
+directly from TOML; the read-only plan's candidate count remains an inspection limit.
 
 `scheduling.coverage_max_runs_per_node` is explicitly 100 in the main TOML.
 Coverage scans newest runs first and stops at the first complete passing requested-test

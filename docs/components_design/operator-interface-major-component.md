@@ -147,6 +147,12 @@ These removals predate the redesign; they are not new implementation work.
 | Public namespace, PVC-pod and raw-DB overrides | Reviewed cluster/storage configuration. |
 | Public template, prefix, repository and policy-limit overrides | Reviewed job/policy configuration; exact Git ref remains explicit. |
 
+The subsequent C1 simplification also retires fixed node-filter, scheduling and
+monitoring flags while retaining `plan --batch-size` as an inspection limit. See
+the [flag-to-TOML migration table](../configuration.md#retired-setting-flags).
+The Phase 6 compatibility inventory above remains a record of that earlier review;
+other public commands, plugin interfaces and result formats are unchanged.
+
 ## Acceptance and Risk
 
 Preserve tested command/help/output contracts or publish a deliberate migration.

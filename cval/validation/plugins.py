@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from cval.models import LatestStatusRow
-from cval.validation.operational_targets import OperationalTarget
+from cval.validation.operational_targets import RESULTS_EXPORT, OperationalTarget, resolve_operational_target
 
 from cval.validation.registry import (
     PLUGIN_API_VERSION,
@@ -135,6 +135,24 @@ class ExportRows:
             or "\r" in self.row_label
         ):
             raise ValueError("ExportRows.row_label must be a single-line string")
+
+
+def export_result_rows(config: CvalConfig, target_name: str, context: ExportContext) -> ExportRows:
+    """Invoke one registry-selected adapter without giving it write access."""
+
+    target = resolve_operational_target(config, target_name, RESULTS_EXPORT)
+    if context.target != target:
+        raise ValueError("Export context target does not match the resolved catalog target")
+    registered = config.tests.registry.require(target.owner_test_id)
+    if context.definition != registered.definition:
+        raise ValueError("Export context definition is not the current registry definition")
+    plugin = load_registered_plugin(registered)
+    if plugin is None:
+        raise PluginLoadError(f"Operational target owner {target.owner_test_id!r} has no plugin")
+    rows = plugin.export_rows(context)
+    if not isinstance(rows, ExportRows):
+        raise TypeError(f"Adapter {target.owner_test_id!r} export_rows must return ExportRows")
+    return ExportRows(tuple(rows.columns), tuple(tuple(row) for row in rows.rows), rows.row_label)
 
 
 def export_rows_from_records(
