@@ -1,0 +1,48 @@
+# Replace metadata.namespace with your existing namespace, then run:
+# kubectl apply -f cpu-pod-template.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gcr-os-cpu-job-template # Choose a new name for each independent run.
+  namespace: your-namespace # Replace with your existing namespace.
+spec:
+  restartPolicy: Never # Leave the pod completed or failed when its command exits.
+  automountServiceAccountToken: false
+
+  # Required: this cluster labels CPU-only nodes with node-type=cpu.
+  # Keep this selector: CPU resource requests alone do not exclude GPU nodes.
+  # If no matching CPU node is available, the pod stays Pending, with no GPU fallback.
+  nodeSelector:
+    k8s.lambda.ai/node-type: cpu
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+  containers:
+    - name: cpu-workload
+      # Replace the image and command with your CPU application.
+      image: ubuntu:24.04
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "CPU workload started"
+          uname -a
+          sleep 6000
+
+      # Size these for your workload; no GPU resources are requested.
+      resources:
+        requests:
+          cpu: "1"
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
