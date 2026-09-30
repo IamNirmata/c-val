@@ -21,7 +21,6 @@ from cval.storage.retry import retry_sqlite
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
     authorize_result_write,
-    bind_ingestion_digest,
 )
 from cval.validation.builtins import project_builtin_statuses
 from cval.validation.execution import RunLogger, RunPaths
@@ -86,11 +85,12 @@ def authorize_run(environment: Mapping[str, str]) -> ResultWriteAuthorization:
         config=config,
     )
     canonical_run = Path(config.runtime.validation_root) / "logs/job_logs" / result.node / run_id
+    dl_root = "logs/dltest" if result.schema_version == "cval.results.v3" else "logs/validation_tests/dltest/runs"
     runtime_paths = {
         "CVAL_JOB_LOG_DIR": str(canonical_run),
         "CVAL_RESULT_JSON_FILE": str(canonical_run / "result.json"),
         "DLTEST_RUN_DIR": str(
-            Path(config.runtime.validation_root) / "logs/validation_tests/dltest/runs"
+            Path(config.runtime.validation_root) / dl_root
             / result.node / run_id
         ),
     }
@@ -116,14 +116,12 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
     config = authorization.config
     run_id = getattr(result, "run_id", f"{result.node}-{result.timestamp}")
     root = Path(config.runtime.validation_root)
-    log_dir = authorization.result_path.parent
+    log_dir = Path(environment.get("CVAL_JOB_LOG_DIR", str(authorization.result_path.parent)))
     paths = RunPaths(
-        log_dir=log_dir, stdout=log_dir / "stdout.log", stderr=log_dir / "stderr.log",
-        job_log=log_dir / "job.log", events=log_dir / "events.jsonl",
-        result=log_dir / "result.json", legacy_env=log_dir / "result.env",
+        log_dir=log_dir, job_log=log_dir / "job.log",
+        result=authorization.result_path,
         marker=log_dir / ".run-active",
     )
-    bind_ingestion_digest(authorization)
     policy = config.sqlite_retry
     logger = RunLogger(paths, run_id, stdout=sys.stdout, stderr=sys.stderr, write_global_files=False)
     statuses = project_builtin_statuses(validation_result_to_env(result))
@@ -201,7 +199,7 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
 
         if statuses["dltest"] == "pass":
             current_stores = tuple(dl_paths)
-            run_dir = root / "logs/validation_tests/dltest/runs" / result.node / run_id
+            run_dir = Path(result.tests["dltest"].summary).parent if isinstance(result, ValidationResultV2) else root / "logs/validation_tests/dltest/runs" / result.node / run_id
             helper = Path(__file__).resolve().parents[2] / "scripts/dl-metric-lock.py"
             lock = runpy.run_path(str(helper))["metric_lock"]
             lock_path = root / "metadata/.dl-metric-ingest.lock"

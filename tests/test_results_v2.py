@@ -13,6 +13,8 @@ from cval.validation.results import (
     parse_validation_result_v2,
     validation_result_to_env,
     validation_result_v2_digest,
+    recording_complete,
+    result_payload,
 )
 from cval.validation.builtins import project_builtin_statuses
 
@@ -92,6 +94,32 @@ def payload() -> dict[str, object]:
 
 
 class ResultSchemaV2Tests(unittest.TestCase):
+    def test_compact_result_keeps_completion_separate_from_execution_digest(self) -> None:
+        value = payload()
+        value["schema_version"] = "cval.results.v3"
+        for test in value["tests"].values():
+            for name in ("stdout", "stderr", "result"):
+                test.pop(name)
+            test["log"] = test["log"].replace("events.jsonl", "job.log")
+        execution = parse_validation_result_v2(value)
+        digest = validation_result_v2_digest(execution)
+        self.assertFalse(recording_complete(execution))
+        value["completion"] = {
+            "finished_at": "2026-07-28T16:00:02Z", "exit_code": 0, "logs": "retained",
+            "files": {name: "complete" for name in value["tests"]},
+            "ingestion": "pass", "result_digest": digest,
+            "stores": {name: "committed" for name in ("validation", "storage", "nccl", "numerical_correctness", "compute_performance", "collective_performance", "overlap_performance")},
+        }
+        completed = parse_validation_result_v2(value)
+        self.assertTrue(recording_complete(completed))
+        self.assertEqual(validation_result_v2_digest(completed), digest)
+        self.assertEqual(result_payload(completed), value)
+        value["completion"]["files"]["nccl"] = "incomplete"
+        self.assertFalse(recording_complete(parse_validation_result_v2(value)))
+        value["completion"]["result_digest"] = DIGEST
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            parse_validation_result_v2(value)
+
     def test_parses_dynamic_four_test_result(self) -> None:
         result = parse_validation_result_v2(payload())
 

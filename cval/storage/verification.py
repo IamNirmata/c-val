@@ -17,7 +17,7 @@ import zlib
 
 from cval.storage.sqlite_uri import SQLiteFileIdentity, assert_sqlite_connection_identity, assert_sqlite_file_identity, canonical_sqlite_path, connect_sqlite_file
 from cval.validation.builtins import project_builtin_statuses
-from cval.validation.results import parse_validation_result_v2, validation_result_digest, validation_result_to_env
+from cval.validation.results import COMPACT_RESULT_SCHEMA, parse_validation_result_v2, validation_result_digest, validation_result_to_env, recording_complete
 
 
 class EvidenceError(ValueError):
@@ -142,9 +142,13 @@ def _canonical(reader: EvidenceReader):
     if not result.completed_at:
         raise EvidenceError("incomplete", "Canonical run has not completed")
     digest = validation_result_digest(result)
+    compact = result.schema_version == COMPACT_RESULT_SCHEMA
     ingestion = {"state": "complete"}
     try:
-        if reader.read(run_dir / ".ingestion-result-digest") != (digest + "\n").encode():
+        if compact:
+            if not recording_complete(result):
+                raise EvidenceError("incomplete", "Final result lacks complete file/log/DB acknowledgements")
+        elif reader.read(run_dir / ".ingestion-result-digest") != (digest + "\n").encode():
             raise EvidenceError("conflicting", "Bound ingestion digest differs from canonical result")
     except Exception as error:
         ingestion = _failure(error)
@@ -160,6 +164,8 @@ def _canonical(reader: EvidenceReader):
         test_dir = root / "logs/validation_tests" / test_id / "runs" / request["node"] / request["run_id"]
         paths = {"stdout": log_dir / "stdout.log", "stderr": log_dir / "stderr.log", "log": log_dir / "events.jsonl",
                  "result": test_dir / "result.json", "summary": test_dir / expected["summary_filename"], "artifacts": test_dir / "artifacts"}
+        if compact:
+            paths = {"log": log_dir / "job.log", "summary": log_dir / expected["summary_filename"], "artifacts": log_dir}
         for field, path in paths.items():
             if getattr(test, field) != str(path):
                 raise EvidenceError("conflicting", f"Noncanonical {test_id}.{field}")
@@ -167,15 +173,19 @@ def _canonical(reader: EvidenceReader):
                 reader.read(path)
         if test.status == "pass" and not reader.read(paths["summary"]).strip():
             raise EvidenceError("incomplete", f"Passing test summary is empty: {test_id}")
-        test_result = reader.json(paths["result"])
-        expected_result = {"schema_version": "cval.test-result.v1", "test_id": test_id} | {
-            field: getattr(test, field) for field in ("status", "phase", "started_at", "completed_at", "duration_ms", "exit_code", "summary", "artifacts", "message")
-        }
-        if test_result != expected_result:
-            raise EvidenceError("conflicting", f"Per-test result differs from canonical envelope: {test_id}")
-    for filename in ("stdout.log", "stderr.log", "job.log"):
-        reader.read(run_dir / filename)
-    events = [json.loads(line) for line in reader.read(run_dir / "events.jsonl").splitlines() if line.strip()]
+        if not compact:
+            test_result = reader.json(paths["result"])
+            expected_result = {"schema_version": "cval.test-result.v1", "test_id": test_id} | {
+                field: getattr(test, field) for field in ("status", "phase", "started_at", "completed_at", "duration_ms", "exit_code", "summary", "artifacts", "message")
+            }
+            if test_result != expected_result:
+                raise EvidenceError("conflicting", f"Per-test result differs from canonical envelope: {test_id}")
+    if compact:
+        events = [json.loads(line.removeprefix(b"CVAL_EVENT ")) for line in reader.read(run_dir / "job.log").splitlines() if line.startswith(b"CVAL_EVENT ")]
+    else:
+        for filename in ("stdout.log", "stderr.log", "job.log"):
+            reader.read(run_dir / filename)
+        events = [json.loads(line) for line in reader.read(run_dir / "events.jsonl").splitlines() if line.strip()]
     if any(event.get("schema_version") != "cval.event.v1" or event.get("run_id") != result.run_id for event in events):
         raise EvidenceError("conflicting", "Canonical event identity or schema differs")
     finished = [index for index, event in enumerate(events) if event.get("event") == "run_finished"]
@@ -191,6 +201,15 @@ def _canonical(reader: EvidenceReader):
         raise EvidenceError("conflicting", "Run-finished event differs from canonical outcome")
     if ends and events[ends[-1]].get("status") != "pass":
         ingestion = ingestion if ingestion["state"] != "complete" else {"state": "incomplete", "reason": "Ingestion did not finish successfully"}
+    if compact and ends:
+        acknowledgement = events[ends[-1]]
+        if (acknowledgement.get("producer"), acknowledgement.get("node_name"), acknowledgement.get("result_digest"), acknowledgement.get("config_digest")) != ("ingestion", result.node, digest, result.global_config_digest):
+            raise EvidenceError("conflicting", "Ingestion event identity differs from the final result")
+        if result.completion and acknowledgement.get("stores") != result.completion["stores"]:
+            raise EvidenceError("conflicting", "Final result stores differ from ingestion acknowledgement")
+        terminal = [index for index, event in enumerate(events) if event.get("event") == "supervisor_finished"]
+        if not terminal or terminal[-1] <= ends[-1] or events[terminal[-1]].get("logs_state") != "retained":
+            raise EvidenceError("incomplete", "Supervisor log finalization is not confirmed")
     for name, test in result.tests.items():
         if test.selected and not any(event.get("test") == name and event.get("status") == test.status and event.get("phase") == test.phase for event in events[:finished[-1]]):
             raise EvidenceError("incomplete", f"Terminal test diagnostic event missing: {name}")
@@ -203,7 +222,8 @@ def _storage(reader: EvidenceReader, result) -> dict:
     path = Path(result.tests["storage"].artifacts)
     for name in STORAGE_FILE_PREFIXES:
         reader.read(path / name)
-    metrics = parse_storage_metrics(path)
+    summary_name = reader.request["tests"]["storage"]["summary_filename"] if result.schema_version == COMPACT_RESULT_SCHEMA else None
+    metrics = parse_storage_metrics(path, summary_filename=summary_name)
     expected = {"node": result.node, "timestamp": result.timestamp, "image_name": result.image_name, **metrics}
     rows = reader.rows(reader.request["db_paths"]["storage"],
                        f"SELECT {','.join(expected)} FROM storage_performance WHERE node=? AND timestamp=?",
@@ -431,6 +451,8 @@ def collect_exact_evidence(request: dict, config, client, *, operation: str = "v
         package = path.name == "__init__.py"
         name = ".".join(relative.parts[:-1] if package else relative.with_suffix("").parts)
         sources[name] = (relative.as_posix(), path.read_text(encoding="utf-8"), package)
+    summary = package_root.parent / "validation-tests/nccl/summary.py"
+    sources["cval.validation.nccl_summary"] = ("validation-tests/nccl/summary.py", summary.read_text(encoding="utf-8"), False)
     encoded = base64.b64encode(zlib.compress(json.dumps(sources).encode())).decode()
     try:
         response = client.run(["exec", "-i", "-n", config.cluster.namespace, config.cluster.pvc_access_pod,
@@ -542,7 +564,7 @@ def verify_request(intent: dict, request: dict, config, client) -> dict:
                 if len(values) != 1 or not _requested_fields_match(entry, values[0]):
                     raise ValueError("Observed pod runtime identity differs from the submitted workload")
         statuses = pod["status"].get("containerStatuses", [])
-        pod_success = pod["status"]["phase"] == "Succeeded" and {item["name"] for item in statuses} == {item["name"] for item in containers} and all(item.get("state", {}).get("terminated", {}).get("exitCode") == 0 for item in statuses)
+        pod_success = pod["status"]["phase"] == "Succeeded" and {item["name"] for item in statuses} == {item["name"] for item in containers} and all(item.get("restartCount") == 0 and item.get("state", {}).get("terminated", {}).get("exitCode") == 0 for item in statuses)
         identity = {"state": "complete", "uid": uid, "phase": phase, "pod": pod["metadata"]["name"],
                     "pod_uid": pod["metadata"]["uid"], "pod_phase": pod["status"]["phase"], "pod_success": pod_success}
         report.update(collect_exact_evidence(request | {"timeout_seconds": remaining()}, config, client))

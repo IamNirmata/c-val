@@ -38,9 +38,10 @@ flowchart LR
    subgraph Pod["2. VALIDATION POD"]
       direction TB
       Bootstrap["Verify source and snapshot;<br/>reserve new evidence paths"] --> Tests["Run enabled tests in order:<br/>storage, NCCL, DL by default"]
-      Tests --> Result["Finalize results,<br/>events, summaries and logs"]
+      Tests --> Result["Retain test evidence;<br/>seal execution state in memory"]
       Result --> Metrics["Authorize passing-test metrics:<br/>storage, NCCL, then locked DL"]
       Metrics --> Outcomes["Write outcome rows last;<br/>verify ingestion acknowledgement"]
+      Outcomes --> Final["Finish job.log;<br/>publish final result.json"]
    end
 
    subgraph Evidence["3. EVIDENCE AND READ-ONLY VIEWS"]
@@ -62,7 +63,7 @@ flowchart LR
    classDef evidence fill:#fff3d6,stroke:#936e18,color:#49350b;
    classDef decision fill:#ffffff,stroke:#626262,color:#222222;
    class Session,Queue,Admit,Track,Report,Coverage control;
-   class Bootstrap,Tests,Result,Accepted workload;
+   class Bootstrap,Tests,Result,Final,Accepted workload;
    class Metrics,Outcomes,Raw,Verify,Retain evidence;
    class Free,Decision decision;
 ```
@@ -246,13 +247,13 @@ The runner uses the registry, not a hard-coded shell chain:
 
 | Stage | What it does |
 | --- | --- |
-| Initialize | Write the run identity, effective test definitions and incomplete starting state |
+| Initialize | Keep run identity, test definitions and starting state in an anonymous result buffer |
 | Skip disabled tests | Record `enabled=false`, `selected=false`, `not_selected` and `incomplete` |
 | Set up one enabled test | Run that test's setup script |
 | Execute it | Run its entrypoint with the time remaining from the same test deadline |
-| Record its outcome | Save per-test result, duration, exit code, summary/artifact paths and progress events |
+| Record its outcome | Update buffered test state and append `CVAL_EVENT` notifications to the logs |
 | Continue | Move to the next enabled test, even after an ordinary test failure |
-| Finalize | Save the overall result and completion time, then return control to the supervisor |
+| Finalize | Return buffered execution state to the supervisor; do not publish the final JSON yet |
 
 The current descriptor contract requires continuation after test failure; there
 is no supported fail-fast toggle. Setup failure, timeout and framework error
@@ -270,8 +271,8 @@ Sources: [bootstrap](../cval/jobs/bootstrap.sh),
 
 ### 6. Write the Evidence
 
-When the runner returns successfully as a program, the supervisor binds its
-finalized result and invokes the Python ingestion coordinator with the same
+When the runner returns successfully as a program, the supervisor seals its
+in-memory execution result and invokes the Python ingestion coordinator with the same
 interpreter. An ordinary benchmark failure can still produce a valid result for
 ingestion. A runner crash or invalid finalization is not treated as that case.
 
@@ -290,9 +291,8 @@ sequenceDiagram
       R->>R: Setup and workload share one deadline
       R->>P: Save outcome, logs, summary and artifacts
    end
-   R->>P: Finalize the canonical run result
-   R-->>S: Runner returns
-   S->>S: Bind the result and configuration checksums
+   R-->>S: Return execution state in the anonymous buffer
+   S->>S: Seal the result and bind configuration checksums
    S->>I: Start authorized ingestion
    I->>P: Storage metrics, if storage passed
    I->>P: NCCL metrics, if NCCL passed
@@ -301,6 +301,7 @@ sequenceDiagram
    I-->>S: ingestion_finished with per-store outcomes
    S->>S: Verify acknowledgement and finish log capture
    S->>P: Retain the final supervisor event
+   S->>P: Publish final result.json with file, log and DB completion
 ```
 
 The write order is **storage, NCCL, locked DL, then the atomic built-in status
@@ -352,8 +353,8 @@ The verification path checks:
 
 1. The expected cluster, Job UID, requested workload and assigned owned pod.
 2. Source commit, configuration and descriptor checksums against the submitted snapshot.
-3. Final canonical and per-test results, readable logs, summaries and ordered events.
-4. A matching ingestion digest and successful terminal ingestion evidence.
+3. Final job result, per-test states, readable logs, summaries and ordered events.
+4. A matching execution digest and successful file/log/database completion record.
 5. Exact node/timestamp outcome rows and artifact-to-database metric values.
 6. DL rank coverage, plan, iterations, receipts and a complete generation unchanged
    across the read.
@@ -419,7 +420,8 @@ The [live loop](../scripts/cval-live.sh) uses its
 supervisor, which runs the Python test runner and then directly starts
 [the Python ingestion coordinator](../cval/storage/run_ingest.py). Both children
 use the same interpreter; ingestion takes recorded software versions from the
-finalized result and independently authorizes all writes. The
+sealed execution result and independently authorizes all writes. The final
+public result is written only after ingestion and log/file checks. The
 [environment script](../validation-tests/0-env.sh) and
 [DB launcher](../validation-tests/db-update.sh) remain compatibility entry points,
 not additional stages in the production supervisor path.
@@ -431,8 +433,9 @@ runtime contract. Each generated Job contains its full startup script; no
 additional in-pod file or download is needed to obtain the bootstrap itself.
 
 The [source renderer](../scripts/cval-source.py) produces only the immutable
-code ConfigMap used by validation Jobs. Test-owned plugins provide configuration
-and read-only raw exports. Backup, layout and SQLite journal tools belong to
+code ConfigMap used by validation Jobs. Test directories own setup, benchmark,
+summary and logger hooks; plugins also provide configuration and read-only raw
+exports. Backup, layout and SQLite journal tools belong to
 evidence recovery, not post-test analysis. See the
 [cleanup review](cleanup-review.md) for approval-only retirement candidates.
 
@@ -459,12 +462,14 @@ The default PVC root is `/data/continuous_validation`. A run ID is
 ```text
 <validation-root>/
    metadata/                                  authoritative raw SQLite files
-   logs/job_logs/<node>/<run-id>/              whole-run results, events and logs
-   logs/<test-id>/<node>/<run-id>/             per-test stdout, stderr and events
-   logs/validation_tests/<test-id>/runs/
-      <node>/<run-id>/                          per-test result and summary
-         artifacts/                             FIO JSON, HCA samples or DL rank files
+   logs/job_logs/<node>/<run-id>/              job.log + final result.json
+   logs/<test-id>/<node>/<run-id>/             job.log + summary.json + artifacts
+      workdir/                               DL source/plan copy and rank JSON
 ```
+
+Events are identifiable `CVAL_EVENT` lines in the consolidated logs. New runs
+do not create separate stream/event files, result.env, per-test result.json or
+an ingestion-digest file. Historical layouts remain readable and are not moved.
 
 On the control host, `live.log_dir` holds the current-session pointer, session
 state, approval/intents, Job projections, cooldown table and cycle logs. It is
@@ -480,7 +485,7 @@ Kubernetes objects from another object with a reused name. The
 The [execution walkthrough](#5-execute-and-preserve-the-run) and
 [ingestion sequence](#6-write-the-evidence) describe the runtime in detail.
 `[tests.<id>]` selects a repository-local `cval.test.v1` descriptor. New tests can
-use the same runner and canonical result format, with optional config/export
+use the same runner and canonical result format, with optional config/export/log
 plugins. That extension point does not create a generic per-test database;
 persistence remains test-owned. See the
 [feature reference](cval-technical-overview.md#5-test-coverage-and-runtime-configuration).
@@ -522,6 +527,7 @@ timeout behavior or permission to delete unrelated Jobs.
 - **Maintenance is not the test loop.** Export, repair, backup and source delivery
    have separate entry points; none implies automatic deployment or remediation.
 
-This guide was traced against source commit `0760c78` and the checked-in TOMLs
-on September 26, 2026. A live run is governed by its retained snapshot, not by
-the defaults or examples in this document.
+The original flow review used source `0760c78` on September 26, 2026; compact
+logging and final-result ownership were updated on September 30. These describe
+source behavior, not an activation claim. A live run is governed by its retained
+snapshot, not by the defaults or examples in this document.

@@ -350,8 +350,9 @@ change prepared files. See [scope and verification limits](components_design/tes
 
 ### Timing and Environment Inspection
 
-Use the exact run's retained `result.json`, full `events.jsonl`, test summaries and
-submitted configuration. Match node/run/source identity and result digest before
+Use the exact run's final `result.json`, `CVAL_EVENT` records in `job.log`, test
+summaries and submitted configuration. Older runs retain their original
+`events.jsonl` evidence. Match node/run/source identity and result digest before
 joining raw records at that timestamp; do not substitute latest rows. Existing
 image/framework, plan and iteration fields are experiment dimensions, not versions
 to freeze. Inspect [existing timing boundaries](result-schema.md#timing-interpretation)
@@ -679,9 +680,11 @@ Backup never restores or deletes source data.
 ## PVC organization
 
 Use the [recovery component](components_design/recovery-maintenance-major-component.md#retained-paths) for the retained-path map,
-bounded inventory, and earlier archive history. The current code writes new
-detailed test evidence under `logs/validation_tests`; existing PVC contents are
-not migrated automatically by a code update. No compatibility symlinks are used.
+bounded inventory, and earlier archive history. Compact-source Jobs write each
+test's log, summary and artifacts together under `logs/<test>/<node>/<run-id>`.
+Older detailed evidence under `logs/validation_tests` stays in place. Existing
+PVC contents are not migrated automatically by a code update. No compatibility
+symlinks are used. The table below describes the earlier historical consolidation.
 
 | Existing location | Consolidated location |
 |---|---|
@@ -690,11 +693,11 @@ not migrated automatically by a code update. No compatibility symlinks are used.
 | `results/` | `logs/results/` |
 | `validation_tests/` | `logs/validation_tests/` |
 
-`logs/job_logs` contains canonical overall results and supervisor logs.
-`logs/<test>` contains per-test stdout, stderr and events; legacy per-test trees
-contain older run records. `logs/validation_tests/<test>/runs` contains detailed
-summaries, artifacts, retained plans and rank JSON. These are different evidence
-types, not interchangeable copies. They share one `logs/` root after migration.
+`logs/job_logs` contains the final job result and supervisor-owned `job.log`.
+New `logs/<test>` runs contain one `job.log`, a test-owned `summary.json` and raw
+artifacts. Older runs may retain split streams, event files and separate detailed
+evidence under `logs/validation_tests/<test>/runs`. Those historical files remain
+readable and must not be treated as interchangeable or automatically deleted.
 `metadata/`, `evaluation-engine/`, and `dl_unit_test_evaluation/` are not moved.
 When the verified backup excludes `dl_unit_test_evaluation/`, consolidation skips
 its content and fingerprint checks too. Rollback never touches that directory.

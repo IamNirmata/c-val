@@ -216,8 +216,12 @@ Raw databases live under the configured validation root, by default
 | `test-nccl.db` | NCCL aggregate and InfiniBand port metrics |
 | Four `dltest_*.db` files | Numerical, compute, collective and overlap metrics |
 
-Canonical artifacts include `cval.results`, `cval.event.v1` progress, summaries
-and logs. Historical `cval.results.v1` and `.v2` formats remain readable.
+Canonical artifacts include final `cval.results.v3`, `CVAL_EVENT` notifications
+inside consolidated job/test logs, summaries and raw measurements. Each test owns
+its `logger.py` and `summary.py`; new summaries and artifacts share its log
+directory. Historical unversioned/v1/v2 results and files remain readable and
+are not rewritten. The supervisor publishes the final result only after
+ingestion acknowledgements and log/file checks.
 Ingestion checks run identity, result digests, configuration and authorized
 destinations. Tests own their persistence; there is no generic per-test database
 or global transaction across all seven stores.

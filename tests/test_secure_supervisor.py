@@ -20,7 +20,7 @@ from unittest.mock import patch
 from cval.config import encode_config_snapshot, load_config
 from cval.storage.write_provenance import authorize_result_write
 from cval.validation.registry import load_test_registry
-from cval.validation.results import load_validation_result, validation_result_digest
+from cval.validation.results import load_validation_result, validation_result_digest, recording_complete
 from cval.validation.runtime import build_runtime_environment
 from cval.validation.secure_fs import publish_test_summary
 from cval.validation.supervisor import (
@@ -49,28 +49,26 @@ class SupervisorChildLifecycleTests(unittest.TestCase):
         self.output = io.BytesIO()
         self.errors = io.BytesIO()
         active = [None]
-        with tempfile.TemporaryFile() as stdout_log, tempfile.TemporaryFile() as stderr_log, tempfile.TemporaryFile() as job_log:
+        with tempfile.TemporaryFile() as job_log:
             try:
                 return _run_child(
                     command, cwd=REPO_ROOT, environment=dict(os.environ), pass_fds=(),
-                    stdout=self.output, stderr=self.errors, global_stdout_fd=stdout_log.fileno(),
-                    global_stderr_fd=stderr_log.fileno(), job_log_fd=job_log.fileno(),
+                    stdout=self.output, stderr=self.errors, job_log_fd=job_log.fileno(),
                     active=active, timeout_seconds=timeout,
                 )
             finally:
                 self.assertEqual(active, [None])
-                stdout_log.seek(0)
-                stderr_log.seek(0)
-                self.assertEqual(stdout_log.read(), self.output.getvalue())
-                self.assertEqual(stderr_log.read(), self.errors.getvalue())
+                job_log.seek(0)
+                self.assertEqual(job_log.read(), self.output.getvalue())
+                self.assertEqual(self.errors.getvalue(), b"")
 
     def test_output_and_exit_status_are_preserved(self) -> None:
         for exit_code in (0, 7):
             with self.subTest(exit_code=exit_code):
                 code = f"import sys; print('stdout'); print('stderr', file=sys.stderr); sys.exit({exit_code})"
                 self.assertEqual(self._capture([sys.executable, "-u", "-c", code]), exit_code)
-                self.assertEqual(self.output.getvalue(), b"stdout\n")
-                self.assertEqual(self.errors.getvalue(), b"stderr\n")
+                self.assertEqual(self.output.getvalue(), b"stdout\nstderr\n")
+                self.assertEqual(self.errors.getvalue(), b"")
 
     def test_timeout_terminates_term_ignoring_child(self) -> None:
         code = "import signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); signal.pause()"
@@ -135,6 +133,23 @@ class SupervisorChildLifecycleTests(unittest.TestCase):
 
 
 class SecureRunSupervisorTests(unittest.TestCase):
+    def test_compact_layout_has_only_single_logs_and_anonymous_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = reserve_secure_run_layout(root, "node-a", "node-a-123", registry_json=REGISTRY)
+            try:
+                job = root / "logs/job_logs/node-a/node-a-123"
+                test = root / "logs/smoke/node-a/node-a-123"
+                self.assertEqual({path.name for path in job.iterdir()}, {"job.log", ".run-active"})
+                self.assertEqual({path.name for path in test.iterdir()}, {"job.log"})
+                self.assertFalse((root / "logs/validation_tests").exists())
+                self.assertEqual(len(set(layout.test_fds["smoke"])), 1)
+                self.assertEqual(os.fstat(layout.result_file_fd).st_nlink, 0)
+                self.assertNotIn("CVAL_RESULT_ENV_FILE", layout.environment())
+                layout.verify()
+            finally:
+                layout.close()
+
     def test_summary_publisher_uses_retained_fd_and_never_overwrites(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -164,7 +179,7 @@ class SecureRunSupervisorTests(unittest.TestCase):
                 )
                 summary = (
                     validation_root
-                    / "logs/validation_tests/smoke/runs/node-a/node-a-123/summary.json"
+                    / "logs/smoke/node-a/node-a-123/summary.json"
                 )
                 self.assertEqual(summary.read_bytes(), b'{"ok":true}\n')
                 self.assertEqual(stat.S_IMODE(summary.stat().st_mode), 0o600)
@@ -214,7 +229,7 @@ class SecureRunSupervisorTests(unittest.TestCase):
                 self.assertFalse(
                     (
                         validation_root
-                        / "logs/validation_tests/smoke/runs/node-a/node-a-123/summary.json"
+                        / "logs/smoke/node-a/node-a-123/summary.json"
                     ).exists()
                 )
             finally:
@@ -235,7 +250,7 @@ class SecureRunSupervisorTests(unittest.TestCase):
             encoding="utf-8",
         )
         (test_dir / "run-test.sh").write_text(
-            "#!/bin/bash\nset -euo pipefail\n" + workload,
+            "#!/bin/bash\nset -euo pipefail\nprintf '{}\\n' > \"$CVAL_TEST_SUMMARY_FILE\"\n" + workload,
             encoding="utf-8",
         )
         (test_dir / "test_config.toml").write_text(
@@ -243,10 +258,20 @@ class SecureRunSupervisorTests(unittest.TestCase):
 [test]
 id = "{test_id}"
 display_name = "{test_id}"
+description = "Supervisor fixture"
 order = {order}
 entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
+continue_on_failure = true
+[requirements]
+cpu = "1"
+memory = "1Gi"
+gpu_count = 0
+rdma_count = 0
+shared_memory = "0"
+read_sysfs = false
+[settings]
 [artifacts]
 summary_filename = "summary.json"
 ''',
@@ -269,6 +294,7 @@ summary_filename = "summary.json"
         base = load_config()
         return replace(
             base,
+            job=replace(base.job, template_path=repo / "template.yml", git_ref="a" * 40, image_name="test-image"),
             storage=replace(
                 base.storage,
                 validation_db_path=str(root / "metadata/validation.db"),
@@ -281,11 +307,11 @@ summary_filename = "summary.json"
             ),
             runtime=replace(
                 base.runtime,
-                repo_dir=str(REPO_ROOT),
+                repo_dir=str(repo),
                 validation_root=str(root),
                 validation_tests_dir=str(repo / "validation-tests"),
                 dl_results_root_path=str(
-                    root / "logs/validation_tests/dltest/runs"
+                    root / "logs/dltest"
                 ),
             ),
             tests=replace(base.tests, registry=registry),
@@ -293,7 +319,7 @@ summary_filename = "summary.json"
 
     def _supervisor_environment(self, config, repo: Path) -> dict[str, str]:
         return os.environ | build_runtime_environment(config) | {
-            "CVAL_REPO_DIR": str(REPO_ROOT),
+            "PYTHONPATH": str(REPO_ROOT),
             "CVAL_TEST_REPO_ROOT": str(repo),
             "CVAL_VALIDATION_ROOT": config.runtime.validation_root,
             "CVAL_RUN_ID": "node-a-123",
@@ -301,10 +327,8 @@ summary_filename = "summary.json"
             "GCRNODE": "node-a",
             "CVAL_TIMESTAMP": "123",
             "GCRTIME": "123",
-            "CVAL_IMAGE_NAME": "test-image",
             "CVAL_PYTORCH_VERSION": "test-pytorch",
             "CVAL_CUDA_VERSION": "test-cuda",
-            "CVAL_GIT_REF": "test-ref",
         }
 
     def test_real_runner_and_db_update_ingest_descriptor_bound_result(self) -> None:
@@ -335,12 +359,8 @@ summary_filename = "summary.json"
             return_code = supervise_validation_run(
                 environment=self._supervisor_environment(config, repo),
                 runner_command=(sys.executable, "-m", "cval.validation.runner"),
-                db_update_command=(
-                    "/bin/bash",
-                    "-c",
-                    "source ./0-env.sh && exec /bin/bash ./db-update.sh",
-                ),
-                validation_tests_dir=REPO_ROOT / "validation-tests",
+                db_update_command=(sys.executable, "-m", "cval.storage.run_ingest"),
+                validation_tests_dir=config.runtime.validation_tests_dir,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -358,10 +378,11 @@ summary_filename = "summary.json"
                     "SELECT test, result FROM runs ORDER BY rowid"
                 ).fetchall()
             events = [
-                json.loads(line)
-                for line in (run_dir / "events.jsonl").read_text(
+                json.loads(line.removeprefix("CVAL_EVENT "))
+                for line in (run_dir / "job.log").read_text(
                     encoding="utf-8"
                 ).splitlines()
+                if line.startswith("CVAL_EVENT ")
             ]
 
             self.assertEqual(result.tests["smoke-pass"].status, "pass")
@@ -376,12 +397,8 @@ summary_filename = "summary.json"
                     ("all", "fail"),
                 ],
             )
-            self.assertEqual(
-                (run_dir / ".ingestion-result-digest").read_text(
-                    encoding="utf-8"
-                ),
-                validation_result_digest(result) + "\n",
-            )
+            self.assertFalse((run_dir / ".ingestion-result-digest").exists())
+            self.assertTrue(recording_complete(result))
             event_names = [event["event"] for event in events]
             self.assertIn("run_started", event_names)
             self.assertIn("run_finished", event_names)
@@ -424,17 +441,28 @@ JSON
 [test]
 id = "nccl"
 display_name = "NCCL"
+description = "NCCL fixture"
 order = 20
 entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
+continue_on_failure = true
 [requirements]
+cpu = "1"
+memory = "1Gi"
 gpu_count = 1
+rdma_count = 0
+shared_memory = "0"
+read_sysfs = false
 [settings]
 gpu_count = 1
 iterations = 20
 data_size_gb = 8
 ibbw_enabled = false
+ibbw_start_device = ""
+ibbw_end_device = ""
+ibbw_interval_seconds = 1
+ib_sys_root = "/sys/class/infiniband"
 net = "IB"
 p2p_disable = true
 shm_disable = true
@@ -447,7 +475,7 @@ summary_filename = "summary.json"
             config = self._runtime_config(root, repo, ("nccl",))
             config = replace(
                 config,
-                job=replace(config.job, git_ref="a" * 40),
+                job=replace(config.job, git_ref="a" * 40, image_name="test-image@sha256:" + "b" * 64),
                 job_template=replace(
                     config.job_template,
                     container_image="test-image@sha256:" + "b" * 64,
@@ -467,12 +495,8 @@ summary_filename = "summary.json"
             return_code = supervise_validation_run(
                 environment=environment,
                 runner_command=(sys.executable, "-m", "cval.validation.runner"),
-                db_update_command=(
-                    "/bin/bash",
-                    "-c",
-                    "source ./0-env.sh && exec /bin/bash ./db-update.sh",
-                ),
-                validation_tests_dir=REPO_ROOT / "validation-tests",
+                db_update_command=(sys.executable, "-m", "cval.storage.run_ingest"),
+                validation_tests_dir=config.runtime.validation_tests_dir,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -513,17 +537,28 @@ summary_filename = "summary.json"
 [test]
 id = "nccl"
 display_name = "NCCL"
+description = "NCCL fixture"
 order = 20
 entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
+continue_on_failure = true
 [requirements]
+cpu = "1"
+memory = "1Gi"
 gpu_count = 1
+rdma_count = 0
+shared_memory = "0"
+read_sysfs = false
 [settings]
 gpu_count = 1
 iterations = 20
 data_size_gb = 8
 ibbw_enabled = false
+ibbw_start_device = ""
+ibbw_end_device = ""
+ibbw_interval_seconds = 1
+ib_sys_root = "/sys/class/infiniband"
 net = "IB"
 p2p_disable = true
 shm_disable = true
@@ -548,12 +583,8 @@ summary_filename = "summary.json"
             return_code = supervise_validation_run(
                 environment=self._supervisor_environment(config, repo),
                 runner_command=(sys.executable, "-m", "cval.validation.runner"),
-                db_update_command=(
-                    "/bin/bash",
-                    "-c",
-                    "source ./0-env.sh && exec /bin/bash ./db-update.sh",
-                ),
-                validation_tests_dir=REPO_ROOT / "validation-tests",
+                db_update_command=(sys.executable, "-m", "cval.storage.run_ingest"),
+                validation_tests_dir=config.runtime.validation_tests_dir,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -594,12 +625,8 @@ mkdir -m 700 "$canonical"
                 supervise_validation_run(
                     environment=environment,
                     runner_command=(sys.executable, "-m", "cval.validation.runner"),
-                    db_update_command=(
-                        "/bin/bash",
-                        "-c",
-                        "source ./0-env.sh && exec /bin/bash ./db-update.sh",
-                    ),
-                    validation_tests_dir=REPO_ROOT / "validation-tests",
+                    db_update_command=(sys.executable, "-m", "cval.storage.run_ingest"),
+                    validation_tests_dir=config.runtime.validation_tests_dir,
                     stdout=io.BytesIO(),
                     stderr=io.BytesIO(),
                 )
@@ -608,7 +635,8 @@ mkdir -m 700 "$canonical"
             self.assertFalse((root / "metadata/validation.db").exists())
             self.assertFalse((replacement / ".ingestion-result-digest").exists())
             retained = root / "logs/job_logs/node-a/node-a-123-retained"
-            self.assertTrue((retained / "result.json").is_file())
+            self.assertFalse((retained / "result.json").exists())
+            self.assertTrue((retained / "job.log").is_file())
             self.assertTrue((retained / ".run-active").is_file())
 
     def test_forged_layout_with_unlisted_result_fd_authorizes_no_write(self) -> None:
@@ -652,6 +680,8 @@ mkdir -m 700 "$canonical"
                     ],
                     repo_root=repo,
                 )
+                with self.assertRaises(OSError):
+                    os.write(layout.result_file_fd, b"changed")
                 forged_environment = (
                     self._supervisor_environment(config, repo)
                     | layout.environment()
@@ -671,7 +701,7 @@ mkdir -m 700 "$canonical"
                         "not inherited run descriptors",
                     ):
                         authorize_result_write(
-                            f"/proc/self/fd/{layout.run_dir_fd}/result.json",
+                            f"/proc/self/fd/{layout.result_file_fd}",
                             result_digest=validation_result_digest(result),
                             config_snapshot_b64=encode_config_snapshot(config),
                             config=config,
@@ -793,8 +823,8 @@ mkdir -m 700 "$canonical"
             (test_dir / "run-test.sh").write_text(
                 """#!/bin/bash
 set -euo pipefail
-mv "$SWAP_VALIDATION_ROOT/logs/validation_tests" "$SWAP_VALIDATION_ROOT/logs/validation_tests-retained"
-ln -s "$SWAP_OUTSIDE" "$SWAP_VALIDATION_ROOT/logs/validation_tests"
+mv "$SWAP_VALIDATION_ROOT/logs/smoke" "$SWAP_VALIDATION_ROOT/logs/smoke-retained"
+ln -s "$SWAP_OUTSIDE" "$SWAP_VALIDATION_ROOT/logs/smoke"
 printf 'anchored\n' > "$CVAL_TEST_OUTPUT_DIR/artifact.txt"
 printf '{"ok":true}\n' > "$CVAL_TEST_SUMMARY_FILE"
 """,
@@ -805,30 +835,27 @@ printf '{"ok":true}\n' > "$CVAL_TEST_SUMMARY_FILE"
 [test]
 id = "smoke"
 display_name = "Smoke"
+description = "Ancestor replacement fixture"
 order = 10
 entrypoint = "run-test.sh"
 setup = "setup.sh"
 timeout_seconds = 30
+continue_on_failure = true
+[requirements]
+cpu = "1"
+memory = "1Gi"
+gpu_count = 0
+rdma_count = 0
+shared_memory = "0"
+read_sysfs = false
+[settings]
 [artifacts]
 summary_filename = "summary.json"
 ''',
                 encoding="utf-8",
             )
-            environment = os.environ | {
-                "CVAL_REPO_DIR": str(Path(__file__).resolve().parents[1]),
-                "CVAL_TEST_REPO_ROOT": str(repo),
-                "CVAL_VALIDATION_TESTS_DIR": str(repo / "validation-tests"),
-                "CVAL_VALIDATION_ROOT": str(validation_root),
-                "CVAL_TEST_REGISTRY_JSON": REGISTRY,
-                "CVAL_RUN_ID": "node-a-123",
-                "CVAL_NODE": "node-a",
-                "GCRNODE": "node-a",
-                "CVAL_TIMESTAMP": "123",
-                "GCRTIME": "123",
-                "CVAL_IMAGE_NAME": "test-image",
-                "CVAL_PYTORCH_VERSION": "test",
-                "CVAL_CUDA_VERSION": "test",
-                "CVAL_GIT_REF": "test-ref",
+            config = self._runtime_config(validation_root, repo, ("smoke",))
+            environment = self._supervisor_environment(config, repo) | {
                 "SWAP_VALIDATION_ROOT": str(validation_root),
                 "SWAP_OUTSIDE": str(outside),
             }
@@ -856,20 +883,13 @@ summary_filename = "summary.json"
             self.assertEqual(list(outside.iterdir()), [])
             retained_run = (
                 validation_root
-                / "logs/validation_tests-retained/smoke/runs/node-a/node-a-123"
+                / "logs/smoke-retained/node-a/node-a-123"
             )
             self.assertEqual(
-                (retained_run / "artifacts/artifact.txt").read_text(encoding="utf-8"),
+                (retained_run / "artifact.txt").read_text(encoding="utf-8"),
                 "anchored\n",
             )
-            result = json.loads((retained_run / "result.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                result["artifacts"],
-                str(
-                    validation_root
-                    / "logs/validation_tests/smoke/runs/node-a/node-a-123/artifacts"
-                ),
-            )
+            self.assertFalse((retained_run / "result.json").exists())
             self.assertTrue(
                 (
                     validation_root

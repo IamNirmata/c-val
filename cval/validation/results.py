@@ -1,8 +1,7 @@
 """Structured validation result schema helpers.
 
-Validation pods write one canonical ``cval.results`` JSON artifact per run.
-Strict historical ``cval.results.v1`` and ``cval.results.v2`` readers remain so
-existing evidence is never rewritten.
+Validation pods publish one final ``cval.results.v3`` artifact per run.
+Historical unversioned/v1/v2 readers remain; existing evidence is not rewritten.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from cval.validation.builtins import (
 
 
 VALID_STATUSES = {"pass", "fail", "incomplete"}
+COMPACT_RESULT_SCHEMA = "cval.results.v3"
 VALID_V2_PHASES = {
     "not_selected",
     "pending",
@@ -117,6 +117,7 @@ class ValidationResultV2:
     global_config_digest: str
     tests: dict[str, TestResultV2]
     errors: list[dict[str, Any]]
+    completion: dict[str, Any] | None = None
 
 
 ValidationResultLike = ValidationResult | ValidationResultV2
@@ -132,7 +133,7 @@ def load_validation_result(path: Path) -> ValidationResultLike:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("c-val result payload must be a JSON object")
-    if payload.get("schema_version") in {"cval.results", "cval.results.v2"}:
+    if payload.get("schema_version") in {"cval.results", "cval.results.v2", COMPACT_RESULT_SCHEMA}:
         return parse_validation_result_v2(payload)
     return parse_validation_result(payload)
 
@@ -214,8 +215,11 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
         "errors",
     }
     schema_version = payload.get("schema_version")
+    compact = schema_version == COMPACT_RESULT_SCHEMA
+    if compact:
+        allowed_top_level.add("completion")
     _reject_unknown(payload, allowed_top_level, "cval.results")
-    if schema_version not in {"cval.results", "cval.results.v2"}:
+    if schema_version not in {"cval.results", "cval.results.v2", COMPACT_RESULT_SCHEMA}:
         raise ValueError("Unsupported c-val result schema_version")
 
     run_id = _required_str(payload, "run_id")
@@ -254,7 +258,7 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
             raise ValueError(f"Invalid current test ID: {test_id!r}")
         if not isinstance(raw, dict):
             raise ValueError(f"current test {test_id!r} must be an object")
-        test = _parse_v2_test(test_id, raw)
+        test = _parse_v2_test(test_id, raw, compact=compact)
         if test.selected:
             if test.order in selected_orders:
                 raise ValueError(
@@ -296,7 +300,7 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
         raise ValueError("cval.results errors must be an array")
     errors = [_parse_v2_error(raw, index) for index, raw in enumerate(errors_raw)]
 
-    return ValidationResultV2(
+    result = ValidationResultV2(
         schema_version=str(schema_version),
         run_id=run_id,
         node=node,
@@ -312,7 +316,56 @@ def parse_validation_result_v2(payload: dict[str, Any]) -> ValidationResultV2:
         global_config_digest=global_config_digest,
         tests=tests,
         errors=errors,
+        completion=payload.get("completion") if compact else None,
     )
+    if result.completion is not None:
+        _validate_completion(result)
+    return result
+
+
+def result_payload(result: ValidationResultV2) -> dict[str, Any]:
+    payload = asdict(result)
+    if result.schema_version == COMPACT_RESULT_SCHEMA:
+        for test in payload["tests"].values():
+            for name in ("stdout", "stderr", "result"):
+                test.pop(name)
+    else:
+        payload.pop("completion")
+    return payload
+
+
+def _validate_completion(result: ValidationResultV2) -> None:
+    completion = result.completion
+    fields = {"finished_at", "exit_code", "logs", "files", "ingestion", "stores", "result_digest"}
+    if not isinstance(completion, dict) or set(completion) != fields:
+        raise ValueError("Invalid final completion record")
+    _validate_timestamp(completion["finished_at"], "completion.finished_at")
+    if result.completed_at and _parse_timestamp(completion["finished_at"]) < _parse_timestamp(result.completed_at):
+        raise ValueError("Completion precedes test execution")
+    if type(completion["exit_code"]) is not int or completion["logs"] not in {"retained", "unconfirmed"}:
+        raise ValueError("Invalid completion exit/log state")
+    if completion["ingestion"] not in {"pass", "fail", "unconfirmed", "not_started", "not_requested"}:
+        raise ValueError("Invalid completion ingestion state")
+    if not isinstance(completion["files"], dict) or set(completion["files"]) != set(result.tests):
+        raise ValueError("Completion file coverage differs from the test set")
+    if any(value not in {"complete", "incomplete", "not_required", "unconfirmed"} for value in completion["files"].values()):
+        raise ValueError("Invalid completion file state")
+    if not isinstance(completion["stores"], dict) or any(value not in {"pending", "committed", "not_required", "unconfirmed"} for value in completion["stores"].values()):
+        raise ValueError("Invalid completion store state")
+    if completion["result_digest"] != validation_result_v2_digest(result):
+        raise ValueError("Completion result digest mismatch")
+
+
+def recording_complete(result: ValidationResultV2) -> bool:
+    completion = result.completion or {}
+    owners = {"storage": "storage", "nccl": "nccl", "numerical_correctness": "dltest",
+              "compute_performance": "dltest", "collective_performance": "dltest", "overlap_performance": "dltest"}
+    expected = {name: "committed" if owner in result.tests and result.tests[owner].selected and result.tests[owner].status == "pass"
+                else "not_required" for name, owner in owners.items()} | {"validation": "committed"}
+    files = {name: "complete" if test.selected else "not_required" for name, test in result.tests.items()}
+    return bool(result.completed_at and completion.get("exit_code") == 0 and completion.get("logs") == "retained"
+                and completion.get("files") == files and completion.get("ingestion") == "pass"
+                and completion.get("stores") == expected)
 
 
 def validation_result_to_env(result: ValidationResultLike) -> dict[str, str]:
@@ -369,10 +422,12 @@ def validation_result_to_env(result: ValidationResultLike) -> dict[str, str]:
 
 
 def validation_result_v2_digest(result: ValidationResultV2) -> str:
-    """Return a canonical SHA-256 digest over the complete validated v2 result."""
+    """Bind execution inputs/outcomes independently of final ingestion completion."""
 
+    value = result_payload(result)
+    value.pop("completion", None)
     payload = json.dumps(
-        asdict(result),
+        value,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -392,7 +447,7 @@ def validation_result_digest(result: ValidationResultLike) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
-def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
+def _parse_v2_test(test_id: str, raw: dict[str, Any], *, compact: bool = False) -> TestResultV2:
     allowed = {
         "display_name",
         "enabled",
@@ -414,7 +469,8 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
         "artifacts",
         "message",
     }
-    _reject_unknown(raw, allowed, f"current test {test_id!r}")
+    removed_paths = {"stdout", "stderr", "result"} if compact else set()
+    _reject_unknown(raw, allowed - removed_paths, f"current test {test_id!r}")
     enabled = _required_bool(raw, "enabled", test_id)
     selected = _required_bool(raw, "selected", test_id)
     if selected and not enabled:
@@ -507,7 +563,7 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
     path_values = {
         "config_path": _required_str(raw, "config_path"),
         **{
-            key: _string(raw, key)
+            key: "" if key in removed_paths else _string(raw, key)
             for key in (
                 "stdout",
                 "stderr",
@@ -522,7 +578,7 @@ def _parse_v2_test(test_id: str, raw: dict[str, Any]) -> TestResultV2:
         if "\x00" in value:
             raise ValueError(f"current test {test_id!r} {key} contains NUL")
     if selected:
-        missing_paths = [key for key, value in path_values.items() if not value]
+        missing_paths = [key for key, value in path_values.items() if key not in removed_paths and not value]
         if missing_paths:
             raise ValueError(
                 f"Selected current test {test_id!r} has empty paths: "

@@ -450,6 +450,9 @@ def _parse_nccl_health_evidence(
     if Path(ibbw_log_path).parent == legacy_artifacts:
         evidence_root = legacy_root
     artifacts = evidence_root / result.node / expected_run_id / "artifacts"
+    if result.schema_version == "cval.results.v3":
+        evidence_root = Path(authorization.config.runtime.validation_root) / "logs/nccl"
+        artifacts = evidence_root / result.node / expected_run_id
     expected_logs = {
         artifacts / "ibbw.log",
         artifacts / f"ibbw-{result.node}-{result.timestamp}.log",
@@ -808,7 +811,7 @@ def add_storage_result(
 ) -> int:
     """Parse fio JSON artifacts and upsert one row into the storage metrics DB."""
 
-    validate_current_write(
+    authorization = validate_current_write(
         _authorization,
         operation="storage",
         node=node,
@@ -819,7 +822,8 @@ def add_storage_result(
         run_id=run_id,
     )
     parsed_timestamp = parse_timestamp(timestamp)
-    metrics = parse_storage_metrics(results_dir)
+    summary_name = authorization.config.tests.registry.require("storage").definition.artifacts.summary_filename if authorization.result.schema_version == "cval.results.v3" else None
+    metrics = parse_storage_metrics(results_dir, summary_filename=summary_name)
     columns = ", ".join(STORAGE_METRIC_COLUMNS)
     placeholders = ", ".join("?" for _ in STORAGE_METRIC_COLUMNS)
 
@@ -911,7 +915,7 @@ def add_storage_result(
     return parsed_timestamp
 
 
-def parse_storage_metrics(results_dir: str | Path) -> dict[str, float]:
+def parse_storage_metrics(results_dir: str | Path, *, summary_filename: str | None = None) -> dict[str, float]:
     """Return fio IOPS and bandwidth metrics from a storage result directory."""
 
     directory = Path(results_dir)
@@ -921,7 +925,9 @@ def parse_storage_metrics(results_dir: str | Path) -> dict[str, float]:
     actual_json_files = {
         child.name for child in directory.iterdir() if child.name.endswith(".json")
     }
-    unexpected_files = sorted(actual_json_files - set(STORAGE_FILE_PREFIXES))
+    if summary_filename is not None and (Path(summary_filename).name != summary_filename or summary_filename in STORAGE_FILE_PREFIXES):
+        raise ValueError("Storage summary must be a distinct basename")
+    unexpected_files = sorted(actual_json_files - set(STORAGE_FILE_PREFIXES) - {summary_filename})
     if unexpected_files:
         raise ValueError(
             "Passing storage result contains unexpected JSON artifact(s): "
@@ -979,6 +985,15 @@ def parse_storage_metrics(results_dir: str | Path) -> dict[str, float]:
             "Passing storage result is missing required FIO artifact(s): "
             f"{', '.join(missing_files)}"
         )
+    if summary_filename is None:
+        return metrics
+    summary_path = directory / summary_filename
+    if summary_path.exists() or summary_path.is_symlink():
+        if summary_path.is_symlink() or not summary_path.is_file():
+            raise ValueError("Storage summary must be a non-symlink regular file")
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(summary, dict) or summary.get("schema_version") != "cval.storage.summary.v1" or summary.get("metrics") != metrics:
+            raise ValueError("Storage summary does not match retained FIO metrics")
     return metrics
 
 

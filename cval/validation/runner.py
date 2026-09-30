@@ -18,29 +18,19 @@ from typing import Any, Mapping, TextIO
 from zoneinfo import ZoneInfo
 
 from cval.config import CvalConfig, REPO_ROOT, load_config, load_config_snapshot
-from cval.validation.builtins import (
-    BUILTIN_DONE_MARKERS,
-    BUILTIN_ENABLE_ENV,
-    BUILTIN_FINAL_RESULT_PREFIX,
-    BUILTIN_RESULT_ENV,
-    RESULT_PROJECTION_KEYS,
-    BUILTIN_RUNNING_MARKERS,
-    BUILTIN_SKIPPED_MARKERS,
-    BUILTIN_TEST_IDS,
-)
 from cval.validation.execution import RunLogger, RunPaths, TestPaths, utc_now
 from cval.validation.registry import (
     RegisteredValidationTest,
     ValidationTestRegistry,
     validation_test_config_digest,
 )
-from cval.validation.results import parse_validation_result_v2
+from cval.validation.results import COMPACT_RESULT_SCHEMA, parse_validation_result_v2
+from cval.validation.plugins import load_registered_plugin
 from cval.validation.runtime import build_runtime_environment, effective_config_digest, test_evidence_environment
 from cval.validation.supervisor import _add_builtin_compatibility_paths, reserve_secure_run_layout
 
 
 LOS_ANGELES = ZoneInfo("America/Los_Angeles")
-TEST_RESULT_SCHEMA_VERSION = "cval.test-result.v1"
 DIGEST_PREFIX = "sha256:"
 PATH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 
@@ -114,7 +104,7 @@ def run_validation_tests(
         _validate_secure_pass_fds(secure_layout, secure_pass_fds)
         run_paths = _secure_run_paths(secure_layout)
         for name, path in (("CVAL_JOB_LOG_DIR", run_paths.log_dir), ("CVAL_RESULT_DIR", run_paths.log_dir),
-                           ("CVAL_RESULT_JSON_FILE", run_paths.result), ("CVAL_RESULT_ENV_FILE", run_paths.legacy_env)):
+                   ("CVAL_RESULT_JSON_FILE", run_paths.result)):
             if runtime_env.get(name) != str(path):
                 raise ValueError(f"{name} disagrees with the secure run layout")
         _prepare_run_paths(run_paths)
@@ -186,7 +176,6 @@ def run_validation_tests(
             node_name=node,
             duration_ms=max(0, int((time.monotonic() - started_clock) * 1000)),
         )
-        logger.message(_legacy_final_line(result))
         _write_state(result, run_paths)
         if owned_layout is not None:
             owned_layout.release_marker()
@@ -228,9 +217,6 @@ def _execute_registry(
                 status="incomplete",
                 message="disabled by config",
             )
-            compatibility_skip = BUILTIN_SKIPPED_MARKERS.get(registered_test.id)
-            if compatibility_skip:
-                logger.message(compatibility_skip)
             continue
         test_paths = _secure_test_paths(secure_layout, registered_test)
         _prepare_test_paths(test_paths)
@@ -362,9 +348,6 @@ def _run_one_test(
             test_paths=test_paths,
             status="incomplete",
         )
-        running_marker = BUILTIN_RUNNING_MARKERS.get(test_id)
-        if running_marker:
-            logger.message(running_marker, test_paths=test_paths)
         entrypoint = (
             registered_test.test_dir / registered_test.definition.metadata.entrypoint
         )
@@ -426,7 +409,7 @@ def _run_one_test(
                 "message": message,
                 "test_id": test_id,
                 "timestamp": utc_now(),
-                "detail_path": str(test_paths.stderr),
+                "detail_path": state["log"],
             }
         )
         _finish_test(
@@ -472,7 +455,6 @@ def _finish_test(
             "message": message,
         }
     )
-    _write_test_result(test_id, state, test_paths.result)
     _write_state(result, run_paths)
     logger.emit(
         event,
@@ -486,7 +468,6 @@ def _finish_test(
         producer="runner",
         node_name=result["node"],
     )
-    _legacy_completion_message(logger, test_id, status, test_paths, state)
 
 
 def _initial_result(
@@ -516,18 +497,15 @@ def _initial_result(
             "exit_code": None,
             "config_path": registered_test.config_path,
             "config_digest": validation_test_config_digest(registered_test),
-            "stdout": str(paths.stdout) if selected else "",
-            "stderr": str(paths.stderr) if selected else "",
-            "log": str(paths.events) if selected else "",
+            "log": str(paths.job_log) if selected else "",
             "summary": str(paths.summary) if selected else "",
-            "result": str(paths.result) if selected else "",
             "artifacts": str(paths.artifacts) if selected else "",
             "message": "" if selected else "disabled by config",
         }
     selected_tests = [test for test in tests.values() if test["selected"]]
     pytorch_version, cuda_version = _framework_versions(runtime_env)
     return {
-        "schema_version": "cval.results",
+        "schema_version": COMPACT_RESULT_SCHEMA,
         "run_id": run_id,
         "node": node,
         "timestamp": timestamp,
@@ -631,27 +609,21 @@ def _test_paths(
 ) -> TestPaths:
     test_id = registered_test.id
     log_dir = validation_root / "logs" / test_id / node / run_id
-    run_dir = (
-        validation_root / "logs/validation_tests" / test_id / "runs" / node / run_id
-    )
+    run_dir = log_dir
     _require_below(validation_root, log_dir, "test log directory")
     _require_below(validation_root, run_dir, "test run directory")
     summary_name = registered_test.definition.artifacts.summary_filename
     return TestPaths(
         log_dir=log_dir,
-        stdout=log_dir / "stdout.log",
-        stderr=log_dir / "stderr.log",
-        events=log_dir / "events.jsonl",
         run_dir=run_dir,
-        result=run_dir / "result.json",
         summary=run_dir / summary_name,
-        artifacts=run_dir / "artifacts",
-        workload_log=log_dir / "workload.log",
+        artifacts=run_dir,
+        job_log=log_dir / "job.log",
     )
 
 
 def _prepare_run_paths(paths: RunPaths) -> None:
-    expected_names = {"stdout.log", "stderr.log", "job.log", "events.jsonl", "result.json", "result.env", ".run-active"}
+    expected_names = {"job.log", ".run-active"}
     if {path.name for path in paths.log_dir.iterdir()} != expected_names:
         raise FileExistsError("Secure run evidence reservation is incomplete or reused")
     for path in paths.log_dir.iterdir():
@@ -660,11 +632,9 @@ def _prepare_run_paths(paths: RunPaths) -> None:
 
 
 def _prepare_test_paths(paths: TestPaths) -> None:
-    expected_logs = {"stdout.log", "stderr.log", "events.jsonl", "workload.log"}
+    expected_logs = {"job.log"}
     if {path.name for path in paths.log_dir.iterdir()} != expected_logs:
         raise FileExistsError("Secure per-test log reservation is incomplete or reused")
-    if {path.name for path in paths.run_dir.iterdir()} != {"artifacts"}:
-        raise FileExistsError("Secure per-test run reservation is incomplete or reused")
     if any(path.is_symlink() or not path.is_file() for path in paths.log_dir.iterdir()):
         raise ValueError("Secure per-test log reservation contains a non-regular file")
     if not paths.artifacts.is_dir():
@@ -693,43 +663,9 @@ def _write_state(result: dict[str, Any], paths: RunPaths) -> None:
     else:
         result["completed_at"] = None
     parse_validation_result_v2(result)
-    _atomic_write_json(paths.result, result)
-    _write_legacy_env(result, paths.legacy_env)
-
-
-def _write_test_result(test_id: str, state: dict[str, Any], path: Path) -> None:
-    payload = {
-        "schema_version": TEST_RESULT_SCHEMA_VERSION,
-        "test_id": test_id,
-        "status": state["status"],
-        "phase": state["phase"],
-        "started_at": state["started_at"],
-        "completed_at": state["completed_at"],
-        "duration_ms": state["duration_ms"],
-        "exit_code": state["exit_code"],
-        "summary": state["summary"],
-        "artifacts": state["artifacts"],
-        "message": state["message"],
-    }
-    _atomic_write_json(path, payload)
-
-
-def _write_legacy_env(result: dict[str, Any], path: Path) -> None:
-    lines: list[str] = []
-    for test_id, result_name in BUILTIN_RESULT_ENV.items():
-        state = result["tests"].get(test_id)
-        status = state["status"] if state else "incomplete"
-        lines.append(f"{result_name}={status}")
-    for test_id, enabled_name in BUILTIN_ENABLE_ENV.items():
-        state = result["tests"].get(test_id)
-        enabled = bool(state and state["enabled"])
-        lines.append(f"{enabled_name}={str(enabled).lower()}")
-    keys = RESULT_PROJECTION_KEYS
-    lines.append(f"{keys['overall']}={result['overall']}")
-    lines.append(f"{keys['node']}={result['node']}")
-    lines.append(f"{keys['timestamp']}={result['timestamp']}")
-    lines.append(f"{keys['run_id']}={result['run_id']}")
-    _atomic_write_text(path, "\n".join(lines) + "\n")
+    with paths.result.open("w", encoding="utf-8") as handle:
+        json.dump(result, handle, sort_keys=True, allow_nan=False)
+        handle.flush()
 
 
 def _overall(result: dict[str, Any]) -> str:
@@ -787,23 +723,6 @@ def _runtime_timestamp(value: str | None) -> int:
         raise ValueError(f"Invalid c-val runtime timestamp: {value!r}") from exc
 
 
-def _legacy_completion_message(
-    logger: RunLogger,
-    test_id: str,
-    status: str,
-    paths: TestPaths,
-    state: Mapping[str, Any],
-) -> None:
-    markers = BUILTIN_DONE_MARKERS.get(test_id)
-    if markers is None:
-        return
-    prefix = markers[0] if status == "pass" else markers[1]
-    logger.message(
-        f"{prefix} Log file: {state['stdout']} Summary file: {state['summary']}",
-        test_paths=paths,
-    )
-
-
 def _load_secure_layout(
     environment: Mapping[str, str],
     validation_root: Path,
@@ -834,7 +753,7 @@ def _load_secure_layout(
         "tests",
     }:
         raise ValueError("Secure run layout has unexpected fields")
-    if payload["schema_version"] != "cval.secure-run-layout.v1":
+    if payload["schema_version"] != "cval.secure-run-layout.v2":
         raise ValueError("Unsupported secure run layout schema")
     if payload["canonical_root"] != str(validation_root):
         raise ValueError("Secure run layout canonical root mismatch")
@@ -843,7 +762,6 @@ def _load_secure_layout(
     if payload["node"] != expected_node or payload["run_id"] != expected_run_id:
         raise ValueError("Secure run layout identity mismatch")
     for name in (
-        "result_file_fd",
         "result_device",
         "result_inode",
         "result_size",
@@ -862,6 +780,9 @@ def _load_secure_layout(
         raise ValueError("Secure run layout does not match enabled registry tests")
     for name in ("root_fd", "run_dir_fd"):
         _require_directory_fd(payload[name], name)
+    result_descriptor = payload["result_file_fd"]
+    if type(result_descriptor) is not int or not stat.S_ISREG(os.fstat(result_descriptor).st_mode) or os.fstat(result_descriptor).st_nlink != 0:
+        raise ValueError("Runner result must be an anonymous inherited buffer")
     for test_id, values in tests.items():
         if not isinstance(values, dict) or set(values) != {
             "log_dir_fd",
@@ -889,12 +810,8 @@ def _secure_run_paths(layout: Mapping[str, Any]) -> RunPaths:
     log_dir = Path(f"/proc/self/fd/{layout['run_dir_fd']}")
     return RunPaths(
         log_dir=log_dir,
-        stdout=log_dir / "stdout.log",
-        stderr=log_dir / "stderr.log",
         job_log=log_dir / "job.log",
-        events=log_dir / "events.jsonl",
-        result=log_dir / "result.json",
-        legacy_env=log_dir / "result.env",
+        result=Path(f"/proc/self/fd/{layout['result_file_fd']}"),
         marker=log_dir / ".run-active",
     )
 
@@ -906,16 +823,15 @@ def _secure_test_paths(
     log_dir = Path(f"/proc/self/fd/{values['log_dir_fd']}")
     run_dir = Path(f"/proc/self/fd/{values['run_dir_fd']}")
     artifacts = Path(f"/proc/self/fd/{values['artifacts_dir_fd']}")
+    plugin = load_registered_plugin(registered_test)
+    writer = plugin.write_log if plugin and "log" in plugin.capabilities else None
     return TestPaths(
         log_dir=log_dir,
-        stdout=log_dir / "stdout.log",
-        stderr=log_dir / "stderr.log",
-        events=log_dir / "events.jsonl",
         run_dir=run_dir,
-        result=run_dir / "result.json",
         summary=run_dir / registered_test.definition.artifacts.summary_filename,
         artifacts=artifacts,
-        workload_log=log_dir / "workload.log",
+        job_log=log_dir / "job.log",
+        write_log=writer,
     )
 
 
@@ -930,48 +846,20 @@ def _secure_pass_fds(environment: Mapping[str, str]) -> tuple[int, ...]:
     if len(descriptors) != len(set(descriptors)):
         raise ValueError("CVAL_SECURE_RUN_FDS contains duplicate descriptors")
     for descriptor in descriptors:
-        _require_directory_fd(descriptor, "inherited")
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) and not (stat.S_ISREG(info.st_mode) and info.st_nlink == 0):
+            raise ValueError("Unexpected inherited descriptor type")
     return descriptors
 
 
 def _validate_secure_pass_fds(
     layout: Mapping[str, Any], descriptors: tuple[int, ...]
 ) -> None:
-    expected = {layout["root_fd"], layout["run_dir_fd"]}
+    expected = {layout["root_fd"], layout["run_dir_fd"], layout["result_file_fd"]}
     for values in layout["tests"].values():
         expected.update(values.values())
     if set(descriptors) != expected:
         raise ValueError("CVAL_SECURE_RUN_FDS does not match the secure run layout")
-
-
-def _legacy_final_line(result: Mapping[str, Any]) -> str:
-    values = []
-    for test_id in BUILTIN_TEST_IDS:
-        state = result["tests"].get(test_id)
-        values.append(f"{test_id}={state['status'] if state else 'incomplete'}")
-    return BUILTIN_FINAL_RESULT_PREFIX + " " + " ".join(values)
-
-
-def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(
-        f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-    )
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(temporary, flags, 0o600)
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _safe_segment(value: str, field_name: str) -> str:

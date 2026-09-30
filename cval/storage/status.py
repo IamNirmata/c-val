@@ -332,7 +332,7 @@ def build_status_snapshot(observations: list[dict], coverage: dict, state: dict,
 
 
 def _read_recording_state(reader, node: str, timestamp: int, rows: list[dict]) -> dict:
-    from cval.validation.results import parse_validation_result_v2, validation_result_digest
+    from cval.validation.results import COMPACT_RESULT_SCHEMA, parse_validation_result_v2, validation_result_digest, recording_complete
 
     result_path = Path(reader.request["root"]) / "logs/job_logs" / node / f"{node}-{timestamp}" / "result.json"
     status = {"recording_state": "unverified", "test_outcome": "unknown"}
@@ -341,7 +341,7 @@ def _read_recording_state(reader, node: str, timestamp: int, rows: list[dict]) -
     except FileNotFoundError:
         status["recording_state"] = "unverified" if rows else "no_results"
         return status
-    if payload.get("schema_version") not in {"cval.results", "cval.results.v2"}:
+    if payload.get("schema_version") not in {"cval.results", "cval.results.v2", COMPACT_RESULT_SCHEMA}:
         return status
     result = parse_validation_result_v2(payload)
     if (result.node, result.timestamp, result.run_id) != (node, timestamp, f"{node}-{timestamp}"):
@@ -360,6 +360,10 @@ def _read_recording_state(reader, node: str, timestamp: int, rows: list[dict]) -
         actual[row["test"]] = row["result"]
     if any(actual.get(name) != value for name, value in expected.items()):
         return status
+    if result.schema_version == COMPACT_RESULT_SCHEMA:
+        if recording_complete(result):
+            status.update(recording_state="fully_recorded", latest_record_timestamp=timestamp)
+        return status
     try:
         receipt = reader.read(result_path.parent / ".ingestion-result-digest")
     except FileNotFoundError:
@@ -375,7 +379,7 @@ def read_local_coverage(request: dict) -> dict:
 
     from cval.storage.verification import EvidenceReader, _failure
     from cval.storage.paths import safe_existing_evidence_path
-    from cval.validation.results import parse_validation_result_v2, validation_result_digest
+    from cval.validation.results import COMPACT_RESULT_SCHEMA, parse_validation_result_v2, validation_result_digest, recording_complete
 
     reader = EvidenceReader(request)
     report = {"schema_version": "cval.coverage.v1", "state": "queried", "policy": "successful_complete_run",
@@ -441,10 +445,12 @@ def read_local_coverage(request: dict) -> dict:
                     root = Path(request["root"])
                     run_id = f"{node}-{timestamp}"
                     canonical = root / "logs/job_logs" / node / run_id / "result.json"
-                    legacy = True
+                    legacy = not canonical.parent.exists()
                     try:
                         payload = reader.json(canonical)
-                        if payload.get("schema_version") not in {"cval.results", "cval.results.v2"}:
+                        if payload.get("schema_version") == "cval.results.v1":
+                            legacy = True
+                        if payload.get("schema_version") not in {"cval.results", "cval.results.v2", COMPACT_RESULT_SCHEMA}:
                             raise FileNotFoundError("Historical envelope lacks completion provenance")
                         legacy = False
                         result = parse_validation_result_v2(payload)
@@ -460,6 +466,8 @@ def read_local_coverage(request: dict) -> dict:
                             for test_id in required:
                                 test = result.tests[test_id]
                                 expected_root = root / "logs/validation_tests" / test_id / "runs" / node / run_id
+                                if result.schema_version == COMPACT_RESULT_SCHEMA:
+                                    expected_root = root / "logs" / test_id / node / run_id
                                 historical_root = root / "validation_tests" / test_id / "runs" / node / run_id
                                 if Path(test.summary).parent not in {expected_root, historical_root}:
                                     raise ValueError("Coverage summary belongs to another run")
@@ -467,7 +475,10 @@ def read_local_coverage(request: dict) -> dict:
                                                                      allowed_root=root, expect_directory=False, allow_relocated=True)
                                 if not reader.read(summary).strip():
                                     raise ValueError("Coverage lacks canonical test summary")
-                            if reader.read(canonical.parent / ".ingestion-result-digest") != (validation_result_digest(result) + "\n").encode():
+                            if result.schema_version == COMPACT_RESULT_SCHEMA:
+                                if not recording_complete(result):
+                                    raise ValueError("Coverage lacks complete final ingestion/log evidence")
+                            elif reader.read(canonical.parent / ".ingestion-result-digest") != (validation_result_digest(result) + "\n").encode():
                                 raise ValueError("Coverage ingestion digest mismatch")
                             item.update(coverage_timestamp=timestamp, reason="complete_canonical_run", outcome=result.overall)
                             break

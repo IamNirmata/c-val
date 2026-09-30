@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
@@ -84,15 +85,6 @@ class _SecureResultBinding:
                 follow_symlinks=False,
             )
             descriptor_result = os.fstat(self.result_file_fd)
-            named_result = os.stat(
-                "result.json",
-                dir_fd=self.run_dir_fd,
-                follow_symlinks=False,
-            )
-            canonical_result = os.stat(
-                self.canonical_path,
-                follow_symlinks=False,
-            )
         except OSError as exc:
             raise ValueError("Validation result descriptor binding is unavailable") from exc
         if not stat.S_ISDIR(root.st_mode) or not stat.S_ISDIR(canonical_root.st_mode):
@@ -103,16 +95,16 @@ class _SecureResultBinding:
         _require_private_directory(named_run_dir, "canonical validation run directory")
         if _device_inode(run_dir) != _device_inode(named_run_dir):
             raise ValueError("Validation result directory identity changed")
-        for value in (descriptor_result, named_result, canonical_result):
-            _require_private_regular_file(value, "validation result")
-            if _immutable_file_identity(value) != self.result_identity:
-                raise ValueError("Validation result identity or content changed")
+        _require_private_regular_file(descriptor_result, "validation result", links=0)
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        if fcntl.fcntl(self.result_file_fd, fcntl.F_GET_SEALS) != seals or _immutable_file_identity(descriptor_result) != self.result_identity:
+            raise ValueError("Validation result buffer is not immutable")
         safe_existing_evidence_path(
-            self.canonical_path,
-            expected_path=self.canonical_path,
+            self.canonical_path.parent,
+            expected_path=self.canonical_path.parent,
             allowed_root=self.canonical_root,
-            expect_directory=False,
-            description="validation result",
+            expect_directory=True,
+            description="validation run",
         )
 
 
@@ -183,52 +175,6 @@ def authorize_result_write(
         config=active_config,
         _nonce=_AUTHORIZATION_NONCE,
     )
-
-
-def bind_ingestion_digest(authorization: ResultWriteAuthorization) -> None:
-    """Reserve or verify the current run's immutable ingestion digest marker."""
-
-    auth = require_result_write_authorization(authorization)
-    _revalidate_authorized_result(auth)
-    if not isinstance(auth.result, ValidationResultV2):
-        return
-    binding = _secure_result_binding(
-        auth.result_path, config=auth.config, result_digest=auth.result_digest
-    )
-    directory_fd = (
-        binding.run_dir_fd
-        if binding is not None
-        else os.open(auth.result_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    )
-    digest = auth.result_digest + "\n"
-    try:
-        marker = ".ingestion-result-digest"
-        try:
-            descriptor = os.open(
-                marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-                0o600, dir_fd=directory_fd,
-            )
-        except FileExistsError:
-            descriptor = os.open(
-                marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                dir_fd=directory_fd,
-            )
-            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-                metadata = os.fstat(handle.fileno())
-                _require_private_regular_file(metadata, "ingestion digest marker")
-                if metadata.st_size != len(digest) or handle.read() != digest:
-                    raise ValueError("Run was already ingested with a different result digest")
-        else:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(digest)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.fsync(directory_fd)
-        _revalidate_authorized_result(auth)
-    finally:
-        if binding is None:
-            os.close(directory_fd)
 
 
 def _validate_result_path(
@@ -307,7 +253,7 @@ def _secure_result_binding(
     }
     if not isinstance(layout, dict) or set(layout) != expected_fields:
         raise ValueError("Secure run layout has unexpected fields")
-    if layout["schema_version"] != "cval.secure-run-layout.v1":
+    if layout["schema_version"] != "cval.secure-run-layout.v2":
         raise ValueError("Unsupported secure run layout schema")
     canonical_root = Path(config.runtime.validation_root)
     if not canonical_root.is_absolute() or str(canonical_root) != layout["canonical_root"]:
@@ -355,7 +301,7 @@ def _secure_result_binding(
             expected_fds.add(descriptor)
     if listed_fds != expected_fds:
         raise ValueError("Secure result descriptors are not inherited run descriptors")
-    expected_path = Path(f"/proc/self/fd/{layout['run_dir_fd']}/result.json")
+    expected_path = Path(f"/proc/self/fd/{layout['result_file_fd']}")
     if path != expected_path:
         raise ValueError("Validation result descriptor path is invalid")
     config_digest = effective_config_digest(config)
@@ -422,12 +368,12 @@ def _require_private_directory(value: os.stat_result, name: str) -> None:
         raise ValueError(f"Secure {name} must be an owner-only directory")
 
 
-def _require_private_regular_file(value: os.stat_result, name: str) -> None:
+def _require_private_regular_file(value: os.stat_result, name: str, *, links: int = 1) -> None:
     if (
         not stat.S_ISREG(value.st_mode)
         or stat.S_IMODE(value.st_mode) != 0o600
         or value.st_uid != os.geteuid()
-        or value.st_nlink != 1
+        or value.st_nlink != links
     ):
         raise ValueError(
             f"Secure {name} must be an owner-only single-link regular file"
@@ -574,6 +520,9 @@ def validate_current_dl_write(
         Path(auth.config.runtime.validation_root)
         / "logs/validation_tests/dltest/runs"
     )
+    compact = result.schema_version == "cval.results.v3"
+    if compact:
+        evidence_root = Path(auth.config.runtime.validation_root) / "logs/dltest"
     expected_run = evidence_root / result.node / expected_run_id
     legacy_root = Path(auth.config.runtime.validation_root) / "validation_tests/dltest/runs"
     if Path(results_root) == legacy_root / result.node / expected_run_id:
@@ -581,7 +530,7 @@ def validate_current_dl_write(
         expected_run = evidence_root / result.node / expected_run_id
     if (
         isinstance(result, ValidationResultV2)
-        and Path(test_result.artifacts) != expected_run / "artifacts"
+        and Path(test_result.artifacts) != (expected_run if compact else expected_run / "artifacts")
     ):
         raise ValueError("Current DL result artifacts are not canonical")
     safe_existing_evidence_path(
@@ -704,6 +653,7 @@ def validate_current_write(
     if run_id and run_id != expected_run_id:
         raise ValueError("Current run ID does not match result evidence")
     if operation in {"storage", "nccl"} and evidence_path is not None:
+        compact = result.schema_version == "cval.results.v3"
         evidence_root = (
             Path(auth.config.runtime.validation_root)
             / "logs/validation_tests"
@@ -714,11 +664,13 @@ def validate_current_write(
         legacy_evidence = legacy_root / result.node / expected_run_id / ("artifacts" if operation == "storage" else "summary.json")
         if Path(evidence_path) == legacy_evidence:
             evidence_root = legacy_root
+        if compact:
+            evidence_root = Path(auth.config.runtime.validation_root) / "logs" / operation
         expected_evidence = (
             evidence_root
             / result.node
             / expected_run_id
-            / ("artifacts" if operation == "storage" else "summary.json")
+            / ("" if compact and operation == "storage" else "artifacts" if operation == "storage" else "summary.json")
         )
         safe_existing_evidence_path(
             evidence_path,

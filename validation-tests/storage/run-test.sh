@@ -13,13 +13,13 @@ CVAL_VALIDATION_TESTS_DIR=${CVAL_VALIDATION_TESTS_DIR:?Missing configured tests 
 : "${CVAL_STORAGE_SETTINGS_JSON:?Missing storage TOML settings}"
 CVAL_RUN_ID=${CVAL_RUN_ID:-$GCRNODE-$GCRTIME}
 STORAGE_RUN_DIR=${STORAGE_RUN_DIR:-\
-$CVAL_VALIDATION_ROOT/logs/validation_tests/storage/runs/$GCRNODE/$CVAL_RUN_ID}
+$CVAL_VALIDATION_ROOT/logs/storage/$GCRNODE/$CVAL_RUN_ID}
 STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-\
 ${CVAL_TEST_OUTPUT_DIR:-}}
-STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$STORAGE_RUN_DIR/artifacts}
+STORAGE_OUTPUT_DIR=${STORAGE_OUTPUT_DIR:-$STORAGE_RUN_DIR}
 STORAGE_SUMMARY_FILE=${STORAGE_SUMMARY_FILE:-\
 ${CVAL_TEST_SUMMARY_FILE:-}}
-STORAGE_SUMMARY_FILE=${STORAGE_SUMMARY_FILE:-$STORAGE_RUN_DIR/summary.txt}
+STORAGE_SUMMARY_FILE=${STORAGE_SUMMARY_FILE:-$STORAGE_RUN_DIR/summary.json}
 STORAGE_DATA_DIR="$STORAGE_OUTPUT_DIR/fio-data"
 
 export GCRNODE GCRTIME STORAGE_OUTPUT_DIR STORAGE_SUMMARY_FILE
@@ -71,31 +71,9 @@ for name in ("randwrite", "randread", "iodepth_write_1file", "iodepth_read_1file
 PY
 echo "Storage tests completed. Results saved in $STORAGE_OUTPUT_DIR"
 
-if ! command -v jq >/dev/null 2>&1; then
-    echo "Warning: jq is not installed; raw fio JSON remains available in $STORAGE_OUTPUT_DIR"
-    exit 0
-fi
-
-{
-    echo "================================================================================"
-    echo " PERFORMANCE SUMMARY REPORT"
-    echo " Node: $GCRNODE"
-    echo " Date: $GCRTIME"
-    echo "================================================================================"
-    printf "%-35s | %-15s | %-15s\n" "Test Filename" "IOPS" "Bandwidth (GB/s)"
-    echo "--------------------------------------------------------------------------------"
-
-    for file in "$STORAGE_OUTPUT_DIR"/*.json; do
-        [[ -e "$file" ]] || continue
-        filename=$(basename "$file")
-        vals=$(jq -r '.jobs[0] | "\(.read.iops + .write.iops) \(.read.bw + .write.bw)"' "$file")
-        read -r iops bw_kb <<< "$vals"
-        bw_gb=$(awk "BEGIN {printf \"%.2f\", $bw_kb / 1024 / 1024}")
-        iops_fixed=$(awk "BEGIN {printf \"%.2f\", $iops}")
-        printf "%-35s | %-15s | %-15s\n" "$filename" "$iops_fixed" "$bw_gb"
-    done
-    echo "================================================================================"
-} > "$STORAGE_SUMMARY_FILE"
-
-echo "Summary report generated at: $STORAGE_SUMMARY_FILE"
-cat "$STORAGE_SUMMARY_FILE"
+(
+    cd "$STORAGE_OUTPUT_DIR"
+    STORAGE_OUTPUT_DIR=. STORAGE_SUMMARY_FILE="./${STORAGE_SUMMARY_FILE##*/}" \
+        PYTHONPATH="$CVAL_REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 "$CVAL_VALIDATION_TESTS_DIR/storage/summary.py"
+)

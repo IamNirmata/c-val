@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
 import threading
 import time
-from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Any, Callable, Mapping, TextIO
 
 
 EVENT_SCHEMA_VERSION = "cval.event.v1"
@@ -31,12 +31,8 @@ class RunPaths:
     """Canonical framework-owned files for one node validation run."""
 
     log_dir: Path
-    stdout: Path
-    stderr: Path
     job_log: Path
-    events: Path
     result: Path
-    legacy_env: Path
     marker: Path
 
 
@@ -45,14 +41,11 @@ class TestPaths:
     """Canonical framework-owned files for one test in one run."""
 
     log_dir: Path
-    stdout: Path
-    stderr: Path
-    events: Path
     run_dir: Path
-    result: Path
     summary: Path
     artifacts: Path
-    workload_log: Path
+    job_log: Path
+    write_log: Callable[[Path, str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,15 +96,12 @@ class RunLogger:
 
         payload = event_payload(self.run_id, event, test_id=test_id, status=status, message=message, **fields)
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        line = f"CVAL_EVENT {serialized}\n"
+        line = f"\nCVAL_EVENT {serialized}\n"
         with self._lock:
-            append_text(self.paths.events, serialized + "\n")
             if self.write_global_files:
-                append_text(self.paths.stdout, line)
                 append_text(self.paths.job_log, line)
             if test_paths is not None:
-                append_text(test_paths.events, serialized + "\n")
-                append_text(test_paths.stdout, line)
+                (test_paths.write_log or append_text)(test_paths.job_log, line)
             self.stdout.write(line)
             self.stdout.flush()
         return payload
@@ -127,16 +117,11 @@ class RunLogger:
 
         line = text if text.endswith("\n") else text + "\n"
         destination = self.stderr if error else self.stdout
-        global_path = self.paths.stderr if error else self.paths.stdout
-        test_path = None
-        if test_paths is not None:
-            test_path = test_paths.stderr if error else test_paths.stdout
         with self._lock:
             if self.write_global_files:
-                append_text(global_path, line)
                 append_text(self.paths.job_log, line)
-            if test_path is not None:
-                append_text(test_path, line)
+            if test_paths is not None:
+                (test_paths.write_log or append_text)(test_paths.job_log, line)
             destination.write(line)
             destination.flush()
 
@@ -260,44 +245,15 @@ class RunLogger:
         errors: list[BaseException],
     ) -> None:
         console = self.stdout if stream_name == "stdout" else self.stderr
-        global_path = self.paths.stdout if stream_name == "stdout" else self.paths.stderr
-        test_path = test_paths.stdout if stream_name == "stdout" else test_paths.stderr
         try:
-            with ExitStack() as stack:
-                test_handle = stack.enter_context(
-                    test_path.open("a", encoding="utf-8", buffering=1)
-                )
-                workload_handle = stack.enter_context(
-                    test_paths.workload_log.open(
-                        "a", encoding="utf-8", buffering=1
-                    )
-                )
-                global_handle = (
-                    stack.enter_context(
-                        global_path.open("a", encoding="utf-8", buffering=1)
-                    )
-                    if self.write_global_files
-                    else None
-                )
-                job_handle = (
-                    stack.enter_context(
-                        self.paths.job_log.open("a", encoding="utf-8", buffering=1)
-                    )
-                    if self.write_global_files
-                    else None
-                )
-                for line in iter(stream.readline, ""):
-                    with self._lock:
-                        if global_handle is not None:
-                            global_handle.write(line)
-                        test_handle.write(line)
-                        if job_handle is not None:
-                            job_handle.write(
-                                f"[{utc_now()}] [{label}:{stream_name}] {line}"
-                            )
-                        workload_handle.write(f"[{stream_name}] {line}")
-                        console.write(line)
-                        console.flush()
+            for line in iter(stream.readline, ""):
+                text = f"[{label}:{stream_name}] {line}"
+                with self._lock:
+                    (test_paths.write_log or append_text)(test_paths.job_log, text)
+                    if self.write_global_files:
+                        append_text(self.paths.job_log, text)
+                    console.write(text)
+                    console.flush()
         except BaseException as exc:  # noqa: BLE001 - propagate through caller
             errors.append(exc)
 
@@ -343,10 +299,16 @@ def terminate_process_group(
 def append_text(path: Path, text: str) -> None:
     """Append UTF-8 text and flush it for live readers."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+            raise ValueError("Log must be an owned single-link regular file")
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(text)
+            handle.flush()
+    finally:
+        os.close(descriptor)
 
 
 def utc_now() -> str:

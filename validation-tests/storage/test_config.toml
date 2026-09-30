@@ -79,10 +79,10 @@ numjobs = 8
 filename_format = "numjobs_read.$jobnum.dat"
 
 [artifacts]
-summary_filename = "summary.txt"
+summary_filename = "summary.json"
 
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "export"]
-support_files = []
+capabilities = ["config", "export", "log"]
+support_files = ["logger.py", "summary.py"]

@@ -1189,6 +1189,9 @@ printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_
         self.assertIn("summary finalization FAILED", completed.stderr)
 
     def test_storage_runner_preserves_six_json_artifacts_and_summary(self) -> None:
+        from cval.config import load_config
+        from cval.validation.runtime import build_runtime_environment
+
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             bin_dir = root / "bin"
@@ -1208,18 +1211,15 @@ printf '%s\n' '{"jobs":[{"read":{"iops":100,"bw":1048576},"write":{"iops":0,"bw"
                 encoding="utf-8",
             )
             fake_fio.chmod(0o755)
-            fake_jq = bin_dir / "jq"
-            fake_jq.write_text(
-                '#!/bin/bash\necho "100 1048576"\n', encoding="utf-8"
-            )
-            fake_jq.chmod(0o755)
             output_dir = root / "storage"
-            summary_file = output_dir / "storage-summary.txt"
+            summary_file = output_dir / "summary.json"
             fio_args_log = root / "fio-args.log"
-            env = os.environ | {
+            env = os.environ | build_runtime_environment(load_config()) | {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "PYTHONPATH": str(REPO_ROOT),
                 "FIO_ARGS_LOG": str(fio_args_log),
                 "CVAL_VALIDATION_TESTS_DIR": str(REPO_ROOT / "validation-tests"),
+                "CVAL_TEST_CONFIG": str(REPO_ROOT / "validation-tests/storage/test_config.toml"),
                 "GCRNODE": "node-a",
                 "GCRTIME": "123",
                 "STORAGE_OUTPUT_DIR": str(output_dir),
@@ -1237,17 +1237,18 @@ printf '%s\n' '{"jobs":[{"read":{"iops":100,"bw":1048576},"write":{"iops":0,"bw"
                 check=True,
             )
 
-            result_files = sorted(output_dir.glob("*.json"))
-            summary = summary_file.read_text(encoding="utf-8")
+            result_files = sorted(path for path in output_dir.glob("*.json") if path != summary_file)
+            summary = json.loads(summary_file.read_text(encoding="utf-8"))
             fio_args = fio_args_log.read_text(encoding="utf-8").splitlines()
 
         self.assertEqual(len(result_files), 6)
-        self.assertIn("randread.json", summary)
-        self.assertIn("randwrite.json", summary)
-        self.assertIn("1.00", summary)
+        self.assertEqual(summary["schema_version"], "cval.storage.summary.v1")
+        self.assertEqual(len(summary["metrics"]), 12)
+        self.assertEqual(summary["metrics"]["randread_iops"], 100)
+        self.assertEqual(summary["metrics"]["randread_bw"], 1048576)
         self.assertEqual(len(fio_args), 6)
         self.assertTrue(
-            all(f"--directory={output_dir / 'fio-data'}" in line for line in fio_args)
+            all("--directory=fio-data" in line for line in fio_args)
         )
         self.assertFalse((output_dir / "fio-data").exists())
 

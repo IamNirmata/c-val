@@ -301,7 +301,16 @@ and the four `dl_*_db_path` values. The raw DL ingestion lock is
 
 A `cval.test.v1` descriptor requires `[test]`, `[requirements]`,
 `[settings]`, `[artifacts]` and may declare `[plugin]`. Supported raw plugin
-capabilities are `config` and `export`; export is read-only.
+capabilities are `config`, `export` and `log`; export is read-only. The `log`
+hook delegates consolidated test output to that test's `logger.py`, using the
+reserved destination and shared safe writer. Test-owned `summary.py` writes
+`summary.json` alongside the test's `job.log` and artifacts under
+`<runtime.validation_root>/logs/<test>/<node>/<run-id>/`.
+
+New default `runtime.dl_results_root_path` is
+`/data/continuous_validation/logs/dltest`. This changes new output, not historical
+PVC contents. Old pinned sessions must retain their original descriptors/source;
+do not resume them against these changed snapshots without reviewed turnover.
 
 Storage FIO parameters now live in `[settings.fio]` and `[settings.workloads.*]`;
 the six independent `.fio` config files are replaced, with the same measured fields

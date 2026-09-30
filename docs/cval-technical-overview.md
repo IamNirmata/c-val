@@ -33,7 +33,7 @@ baseline, classification, scoring, repair or remediation controller is included.
 | Verification | Exact-run comparison of Kubernetes identity, canonical artifacts and raw records |
 | Reporting | CLI views, paired node/cluster status CSVs and local raw-result exports |
 | Operations | Continuous/one-cycle control plus separately gated source and data maintenance |
-| Extension | Repository-local test descriptors and optional configuration/export plugins |
+| Extension | Repository-local test descriptors and configuration/export/logging plugins |
 
 ## 2. Validation Boundary
 
@@ -171,7 +171,7 @@ individual runs retain their effective configuration.
 | [Deep-learning unit test](../validation-tests/dltest/test_config.toml) | Order 30; 40-minute timeout. Eight ranks, `80gb-example`, 100 iterations. Numerical norms/parameters, CPU/GPU forward/backward timings, collective timings and compute/communication overlap | Selected primitives, not a complete training workload or certified numerical reference; exact task coverage depends on the external benchmark plan |
 
 Storage runs six profiles: random write/read, single-file queued write/read and
-multi-file parallel write/read. It retains FIO JSON and a readable summary while
+multi-file parallel write/read. It retains FIO JSON and a JSON metric summary while
 removing the run-local scratch data. Raw bandwidth/IOPS are not automatically
 compared with a fleet performance baseline.
 
@@ -202,9 +202,9 @@ profile; it changes placement, not test coverage or guaranteed completion time.
 | Secure run reservation | Reject reused run paths, symlinks and changed evidence-directory identities |
 | Child-process cleanup | Terminate process groups on timeout/interruption and clean up lingering descendants |
 | Structured progress | Emit run-bound `cval.event.v1` events and `CVAL_EVENT` console records |
-| Canonical results | Update whole-run and per-test results with status, phase, timings, exit codes, paths and checksums |
-| Supervised ingestion | Run the Python writer coordinator after valid finalization; require its matching acknowledgement |
-| Bounded capture | Preserve stdout/stderr and global/per-test logs without treating an arbitrary final log line as proof of success |
+| Canonical results | Publish one final job result with per-test states and explicit log/file/DB completion; no per-test result files |
+| Supervised ingestion | Seal the buffered execution result, run authorized writers and verify acknowledgements before final JSON publication |
+| Bounded capture | Merge both streams and `CVAL_EVENT` notifications into one job log and one log per test |
 
 Source: [runtime owner](../cval/validation/supervisor.py),
 [runner](../cval/validation/runner.py), [execution helpers](../cval/validation/execution.py).
@@ -235,7 +235,7 @@ storage and fabric. See the [configured limits](../config/cval.toml).
 | Layer | Contents and contract |
 | --- | --- |
 | Authoritative raw stores | Seven SQLite files under `metadata/`: validation status, storage, NCCL, and four DL stores for numerical, compute, collective and overlap observations |
-| Canonical artifacts | `cval.results`, `cval.event.v1` progress, logs, summaries, run identity and configuration identity; historical result formats remain readable |
+| Canonical artifacts | Final `cval.results.v3`, `cval.event.v1` records inside job logs, summaries and raw artifacts; historical formats remain readable |
 | Control-host state | Session approval, frozen config, durable intents/receipts, cooldown and cycle history |
 | Public reporting | Two current CSVs; detailed operational files stay in the private state root |
 
@@ -343,10 +343,10 @@ or automatic rollback to an older running source.
 | --- | --- |
 | Add a test | Register a repository-local descriptor with a unique ID/order, setup, entrypoint, requirements, settings and summary name |
 | Validate the registration | Reject reserved IDs such as `all`/`overall`, duplicate paths, invalid quantities and incompatible resources |
-| Optional plugins | `cval.plugin.v1` supports configuration validation and raw-result export; it is not a generic DB-writer interface |
+| Optional plugins | `cval.plugin.v1` supports configuration validation, raw-result export and test-owned logging hooks; it is not a generic DB-writer interface |
 | Result-only tests | Use the common runner and canonical result envelope without inventing a new raw database |
 | Per-test persistence | Add intentional test-owned integration when new metrics require a store; the framework does not generate it automatically |
-| Historical results | New runs emit `cval.results`; older `cval.results.v1` and `.v2` remain readable within their documented limits |
+| Historical results | New runs emit final `cval.results.v3`; older unversioned, v1 and v2 evidence remains readable and is not rewritten |
 | Compatibility launchers | Environment, runner and DB shell entry points remain available; production supervision directly starts Python runner and ingestion children |
 | Importable APIs | Discovery, queue construction, rendering, monitoring and verification remain separate Python owners behind the CLI |
 

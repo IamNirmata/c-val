@@ -281,6 +281,7 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
     required_methods: dict[str, tuple[str, ...]] = {
         "config": ("validate_config",),
         "export": ("export_rows",),
+        "log": ("write_log",),
     }
     for capability in sorted(declared):
         missing = [

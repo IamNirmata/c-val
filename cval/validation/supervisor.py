@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -16,13 +17,16 @@ from typing import BinaryIO, Callable, Mapping, Sequence
 
 from cval.config import CvalConfig, load_config_snapshot
 from cval.validation.builtins import BUILTIN_TEST_IDS
-from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload, process_group_exists, terminate_process_group
+from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload, process_group_exists, terminate_process_group, utc_now
 from cval.validation.results import (
     RUN_ID_PATTERN as SAFE_SEGMENT,
     ValidationResultV2,
     load_validation_result,
+    parse_validation_result_v2,
+    result_payload,
     validation_result_digest,
 )
+from cval.validation.secure_fs import write_file_at, rename_noreplace_at, read_regular_file_at
 from cval.validation.runtime import build_runtime_environment, effective_config_digest, test_evidence_environment
 
 
@@ -35,17 +39,9 @@ _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(
 _PARENT_MODE = 0o750
 _RUN_MODE = 0o700
 _FILE_MODE = 0o600
-_LAYOUT_VERSION = "cval.secure-run-layout.v1"
-_GLOBAL_FILES = (
-    "stdout.log",
-    "stderr.log",
-    "job.log",
-    "events.jsonl",
-    "result.json",
-    "result.env",
-    ".run-active",
-)
-_TEST_LOG_FILES = ("stdout.log", "stderr.log", "events.jsonl", "workload.log")
+_LAYOUT_VERSION = "cval.secure-run-layout.v2"
+_GLOBAL_FILES = ("job.log", ".run-active")
+_RESULT_SEALS = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
 
 
 @dataclass(frozen=True)
@@ -125,8 +121,7 @@ class SecureRunLayout:
             "CVAL_RUN_MARKER_PREACQUIRED": "true",
             "CVAL_JOB_LOG_DIR": anchored_run,
             "CVAL_RESULT_DIR": anchored_run,
-            "CVAL_RESULT_JSON_FILE": f"{anchored_run}/result.json",
-            "CVAL_RESULT_ENV_FILE": f"{anchored_run}/result.env",
+            "CVAL_RESULT_JSON_FILE": _fd_path(self.result_file_fd),
             "CVAL_CANONICAL_JOB_LOG_DIR": str(self.canonical_root / "logs/job_logs" / self.node / self.run_id),
             "CVAL_CANONICAL_RESULT_JSON_FILE": str(self.canonical_root / "logs/job_logs" / self.node / self.run_id / "result.json"),
         }
@@ -161,7 +156,7 @@ class SecureRunLayout:
                     )
             finally:
                 os.close(check)
-        if self.result_file_fd is not None:
+        if self.result_digest is not None:
             self._verify_bound_result()
 
     def bind_result(
@@ -173,7 +168,7 @@ class SecureRunLayout:
     ) -> None:
         """Open and bind the runner's final result before starting ingestion."""
 
-        if self.result_file_fd is not None:
+        if self.result_digest is not None:
             raise RuntimeError("Secure validation result is already bound")
         if not config_snapshot_b64:
             raise ValueError("Secure ingestion requires an immutable config snapshot")
@@ -182,61 +177,36 @@ class SecureRunLayout:
         if config_digest != actual_config_digest:
             raise ValueError("Secure ingestion config digest does not match snapshot")
         self.verify()
-        descriptor = os.open(
-            "result.json",
-            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=self.run_dir_fd,
-        )
-        try:
-            result_stat = os.fstat(descriptor)
-            _require_private_regular_file(result_stat, "validation result")
-            result = load_validation_result(Path(f"/proc/self/fd/{descriptor}"))
-            if not isinstance(result, ValidationResultV2):
-                raise ValueError("Secure supervisor requires a current result schema")
-            if result.node != self.node or result.run_id != self.run_id:
-                raise ValueError("Secure validation result identity is not canonical")
-            if result.global_config_digest != actual_config_digest:
-                raise ValueError("Secure validation result config digest changed")
-            self.result_file_fd = descriptor
-            self.result_device = result_stat.st_dev
-            self.result_inode = result_stat.st_ino
-            self.result_size = result_stat.st_size
-            self.result_mtime_ns = result_stat.st_mtime_ns
-            self.result_ctime_ns = result_stat.st_ctime_ns
-            self.result_digest = validation_result_digest(result)
-            self.config_digest = actual_config_digest
-            self.owned_fds.append(descriptor)
-            self._verify_bound_result()
-        except BaseException:
-            if self.result_file_fd == descriptor:
-                self.result_file_fd = None
-                self.result_device = None
-                self.result_inode = None
-                self.result_size = None
-                self.result_mtime_ns = None
-                self.result_ctime_ns = None
-                self.result_digest = None
-                self.config_digest = None
-                self.owned_fds.remove(descriptor)
-            os.close(descriptor)
-            raise
+        descriptor = self.result_file_fd
+        result_stat = os.fstat(descriptor)
+        _require_private_regular_file(result_stat, "validation result", links=0)
+        if result_stat.st_size > config.monitoring.verification_max_bytes:
+            raise ValueError("Validation result exceeds the evidence byte limit")
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, _RESULT_SEALS)
+        result = load_validation_result(Path(_fd_path(descriptor)))
+        if not isinstance(result, ValidationResultV2) or result.schema_version != "cval.results.v3":
+            raise ValueError("Secure supervisor requires the compact result schema")
+        if result.node != self.node or result.run_id != self.run_id:
+            raise ValueError("Secure validation result identity is not canonical")
+        if result.global_config_digest != actual_config_digest:
+            raise ValueError("Secure validation result config digest changed")
+        result_stat = os.fstat(descriptor)
+        self.result_device = result_stat.st_dev
+        self.result_inode = result_stat.st_ino
+        self.result_size = result_stat.st_size
+        self.result_mtime_ns = result_stat.st_mtime_ns
+        self.result_ctime_ns = result_stat.st_ctime_ns
+        self.result_digest = validation_result_digest(result)
+        self.config_digest = actual_config_digest
+        self._verify_bound_result()
 
     def _verify_bound_result(self) -> None:
         if self.result_file_fd is None:
             raise RuntimeError("Secure validation result is not bound")
         retained = os.fstat(self.result_file_fd)
-        named = os.stat("result.json", dir_fd=self.run_dir_fd, follow_symlinks=False)
-        canonical = os.stat(
-            self.canonical_root
-            / "logs"
-            / "job_logs"
-            / self.node
-            / self.run_id
-            / "result.json",
-            follow_symlinks=False,
-        )
-        for value in (retained, named, canonical):
-            _require_private_regular_file(value, "validation result")
+        _require_private_regular_file(retained, "validation result", links=0)
+        if fcntl.fcntl(self.result_file_fd, fcntl.F_GET_SEALS) != _RESULT_SEALS:
+            raise RuntimeError("Validation result buffer is not immutable")
         expected = (
             self.result_device,
             self.result_inode,
@@ -244,16 +214,9 @@ class SecureRunLayout:
             self.result_mtime_ns,
             self.result_ctime_ns,
         )
-        for value in (retained, named, canonical):
-            actual = (
-                value.st_dev,
-                value.st_ino,
-                value.st_size,
-                value.st_mtime_ns,
-                value.st_ctime_ns,
-            )
-            if actual != expected:
-                raise RuntimeError("Secure validation result identity or content changed")
+        actual = (retained.st_dev, retained.st_ino, retained.st_size, retained.st_mtime_ns, retained.st_ctime_ns)
+        if actual != expected:
+            raise RuntimeError("Secure validation result identity or content changed")
 
     def release_marker(self) -> None:
         self.verify()
@@ -313,6 +276,9 @@ def reserve_secure_run_layout(
         )
         os.fsync(global_files[".run-active"])
         os.fsync(run_fd)
+        result_fd = os.memfd_create("cval-result", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        os.fchmod(result_fd, _FILE_MODE)
+        owned.append(result_fd)
 
         test_fds: dict[str, tuple[int, int, int]] = {}
         for test_id in enabled:
@@ -325,34 +291,8 @@ def reserve_secure_run_layout(
                 observer=directory_observer,
             )
             identities.append(_identity(log_relative, test_log_fd))
-            for name in _TEST_LOG_FILES:
-                owned.append(_create_file(test_log_fd, name))
-
-            run_relative = (
-                "logs",
-                "validation_tests",
-                test_id,
-                "runs",
-                node,
-                run_id,
-            )
-            test_run_fd = _mkdirs_open(
-                root_fd,
-                run_relative,
-                final_exclusive=True,
-                owned=owned,
-                observer=directory_observer,
-            )
-            identities.append(_identity(run_relative, test_run_fd))
-            artifacts_fd = _mkdirs_open(
-                test_run_fd,
-                ("artifacts",),
-                final_exclusive=True,
-                owned=owned,
-                observer=None,
-            )
-            identities.append(_identity(run_relative + ("artifacts",), artifacts_fd))
-            test_fds[test_id] = (test_log_fd, test_run_fd, artifacts_fd)
+            owned.append(_create_file(test_log_fd, "job.log"))
+            test_fds[test_id] = (test_log_fd, test_log_fd, test_log_fd)
 
         layout = SecureRunLayout(
             canonical_root=root,
@@ -364,6 +304,7 @@ def reserve_secure_run_layout(
             identities=tuple(identities),
             global_file_fds=global_files,
             owned_fds=owned,
+            result_file_fd=result_fd,
         )
         layout.verify()
         return layout
@@ -382,14 +323,14 @@ def _emit_supervisor_event(layout: SecureRunLayout, console: BinaryIO, event: st
     layout.verify()
     payload = event_payload(layout.run_id, event, node_name=layout.node, **fields)
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    line = f"CVAL_EVENT {serialized}\n".encode()
-    for name in ("events.jsonl", "stdout.log", "job.log"):
+    line = f"\nCVAL_EVENT {serialized}\n".encode()
+    for name in ("job.log",):
         descriptor = layout.global_file_fds[name]
         _require_private_regular_file(os.fstat(descriptor), name)
         named = os.stat(name, dir_fd=layout.run_dir_fd, follow_symlinks=False)
         _require_stat_identity(named, os.fstat(descriptor), name)
         os.lseek(descriptor, 0, os.SEEK_END)
-        _write_all(descriptor, (serialized + "\n").encode() if name == "events.jsonl" else line)
+        _write_all(descriptor, line)
         os.fsync(descriptor)
     console.write(line)
     console.flush()
@@ -398,10 +339,10 @@ def _emit_supervisor_event(layout: SecureRunLayout, console: BinaryIO, event: st
 def _ingestion_acknowledgement(layout: SecureRunLayout, config: CvalConfig, result: ValidationResultV2) -> dict | None:
     """Read the ingestion owner's last acknowledgement, never infer it from exit zero."""
 
-    descriptor = os.open("events.jsonl", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=layout.run_dir_fd)
+    descriptor = os.open("job.log", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=layout.run_dir_fd)
     with os.fdopen(descriptor, "rb") as handle:
-        _require_private_regular_file(os.fstat(handle.fileno()), "events.jsonl")
-        _require_stat_identity(os.fstat(handle.fileno()), os.fstat(layout.global_file_fds["events.jsonl"]), "events.jsonl")
+        _require_private_regular_file(os.fstat(handle.fileno()), "job.log")
+        _require_stat_identity(os.fstat(handle.fileno()), os.fstat(layout.global_file_fds["job.log"]), "job.log")
         max_bytes = config.monitoring.verification_max_bytes
         if os.fstat(handle.fileno()).st_size > max_bytes:
             raise ValueError("Ingestion acknowledgement exceeds configured evidence read limit")
@@ -410,7 +351,9 @@ def _ingestion_acknowledgement(layout: SecureRunLayout, config: CvalConfig, resu
         raise ValueError("Ingestion acknowledgement exceeds configured evidence read limit")
     acknowledgement = None
     for line in content.splitlines():
-        record = json.loads(line)
+        if not line.startswith(b"CVAL_EVENT "):
+            continue
+        record = json.loads(line.removeprefix(b"CVAL_EVENT "))
         if record.get("schema_version") != EVENT_SCHEMA_VERSION or record.get("run_id") != layout.run_id:
             raise ValueError("Ingestion event identity mismatch")
         if record.get("event") == "ingestion_started":
@@ -442,6 +385,40 @@ def _supervised_outcome(result: ValidationResultV2 | None, exit_code: int, inges
     return "incomplete"
 
 
+def _file_states(layout: SecureRunLayout, result: ValidationResultV2, config: CvalConfig) -> dict[str, str]:
+    states = {}
+    for name, test in result.tests.items():
+        states[name] = "not_required" if not test.selected else "incomplete"
+        if not test.selected:
+            continue
+        descriptor = layout.test_fds[name][0]
+        try:
+            read_regular_file_at(descriptor, "job.log", max_bytes=config.monitoring.verification_max_bytes)
+            log_descriptor = os.open("job.log", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+            try:
+                os.fsync(log_descriptor)
+            finally:
+                os.close(log_descriptor)
+            if test.status == "pass":
+                summary = config.tests.registry.require(name).definition.artifacts.summary_filename
+                if not read_regular_file_at(descriptor, summary, max_bytes=config.monitoring.verification_max_bytes):
+                    continue
+            states[name] = "complete"
+        except (OSError, ValueError):
+            pass
+    return states
+
+
+def _publish_final_result(layout: SecureRunLayout, result: ValidationResultV2, completion: dict) -> None:
+    payload = result_payload(result) | {"completion": completion}
+    parse_validation_result_v2(payload)
+    layout.verify()
+    temporary = f".result-{os.getpid()}.tmp"
+    write_file_at(layout.run_dir_fd, temporary, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode(), 0o600)
+    rename_noreplace_at(layout.run_dir_fd, temporary, layout.run_dir_fd, "result.json")
+    os.fsync(layout.run_dir_fd)
+
+
 def supervise_validation_run(
     *,
     environment: Mapping[str, str],
@@ -451,7 +428,7 @@ def supervise_validation_run(
     stdout: BinaryIO | None = None,
     stderr: BinaryIO | None = None,
 ) -> int:
-    """Reserve evidence, run both compatibility children, and cleanly release."""
+    """Capture one run, authorize ingestion and publish its final receipt last."""
 
     runtime_env = dict(environment)
     sensitive_fragments = (
@@ -541,11 +518,8 @@ def supervise_validation_run(
                                git_ref=config.job.git_ref, config_digest=effective_config_digest(config),
                                tests=[test.id for test in config.tests.registry.enabled],
                                log_dir=str(canonical_run), result_path=str(canonical_run / "result.json"))
-        _write_all(layout.global_file_fds["stdout.log"], b"test started.\n")
         _write_all(layout.global_file_fds["job.log"], b"test started.\n")
         for index, command in enumerate((runner_command, db_update_command)):
-            if command is None:
-                continue
             if index == 1:
                 stage = "result_finalization"
                 repo_root_value = runtime_env.get("CVAL_TEST_REPO_ROOT") or repo_dir
@@ -562,6 +536,8 @@ def supervise_validation_run(
                 result = load_validation_result(Path(f"/proc/self/fd/{layout.result_file_fd}"))
                 _emit_supervisor_event(layout, stdout, "result_finalized", status=result.overall, producer="supervisor",
                                        result_path=str(canonical_run / "result.json"), result_digest=layout.result_digest)
+            if command is None:
+                continue
             layout.verify()
             stage = "runner" if index == 0 else "ingestion"
             child_started = time.monotonic()
@@ -575,8 +551,6 @@ def supervise_validation_run(
                 pass_fds=layout.inherited_fds,
                 stdout=stdout,
                 stderr=stderr,
-                global_stdout_fd=layout.global_file_fds["stdout.log"],
-                global_stderr_fd=layout.global_file_fds["stderr.log"],
                 job_log_fd=layout.global_file_fds["job.log"],
                 active=active,
                 timeout_seconds=config.runtime.runner_timeout_seconds if index == 0 else config.runtime.ingestion_timeout_seconds,
@@ -601,7 +575,8 @@ def supervise_validation_run(
             if index == 1 and ingestion != "pass":
                 raise RuntimeError("Ingestion child exited zero without a matching successful acknowledgement")
         stage = "log_finalization"
-        _write_all(layout.global_file_fds["stdout.log"], b"Completed.\n")
+        if any(value == "incomplete" for value in _file_states(layout, result, config).values()):
+            raise RuntimeError("Required test log or summary is missing")
         _write_all(layout.global_file_fds["job.log"], b"Completed.\n")
         layout.release_marker()
         stage = "finished"
@@ -619,8 +594,12 @@ def supervise_validation_run(
             signal.signal(signal_name, handler)
         try:
             layout.verify()
-            for name in ("stdout.log", "stderr.log", "job.log", "events.jsonl"):
-                os.fsync(layout.global_file_fds[name])
+            os.fsync(layout.global_file_fds["job.log"])
+            if result is None:
+                try:
+                    result = load_validation_result(Path(_fd_path(layout.result_file_fd)))
+                except (OSError, ValueError):
+                    pass
             _emit_supervisor_event(layout, stdout, "supervisor_finished", producer="supervisor",
                                    status=_supervised_outcome(result, exit_code, ingestion), message=message, stage=stage,
                                    duration_ms=max(0, int((time.monotonic() - started) * 1000)), exit_code=exit_code,
@@ -632,6 +611,14 @@ def supervise_validation_run(
                                    logs_state="retained" if log_capture_complete else "unconfirmed",
                                    log_dir=str(canonical_run), ingestion_outcome=ingestion,
                                    stores=acknowledgement["stores"] if acknowledgement is not None else {})
+            if isinstance(result, ValidationResultV2):
+                _publish_final_result(layout, result, {
+                    "finished_at": utc_now(),
+                    "exit_code": exit_code, "logs": "retained" if log_capture_complete else "unconfirmed",
+                    "files": _file_states(layout, result, config), "ingestion": ingestion,
+                    "stores": acknowledgement["stores"] if acknowledgement else {},
+                    "result_digest": validation_result_digest(result),
+                })
         finally:
             layout.close()
 
@@ -790,12 +777,12 @@ def _require_stat_identity(named: os.stat_result, opened: os.stat_result, name: 
         raise RuntimeError(f"Directory entry identity changed while opening: {name}")
 
 
-def _require_private_regular_file(value: os.stat_result, name: str) -> None:
+def _require_private_regular_file(value: os.stat_result, name: str, *, links: int = 1) -> None:
     if (
         not stat.S_ISREG(value.st_mode)
         or stat.S_IMODE(value.st_mode) != _FILE_MODE
         or value.st_uid != os.geteuid()
-        or value.st_nlink != 1
+        or value.st_nlink != links
     ):
         raise PermissionError(
             f"Secure {name} must be an owner-only single-link regular file"
@@ -817,16 +804,15 @@ def _add_builtin_compatibility_paths(
     canonical_root = layout.canonical_root
     canonical_run = canonical_root / "logs/job_logs" / node / run_id
     values = {name: value for name, value in layout.environment().items()
-              if name in {"CVAL_JOB_LOG_DIR", "CVAL_RESULT_DIR", "CVAL_RESULT_JSON_FILE", "CVAL_RESULT_ENV_FILE",
+              if name in {"CVAL_JOB_LOG_DIR", "CVAL_RESULT_DIR", "CVAL_RESULT_JSON_FILE",
                           "CVAL_CANONICAL_JOB_LOG_DIR", "CVAL_CANONICAL_RESULT_JSON_FILE"}}
     canonical_values = {"CVAL_JOB_LOG_DIR": str(canonical_run), "CVAL_RESULT_DIR": str(canonical_run),
-                        "CVAL_RESULT_JSON_FILE": str(canonical_run / "result.json"),
-                        "CVAL_RESULT_ENV_FILE": str(canonical_run / "result.env")}
+                        "CVAL_RESULT_JSON_FILE": str(canonical_run / "result.json")}
     for test_id, (log_fd, run_fd, artifacts_fd) in layout.test_fds.items():
         if test_id not in BUILTIN_TEST_IDS:
             continue
         test = config.tests.registry.require(test_id)
-        canonical_run = canonical_root / "logs/validation_tests" / test_id / "runs" / node / run_id
+        canonical_run = canonical_root / "logs" / test_id / node / run_id
         values.update(test_evidence_environment(
             test, log_dir=Path(_fd_path(log_fd)), run_dir=Path(_fd_path(run_fd)),
             artifacts=Path(_fd_path(artifacts_fd)), node=node, timestamp=int(environment["GCRTIME"]),
@@ -834,7 +820,7 @@ def _add_builtin_compatibility_paths(
         ))
         canonical_values.update(test_evidence_environment(
             test, log_dir=canonical_root / "logs" / test_id / node / run_id, run_dir=canonical_run,
-            artifacts=canonical_run / "artifacts", node=node, timestamp=int(environment["GCRTIME"]),
+            artifacts=canonical_run, node=node, timestamp=int(environment["GCRTIME"]),
             validation_root=canonical_root, run_id=run_id,
         ))
     for name, value in values.items():
@@ -851,8 +837,6 @@ def _run_child(
     pass_fds: tuple[int, ...],
     stdout: BinaryIO,
     stderr: BinaryIO,
-    global_stdout_fd: int,
-    global_stderr_fd: int,
     job_log_fd: int,
     active: list[subprocess.Popen[bytes] | None],
     timeout_seconds: float,
@@ -865,43 +849,28 @@ def _run_child(
         cwd=cwd,
         env=dict(environment),
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         pass_fds=pass_fds,
         start_new_session=True,
     )
     active[0] = process
-    assert process.stdout is not None and process.stderr is not None
-    lock = threading.Lock()
+    assert process.stdout is not None
     errors: list[BaseException] = []
 
-    def pump(source: BinaryIO, console: BinaryIO, destination_fd: int) -> None:
+    def pump() -> None:
         try:
             while True:
-                chunk = os.read(source.fileno(), 65536)
+                chunk = os.read(process.stdout.fileno(), 65536)
                 if not chunk:
                     return
-                with lock:
-                    _write_all(destination_fd, chunk)
-                    _write_all(job_log_fd, chunk)
-                    console.write(chunk)
-                    console.flush()
+                _write_all(job_log_fd, chunk)
+                stdout.write(chunk)
+                stdout.flush()
         except BaseException as exc:  # noqa: BLE001 - propagated after join
             errors.append(exc)
 
-    threads = (
-        threading.Thread(
-            target=pump,
-            args=(process.stdout, stdout, global_stdout_fd),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=pump,
-            args=(process.stderr, stderr, global_stderr_fd),
-            daemon=True,
-        ),
-    )
-    for thread in threads:
-        thread.start()
+    thread = threading.Thread(target=pump, daemon=True)
+    thread.start()
     try:
         return_code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
         if process_group_exists(process.pid):
@@ -911,12 +880,9 @@ def _run_child(
         raise
     finally:
         active[0] = None
-        drain_deadline = time.monotonic() + 5.0
-        for thread in threads:
-            thread.join(timeout=max(0.0, drain_deadline - time.monotonic()))
+        thread.join(timeout=5.0)
         process.stdout.close()
-        process.stderr.close()
-        if any(thread.is_alive() for thread in threads):
+        if thread.is_alive():
             raise RuntimeError("supervised child log streams did not close")
         if errors:
             raise RuntimeError(f"supervised child log capture failed: {errors[0]}")
@@ -927,6 +893,8 @@ def _write_all(descriptor: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
         written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("Short write to job log")
         view = view[written:]
 
 

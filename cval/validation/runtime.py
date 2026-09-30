@@ -111,16 +111,16 @@ def test_evidence_environment(test: RegisteredValidationTest, *, log_dir: Path, 
         aliases["run_dir"]: str(run_dir),
         aliases["artifacts"]: str(artifacts),
         aliases["summary"]: str(run_dir / test.definition.artifacts.summary_filename),
-        aliases["log"]: str(log_dir / ("stdout.log" if test.id == "storage" else "workload.log")),
+        aliases["log"]: str(log_dir / "job.log"),
     }
     if "ibbw_log" in aliases:
         values[aliases["ibbw_log"]] = str(artifacts / f"ibbw-{node}-{timestamp}.log")
-    canonical_run = validation_root / "logs/validation_tests" / test.id / "runs" / node / run_id
+    canonical_run = validation_root / "logs" / test.id / node / run_id
     values[f"CVAL_CANONICAL_{aliases['run_dir']}"] = str(canonical_run)
-    values[f"CVAL_CANONICAL_{aliases['artifacts']}"] = str(canonical_run / "artifacts")
+    values[f"CVAL_CANONICAL_{aliases['artifacts']}"] = str(canonical_run)
     if test.id == "nccl":
         values[f"CVAL_CANONICAL_{aliases['summary']}"] = str(canonical_run / test.definition.artifacts.summary_filename)
-        values[f"CVAL_CANONICAL_{aliases['ibbw_log']}"] = str(canonical_run / "artifacts" / f"ibbw-{node}-{timestamp}.log")
+        values[f"CVAL_CANONICAL_{aliases['ibbw_log']}"] = str(canonical_run / f"ibbw-{node}-{timestamp}.log")
     return values
 
 

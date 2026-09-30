@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import runpy
+
+write_log = runpy.run_path(str(Path(__file__).with_name("logger.py")))["write_log"]
+
 from collections.abc import Mapping
 from pathlib import Path
 from cval.validation.plugins import (
@@ -16,7 +21,8 @@ CVAL_PLUGIN_API = "cval.plugin.v1"
 
 class StoragePlugin:
     plugin_id = "storage"
-    capabilities = frozenset({"config", "export"})
+    capabilities = frozenset({"config", "export", "log"})
+    write_log = staticmethod(write_log)
 
     def validate_config(self, definition) -> tuple[ConfigIssue, ...]:
         settings = definition.settings
