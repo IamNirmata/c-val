@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import errno
 import json
 import os
 import signal
@@ -219,6 +220,52 @@ class CompactWorkflowTests(unittest.TestCase):
             self.assertEqual(result.completion["exit_code"], 1)
             self.assertTrue((job / ".run-active").exists())
             self.assertFalse((Path(config.runtime.validation_root) / "metadata").exists())
+
+    def test_final_receipt_survives_unsupported_noreplace_rename(self) -> None:
+        for error_number in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+            with self.subTest(error_number=error_number), patch(
+                "cval.validation.supervisor.rename_noreplace_at",
+                side_effect=OSError(error_number, "No-replace rename unsupported", "result.json"),
+            ):
+                self.test_storage_pipeline_publishes_only_final_result_and_single_logs()
+
+    def test_final_receipt_fallback_never_replaces_existing_evidence(self) -> None:
+        for existing_kind in ("file", "symlink"):
+            with self.subTest(existing_kind=existing_kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = self._suite(root, "storage")
+                directory = Path(config.runtime.validation_tests_dir) / "storage"
+                (directory / "setup.sh").write_text("#!/bin/bash\nexit 0\n")
+                (directory / "run-test.sh").write_text("#!/bin/bash\nprintf '{}\\n' > \"$CVAL_TEST_SUMMARY_FILE\"\n")
+                destination = Path(config.runtime.validation_root) / "logs/job_logs/node-a/node-a-123/result.json"
+                outside = root / "retained.json"
+                outside.write_bytes(b"retained evidence\n")
+
+                def unsupported_rename(*_args):
+                    if existing_kind == "file":
+                        destination.write_bytes(b"retained evidence\n")
+                    else:
+                        destination.symlink_to(outside)
+                    raise OSError(errno.EINVAL, "Invalid argument", "result.json")
+
+                with patch("cval.validation.supervisor.rename_noreplace_at", side_effect=unsupported_rename):
+                    with self.assertRaises(FileExistsError):
+                        self._execute(root, config, ingestion=(sys.executable, "-c", "raise SystemExit(9)"))
+                self.assertEqual(destination.read_bytes(), b"retained evidence\n")
+                self.assertEqual(outside.read_bytes(), b"retained evidence\n")
+                self.assertEqual(destination.is_symlink(), existing_kind == "symlink")
+                self.assertTrue((destination.parent / ".run-active").exists())
+
+    def test_final_receipt_does_not_fallback_on_other_rename_errors(self) -> None:
+        for error_number in (errno.EACCES, errno.EIO):
+            with self.subTest(error_number=error_number), patch(
+                "cval.validation.supervisor.rename_noreplace_at",
+                side_effect=OSError(error_number, "Publication failed", "result.json"),
+            ), patch("cval.validation.supervisor.os.link") as link:
+                with self.assertRaises(OSError) as raised:
+                    self.test_storage_pipeline_publishes_only_final_result_and_single_logs()
+                self.assertEqual(raised.exception.errno, error_number)
+                link.assert_not_called()
 
     def test_storage_pipeline_publishes_only_final_result_and_single_logs(self) -> None:
         from cval.storage.status import read_local_coverage

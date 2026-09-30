@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -415,7 +416,15 @@ def _publish_final_result(layout: SecureRunLayout, result: ValidationResultV2, c
     layout.verify()
     temporary = f".result-{os.getpid()}.tmp"
     write_file_at(layout.run_dir_fd, temporary, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode(), 0o600)
-    rename_noreplace_at(layout.run_dir_fd, temporary, layout.run_dir_fd, "result.json")
+    try:
+        rename_noreplace_at(layout.run_dir_fd, temporary, layout.run_dir_fd, "result.json")
+    except OSError as error:
+        if error.errno not in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+            raise
+        layout.verify()
+        os.link(temporary, "result.json", src_dir_fd=layout.run_dir_fd,
+                dst_dir_fd=layout.run_dir_fd, follow_symlinks=False)
+        os.unlink(temporary, dir_fd=layout.run_dir_fd)
     os.fsync(layout.run_dir_fd)
 
 

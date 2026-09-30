@@ -107,7 +107,13 @@ The supervisor adds a `completion` object:
 | `stores` | Existing per-store `pending`, `committed`, `not_required` or `unconfirmed` acknowledgements |
 | `result_digest` | Digest of the sealed execution result, independent of this later completion object |
 
-The public file is atomically published last, without replacement. During a run,
+The public file is atomically published last, without replacement. If the
+filesystem does not support `renameat2(RENAME_NOREPLACE)`, the supervisor creates
+a no-overwrite hard link to the fully written, fsynced temporary file through
+the retained private directory descriptor, removes the temporary name and fsyncs
+the directory. Existing files or symlinks are never replaced; other I/O failures
+remain fatal. An unpublished temporary receipt is not canonical evidence.
+During a run,
 progress comes from `CVAL_EVENT` lines. A recoverable failure can still produce
 a final JSON with non-success completion. An early crash, SIGKILL or invalid path
 may prevent final publication; missing JSON is unconfirmed, never a pass.
