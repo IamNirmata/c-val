@@ -469,9 +469,17 @@ shm_disable = true
 debug = "INFO"
 [artifacts]
 summary_filename = "summary.json"
+[plugin]
+adapter = "plugin.py"
+api_version = "cval.plugin.v1"
+capabilities = ["config", "export", "log", "ingest", "runtime"]
+support_files = ["logger.py", "summary.py", "ingest.py"]
 ''',
                 encoding="utf-8",
             )
+            for filename in ("plugin.py", "logger.py", "summary.py", "ingest.py"):
+                source = Path(__file__).resolve().parents[1] / "validation-tests/nccl" / filename
+                (test_dir / filename).write_bytes(source.read_bytes())
             config = self._runtime_config(root, repo, ("nccl",))
             config = replace(
                 config,

@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 
-from cval.storage.ingest import parse_storage_metrics
+from cval.validation.plugins import load_test_support
+
+parse_storage_metrics = load_test_support(Path(__file__).with_name("ingest.py")).parse_storage_metrics
 
 
 def main() -> None:

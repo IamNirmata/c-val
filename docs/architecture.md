@@ -304,8 +304,10 @@ sequenceDiagram
    S->>P: Publish final result.json with file, log and DB completion
 ```
 
-The write order is **storage, NCCL, locked DL, then the atomic built-in status
-set**. A failed or disabled test does not get fabricated performance metrics.
+Registered ingestion hooks follow descriptor order, currently **storage, NCCL,
+locked DL, then the atomic built-in status set**. Each hook declares its existing
+raw destinations and returns per-store receipts; missing, duplicate or invalid
+receipts cannot authorize the final status write. A failed or disabled test does not get fabricated performance metrics.
 Its outcome can still be recorded. SQLite contention has bounded writer retries;
 those retries do not rerun a test or recreate a Job.
 
@@ -319,7 +321,9 @@ An ingestion process exit code of zero, by itself, is not enough.
 
 Sources: [ingestion coordinator](../cval/storage/run_ingest.py),
 [write authorization](../cval/storage/write_provenance.py),
-[built-in writers](../cval/storage/ingest.py), [DL writer](../cval/storage/dltest_ingest.py).
+[storage writer](../validation-tests/storage/ingest.py),
+[NCCL writer](../validation-tests/nccl/ingest.py),
+[DL writer](../validation-tests/dltest/ingest.py).
 
 ### 7. Track Execution Without Confusing It With Acceptance
 
@@ -434,8 +438,12 @@ additional in-pod file or download is needed to obtain the bootstrap itself.
 
 The [source renderer](../scripts/cval-source.py) produces only the immutable
 code ConfigMap used by validation Jobs. Test directories own setup, benchmark,
-summary and logger hooks; plugins also provide configuration and read-only raw
-exports. Backup, layout and SQLite journal tools belong to
+log formatting, summary validation, raw parsers and SQL mapping. Their plugins
+provide configuration validation, runtime/evidence projections, ingestion hooks
+and read-only raw exports. The framework retains secure reservation, the safe
+append primitive, process cleanup, write authorization, retries, locking and
+final completion publication. Existing core writer imports forward to test-owned
+implementations so historical callers remain supported. Backup, layout and SQLite journal tools belong to
 evidence recovery, not post-test analysis. See the
 [cleanup review](cleanup-review.md) for approval-only retirement candidates.
 
@@ -485,8 +493,8 @@ Kubernetes objects from another object with a reused name. The
 The [execution walkthrough](#5-execute-and-preserve-the-run) and
 [ingestion sequence](#6-write-the-evidence) describe the runtime in detail.
 `[tests.<id>]` selects a repository-local `cval.test.v1` descriptor. New tests can
-use the same runner and canonical result format, with optional config/export/log
-plugins. That extension point does not create a generic per-test database;
+use the same runner and canonical result format, with optional config, runtime,
+export, log and ingest plugins. That extension point does not create a generic per-test database;
 persistence remains test-owned. See the
 [feature reference](cval-technical-overview.md#5-test-coverage-and-runtime-configuration).
 

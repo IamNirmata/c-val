@@ -832,6 +832,7 @@ def _secure_test_paths(
         artifacts=artifacts,
         job_log=log_dir / "job.log",
         write_log=writer,
+        format_output=getattr(plugin, "format_output", None) if writer else None,
     )
 
 

@@ -218,13 +218,17 @@ Raw databases live under the configured validation root, by default
 
 Canonical artifacts include final `cval.results.v3`, `CVAL_EVENT` notifications
 inside consolidated job/test logs, summaries and raw measurements. Each test owns
-its `logger.py` and `summary.py`; new summaries and artifacts share its log
+its setup, workload, `logger.py`, `summary.py` and `ingest.py`; its registered
+plugin projects runtime settings and reserved evidence aliases. New summaries and artifacts share its log
 directory. Historical unversioned/v1/v2 results and files remain readable and
 are not rewritten. The supervisor publishes the final result only after
 ingestion acknowledgements and log/file checks.
 Ingestion checks run identity, result digests, configuration and authorized
 destinations. Tests own their persistence; there is no generic per-test database
 or global transaction across all seven stores.
+The coordinator invokes registered writers, validates their store receipts and
+writes the existing built-in outcome rows last. Safe log writes, process cleanup,
+authorization, SQLite retries and the persistent DL lock remain shared services.
 
 Preserve historical databases and artifacts. They are not automatically migrated
 or pruned. SQLite audits use `mode=ro` and `query_only=ON`; unavailable,

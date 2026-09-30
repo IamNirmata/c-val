@@ -33,7 +33,7 @@ baseline, classification, scoring, repair or remediation controller is included.
 | Verification | Exact-run comparison of Kubernetes identity, canonical artifacts and raw records |
 | Reporting | CLI views, paired node/cluster status CSVs and local raw-result exports |
 | Operations | Continuous/one-cycle control plus separately gated source and data maintenance |
-| Extension | Repository-local test descriptors and configuration/export/logging plugins |
+| Extension | Repository-local descriptors and configuration/runtime/export/logging/ingestion plugins |
 
 ## 2. Validation Boundary
 
@@ -343,9 +343,9 @@ or automatic rollback to an older running source.
 | --- | --- |
 | Add a test | Register a repository-local descriptor with a unique ID/order, setup, entrypoint, requirements, settings and summary name |
 | Validate the registration | Reject reserved IDs such as `all`/`overall`, duplicate paths, invalid quantities and incompatible resources |
-| Optional plugins | `cval.plugin.v1` supports configuration validation, raw-result export and test-owned logging hooks; it is not a generic DB-writer interface |
+| Optional plugins | `cval.plugin.v1` supports config validation, runtime/evidence projection, read-only export, log formatting and authorized test-owned ingestion |
 | Result-only tests | Use the common runner and canonical result envelope without inventing a new raw database |
-| Per-test persistence | Add intentional test-owned integration when new metrics require a store; the framework does not generate it automatically |
+| Per-test persistence | Storage/NCCL/DL own parsers and SQL in their `ingest.py`; core validates store receipts and writes built-in status last. New stores still require explicit schema work, not automatic generation |
 | Historical results | New runs emit final `cval.results.v3`; older unversioned, v1 and v2 evidence remains readable and is not rewritten |
 | Compatibility launchers | Environment, runner and DB shell entry points remain available; production supervision directly starts Python runner and ingestion children |
 | Importable APIs | Discovery, queue construction, rendering, monitoring and verification remain separate Python owners behind the CLI |
@@ -363,5 +363,6 @@ before live use. Editing a descriptor does not retune an already pinned session.
 - [Ingestion implementation](../cval/storage/run_ingest.py)
 - [Targeted acceptance implementation](../cval/orchestrator/validate.py)
 
-The source baseline for this inventory is `0760c78`. These references provide
-field-level detail without changing the scope described here.
+Runtime ownership and ingestion hooks were updated on September 30, 2026.
+These describe source behavior; exact-commit cluster acceptance and live
+activation remain separate, approval-gated steps.

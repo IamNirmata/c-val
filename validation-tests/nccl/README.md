@@ -6,13 +6,16 @@ the IBBW log, and a validated `summary.json`.
 
 [summary.py](summary.py) validates and combines benchmark metrics with HCA
 samples. [logger.py](logger.py) owns the single-log hook using the shared safe
-writer. New output lives in
+writer and formats its setup/workload output. [plugin.py](plugin.py) owns runtime
+settings, evidence aliases, raw store declaration and ingestion dispatch. New output lives in
 `/data/continuous_validation/logs/nccl/<node>/<run-id>/`: `job.log`,
 `summary.json` and `ibbw-<run-id>.log`. There is no per-test result file.
 
 The summary contains aggregate bus bandwidth, algorithm bandwidth, latency,
 iteration/data-size identity, and per-port bandwidth samples. For a passing
-phase, `cval.storage.run_ingest` writes one raw `metadata/test-nccl.db` `IB_HEALTH` row.
+phase, [ingest.py](ingest.py) validates summary/HCA evidence and independently
+authorizes one raw `metadata/test-nccl.db` `IB_HEALTH` row. The coordinator checks
+the store receipt before publishing status.
 The retained table name denotes measurements, not a health-class decision.
 
 Troubleshooting:

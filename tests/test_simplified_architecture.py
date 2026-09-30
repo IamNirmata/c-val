@@ -63,27 +63,30 @@ class SimplifiedArchitectureTests(unittest.TestCase):
                 self.assertNotIn("results_db_path", text)
                 self.assertNotIn("health_classes_db_path", text)
                 self.assertNotIn("[health]", text)
-                self.assertNotIn('"ingest"', text)
                 self.assertNotIn('"health"', text)
                 self.assertNotIn("evaluation", tomllib.loads(text))
                 self.assertFalse((REPO_ROOT / f"validation-tests/{test_id}/baseline.py").exists())
                 self.assertFalse((REPO_ROOT / f"validation-tests/{test_id}/classification.py").exists())
 
-    def test_builtin_plugins_are_config_and_raw_export_only(self) -> None:
-        for test_id in ("storage", "nccl", "dltest"):
-            with self.subTest(test_id=test_id):
-                descriptor = (
-                    REPO_ROOT / f"validation-tests/{test_id}/test_config.toml"
-                ).read_text(encoding="utf-8")
-                plugin = (
-                    REPO_ROOT / f"validation-tests/{test_id}/plugin.py"
-                ).read_text(encoding="utf-8")
-                self.assertIn('capabilities = ["config", "export"]', descriptor)
-                self.assertIn(
-                    'capabilities = frozenset({"config", "export"})', plugin
-                )
-                self.assertNotIn("def build_baseline", plugin)
-                self.assertNotIn("def classify", plugin)
+    def test_builtin_plugins_own_runtime_logging_and_raw_ingestion(self) -> None:
+        from cval.validation.plugins import load_registered_plugin, load_test_support
+
+        config = load_config()
+        stores = {}
+        for test in config.tests.registry.tests:
+            with self.subTest(test_id=test.id):
+                plugin = load_registered_plugin(test)
+                self.assertEqual(plugin.capabilities, frozenset({"config", "export", "log", "runtime", "ingest"}))
+                self.assertEqual(set(test.definition.plugin.support_files), {"logger.py", "summary.py", "ingest.py"})
+                implementation = load_test_support(test.test_dir / "ingest.py")
+                self.assertEqual(Path(implementation.ingest.__code__.co_filename), test.test_dir / "ingest.py")
+                self.assertFalse(hasattr(plugin, "build_baseline"))
+                self.assertFalse(hasattr(plugin, "classify"))
+                owned = plugin.raw_stores(config)
+                self.assertFalse(set(stores) & set(owned))
+                stores.update(owned)
+        self.assertEqual(set(stores), {"storage", "nccl", "numerical_correctness", "compute_performance",
+                                       "collective_performance", "overlap_performance"})
 
     def test_postgresql_extra_and_package_data_are_absent(self) -> None:
         metadata = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")

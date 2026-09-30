@@ -402,6 +402,11 @@ class SourceLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             return importlib.util.spec_from_loader(fullname, self, origin="/__cval_readonly__/" + filename, is_package=package)
     def create_module(self, spec):
         return None
+    def get_data(self, path):
+        for filename, source, package in sources.values():
+            if path == "/__cval_readonly__/" + filename:
+                return source.encode("utf-8")
+        raise FileNotFoundError(path)
     def exec_module(self, module):
         filename, source, package = sources[module.__name__]
         module.__file__ = "/__cval_readonly__/" + filename
@@ -453,6 +458,16 @@ def collect_exact_evidence(request: dict, config, client, *, operation: str = "v
         sources[name] = (relative.as_posix(), path.read_text(encoding="utf-8"), package)
     summary = package_root.parent / "validation-tests/nccl/summary.py"
     sources["cval.validation.nccl_summary"] = ("validation-tests/nccl/summary.py", summary.read_text(encoding="utf-8"), False)
+    for registered in config.tests.registry.tests:
+        declaration = registered.definition.plugin
+        if declaration is None:
+            continue
+        for filename in declaration.support_files:
+            if not filename.endswith(".py"):
+                continue
+            path = registered.test_dir / filename
+            relative = (Path(registered.config_path).parent / filename).as_posix()
+            sources[relative] = (relative, path.read_text(encoding="utf-8"), False)
     encoded = base64.b64encode(zlib.compress(json.dumps(sources).encode())).decode()
     try:
         response = client.run(["exec", "-i", "-n", config.cluster.namespace, config.cluster.pvc_access_pod,

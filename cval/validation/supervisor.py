@@ -809,8 +809,6 @@ def _add_builtin_compatibility_paths(
     canonical_values = {"CVAL_JOB_LOG_DIR": str(canonical_run), "CVAL_RESULT_DIR": str(canonical_run),
                         "CVAL_RESULT_JSON_FILE": str(canonical_run / "result.json")}
     for test_id, (log_fd, run_fd, artifacts_fd) in layout.test_fds.items():
-        if test_id not in BUILTIN_TEST_IDS:
-            continue
         test = config.tests.registry.require(test_id)
         canonical_run = canonical_root / "logs" / test_id / node / run_id
         values.update(test_evidence_environment(

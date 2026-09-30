@@ -29,5 +29,5 @@ summary_filename = "summary.json"
 [plugin]
 adapter = "plugin.py"
 api_version = "cval.plugin.v1"
-capabilities = ["config", "export", "log"]
-support_files = ["logger.py", "summary.py"]
+capabilities = ["config", "export", "log", "ingest", "runtime"]
+support_files = ["logger.py", "summary.py", "ingest.py"]

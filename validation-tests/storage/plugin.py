@@ -5,15 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 import runpy
 
-write_log = runpy.run_path(str(Path(__file__).with_name("logger.py")))["write_log"]
+logger = runpy.run_path(str(Path(__file__).with_name("logger.py")))
+write_log = logger["write_log"]
 
 from collections.abc import Mapping
-from pathlib import Path
+import json
 from cval.validation.plugins import (
     ConfigIssue,
     ExportContext,
     ExportRows,
     export_rows_from_records,
+    load_test_support,
 )
 
 CVAL_PLUGIN_API = "cval.plugin.v1"
@@ -21,8 +23,25 @@ CVAL_PLUGIN_API = "cval.plugin.v1"
 
 class StoragePlugin:
     plugin_id = "storage"
-    capabilities = frozenset({"config", "export", "log"})
+    capabilities = frozenset({"config", "export", "log", "ingest", "runtime"})
     write_log = staticmethod(write_log)
+    format_output = staticmethod(logger["format_output"])
+
+    def runtime_environment(self, test, config) -> dict[str, str]:
+        return {"RUN_STORAGE": str(test.enabled).lower(),
+                "CVAL_STORAGE_DB_PATH": config.storage.storage_db_path,
+                "CVAL_STORAGE_INSTALL_FIO": str(test.definition.settings["install_fio"]).lower(),
+                "CVAL_STORAGE_SETTINGS_JSON": json.dumps(test.to_dict()["settings"], sort_keys=True, separators=(",", ":"))}
+
+    def evidence_environment(self, context) -> dict[str, str]:
+        return context.evidence_aliases(run="STORAGE_RUN_DIR", artifacts="STORAGE_OUTPUT_DIR",
+                                        summary="STORAGE_SUMMARY_FILE", log="STORAGE_LOG_FILE")
+
+    def raw_stores(self, config) -> dict[str, str]:
+        return {"storage": config.storage.storage_db_path}
+
+    def ingest(self, context) -> dict[str, dict]:
+        return load_test_support(Path(__file__).with_name("ingest.py")).ingest(context)
 
     def validate_config(self, definition) -> tuple[ConfigIssue, ...]:
         settings = definition.settings

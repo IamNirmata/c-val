@@ -96,6 +96,11 @@ class CompactWorkflowTests(unittest.TestCase):
             config = self._suite(root, "nccl")
             directory = Path(config.runtime.validation_tests_dir) / "nccl"
             (directory / "ibbw.sh").write_text("#!/bin/bash\nprintf 'mlx5_0: 12 GB/s\\n'\n")
+            (directory / "logger.py").write_text(
+                "from cval.validation.execution import append_text as write_log\n"
+                "def format_output(text, *, label, stream):\n"
+                "    return f'[nccl-owned:{label}:{stream}] {text}'\n"
+            )
             launcher = root / "torchrun"
             launcher.write_text(
                 f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
@@ -112,6 +117,7 @@ class CompactWorkflowTests(unittest.TestCase):
             self.assertTrue(verified["tests_passed"], verified)
             directory = Path(config.runtime.validation_root) / "logs/nccl/node-a/node-a-123"
             self.assertEqual({path.name for path in directory.iterdir()}, {"job.log", "summary.json", "ibbw-node-a-123.log"})
+            self.assertIn("[nccl-owned:nccl:run:stdout] fixture allreduce complete", (directory / "job.log").read_text())
             self.assertEqual(verified["sources"]["nccl"]["hca_ports_compared"], 1)
 
     def test_dl_pipeline_keeps_rank_json_and_four_store_receipts(self) -> None:
@@ -168,6 +174,25 @@ class CompactWorkflowTests(unittest.TestCase):
             self.assertEqual(result.completion["ingestion"], "unconfirmed")
             self.assertEqual(result.completion["exit_code"], 9)
             self.assertFalse((Path(config.runtime.validation_root) / "metadata").exists())
+
+    def test_incomplete_test_ingestion_receipts_withhold_status(self) -> None:
+        from cval.validation.results import recording_complete
+
+        for receipt in ({}, {"storage": {"rows": True}}, {"storage": {"rows": 1}, "nccl": {"rows": 1}}):
+            with self.subTest(receipt=receipt), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = self._suite(root, "storage")
+                directory = Path(config.runtime.validation_tests_dir) / "storage"
+                (directory / "setup.sh").write_text("#!/bin/bash\nexit 0\n")
+                (directory / "run-test.sh").write_text("#!/bin/bash\nprintf '{}\\n' > \"$CVAL_TEST_SUMMARY_FILE\"\n")
+                (directory / "ingest.py").write_text(f"def ingest(context):\n    return {receipt!r}\n")
+                code, output = self._execute(root, config)
+                self.assertNotEqual(code, 0, output)
+                result = load_validation_result(Path(config.runtime.validation_root) / "logs/job_logs/node-a/node-a-123/result.json")
+                self.assertEqual(result.completion["ingestion"], "fail")
+                self.assertEqual(result.completion["stores"]["storage"], "unconfirmed")
+                self.assertFalse(recording_complete(result))
+                self.assertFalse(Path(config.storage.validation_db_path).exists())
 
     def test_invalid_ingestion_acknowledgement_cannot_confirm_completion(self) -> None:
         from cval.validation.results import recording_complete

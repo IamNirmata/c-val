@@ -425,6 +425,9 @@ printf '%s\n' \
         self.assertIn("test_finished", runner)
 
     def test_ingestion_coordinator_validates_identity_and_snapshot_before_writes(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
         from cval.storage.run_ingest import authorize_run, ingest_run
         from unittest.mock import patch
 
@@ -466,7 +469,8 @@ printf '%s\n' \
                 with self.subTest(setting=name), self.assertRaises(ValueError):
                     authorize_run(environment | {name: value})
             self.assertEqual(list(root.glob("**/*.db")), [])
-            with patch("subprocess.Popen", side_effect=AssertionError("Ingestion must call writers directly")):
+            output = io.StringIO()
+            with patch("subprocess.Popen", side_effect=AssertionError("Ingestion must call writers directly")), redirect_stdout(output):
                 ingest_run(environment)
             with closing(sqlite3.connect(config.storage.validation_db_path)) as connection:
                 rows = connection.execute("SELECT test, result FROM runs ORDER BY rowid").fetchall()
@@ -474,8 +478,8 @@ printf '%s\n' \
                 ("storage", "incomplete"), ("nccl", "incomplete"),
                 ("dltest", "incomplete"), ("all", "incomplete"),
             ])
-            events = [json.loads(line) for line in (result_path.parent / "events.jsonl").read_text().splitlines()]
-            self.assertEqual([(event["event"], event["status"]) for event in events], [
+            events = [json.loads(line.removeprefix("CVAL_EVENT ")) for line in output.getvalue().splitlines() if line.startswith("CVAL_EVENT ")]
+            self.assertEqual([(event["event"], event["status"]) for event in events if event["event"] != "ingestion_store_finished"], [
                 ("ingestion_started", "incomplete"), ("ingestion_finished", "pass"),
             ])
 
@@ -513,18 +517,19 @@ printf '%s\n' \
                     "CVAL_RESULT_JSON_FILE": str(result_path), "CVAL_REPO_DIR": str(REPO_ROOT),
                     "CVAL_VALIDATION_ROOT": str(root),
                 }
+                output = io.StringIO()
                 with (
-                    patch("cval.storage.run_ingest.ingest_dltest_run", side_effect=failure) as dl_writer,
+                    patch("cval.storage.dltest_ingest.ingest_dltest_run", side_effect=failure) as dl_writer,
                     patch("cval.storage.run_ingest.add_validation_run_results") as status_writer,
-                    redirect_stdout(io.StringIO()),
+                    redirect_stdout(output),
                 ):
                     with self.assertRaises(type(failure)):
                         ingest_run(environment)
                 dl_writer.assert_called_once()
                 status_writer.assert_not_called()
                 self.assertFalse(Path(config.storage.validation_db_path).exists())
-                events = [json.loads(line) for line in (result_path.parent / "events.jsonl").read_text().splitlines()]
-                self.assertEqual([(event["event"], event["status"]) for event in events], [
+                events = [json.loads(line.removeprefix("CVAL_EVENT ")) for line in output.getvalue().splitlines() if line.startswith("CVAL_EVENT ")]
+                self.assertEqual([(event["event"], event["status"]) for event in events if event["event"] != "ingestion_store_finished"], [
                     ("ingestion_started", "incomplete"), ("ingestion_finished", "fail"),
                 ])
                 lock_path = root / "metadata/.dl-metric-ingest.lock"
@@ -549,37 +554,20 @@ printf '%s\n' \
         from unittest.mock import patch
 
         from cval.storage import dltest_ingest
-        from cval.storage.retry import RetryPolicy
         from cval.storage.run_ingest import ingest_run
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             metadata = root / "metadata"
             dl_results = root / "logs/validation_tests/dltest/runs"
-            config_path = root / "cval.toml"
-            config_path.write_text(
-                "\n".join(
-                    (
-                        "[storage]",
-                        f'validation_db_path = "{metadata / "validation.db"}"',
-                        f'storage_db_path = "{metadata / "test-storage.db"}"',
-                        f'nccl_db_path = "{metadata / "test-nccl.db"}"',
-                        f'dl_numerical_db_path = "{metadata / "dltest_numerical_correctness.db"}"',
-                        f'dl_compute_db_path = "{metadata / "dltest_compute_performance.db"}"',
-                        f'dl_collective_db_path = "{metadata / "dltest_collective_performance.db"}"',
-                        f'dl_overlap_db_path = "{metadata / "dltest_overlap_performance.db"}"',
-                        "",
-                        "[runtime]",
-                        f'repo_dir = "{REPO_ROOT}"',
-                        f'validation_root = "{root}"',
-                        f'validation_tests_dir = "{REPO_ROOT / "validation-tests"}"',
-                        f'dl_results_root_path = "{dl_results}"',
-                    )
-                )
-                + "\n",
-                encoding="utf-8",
+            base = load_config()
+            config = replace(
+                base,
+                storage=replace(base.storage, **{name: str(metadata / Path(value).name) for name, value in vars(base.storage).items()}),
+                runtime=replace(base.runtime, repo_dir=str(REPO_ROOT), validation_root=str(root),
+                                validation_tests_dir=str(REPO_ROOT / "validation-tests"), dl_results_root_path=str(dl_results)),
+                sqlite_retry=replace(base.sqlite_retry, attempts=2, delay_seconds=0.0),
             )
-            config = load_config(config_path)
             run_dir = dl_results / "node-a/node-a-123"
             ranks_dir = run_dir / "artifacts/workdir/test_plans/80gb-example/runs"
             ranks_dir.mkdir(parents=True)
@@ -625,12 +613,15 @@ printf '%s\n' \
                 ),
                 encoding="utf-8",
             )
+            rank_payload = json.loads((ranks_dir / "example_RANK0.json").read_text())
+            for rank in range(1, 8):
+                (ranks_dir / f"example_RANK{rank}.json").write_text(json.dumps(rank_payload | {"runID": f"example_RANK{rank}"}))
             (run_dir / "summary.json").write_text(
                 json.dumps(
                     {
                         "status": "pass",
-                        "gpu_count": 1,
-                        "rank_result_count": 1,
+                        "gpu_count": 8,
+                        "rank_result_count": 8,
                         "iterations": 100,
                     }
                 ),
@@ -680,7 +671,6 @@ printf '%s\n' \
                 "GCRTIME": "123",
                 "CVAL_RUN_ID": "node-a-123",
                 "CVAL_REPO_DIR": str(REPO_ROOT),
-                "CVAL_CONFIG_PATH": str(config_path),
                 "CVAL_VALIDATION_ROOT": str(root),
                 "CVAL_RESULT_JSON_FILE": str(result_path),
                 "CVAL_JOB_LOG_DIR": str(result_path.parent),
@@ -705,7 +695,6 @@ printf '%s\n' \
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch("subprocess.Popen", side_effect=AssertionError("Ingestion must not spawn writers")),
-                patch("cval.storage.run_ingest.load_retry_policy", return_value=RetryPolicy(attempts=2, delay_seconds=0)),
                 patch.object(dltest_ingest, "_finalize_dl_generation", side_effect=finalize),
                 redirect_stdout(output),
             ):
@@ -747,24 +736,24 @@ printf '%s\n' \
                     "SELECT Node, timestamp, BUS_BW, LATENCY, mlx5_0 FROM IB_HEALTH"
                 ).fetchall(), [("node-a", 123, 44.0, 600.0, 47.25)])
             self.assertEqual(len(list(metadata.glob("*.db"))), 7)
-            events = [json.loads(line) for line in (result_path.parent / "events.jsonl").read_text().splitlines()]
-            self.assertEqual([(event["event"], event["status"]) for event in events], [
+            events = [json.loads(line.removeprefix("CVAL_EVENT ")) for line in output.getvalue().splitlines() if line.startswith("CVAL_EVENT ")]
+            self.assertEqual([(event["event"], event["status"]) for event in events if event["event"] != "ingestion_store_finished"], [
                 ("ingestion_started", "incomplete"), ("ingestion_finished", "pass"),
             ])
 
         self.assertEqual(
             counts,
             {
-                "numerical_correctness": 2,
-                "compute_performance": 4,
-                "collective_performance": 2,
-                "overlap_performance": 4,
+                "numerical_correctness": 16,
+                "compute_performance": 32,
+                "collective_performance": 16,
+                "overlap_performance": 32,
             },
         )
         self.assertEqual(statuses, [(test, "pass") for test in ("all", "dltest", "nccl", "storage")])
-        self.assertIn("DL metric DB update completed.", output.getvalue())
-        self.assertLess(output.getvalue().index("Storage DB update completed."), output.getvalue().index("NCCL IB_HEALTH DB update completed."))
-        self.assertLess(output.getvalue().index("DL metric DB update completed."), output.getvalue().index("Main DB update completed."))
+        self.assertEqual([event["store"] for event in events if event["event"] == "ingestion_store_finished"],
+                 ["storage", "nccl", "numerical_correctness", "compute_performance",
+                  "collective_performance", "overlap_performance", "validation"])
 
     def test_db_update_rejects_passing_dl_run_without_rank_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -301,11 +301,23 @@ and the four `dl_*_db_path` values. The raw DL ingestion lock is
 
 A `cval.test.v1` descriptor requires `[test]`, `[requirements]`,
 `[settings]`, `[artifacts]` and may declare `[plugin]`. Supported raw plugin
-capabilities are `config`, `export` and `log`; export is read-only. The `log`
-hook delegates consolidated test output to that test's `logger.py`, using the
+capabilities are `config`, `runtime`, `export`, `log` and `ingest`; export is
+read-only. The `runtime` hook projects test settings and reserved evidence paths;
+it cannot replace another owner's runtime variables. The `log`
+hook delegates consolidated test output and optional line formatting to that test's `logger.py`, using the
 reserved destination and shared safe writer. Test-owned `summary.py` writes
 `summary.json` alongside the test's `job.log` and artifacts under
 `<runtime.validation_root>/logs/<test>/<node>/<run-id>/`.
+
+The `ingest` hook declares `raw_stores(config)` and implements `ingest(context)`.
+The context contains the immutable result authorization, read-only environment
+and the shared persistent metric lock. Each test's `ingest.py` owns artifact
+parsing, SQL mapping and store receipts; every raw writer still independently
+validates provenance. The coordinator rejects undeclared/duplicate stores and
+invalid receipts, then commits built-in status last. This is not a generic DB
+generator or schema migration: the same seven raw stores remain authoritative.
+List each imported test support module in `plugin.support_files`; the read-only
+exact-run collector packages those sources in memory without writing to the PVC.
 
 New default `runtime.dl_results_root_path` is
 `/data/continuous_validation/logs/dltest`. This changes new output, not historical
@@ -315,7 +327,7 @@ do not resume them against these changed snapshots without reviewed turnover.
 Storage FIO parameters now live in `[settings.fio]` and `[settings.workloads.*]`;
 the six independent `.fio` config files are replaced, with the same measured fields
 and workload order. NCCL explicitly configures sampling interval, sysfs root and
-device range. The runtime projects these values into existing child environment
+device range. Each test's runtime hook projects these values into existing child environment
 variables; scripts reject missing inputs instead of inventing benchmark settings.
 
 Old partial-config/default-based test helpers and operator TOMLs need migration to

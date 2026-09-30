@@ -18,6 +18,16 @@ from cval.validation.runtime import (
 
 
 class ValidationRuntimeTests(unittest.TestCase):
+    def test_runtime_hook_rejects_framework_variable_override(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        config = load_config()
+        plugin = SimpleNamespace(runtime_environment=lambda *_args: {"CVAL_GIT_REF": "changed"})
+        with patch("cval.validation.runtime.load_registered_plugin", return_value=plugin):
+            with self.assertRaisesRegex(ValueError, "overrides another owner"):
+                build_runtime_environment(config)
+
     def test_runtime_environment_contains_registry_and_builtin_values(self) -> None:
         config = load_config()
 

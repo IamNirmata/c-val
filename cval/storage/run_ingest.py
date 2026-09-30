@@ -5,18 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 import os
 from pathlib import Path
-import runpy
 import signal
 import sys
 import time
+from types import MappingProxyType
 
 from cval.config import load_config_snapshot
-from cval.storage.dltest_ingest import ingest_dltest_run
-from cval.storage.ingest import (
-    add_nccl_health_from_summary,
-    add_storage_result,
-    add_validation_run_results,
-)
+from cval.storage.ingest import add_validation_run_results
 from cval.storage.retry import retry_sqlite
 from cval.storage.write_provenance import (
     ResultWriteAuthorization,
@@ -24,6 +19,7 @@ from cval.storage.write_provenance import (
 )
 from cval.validation.builtins import project_builtin_statuses
 from cval.validation.execution import RunLogger, RunPaths
+from cval.validation.plugins import IngestContext, load_registered_plugin
 from cval.validation.results import (
     ValidationResultV2,
     load_validation_result,
@@ -60,18 +56,12 @@ def authorize_run(environment: Mapping[str, str]) -> ResultWriteAuthorization:
     expected = {
         "CVAL_VALIDATION_ROOT": config.runtime.validation_root,
         "CVAL_VALIDATION_DB_PATH": config.storage.validation_db_path,
-        "CVAL_STORAGE_DB_PATH": config.storage.storage_db_path,
-        "CVAL_NCCL_DB_PATH": config.storage.nccl_db_path,
-        "CVAL_DL_NUMERICAL_DB_PATH": config.storage.dl_numerical_db_path,
-        "CVAL_DL_COMPUTE_DB_PATH": config.storage.dl_compute_db_path,
-        "CVAL_DL_COLLECTIVE_DB_PATH": config.storage.dl_collective_db_path,
-        "CVAL_DL_OVERLAP_DB_PATH": config.storage.dl_overlap_db_path,
         "CVAL_CONFIG_DIGEST": effective_config_digest(config),
     }
-    nccl = config.tests.registry.get("nccl")
-    if nccl is not None:
-        expected["CVAL_NCCL_ITERATIONS"] = str(nccl.definition.settings["iterations"])
-        expected["CVAL_IBBW_ENABLED"] = str(nccl.definition.settings["ibbw_enabled"]).lower()
+    for registered in config.tests.registry.tests:
+        declaration = registered.definition.plugin
+        if declaration is not None and "runtime" in declaration.capabilities:
+            expected.update(load_registered_plugin(registered).runtime_environment(registered, config))
     for name, value in expected.items():
         if environment.get(name) != str(value):
             raise ValueError(f"Runtime value {name} does not match the effective configuration snapshot")
@@ -115,7 +105,6 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
     result = authorization.result
     config = authorization.config
     run_id = getattr(result, "run_id", f"{result.node}-{result.timestamp}")
-    root = Path(config.runtime.validation_root)
     log_dir = Path(environment.get("CVAL_JOB_LOG_DIR", str(authorization.result_path.parent)))
     paths = RunPaths(
         log_dir=log_dir, job_log=log_dir / "job.log",
@@ -137,6 +126,29 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
                     **dl_paths, "validation": config.storage.validation_db_path}
     stores = {name: "pending" if name == "validation" or statuses["dltest" if name in dl_paths else name] == "pass"
               else "not_required" for name in destinations}
+    context = IngestContext(authorization, MappingProxyType(dict(environment)))
+    writers = []
+    claimed = set()
+    for registered in config.tests.registry.tests:
+        declaration = registered.definition.plugin
+        if declaration is None or "ingest" not in declaration.capabilities:
+            continue
+        plugin = load_registered_plugin(registered)
+        owned = plugin.raw_stores(config)
+        if not isinstance(owned, dict) or any(
+            name not in destinations or name == "validation" or name in claimed or destinations[name] != path
+            for name, path in owned.items()
+        ):
+            raise ValueError(f"Invalid raw store ownership for {registered.id}")
+        claimed.update(owned)
+        test = result.tests.get(registered.id)
+        if test is not None and test.enabled and getattr(test, "selected", True) and test.status == "pass":
+            if any(stores[name] != "pending" for name in owned):
+                raise ValueError(f"Raw stores do not match passing test {registered.id}")
+            writers.append((registered.id, plugin, tuple(owned)))
+    required_owners = {name for _test, _plugin, owned in writers for name in owned}
+    if set(name for name, state in stores.items() if state == "pending") - required_owners - {"validation"}:
+        raise ValueError("Passing result has raw stores without a registered ingestion owner")
     started = time.monotonic()
     current_stores: tuple[str, ...] = ()
 
@@ -149,78 +161,19 @@ def ingest_run(environment: Mapping[str, str] | None = None) -> None:
         for name, outcome in stores.items():
             if outcome == "not_required":
                 store_finished(name)
-        if statuses["storage"] == "pass":
-            current_stores = ("storage",)
-            test = result.tests["storage"]
-            artifacts = (
-                test.artifacts if isinstance(result, ValidationResultV2)
-                else environment.get("CVAL_CANONICAL_STORAGE_OUTPUT_DIR")
-                or environment.get("STORAGE_OUTPUT_DIR")
-                or str(root / "logs/validation_tests/storage/runs" / result.node / run_id / "artifacts")
-            )
-            retry_sqlite(lambda: add_storage_result(
-                result.node, result.timestamp, artifacts,
-                image_name=result.image_name, immutable=True,
-                db_path=config.storage.storage_db_path, _authorization=authorization,
-            ), policy)
-            stores["storage"] = "committed"
-            store_finished("storage", rows=1)
-            print("Storage DB update completed.", flush=True)
-
-        if statuses["nccl"] == "pass":
-            current_stores = ("nccl",)
-            test = result.tests["nccl"]
-            run_dir = root / "logs/validation_tests/nccl/runs" / result.node / run_id
-            summary = (
-                test.summary if isinstance(result, ValidationResultV2)
-                else environment.get("CVAL_CANONICAL_NCCL_SUMMARY_FILE")
-                or environment.get("NCCL_SUMMARY_FILE") or str(run_dir / "summary.json")
-            )
-            if not Path(summary).is_file():
-                raise ValueError(f"Passing NCCL result is missing required summary: {summary}")
-            settings = config.tests.registry.require("nccl").definition.settings
-            ibbw = None
-            if settings["ibbw_enabled"]:
-                ibbw = (
-                    environment.get("CVAL_CANONICAL_NCCL_IBBW_LOG_FILE")
-                    or environment.get("NCCL_IBBW_LOG_FILE")
-                    or str(run_dir / "artifacts" / f"ibbw-{result.node}-{result.timestamp}.log")
-                )
-            retry_sqlite(lambda: add_nccl_health_from_summary(
-                result.node, result.timestamp, summary,
-                iterations=settings["iterations"], image_name=result.image_name,
-                cuda_version=result.cuda_version, pytorch_version=result.pytorch_version,
-                immutable=True, ibbw_log_path=ibbw, require_hca_samples=bool(settings["ibbw_enabled"]),
-                db_path=config.storage.nccl_db_path, _authorization=authorization,
-            ), policy)
-            stores["nccl"] = "committed"
-            store_finished("nccl", rows=1)
-            print("NCCL IB_HEALTH DB update completed.", flush=True)
-
-        if statuses["dltest"] == "pass":
-            current_stores = tuple(dl_paths)
-            run_dir = Path(result.tests["dltest"].summary).parent if isinstance(result, ValidationResultV2) else root / "logs/validation_tests/dltest/runs" / result.node / run_id
-            helper = Path(__file__).resolve().parents[2] / "scripts/dl-metric-lock.py"
-            lock = runpy.run_path(str(helper))["metric_lock"]
-            lock_path = root / "metadata/.dl-metric-ingest.lock"
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with lock(lock_path) as verify_lock:
-                def write_dl():
-                    verify_lock()
-                    summary = ingest_dltest_run(
-                        run_dir, node=result.node, timestamp=result.timestamp,
-                        config=config, _authorization=authorization,
-                    )
-                    verify_lock()
-                    return summary
-
-                summary = retry_sqlite(write_dl, policy)
-            for name in dl_paths:
+        for test_id, plugin, current_stores in writers:
+            receipts = plugin.ingest(context)
+            if not isinstance(receipts, dict) or set(receipts) != set(current_stores):
+                raise ValueError(f"Incomplete raw ingestion receipts for {test_id}")
+            for name, receipt in receipts.items():
+                if (not isinstance(receipt, dict) or set(receipt) - {"rows", "ranks", "generation_id"}
+                        or type(receipt.get("rows")) is not int or receipt["rows"] < 0
+                        or ("ranks" in receipt and (type(receipt["ranks"]) is not int or receipt["ranks"] <= 0))
+                        or ("generation_id" in receipt and (not isinstance(receipt["generation_id"], str) or not receipt["generation_id"]))):
+                    raise ValueError(f"Invalid raw ingestion receipt for {test_id}/{name}")
+            for name in current_stores:
                 stores[name] = "committed"
-            for name in dl_paths:
-                store_finished(name, rows=summary[f"{name}_rows"], ranks=summary["rank_files"],
-                               generation_id=summary["generation_id"])
-            print("DL metric DB update completed.", flush=True)
+                store_finished(name, **receipts[name])
 
         current_stores = ("validation",)
         retry_sqlite(lambda: add_validation_run_results(

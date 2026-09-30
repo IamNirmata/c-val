@@ -46,6 +46,7 @@ class TestPaths:
     artifacts: Path
     job_log: Path
     write_log: Callable[[Path, str], None] | None = None
+    format_output: Callable[..., str] | None = None
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,10 @@ class RunLogger:
         console = self.stdout if stream_name == "stdout" else self.stderr
         try:
             for line in iter(stream.readline, ""):
-                text = f"[{label}:{stream_name}] {line}"
+                text = (test_paths.format_output(line, label=label, stream=stream_name)
+                    if test_paths.format_output else f"[{label}:{stream_name}] {line}")
+                if not isinstance(text, str):
+                    raise TypeError("Test log formatter must return text")
                 with self._lock:
                     (test_paths.write_log or append_text)(test_paths.job_log, text)
                     if self.write_global_files:

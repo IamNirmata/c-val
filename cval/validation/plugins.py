@@ -14,6 +14,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from cval.models import LatestStatusRow
@@ -28,6 +29,7 @@ from cval.validation.registry import (
 
 if TYPE_CHECKING:
     from cval.config import CvalConfig
+    from cval.storage.write_provenance import ResultWriteAuthorization
 
 
 class PluginError(RuntimeError):
@@ -38,12 +40,71 @@ class PluginLoadError(PluginError):
     """Raised when a declared adapter cannot satisfy its frozen contract."""
 
 
+def load_test_support(path: Path) -> ModuleType:
+    """Load an explicit support path, including from the read-only evidence bundle."""
+
+    path = path.resolve()
+    module_name = "_cval_test_support_" + hashlib.sha256(str(path).encode()).hexdigest()[:20]
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    loader = globals().get("__loader__")
+    source = loader.get_data(str(path)) if hasattr(loader, "get_data") else path.read_bytes()
+    module = ModuleType(module_name)
+    module.__file__ = str(path)
+    sys.modules[module_name] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
 @dataclass(frozen=True)
 class ConfigIssue:
     """One deterministic adapter-owned descriptor validation issue."""
 
     code: str
     message: str
+
+
+@dataclass(frozen=True)
+class IngestContext:
+    """Immutable run authorization and runtime evidence supplied to a raw writer."""
+
+    authorization: ResultWriteAuthorization
+    environment: Mapping[str, str]
+
+    def metric_lock(self):
+        """Use the existing persistent raw-metric lock from the framework source."""
+
+        import runpy
+
+        helper = Path(__file__).resolve().parents[2] / "scripts/dl-metric-lock.py"
+        lock_path = Path(self.authorization.config.runtime.validation_root) / "metadata/.dl-metric-ingest.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        return runpy.run_path(str(helper))["metric_lock"](lock_path)
+
+
+@dataclass(frozen=True)
+class TestEnvironmentContext:
+    """Reserved test evidence paths; adapters only choose their environment aliases."""
+
+    test: RegisteredValidationTest
+    log_dir: Path
+    run_dir: Path
+    artifacts: Path
+    node: str
+    timestamp: int
+    validation_root: Path
+    run_id: str
+
+    def evidence_aliases(self, *, run: str, artifacts: str, summary: str, log: str) -> dict[str, str]:
+        summary_name = self.test.definition.artifacts.summary_filename
+        canonical = self.validation_root / "logs" / self.test.id / self.node / self.run_id
+        return {run: str(self.run_dir), artifacts: str(self.artifacts),
+                summary: str(self.run_dir / summary_name), log: str(self.log_dir / "job.log"),
+                f"CVAL_CANONICAL_{run}": str(canonical), f"CVAL_CANONICAL_{artifacts}": str(canonical)}
 
 
 @dataclass(frozen=True)
@@ -282,6 +343,8 @@ def load_registered_plugin(registered_test: RegisteredValidationTest) -> Any | N
         "config": ("validate_config",),
         "export": ("export_rows",),
         "log": ("write_log",),
+        "ingest": ("raw_stores", "ingest"),
+        "runtime": ("runtime_environment", "evidence_environment"),
     }
     for capability in sorted(declared):
         missing = [

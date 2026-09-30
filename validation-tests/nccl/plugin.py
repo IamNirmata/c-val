@@ -5,13 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 import runpy
 
-write_log = runpy.run_path(str(Path(__file__).with_name("logger.py")))["write_log"]
+logger = runpy.run_path(str(Path(__file__).with_name("logger.py")))
+write_log = logger["write_log"]
 
 from cval.validation.plugins import (
     ConfigIssue,
     ExportContext,
     ExportRows,
     export_rows_from_records,
+    load_test_support,
 )
 
 CVAL_PLUGIN_API = "cval.plugin.v1"
@@ -19,8 +21,40 @@ CVAL_PLUGIN_API = "cval.plugin.v1"
 
 class NcclPlugin:
     plugin_id = "nccl"
-    capabilities = frozenset({"config", "export", "log"})
+    capabilities = frozenset({"config", "export", "log", "ingest", "runtime"})
     write_log = staticmethod(write_log)
+    format_output = staticmethod(logger["format_output"])
+
+    def runtime_environment(self, test, config) -> dict[str, str]:
+        names = {
+            "gpu_count": "CVAL_NCCL_GPU_COUNT", "iterations": "CVAL_NCCL_ITERATIONS",
+            "data_size_gb": "CVAL_NCCL_DATA_SIZE_GB", "ibbw_enabled": "CVAL_IBBW_ENABLED",
+            "ibbw_start_device": "CVAL_IBBW_START_DEVICE", "ibbw_end_device": "CVAL_IBBW_END_DEVICE",
+            "net": "CVAL_NCCL_NET", "p2p_disable": "CVAL_NCCL_P2P_DISABLE",
+            "shm_disable": "CVAL_NCCL_SHM_DISABLE", "debug": "CVAL_NCCL_DEBUG",
+            "ibbw_interval_seconds": "CVAL_IBBW_INTERVAL_SECONDS", "ib_sys_root": "CVAL_IB_SYS_ROOT",
+        }
+        values = {"RUN_NCCL": str(test.enabled).lower(), "CVAL_NCCL_DB_PATH": config.storage.nccl_db_path}
+        for setting, name in names.items():
+            value = test.definition.settings[setting]
+            values[name] = str(value).lower() if isinstance(value, bool) else str(value)
+        return values
+
+    def evidence_environment(self, context) -> dict[str, str]:
+        values = context.evidence_aliases(run="NCCL_RUN_DIR", artifacts="NCCL_OUTPUT_DIR",
+                                          summary="NCCL_SUMMARY_FILE", log="NCCL_LOG_FILE")
+        canonical = context.validation_root / "logs/nccl" / context.node / context.run_id
+        sample_name = f"ibbw-{context.node}-{context.timestamp}.log"
+        values.update(NCCL_IBBW_LOG_FILE=str(context.artifacts / sample_name),
+                      CVAL_CANONICAL_NCCL_SUMMARY_FILE=str(canonical / context.test.definition.artifacts.summary_filename),
+                      CVAL_CANONICAL_NCCL_IBBW_LOG_FILE=str(canonical / sample_name))
+        return values
+
+    def raw_stores(self, config) -> dict[str, str]:
+        return {"nccl": config.storage.nccl_db_path}
+
+    def ingest(self, context) -> dict[str, dict]:
+        return load_test_support(Path(__file__).with_name("ingest.py")).ingest(context)
 
     def validate_config(self, definition) -> tuple[ConfigIssue, ...]:
         settings = definition.settings

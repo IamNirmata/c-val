@@ -8,14 +8,17 @@ descriptors, so child arguments must not depend on `/proc/self/fd/...` aliases.
 
 [summary.py](summary.py) creates the JSON metric summary without `jq`.
 [logger.py](logger.py) owns the test's consolidated logging hook and reuses the
-shared safe append implementation. New runs keep `job.log`, `summary.json` and
+shared safe append implementation; it also formats setup/workload stream lines. New runs keep `job.log`, `summary.json` and
 the six FIO JSON files together under
 `/data/continuous_validation/logs/storage/<node>/<run-id>/`.
 No separate per-test result or stream/event files are generated.
 
-For a passing phase, `cval.storage.run_ingest` validates all six artifacts and writes one
-raw `metadata/test-storage.db` row containing IOPS and bandwidth measurements.
-The plugin validates explicit setup and FIO settings and provides read-only raw export rows.
+For a passing phase, the registered [ingest.py](ingest.py) validates all six FIO
+artifacts against the declared summary and writes one authorized raw
+`metadata/test-storage.db` row containing IOPS and bandwidth measurements.
+[plugin.py](plugin.py) owns setup/FIO validation, runtime/evidence environment
+projection, raw store declaration, ingestion dispatch and read-only export.
+The shared coordinator validates the returned receipt before publishing status.
 
 Troubleshooting:
 
