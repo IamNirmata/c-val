@@ -62,10 +62,10 @@ import sys
 settings = json.loads(os.environ["CVAL_STORAGE_SETTINGS_JSON"])
 for name in ("randwrite", "randread", "iodepth_write_1file", "iodepth_read_1file", "numjobs_write_nfiles", "numjobs_read_nfiles"):
     options = settings["fio"] | settings["workloads"][name]
-    command = ["fio", f"--name={options.pop('name')}"]
+    command = ["fio", f"--name={options.pop('name')}", "--directory=fio-data"]
     for key, value in options.items():
         command.append(f"--{key}={int(value) if isinstance(value, bool) else value}")
-    command.extend(["--output-format=json", "--directory=fio-data", f"--output={name}.json"])
+    command.extend(["--output-format=json", f"--output={name}.json"])
     print(f"Running storage workload: {name}", flush=True)
     subprocess.run(command, check=True, cwd=sys.argv[1])
 PY

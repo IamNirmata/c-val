@@ -1,5 +1,29 @@
 # Framework Simplification Review
 
+## September 30 Post-Acceptance Cleanup
+
+Commit `ca79e54c1f9b9cffdb41aebcb3f92be125b583a4` completed exact-run
+acceptance on `slc01-cl02-hgx-0149`, timestamp `1790786650`: Completed Job,
+exit 0, zero restarts, all three tests passing, final v3 receipt, retained logs
+and matching evidence in all seven raw stores. Its live loop remains pinned to
+that accepted source; the cleanup below is prepared separately, not credited
+with the earlier Job's acceptance.
+
+| Candidate | Disposition |
+| --- | --- |
+| Old runtime boolean formatter and supervisor built-in import | Removed after finding no callers; test-owned runtime projections remain. |
+| Private registry forwarding helper | Inlined its only call to `config.tests.registry`; no environment-based alternate registry remains. |
+| Storage scratch data left beside JSON | Put `--directory=fio-data` before FIO filename options so the existing exit trap removes newly generated data. The regression creates scratch files and checks removal before its fixture directory is deleted. Existing PVC data is untouched. |
+| Main/per-test settings | Retained the complete main TOML and test-owned descriptors. No workload, image, resource, retry, timeout or raw schema change. Old independent FIO configs are already absent. |
+| Environment/DB launchers, DL/NCCL import shims | Retained: repository callers and historical/public compatibility obligations remain. |
+| Backup, layout, journal, lock, source and cooldown tools | Retained: production, recovery and exact-source delivery still use these tools. |
+
+No new framework feature, setting or source file is introduced. No historical
+reader, database, failed run, log, session, ConfigMap or backup is removed.
+Local shell/runner/safety checks do not substitute for deployment acceptance of
+the new cleanup commit; its source installation and live activation need a new
+exact-command approval.
+
 ## C2-C9 Source Cleanup
 
 The 2026-09-26 follow-up starts at published C1 `f9837ab`. Source cleanup is

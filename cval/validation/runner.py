@@ -47,7 +47,7 @@ def run_validation_tests(
 
     runtime_env = dict(os.environ if environ is None else environ)
     config = config or _load_runtime_config(runtime_env)
-    registry = registry or _load_runtime_registry(config, runtime_env)
+    registry = registry or config.tests.registry
     if registry.to_dict() != config.tests.registry.to_dict():
         raise ValueError("Runtime registry disagrees with the configuration")
     expected_environment = build_runtime_environment(config)
@@ -556,13 +556,6 @@ def _framework_versions(environment: Mapping[str, str]) -> tuple[str, str]:
         version = getattr(torch, "version", None)
         cuda = str(getattr(version, "cuda", "") or "")
     return pytorch, cuda
-
-
-def _load_runtime_registry(
-    config: CvalConfig,
-    environment: Mapping[str, str],
-) -> ValidationTestRegistry:
-    return config.tests.registry
 
 
 def _test_environment(

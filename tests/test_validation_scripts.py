@@ -1190,8 +1190,12 @@ printf '%s\n' '{"GCR_ITERATIONS":20,"GCR_DATA_SIZE_GB":8,"GCR_LATENCY":1.0,"GCR_
                 """#!/bin/bash
 set -e
 printf '%s\n' "$*" >> "$FIO_ARGS_LOG"
+data_dir=.
 for argument in "$@"; do
     case "$argument" in
+        --directory=*) data_dir=${argument#--directory=} ;;
+        --filename=*) touch -- "$data_dir/${argument#--filename=}" ;;
+        --filename_format=*) touch -- "$data_dir/fixture-rank.dat" ;;
         --output=*) output=${argument#--output=} ;;
     esac
 done
@@ -1229,6 +1233,14 @@ printf '%s\n' '{"jobs":[{"read":{"iops":100,"bw":1048576},"write":{"iops":0,"bw"
             result_files = sorted(path for path in output_dir.glob("*.json") if path != summary_file)
             summary = json.loads(summary_file.read_text(encoding="utf-8"))
             fio_args = fio_args_log.read_text(encoding="utf-8").splitlines()
+            self.assertFalse((output_dir / "fio-data").exists())
+            self.assertEqual(list(output_dir.glob("*.dat")), [])
+            for line in fio_args:
+                arguments = line.split()
+                directory_position = arguments.index("--directory=fio-data")
+                filename_position = next(index for index, value in enumerate(arguments)
+                                         if value.startswith(("--filename=", "--filename_format=")))
+                self.assertLess(directory_position, filename_position)
 
         self.assertEqual(len(result_files), 6)
         self.assertEqual(summary["schema_version"], "cval.storage.summary.v1")
@@ -1239,7 +1251,6 @@ printf '%s\n' '{"jobs":[{"read":{"iops":100,"bw":1048576},"write":{"iops":0,"bw"
         self.assertTrue(
             all("--directory=fio-data" in line for line in fio_args)
         )
-        self.assertFalse((output_dir / "fio-data").exists())
 
     def test_dl_runner_preserves_rank_json_summary_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

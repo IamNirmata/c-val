@@ -118,10 +118,6 @@ def effective_config_digest(config: CvalConfig) -> str:
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
 
-def _shell_bool(value: bool) -> str:
-    return "true" if value else "false"
-
-
 def _validate_environment(values: dict[str, str]) -> None:
     for name, value in values.items():
         if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):

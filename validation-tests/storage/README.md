@@ -5,6 +5,10 @@ verifies `fio`; [run-test.sh](run-test.sh) executes the workload and retains eac
 under `STORAGE_OUTPUT_DIR`. Each FIO child enters that reserved directory before
 execution and uses relative data/output names. Its launcher may close inherited
 descriptors, so child arguments must not depend on `/proc/self/fd/...` aliases.
+The scratch `--directory=fio-data` option precedes filename options, keeping
+workload data under the run-private directory removed by the existing exit trap.
+JSON artifacts remain alongside the summary. This does not delete data left by
+historical runs.
 
 [summary.py](summary.py) creates the JSON metric summary without `jq`.
 [logger.py](logger.py) owns the test's consolidated logging hook and reuses the

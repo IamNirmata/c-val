@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Mapping, Sequence
 
 from cval.config import CvalConfig, load_config_snapshot
-from cval.validation.builtins import BUILTIN_TEST_IDS
 from cval.validation.execution import EVENT_SCHEMA_VERSION, event_payload, process_group_exists, terminate_process_group, utc_now
 from cval.validation.results import (
     RUN_ID_PATTERN as SAFE_SEGMENT,
