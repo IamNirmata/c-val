@@ -240,7 +240,7 @@ def _status(args: argparse.Namespace) -> None:
                 if str(error) != "Another admission or session update holds the shared lock":
                     raise
                 print("Status refresh deferred: admission lock is busy", file=sys.stderr, flush=True)
-                if stopping.wait(config.live.status_refresh_seconds):
+                if stopping.wait(min(5, config.live.status_refresh_seconds)):
                     break
     finally:
         for kind, handler in handlers.items():

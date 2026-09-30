@@ -5,8 +5,13 @@ import json
 import tempfile
 import sqlite3
 import hashlib
+import subprocess
+import sys
+import base64
+import zlib
 from pathlib import Path
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from cval.storage.status import (
@@ -45,6 +50,110 @@ class FakeKubectlClient:
 
 
 class StatusParsingTests(unittest.TestCase):
+    def test_evidence_transport_rejects_corruption_and_oversized_reports(self) -> None:
+        from cval.storage.verification import collect_exact_evidence
+
+        config = load_config()
+        report = json.dumps({"state": "queried", "nodes": [], "timestamps": {}}).encode()
+        compressed = zlib.compress(report)
+        envelope = {"encoding": "zlib+base64", "sha256": hashlib.sha256(report).hexdigest(),
+                    "data": base64.b64encode(compressed).decode()}
+        invalid_responses = {
+            "empty": "",
+            "truncated_json": json.dumps(envelope)[:-1],
+            "checksum": json.dumps(envelope | {"sha256": "0" * 64}),
+            "truncated_payload": json.dumps(envelope | {"data": base64.b64encode(compressed[:-1]).decode()}),
+            "trailing_payload": json.dumps(envelope | {"data": base64.b64encode(compressed + b"extra").decode()}),
+            "encoding": json.dumps(envelope | {"encoding": "plain"}),
+            "oversized": json.dumps(envelope),
+        }
+        for name, stdout in invalid_responses.items():
+            with self.subTest(name=name):
+                client = SimpleNamespace(run=lambda *_args, **_kwargs: CommandResult([], stdout, "", 0))
+                response = collect_exact_evidence({"timeout_seconds": 10, "max_bytes": len(report) - 1 if name == "oversized" else 4096}, config, client)
+                self.assertEqual(response["state"], "unavailable")
+                self.assertFalse(response["accepted"])
+                self.assertFalse(response["complete"])
+        client = SimpleNamespace(run=lambda *_args, **_kwargs: CommandResult([], "", "Forbidden", 1))
+        self.assertEqual(collect_exact_evidence({"timeout_seconds": 10, "max_bytes": 4096}, config, client)["state"], "forbidden")
+
+    def test_fleet_coverage_survives_bounded_exec_output(self) -> None:
+        from cval.storage.status import get_coverage_report
+        from cval.storage.verification import _MEMORY_READER
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "validation.db"
+            nodes = [f"hgx-{index:04d}" for index in range(500)]
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE runs (node TEXT, test TEXT, timestamp INTEGER, result TEXT, image_name TEXT, pytorch_version TEXT, cuda_version TEXT)")
+                connection.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                       [(node, test, 123, "pass", "image", "torch", "cuda")
+                                        for node in nodes for test in ("all", "storage", "nccl", "dltest")])
+                connection.commit()
+            finally:
+                connection.close()
+            config = load_config()
+            config = replace(config, runtime=replace(config.runtime, validation_root=str(root)),
+                             storage=replace(config.storage, validation_db_path=str(database)))
+            output_sizes = []
+
+            def execute_reader(arguments, *, input_text, timeout, check):
+                response = subprocess.run([sys.executable, "-I", "-B", "-c", _MEMORY_READER],
+                                          input=input_text, timeout=timeout, check=check, text=True, capture_output=True)
+                output_sizes.append(len(response.stdout.encode()))
+                return CommandResult(arguments, response.stdout[:32768], response.stderr, response.returncode)
+
+            report = get_coverage_report(config, SimpleNamespace(run=execute_reader), nodes=nodes)
+            self.assertEqual(report["state"], "queried", report)
+            self.assertEqual(report["timestamps"], {node: 123 for node in nodes})
+            self.assertEqual(len(report["nodes"]), 500)
+            self.assertTrue(all(size < 32768 for size in output_sizes))
+
+    def test_periodic_projection_keeps_completed_collection_during_next_refresh(self) -> None:
+        from cval.config import encode_config_snapshot
+        from cval.storage.status import project_status_csvs, read_status_csvs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "session"
+            session.mkdir()
+            base = load_config()
+            config = replace(base, live=replace(base.live, status_dir=str(root / "reports")))
+            timestamp = 900
+            coverage = {
+                "schema_version": "cval.coverage.v1", "state": "queried", "policy": "successful_complete_run",
+                "requested_tests": sorted(test.id for test in config.tests.registry.enabled),
+                "timestamps": {"hgx-a": timestamp},
+                "nodes": [{"node": "hgx-a", "state": "queried", "coverage_timestamp": timestamp,
+                           "reason": "complete_canonical_run", "outcome": "pass", "recording_state": "fully_recorded",
+                           "test_outcome": "pass", "latest_record_timestamp": timestamp}],
+            }
+            snapshot = {"observed_at_epoch": 1000, "collected_at_epoch": 1170, "inventory_state": "queried",
+                        "nodes": [{"node_name": "hgx-a", "node_uid": "uid-a", "observed_at_epoch": 1000,
+                                   "observation_state": "queried"}], "coverage": coverage}
+            (session / "status-observation.json").write_text(json.dumps(snapshot))
+            state = {"config_snapshot_b64": encode_config_snapshot(config), "intents": {}}
+            with patch("cval.storage.status.time.time", return_value=1301):
+                project_status_csvs(session, state)
+            rows, _cluster = read_status_csvs(Path(config.live.status_dir))
+            self.assertEqual(rows[0]["coverage_state"], "fresh")
+            self.assertEqual(rows[0]["recording_state"], "fully_recorded")
+            self.assertEqual(rows[0]["observed_at_epoch"], "1000")
+            with patch("cval.storage.status.time.time", return_value=1471):
+                project_status_csvs(session, state)
+            expired, _cluster = read_status_csvs(Path(config.live.status_dir))
+            self.assertEqual(expired[0]["coverage_state"], "unverified")
+            self.assertEqual(expired[0]["observation_state"], "stale")
+            del snapshot["collected_at_epoch"]
+            (session / "status-observation.json").write_text(json.dumps(snapshot))
+            for now, expected in ((1200, "fresh"), (1301, "unverified")):
+                with self.subTest(historical_cache_at=now), patch("cval.storage.status.time.time", return_value=now):
+                    project_status_csvs(session, state)
+                    historical, _cluster = read_status_csvs(Path(config.live.status_dir))
+                    self.assertEqual(historical[0]["coverage_state"], expected)
+
     def test_operational_status_preserves_then_counts_and_hashes_one_generation(self) -> None:
         now = 1790370000
         previous = [{"node_name": "hgx-a", "node_uid": "uid-a", "latest_record_epoch": str(now - 60),
@@ -133,6 +242,7 @@ class StatusParsingTests(unittest.TestCase):
         client.get_pods_json.assert_called_once()
         self.assertEqual(coverage.call_args.kwargs["nodes"], ["hgx-a", "hgx-b"])
         self.assertTrue(coverage.call_args.kwargs["include_recording"])
+        self.assertGreaterEqual(snapshot["collected_at_epoch"], snapshot["observed_at_epoch"])
         self.assertEqual(snapshot["nodes"][0]["k8s_ready"], "true")
         self.assertEqual(snapshot["nodes"][0]["scheduling_enabled"], "false")
         self.assertEqual(snapshot["nodes"][1]["k8s_ready"], "unknown")

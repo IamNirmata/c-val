@@ -23,6 +23,59 @@ GIT_REF = "a" * 40
 
 
 class StatusCsvTests(unittest.TestCase):
+    def test_admission_lock_remains_fail_fast_and_bounds_opt_in_wait(self) -> None:
+        from cval.config import load_config
+        from cval.jobs.manager import admission_lock
+        from cval.policy import PolicyViolation
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config()
+            config = replace(config, live=replace(config.live, log_dir=directory, control_host=socket.gethostname()))
+            for timeout, clock, attempts in ((0, [100, 100], 1), (5, [100, 100, 106], 2)):
+                with self.subTest(timeout=timeout), \
+                     patch("cval.jobs.manager.fcntl.flock", side_effect=BlockingIOError()) as lock, \
+                     patch("cval.jobs.manager.time.monotonic", side_effect=clock), \
+                     patch("cval.jobs.manager.time.sleep") as wait:
+                    with self.assertRaisesRegex(PolicyViolation, "shared lock"), admission_lock(config, timeout_seconds=timeout):
+                        self.fail("A busy lock must not be acquired")
+                    self.assertEqual(lock.call_count, attempts)
+                    self.assertEqual(wait.call_count, attempts - 1)
+            for timeout in (-1, float("inf"), float("nan")):
+                with self.subTest(invalid_timeout=timeout), self.assertRaises(ValueError), admission_lock(config, timeout_seconds=timeout):
+                    self.fail("An invalid wait bound must be rejected")
+
+    def test_refresh_retains_collected_snapshot_through_brief_lock_contention(self) -> None:
+        from cval.config import encode_config_snapshot, load_config
+        from cval.storage.status import refresh_status_csvs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "session"
+            session.mkdir()
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            base = load_config()
+            config = replace(base, live=replace(base.live, log_dir=str(log_dir), status_dir=str(root / "reports"),
+                                                control_host=socket.gethostname()))
+            state = {"config_snapshot_b64": encode_config_snapshot(config), "intents": {}}
+            now = int(time.time())
+            snapshot = {"observed_at_epoch": now - 170, "collected_at_epoch": now, "inventory_state": "queried", "nodes": [],
+                        "coverage": {"schema_version": "cval.coverage.v1", "state": "empty", "policy": "successful_complete_run",
+                                     "requested_tests": sorted(test.id for test in config.tests.registry.enabled), "nodes": [], "timestamps": {}}}
+            for attempts in ([None, BlockingIOError(), None], [BlockingIOError(), None, None]):
+                with self.subTest(attempts=attempts), patch("cval.jobs.manager.check_admission_cluster"), \
+                     patch("cval.jobs.manager.read_session_state", return_value=state), \
+                     patch("cval.jobs.manager.read_admission_session", return_value=(session, state)), \
+                     patch("cval.storage.status.collect_status_observation", return_value=snapshot) as collect, \
+                     patch("cval.jobs.manager.fcntl.flock", side_effect=attempts) as lock:
+                    refreshed = refresh_status_csvs(session, client=Mock())
+                self.assertEqual(refreshed["state"], "queried")
+                self.assertEqual(refreshed["coverage_state"], "empty")
+                self.assertEqual(refreshed["collected_at_epoch"], now)
+                collect.assert_called_once()
+                self.assertEqual(lock.call_count, 3)
+                self.assertEqual(json.loads((session / "status-observation.json").read_text()), snapshot)
+
     def test_plan_coverage_summary_does_not_write_a_duplicate_snapshot(self) -> None:
         script = (REPO_ROOT / "scripts/cval-live.sh").read_text()
         function = "json_coverage_summary_tsv() {" + script.split("json_coverage_summary_tsv() {", 1)[1].split("\ncollect_plan_inputs()", 1)[0]
@@ -57,6 +110,22 @@ class StatusCsvTests(unittest.TestCase):
                 helper["_status"](SimpleNamespace(cval_config=load_config(), session_dir=session, watch=True))
             refresh.assert_called_once_with(session)
             self.assertEqual(stopping.wait.call_args_list, [call(300), call(300)])
+
+    def test_watch_retries_contention_without_skipping_a_refresh_interval(self) -> None:
+        from cval.config import load_config
+        from cval.policy import PolicyViolation
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory)
+            (session / "status-observation.json").write_text(json.dumps({"observed_at_epoch": 1000, "collected_at_epoch": 1170}))
+            stopping = Mock()
+            stopping.is_set.return_value = False
+            stopping.wait.side_effect = [False, True]
+            helper = runpy.run_path(str(SCRIPT))
+            with patch("threading.Event", return_value=stopping), patch("signal.signal"), patch("time.time", return_value=1170), \
+                 patch("cval.storage.status.refresh_status_csvs", side_effect=PolicyViolation("Another admission or session update holds the shared lock")):
+                helper["_status"](SimpleNamespace(cval_config=load_config(), session_dir=session, watch=True))
+            self.assertEqual(stopping.wait.call_args_list, [call(130), call(5)])
 
     def test_loop_refresh_starts_before_submission_and_has_exit_cleanup(self) -> None:
         script = (REPO_ROOT / "scripts/cval-live.sh").read_text()

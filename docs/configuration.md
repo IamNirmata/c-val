@@ -207,8 +207,19 @@ loop. Startup checks existing CSVs against the authoritative submission journal
 and refreshes before submission. The reader then refreshes at this interval while
 the loop watches Jobs, scans candidates or waits between cycles. It stops with
 the controller. Intent/observation writes also republish from the latest collected
-snapshot, including prepared intent before Job creation. Data older than the
-interval is labeled stale; unavailable and forbidden reads are not empty results.
+snapshot, including prepared intent before Job creation. Refresh scheduling uses
+the collection start, while cached evidence expires one interval after collection
+finishes, so a slow refresh does not immediately invalidate the preceding result.
+The node observation timestamp remains the actual collection start. Historical
+caches without a completion timestamp expire from their observation time.
+Unavailable and forbidden reads are not empty results; refresh output reports
+coverage state and reason separately from inventory state.
+
+Read-only evidence responses use compressed, checksummed transport with a bounded
+decoded size. Truncated or corrupt responses remain unavailable. Status collection
+and publication wait at most five seconds for the admission lock; a still-busy
+watcher retries after at most five seconds instead of skipping a full interval.
+Job submitters retain fail-fast locking. No collection runs while holding the lock.
 
 The node CSV includes node name/UID, latest complete recorded run epoch and
 Los Angeles time, coverage and priority, current/latest Job name/UID/run epoch/phase,

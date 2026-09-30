@@ -391,7 +391,7 @@ def verify_local_evidence(request: dict) -> dict:
 
 
 _MEMORY_READER = r'''
-import base64, importlib.abc, importlib.util, json, signal, sys, zlib
+import base64, hashlib, importlib.abc, importlib.util, json, signal, sys, zlib
 sys.dont_write_bytecode = True
 payload = json.load(sys.stdin)
 sources = json.loads(zlib.decompress(base64.b64decode(payload["sources"])))
@@ -422,7 +422,9 @@ elif payload["operation"] == "verification":
     from cval.storage.verification import verify_local_evidence as collect
 else:
     raise ValueError("Unknown read-only collection operation")
-print(json.dumps(collect(payload["request"]), sort_keys=True, allow_nan=False))
+report = json.dumps(collect(payload["request"]), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+print(json.dumps({"encoding": "zlib+base64", "sha256": hashlib.sha256(report).hexdigest(),
+                  "data": base64.b64encode(zlib.compress(report)).decode()}, separators=(",", ":")), flush=True)
 '''
 
 
@@ -477,7 +479,18 @@ def collect_exact_evidence(request: dict, config, client, *, operation: str = "v
         if response.returncode:
             return {"state": "forbidden" if "forbidden" in response.stderr.lower() else "unavailable",
                     "accepted": False, "complete": False, "reason": response.stderr, "sources": {}}
-        report = json.loads(response.stdout)
+        transport = json.loads(response.stdout)
+        if not isinstance(transport, dict) or set(transport) != {"encoding", "sha256", "data"} or transport["encoding"] != "zlib+base64":
+            raise ValueError("Invalid evidence transport envelope")
+        decoder = zlib.decompressobj()
+        decoded = decoder.decompress(base64.b64decode(transport["data"], validate=True), request["max_bytes"] + 1)
+        if len(decoded) > request["max_bytes"] or not decoder.eof or decoder.unused_data:
+            raise ValueError("Incomplete or oversized evidence transport payload")
+        if hashlib.sha256(decoded).hexdigest() != transport["sha256"]:
+            raise ValueError("Evidence transport checksum mismatch")
+        report = json.loads(decoded)
+        if not isinstance(report, dict):
+            raise ValueError("Evidence transport report must be an object")
         report["reader_source_sha256"] = hashlib.sha256(zlib.decompress(base64.b64decode(encoded))).hexdigest()
         report["transport_stderr"] = response.stderr
         return report

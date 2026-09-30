@@ -83,7 +83,8 @@ def collect_status_observation(config, client, state: dict, previous: list[dict]
     for intent in sorted(state.get("intents", {}).values(), key=lambda item: (intent_finished(item), -item["timestamp"])):
         attempts.setdefault(intent["node_name"], intent["timestamp"])
     coverage = get_coverage_report(config, client, nodes=sorted(nodes), include_recording=True, attempts=attempts)
-    return {"observed_at_epoch": observed_at, "nodes": observations, "coverage": coverage, "inventory_state": "queried"}
+    return {"observed_at_epoch": observed_at, "collected_at_epoch": int(time.time()),
+            "nodes": observations, "coverage": coverage, "inventory_state": "queried"}
 
 
 def refresh_status_csvs(session_dir: Path, *, client=None) -> dict:
@@ -97,20 +98,23 @@ def refresh_status_csvs(session_dir: Path, *, client=None) -> dict:
         return {"state": "disabled_historical_snapshot"}
     client = client or KubectlClient(config=config)
     check_admission_cluster(config, client)
-    with admission_lock(config):
+    with admission_lock(config, timeout_seconds=min(5, config.live.status_refresh_seconds)):
         active, state = read_admission_session(config)
         if active != session_dir:
             raise ValueError("Status refresh does not own the active session")
         previous, _cluster = read_status_csvs(Path(config.live.status_dir))
         check_status_reconciliation(previous, state)
     snapshot = collect_status_observation(config, client, state, previous)
-    with admission_lock(config):
+    with admission_lock(config, timeout_seconds=min(5, config.live.status_refresh_seconds)):
         active, current = read_admission_session(config)
         if active != session_dir or current["config_snapshot_b64"] != state["config_snapshot_b64"]:
             raise ValueError("Active session changed during status collection")
         atomic_session_text(session_dir / "status-observation.json", json.dumps(snapshot, sort_keys=True) + "\n")
         project_status_csvs(session_dir, current)
-    return {"state": snapshot["inventory_state"], "node_count": len(snapshot["nodes"]), "observed_at_epoch": snapshot["observed_at_epoch"]}
+        return {"state": snapshot["inventory_state"], "coverage_state": snapshot["coverage"]["state"],
+            "coverage_reason": snapshot["coverage"].get("reason", ""), "node_count": len(snapshot["nodes"]),
+            "observed_at_epoch": snapshot["observed_at_epoch"],
+            "collected_at_epoch": snapshot.get("collected_at_epoch", snapshot["observed_at_epoch"])}
 
 
 def read_status_csvs(directory: Path) -> tuple[list[dict], dict]:
@@ -176,7 +180,8 @@ def project_status_csvs(session_dir: Path, state: dict) -> None:
     now = int(time.time())
     coverage = snapshot.get("coverage", {"state": "unavailable"})
     observations = {item["node_name"]: dict(item) for item in snapshot.get("nodes", [])}
-    if now - snapshot.get("observed_at_epoch", 0) > config.live.status_refresh_seconds:
+    collected_at = snapshot.get("collected_at_epoch", snapshot.get("observed_at_epoch", 0))
+    if now - collected_at > config.live.status_refresh_seconds:
         coverage = {"state": "stale"}
         for observation in observations.values():
             observation["observation_state"] = "stale"

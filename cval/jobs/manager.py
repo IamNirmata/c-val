@@ -15,6 +15,7 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -289,9 +290,11 @@ def check_admission_cluster(config: CvalConfig, client: KubectlClient) -> None:
 
 
 @contextmanager
-def admission_lock(config: CvalConfig):
-    """Serialize short admission/state transitions; contention fails without waiting."""
+def admission_lock(config: CvalConfig, *, timeout_seconds: float = 0):
+    """Serialize short state transitions; fail fast unless a bounded wait is requested."""
 
+    if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+        raise ValueError("Admission lock timeout must be finite and nonnegative")
     admission_scope(config)
     path = Path(config.live.log_dir) / ".cval-admission.lock"
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -299,10 +302,16 @@ def admission_lock(config: CvalConfig):
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o022:
             raise PolicyViolation("Admission lock must be a regular file owned by this operator")
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise PolicyViolation("Another admission or session update holds the shared lock") from exc
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PolicyViolation("Another admission or session update holds the shared lock") from exc
+                time.sleep(min(0.1, remaining))
         if path.stat().st_ino != info.st_ino:
             raise PolicyViolation("Admission lock identity changed")
         yield
