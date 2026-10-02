@@ -173,23 +173,19 @@ pending_start_timeout_seconds = 180
                 shutil.copytree(repository / "validation-tests", root / "validation-tests")
                 descriptor = root / "validation-tests/nccl/test_config.toml"
                 text = descriptor.read_text(encoding="utf-8")
-                self.assertIn("iterations = 20", text)
+                iterations = tomllib.loads(text)["settings"]["iterations"]
+                self.assertIn(f"iterations = {iterations}", text)
                 descriptor.write_text(
-                    text.replace("iterations = 20", "iterations = 0", 1),
+                    text.replace(f"iterations = {iterations}", "iterations = 0", 1),
                     encoding="utf-8",
                 )
                 config_path = root / "cval.toml"
                 config_path.write_text(
-                    f'''[tests.storage]
-enabled = true
-config_path = "validation-tests/storage/test_config.toml"
-[tests.nccl]
-enabled = {str(nccl_enabled).lower()}
-config_path = "validation-tests/nccl/test_config.toml"
-[tests.dltest]
-enabled = true
-config_path = "validation-tests/dltest/test_config.toml"
-''',
+                    (repository / "config/cval.toml").read_text(encoding="utf-8").replace(
+                        "[tests.nccl]\nenabled = true",
+                        f"[tests.nccl]\nenabled = {str(nccl_enabled).lower()}",
+                        1,
+                    ),
                     encoding="utf-8",
                 )
                 with patch("cval.config.REPO_ROOT", root), self.assertRaisesRegex(

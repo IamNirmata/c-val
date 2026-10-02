@@ -20,7 +20,7 @@ read_sysfs = true
 
 [settings]
 gpu_count = 8
-iterations = 20
+iterations = 50
 data_size_gb = 8
 ibbw_enabled = true
 ibbw_start_device = ""
