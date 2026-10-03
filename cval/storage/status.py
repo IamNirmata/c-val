@@ -118,25 +118,40 @@ def refresh_status_csvs(session_dir: Path, *, client=None) -> dict:
 
 
 def read_status_csvs(directory: Path) -> tuple[list[dict], dict]:
-    """Read one coherent generation; callers serialize with the admission lock."""
+    """Read a coherent node CSV and cluster YAML pair, including historical CSVs."""
 
-    paths = [directory / name for name in ("node-status.csv", "cluster-status.csv")]
+    cluster_path = directory / "cluster-status.yaml"
+    if not (cluster_path.exists() or cluster_path.is_symlink()):
+        cluster_path = directory / "cluster-status.csv"
+    paths = [directory / "node-status.csv", cluster_path]
     if not any(path.exists() or path.is_symlink() for path in paths):
         return [], {}
     if any(path.is_symlink() or not path.is_file() for path in paths):
-        raise ValueError("Status CSV pair is missing or not regular; reconcile retained session evidence")
+        raise ValueError("Status report pair is missing or not regular; reconcile retained session evidence")
     with paths[0].open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames != list(NODE_STATUS_FIELDS):
             raise ValueError("Unexpected node status CSV columns")
         nodes = list(reader)
-    with paths[1].open(newline="", encoding="utf-8") as handle:
-        clusters = list(csv.DictReader(handle))
-    if len(clusters) != 1 or not clusters[0].get("snapshot_id") or any(row.get("snapshot_id") != clusters[0]["snapshot_id"] for row in nodes):
-        raise ValueError("Status CSV snapshot IDs disagree; reconcile retained session evidence")
+    if cluster_path.suffix == ".yaml":
+        import yaml
+
+        try:
+            with cluster_path.open(encoding="utf-8") as handle:
+                cluster = yaml.safe_load(handle)
+        except yaml.YAMLError as error:
+            raise ValueError("Invalid cluster status YAML") from error
+    else:
+        with cluster_path.open(newline="", encoding="utf-8") as handle:
+            clusters = list(csv.DictReader(handle))
+        if len(clusters) != 1:
+            raise ValueError("Expected one cluster status record")
+        cluster = clusters[0]
+    if not isinstance(cluster, dict) or not isinstance(cluster.get("snapshot_id"), str) or not cluster["snapshot_id"] or any(row.get("snapshot_id") != cluster["snapshot_id"] for row in nodes):
+        raise ValueError("Status snapshot IDs disagree; reconcile retained session evidence")
     if len({row["node_name"] for row in nodes}) != len(nodes):
         raise ValueError("Duplicate node status identity")
-    return nodes, clusters[0]
+    return nodes, cluster
 
 
 def check_status_reconciliation(rows: list[dict], state: dict) -> None:
@@ -162,6 +177,8 @@ def check_status_reconciliation(rows: list[dict], state: dict) -> None:
 
 def project_status_csvs(session_dir: Path, state: dict) -> None:
     """Publish both summaries under the caller's already-held admission lock."""
+
+    import yaml
 
     from cval.jobs.manager import atomic_session_text
 
@@ -195,12 +212,13 @@ def project_status_csvs(session_dir: Path, state: dict) -> None:
         previous=previous, inventory_state=snapshot.get("inventory_state", "unavailable"),
     )
     directory.mkdir(parents=True, exist_ok=True)
-    for filename, entries, fields in (("node-status.csv", rows, NODE_STATUS_FIELDS), ("cluster-status.csv", [cluster], tuple(cluster))):
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(entries)
-        atomic_session_text(directory / filename, output.getvalue())
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=NODE_STATUS_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    cluster_yaml = yaml.safe_dump(cluster, sort_keys=False)
+    atomic_session_text(directory / "node-status.csv", output.getvalue())
+    atomic_session_text(directory / "cluster-status.yaml", cluster_yaml)
 
 
 def build_status_snapshot(observations: list[dict], coverage: dict, state: dict, config, *, now: int,

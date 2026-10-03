@@ -385,14 +385,14 @@ Reporting runs beside the controller. At startup and every configured refresh
 interval, currently **300 seconds**, the passive reader collects node/pod state
 and coverage/recording observations. It collects outside the short admission
 lock, then publishes against the latest session intents. Durable intent updates
-also refresh the CSV projection from the cached observation.
+also refresh the status projection from the cached observation.
 
 | Public output | What to read from it |
 | --- | --- |
 | Node-status CSV | One row per observed node: identity, coverage, attempt, recording, outcome, cooldown, availability and observation time |
-| Cluster-status CSV | Matching node totals, coverage/readiness counts, recent fully recorded count and observation completeness |
+| Cluster-status YAML | Matching node totals, coverage/readiness counts, recent fully recorded count and observation completeness |
 
-The generated filenames are `node-status.csv` and `cluster-status.csv`.
+The generated filenames are `node-status.csv` and `cluster-status.yaml`.
 Both files carry the same `snapshot_id`. Each file is replaced atomically, but
 the pair is not a single filesystem transaction. Readers must require matching
 generation IDs; the framework rejects incomplete or mismatched pairs.

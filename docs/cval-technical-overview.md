@@ -269,8 +269,8 @@ shows the distinction.
 | Output | Contents and limits |
 | --- | --- |
 | Node-status CSV | One row per observed node with UID, coverage, priority, attempt, recording/outcome, cooldown, resource state, source/config and observation time |
-| Cluster-status CSV | Matching totals, coverage/readiness counts, recent fully recorded count and observation completeness |
-| Paired generation | Both CSVs carry one `snapshot_id`; mismatched or missing pairs are rejected |
+| Cluster-status YAML | Matching totals, coverage/readiness counts, recent fully recorded count and observation completeness |
+| Paired generation | Both files carry one `snapshot_id`; mismatched or missing pairs are rejected |
 | Explicit stale/unknown state | Keep historical timestamps when possible while identifying stale, unverified, unavailable or forbidden observations |
 | Overall result export | Aggregate outcome plus optional exact-timestamp storage/NCCL metrics |
 | Storage export | Per-node outcome and the 12 FIO bandwidth/IOPS fields |
@@ -279,13 +279,13 @@ shows the distinction.
 | Exact-run selectors | Node plus timestamp selects that run; absent exact status fails rather than falling back |
 | Human-readable times | Preserve epoch identity and provide UTC/Los Angeles times where defined by the output schema |
 
-The two live filenames are `node-status.csv` and `cluster-status.csv`. Exported
+The two live filenames are `node-status.csv` and `cluster-status.yaml`. Exported
 result snapshots are separate local outputs, not extra live-status files. Export
 to a separate directory. Missing same-timestamp metrics remain blank; another
 run's measurements are never substituted.
 
 The recent fully recorded count can include failed tests, and normal
-`fully_recorded` projection is not a fresh seven-store audit. Status CSVs are
+`fully_recorded` projection is not a fresh seven-store audit. Status reports are
 informational; they cannot authorize submission.
 
 Sources: [status projection](../cval/storage/status.py),

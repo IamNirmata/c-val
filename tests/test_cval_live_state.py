@@ -137,6 +137,8 @@ class StatusCsvTests(unittest.TestCase):
         subprocess.run(["bash", "-n", str(REPO_ROOT / "scripts/cval-live.sh")], check=True)
 
     def test_intent_is_projected_before_create_and_unresolved_csv_is_not_adopted(self) -> None:
+        import yaml
+
         from cval.config import encode_config_snapshot, load_config
         from cval.jobs.manager import admission_lock, retain_submission_event
         from cval.storage.status import check_status_reconciliation, read_status_csvs, refresh_status_csvs
@@ -166,7 +168,20 @@ class StatusCsvTests(unittest.TestCase):
                 self.assertEqual(rows[0]["job_phase"], "prepared")
                 self.assertEqual(rows[0]["recording_state"], "no_results")
                 self.assertEqual(rows[0]["snapshot_id"], cluster["snapshot_id"])
-                self.assertEqual(sorted(path.name for path in (root / "run-logs").iterdir()), ["cluster-status.csv", "node-status.csv"])
+                self.assertEqual(sorted(path.name for path in (root / "run-logs").iterdir()), ["cluster-status.yaml", "node-status.csv"])
+                self.assertEqual(yaml.safe_load((root / "run-logs/cluster-status.yaml").read_text()), cluster)
+                self.assertIsInstance(cluster["total_hgx_nodes"], int)
+                self.assertIsInstance(cluster["observation_complete"], bool)
+                legacy_path = root / "run-logs/cluster-status.csv"
+                with legacy_path.open("w", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=tuple(cluster))
+                    writer.writeheader()
+                    writer.writerow(cluster)
+                legacy_bytes = legacy_path.read_bytes()
+                (root / "run-logs/cluster-status.yaml").unlink()
+                legacy_rows, legacy_cluster = read_status_csvs(root / "run-logs")
+                self.assertEqual(legacy_rows, rows)
+                self.assertEqual(legacy_cluster["snapshot_id"], cluster["snapshot_id"])
                 with self.assertRaisesRegex(ValueError, "Unresolved status attempt"):
                     check_status_reconciliation(rows, {"intents": {}})
                 check_status_reconciliation(rows, state)
@@ -176,6 +191,8 @@ class StatusCsvTests(unittest.TestCase):
                 self.assertEqual(rows[0]["job_uid"], "job-uid")
                 self.assertEqual(rows[0]["job_phase"], "Running")
                 self.assertEqual(len(state["intents"]["new-job"]["events"]), 2)
+                self.assertEqual(legacy_path.read_bytes(), legacy_bytes)
+                self.assertTrue((root / "run-logs/cluster-status.yaml").is_file())
             def collect(*_args):
                 with admission_lock(config):
                     retain_submission_event(session, state, "new-job", {"state": "observed", "uid": "job-uid",
@@ -192,6 +209,31 @@ class StatusCsvTests(unittest.TestCase):
             rows, _cluster = read_status_csvs(root / "run-logs")
             self.assertEqual(rows[0]["test_outcome"], "fail")
             self.assertEqual(rows[0]["job_uid"], "job-uid")
+
+    def test_invalid_cluster_yaml_never_falls_back_to_legacy_csv(self) -> None:
+        from cval.storage.status import NODE_STATUS_FIELDS, read_status_csvs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (root / "node-status.csv").open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=NODE_STATUS_FIELDS)
+                writer.writeheader()
+                writer.writerow({"node_name": "hgx-a", "snapshot_id": "current"})
+            (root / "cluster-status.csv").write_text("snapshot_id\ncurrent\n")
+            cluster_path = root / "cluster-status.yaml"
+            for text in ("", "[]\n", "snapshot_id: other\n", "snapshot_id: 12\n", "[", "!!python/tuple [1, 2]\n"):
+                with self.subTest(yaml=text):
+                    cluster_path.write_text(text)
+                    with self.assertRaises(ValueError):
+                        read_status_csvs(root)
+            cluster_path.unlink()
+            cluster_path.symlink_to(root / "cluster-status.csv")
+            with self.assertRaisesRegex(ValueError, "not regular"):
+                read_status_csvs(root)
+            cluster_path.unlink()
+            cluster_path.mkdir()
+            with self.assertRaisesRegex(ValueError, "not regular"):
+                read_status_csvs(root)
 
     def test_partial_csv_pair_is_rejected(self) -> None:
         from cval.storage.status import read_status_csvs

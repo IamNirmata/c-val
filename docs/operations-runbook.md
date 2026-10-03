@@ -141,7 +141,7 @@ No create is retried by reconciliation. Absent/unavailable observations keep the
 node/slot reserved, and identity conflicts block admission. Preserve prepared-only
 crash records for explicit reconciliation rather than assuming nothing happened.
 
-A successful state write followed by a failed CSV write is still retained evidence;
+A successful state write followed by a failed status-file write is still retained evidence;
 the next append loads that on-disk state before rebuilding the projection. Missing
 or corrupt authoritative state never becomes an empty session. Attempted
 intents retain reservations until identity-bound terminal tracking permits release.
@@ -150,16 +150,16 @@ and partial live batches remain unverified; this is not exactly-once delivery.
 
 ### Compact Operational Status
 
-The public `run-logs` output is two updating CSVs: `node-status.csv` and
-`cluster-status.csv`. See [status settings and semantics](configuration.md#node-and-cluster-status-csvs).
+The public `run-logs` output is the node CSV `node-status.csv` and cluster YAML
+`cluster-status.yaml`. See [status settings and semantics](configuration.md#node-and-cluster-status-files).
 The default private controller path is `.cval-state/cval-live`; journals, approvals,
 locks, cooldowns and recovery artifacts remain there rather than in the public
 status directory. Old pinned sessions keep their old paths until approved turnover.
 
 The existing `cval-live-state.py status <active-session>` command performs one
-bounded read-only cluster observation and republishes the local CSV pair. The live
+bounded read-only cluster observation and republishes the local report pair. The live
 loop owns its `--watch` mode, which uses the pinned 300-second TOML interval. Do not
-start a second refresher over a live writer or manually edit the CSVs to clear work.
+start a second refresher over a live writer or manually edit the reports to clear work.
 The refresher never creates, deletes or restarts a Kubernetes Job and never writes
 the raw databases. Admission continues to recheck actual eligibility before create.
 

@@ -194,16 +194,21 @@ state; missing CLI receipt files or a failed CSV write do not erase reservations
 Missing/corrupt authoritative state still blocks. The reconciliation pass shares
 one `monitoring.ingestion_grace_seconds` deadline across retained intents.
 
-### Node and Cluster Status CSVs
+### Node and Cluster Status Files
 
 `live.status_dir` is a separate absolute directory, checked in as the repository's
 `run-logs` directory. New status output consists of `node-status.csv` and
-`cluster-status.csv`, readable in Excel without an Excel dependency. Both status
+`cluster-status.yaml`. The node CSV remains readable in Excel; the cluster YAML
+is one mapping with integer counts and a boolean completeness flag. Both status
 and private state directories are Git-ignored. Historical directories are not
 automatically deleted or moved by a source or configuration update.
 
+Readers accept an older `cluster-status.csv` only when no cluster YAML exists.
+New writes produce YAML and leave any historical CSV untouched. Present but
+invalid YAML is rejected, never replaced with a silent fallback to an old CSV.
+
 `live.status_refresh_seconds = 300` controls the passive reader owned by the live
-loop. Startup checks existing CSVs against the authoritative submission journal
+loop. Startup checks existing reports against the authoritative submission journal
 and refreshes before submission. The reader then refreshes at this interval while
 the loop watches Jobs, scans candidates or waits between cycles. It stops with
 the controller. Intent/observation writes also republish from the latest collected
@@ -236,14 +241,14 @@ a canonical terminal envelope, matching exact status rows and its digest-bound
 ingestion receipt. Legacy status-only evidence is not counted as fully recorded.
 These operational summaries do not replace the separate exact raw-row audit.
 
-The single cluster row counts unique nodes recorded in the last 24 hours, coverage
+The cluster YAML mapping counts unique nodes recorded in the last 24 hours, coverage
 states, known HGX nodes, Ready/NotReady/readiness-unknown nodes and scheduling-disabled
 nodes. Ready and scheduling-disabled counts may overlap. Generation timestamp,
 inventory state and observation completeness accompany the counts. This is cluster
 status, not health classification.
 
-Writers use the shared admission lock and atomic replacement. Both CSVs contain
-the same `snapshot_id`; readers must reject a mismatched pair. Neither CSV can
+Writers use the shared admission lock and atomic replacement. Both files contain
+the same `snapshot_id`; readers must reject a mismatched pair. Neither report can
 authorize admission or replace durable intents, receipts, manifests, canonical
 logs or raw SQLite. An unresolved CSV attempt without its journal blocks startup.
 Historical snapshots lacking both new status settings retain their exact transport

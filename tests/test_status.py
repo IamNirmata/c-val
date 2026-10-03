@@ -100,7 +100,7 @@ class StatusParsingTests(unittest.TestCase):
             output_sizes = []
 
             def execute_reader(arguments, *, input_text, timeout, check):
-                response = subprocess.run([sys.executable, "-I", "-B", "-c", _MEMORY_READER],
+                response = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _MEMORY_READER],
                                           input=input_text, timeout=timeout, check=check, text=True, capture_output=True)
                 output_sizes.append(len(response.stdout.encode()))
                 return CommandResult(arguments, response.stdout[:32768], response.stderr, response.returncode)
