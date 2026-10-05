@@ -609,6 +609,8 @@ class PvcAccessDeploymentTests(unittest.TestCase):
         container = spec["containers"][0]
         self.assertEqual(container["name"], "pvcaccess")
         self.assertIn("@sha256:", container["image"])
+        self.assertEqual(container["resources"]["requests"]["cpu"], "2")
+        self.assertEqual(container["resources"]["limits"]["cpu"], "8")
         self.assertNotIn("nvidia.com/gpu", container["resources"]["requests"])
         self.assertEqual(container["resources"]["limits"]["memory"], "8Gi")
         mounts = {entry["mountPath"]: entry for entry in container["volumeMounts"]}

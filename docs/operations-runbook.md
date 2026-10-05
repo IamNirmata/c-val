@@ -625,8 +625,8 @@ read-only status/export queries. NumPy, pandas and a repository checkout are not
 installed automatically. Install additional interactive tools explicitly if
 needed; only `/data` is persistent.
 
-The pod keeps the `pvcaccess` container name, requests 2 CPU/2 GiB, and limits
-memory to 8 GiB. `/workspace`, `/tmp`, and `/root/.vscode-server` are disposable
+The pod keeps the `pvcaccess` container name, requests 2 CPU/2 GiB and limits
+8 CPU/8 GiB memory. `/workspace`, `/tmp`, and `/root/.vscode-server` are disposable
 volumes. The exec readiness probe checks the Python/SQLite runtime, not PVC
 latency or node health. No liveness probe interrupts long interactive tasks.
 No API token is mounted. The pod does not read or modify PVC contents at startup.
