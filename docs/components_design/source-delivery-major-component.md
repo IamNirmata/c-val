@@ -11,6 +11,7 @@ before initializing a new session; it must not update the checkout while running
 Jobs may still need objects from it. Existing ConfigMaps and session snapshots are
 retained for historical Jobs, but new Jobs must leave the legacy source-map fields
 blank.
+Preserve source ConfigMaps referenced by existing Job specs and preserve session snapshots; unreferenced old source maps are eligible for cleanup only after checking all Job and pod consumers. New Jobs leave the legacy source-map fields blank.
 
 The following Phase 5 records describe the previous source-ConfigMap design and
 its acceptance evidence; they are historical, not the current transport.

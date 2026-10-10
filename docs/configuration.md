@@ -50,7 +50,7 @@ and independent confirmations remain explicit command inputs.
 
 - `[cluster]`: namespace, PVC reader, node filter, tolerated taints and kubectl timeout;
 - `[scheduling]`: stale threshold, concurrent batch size, submission cooldown and coverage scan bound;
-- `[job]`: template, prefix, recorded image name, source repository/ref and explicit source transport;
+- `[job]`: template, prefix, recorded image name, source repository and exact ref; legacy source ConfigMap/hash fields remain blank for historical snapshot decoding;
 - `[policy]`: namespace allowlist, maximum batch size, confirmation phrase;
 - `[monitoring]`: loop/targeted polling, pending/overall deadlines, ingestion grace,
   log-tail size and explicit verification byte/file limits;

@@ -77,9 +77,8 @@ class StatusParsingTests(unittest.TestCase):
         client = SimpleNamespace(run=lambda *_args, **_kwargs: CommandResult([], "", "Forbidden", 1))
         self.assertEqual(collect_exact_evidence({"timeout_seconds": 10, "max_bytes": 4096}, config, client)["state"], "forbidden")
 
-    def test_fleet_coverage_survives_bounded_exec_output(self) -> None:
+    def test_fleet_coverage_reads_mounted_pvc_without_access_pod(self) -> None:
         from cval.storage.status import get_coverage_report
-        from cval.storage.verification import _MEMORY_READER
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -97,19 +96,12 @@ class StatusParsingTests(unittest.TestCase):
             config = load_config()
             config = replace(config, runtime=replace(config.runtime, validation_root=str(root)),
                              storage=replace(config.storage, validation_db_path=str(database)))
-            output_sizes = []
-
-            def execute_reader(arguments, *, input_text, timeout, check):
-                response = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _MEMORY_READER],
-                                          input=input_text, timeout=timeout, check=check, text=True, capture_output=True)
-                output_sizes.append(len(response.stdout.encode()))
-                return CommandResult(arguments, response.stdout[:32768], response.stderr, response.returncode)
-
-            report = get_coverage_report(config, SimpleNamespace(run=execute_reader), nodes=nodes)
+            client = SimpleNamespace(run=Mock(side_effect=AssertionError("mounted PVC coverage must not exec into the reader pod")))
+            report = get_coverage_report(config, client, nodes=nodes)
             self.assertEqual(report["state"], "queried", report)
             self.assertEqual(report["timestamps"], {node: 123 for node in nodes})
             self.assertEqual(len(report["nodes"]), 500)
-            self.assertTrue(all(size < 32768 for size in output_sizes))
+            client.run.assert_not_called()
 
     def test_periodic_projection_keeps_completed_collection_during_next_refresh(self) -> None:
         from cval.config import encode_config_snapshot
@@ -472,18 +464,49 @@ class StatusParsingTests(unittest.TestCase):
 
         commands = [call[0] for call in client.calls]
         self.assertTrue(all("explicit-namespace" in command for command in commands))
-        self.assertEqual(
-            [command[-1] for command in commands],
-            [
-                "/explicit/status ?#%.db",
-                "/explicit/nccl ?#%.db",
-                "/explicit/storage ?#%.db",
-                "/explicit/nccl ?#%.db",
-            ],
-        )
+        expected_paths = [
+            "/explicit/status ?#%.db",
+            "/explicit/nccl ?#%.db",
+            "/explicit/storage ?#%.db",
+            "/explicit/nccl ?#%.db",
+        ]
+        for command, expected_path in zip(commands, expected_paths):
+            self.assertIn(expected_path, command)
         self.assertTrue(
             all("connect_sqlite_readonly" in (call[1] or "") for call in client.calls)
         )
+
+    def test_latest_status_reads_mounted_pvc_without_access_pod_exec(self) -> None:
+        from cval.models import LatestStatusRow
+        from cval.storage.status import get_latest_status_rows
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "validation.db"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE latest_status (node TEXT, test TEXT, latest_timestamp INTEGER, result TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO latest_status VALUES (?, ?, ?, ?)",
+                ("hgx-test", "storage", 123, "pass"),
+            )
+            connection.commit()
+            connection.close()
+            before = hashlib.sha256(database.read_bytes()).hexdigest()
+            config = load_config()
+            config = replace(
+                config,
+                runtime=replace(config.runtime, validation_root=str(root)),
+                storage=replace(config.storage, validation_db_path=str(database)),
+            )
+            client = Mock()
+
+            rows = get_latest_status_rows(client=client, config=config)
+
+            self.assertEqual(rows, [LatestStatusRow("hgx-test", "storage", 123, "pass")])
+            client.run.assert_not_called()
+            self.assertEqual(hashlib.sha256(database.read_bytes()).hexdigest(), before)
 
 
 if __name__ == "__main__":

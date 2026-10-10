@@ -154,8 +154,10 @@ has a separate confirmation gate and is not enabled by an ordinary timeout.
 Prerequisites include Python 3.11+, the configured Python dependencies, Bash,
 authenticated `kubectl`, Volcano, suitable GPU/RDMA capacity and the shared PVC.
 Continuous host operation also uses Git, tmux and file locks. PVC reporting needs
-the configured access pod and appropriate read/exec permissions. The workload
-image and test dependencies must be available independently of source delivery.
+the PVC mounted into the controller; host-side reporting uses the configured
+read-only access pod when the database path is not local. Exact-run acceptance
+still requires its bounded evidence reader. The workload image and test
+dependencies are independent of the controller source checkout.
 
 ## 5. Test Coverage and Runtime Configuration
 

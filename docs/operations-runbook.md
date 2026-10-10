@@ -161,7 +161,10 @@ bounded read-only cluster observation and republishes the local report pair. The
 loop owns its `--watch` mode, which uses the pinned 300-second TOML interval. Do not
 start a second refresher over a live writer or manually edit the reports to clear work.
 The refresher never creates, deletes or restarts a Kubernetes Job and never writes
-the raw databases. Admission continues to recheck actual eligibility before create.
+the raw databases. In the controller pod, coverage and latest-status reads use the
+same mounted PVC directly with read-only SQLite; host-side commands retain the
+configured PVC-reader fallback. Admission continues to recheck actual eligibility
+before create.
 
 To clean historical local data, first inventory exact paths and active users. Retain
 current sessions, unresolved attempts, approval/rollback evidence, open watcher

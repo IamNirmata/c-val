@@ -388,6 +388,13 @@ and coverage/recording observations. It collects outside the short admission
 lock, then publishes against the latest session intents. Durable intent updates
 also refresh the status projection from the cached observation.
 
+When the controller has the validation PVC mounted, successful-run coverage and
+latest-status reads use the configured SQLite files directly with read-only,
+query-only connections. Host-side commands without the mounted database retain
+the configured PVC-reader-pod fallback. Exact Job acceptance continues to use
+the dedicated bounded evidence reader; this optimization does not replace its
+canonical-file and exact-run checks.
+
 | Public output | What to read from it |
 | --- | --- |
 | Node-status CSV | One row per observed node: identity, coverage, attempt, recording, outcome, cooldown, availability and observation time |

@@ -11,6 +11,7 @@ import re
 import hashlib
 import csv
 import io
+import sqlite3
 import time
 import runpy
 from datetime import datetime, timezone
@@ -21,7 +22,7 @@ from zoneinfo import ZoneInfo
 from cval.config import load_config, load_config_snapshot
 from cval.k8s.client import KubectlClient
 from cval.models import LatestStatusRow
-from cval.storage.sqlite_uri import sqlite_readonly_script_prelude
+from cval.storage.sqlite_uri import connect_sqlite_file, sqlite_readonly_script_prelude
 
 
 NODE_STATUS_FIELDS = (
@@ -531,8 +532,6 @@ def read_local_coverage(request: dict) -> dict:
 
 
 def get_coverage_report(config=None, client=None, nodes: list[str] | None = None, *, include_recording: bool = False, attempts: dict[str, int] | None = None) -> dict:
-    from cval.storage.verification import collect_exact_evidence
-
     active = config or load_config()
     if nodes is not None and (len(set(nodes)) != len(nodes) or any(not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", node) for node in nodes)):
         raise ValueError("Coverage nodes must be unique exact node names")
@@ -545,6 +544,10 @@ def get_coverage_report(config=None, client=None, nodes: list[str] | None = None
         if attempts and any(not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", node) or type(timestamp) is not int or timestamp <= 0 for node, timestamp in attempts.items()):
             raise ValueError("Invalid tracked recording identity")
         request.update(include_recording=True, attempts=attempts or {})
+    if Path(active.storage.validation_db_path).is_file():
+        return read_local_coverage(request)
+    from cval.storage.verification import collect_exact_evidence
+
     return collect_exact_evidence(request, active, client or KubectlClient(config=active), operation="coverage")
 
 
@@ -612,7 +615,7 @@ def get_latest_status_rows(
     node: str | None = None,
     timestamp: int | None = None,
 ) -> list[LatestStatusRow]:
-    """Read latest status rows from the PVC access pod using SQLite read-only mode."""
+    """Read status locally from a mounted PVC or via the read-only access pod."""
 
     active_config = config or load_config()
     if (node is None) != (timestamp is None):
@@ -622,6 +625,25 @@ def get_latest_status_rows(
     pod = pod or active_config.cluster.pvc_access_pod
     namespace = namespace or active_config.cluster.namespace
     db_path = db_path or active_config.storage.validation_db_path
+    if Path(db_path).is_file():
+        connection = connect_sqlite_file(db_path, mode="ro", timeout=active_config.sqlite_retry.timeout_seconds)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.row_factory = sqlite3.Row
+            deadline = time.monotonic() + active_config.cluster.kubectl_timeout_seconds
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            if node:
+                rows = connection.execute(
+                    "SELECT node,test,timestamp AS latest_timestamp,result FROM runs WHERE node=? AND timestamp=? ORDER BY test",
+                    (node, timestamp),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT node,test,latest_timestamp,result FROM latest_status ORDER BY node,test"
+                ).fetchall()
+            return parse_latest_status_rows_json(json.dumps([dict(row) for row in rows]))
+        finally:
+            connection.close()
     kubectl = client or KubectlClient(config=active_config)
     status_pod = resolve_status_pod(kubectl, namespace, pod)
     code = f"CVAL_SQLITE_TIMEOUT = {active_config.sqlite_retry.timeout_seconds!r}\n" + sqlite_readonly_script_prelude() + r'''

@@ -107,7 +107,7 @@ per-test database, a message broker or another long-running service.
 | --- | --- | --- |
 | Designated control host | C1-C4; C8 rendering | Inspect, prepare and serialize approved submissions. |
 | Validation Job | C1 snapshot; C5-C6; C7 writers | Run tests and write only authorized evidence. |
-| Read-only client/PVC reader | C2; C7 readers | Inspect/export; never silently repair data. |
+| Controller with PVC / read-only PVC reader | C2; C7 readers | Read local mounted coverage or inspect/export; never silently repair data. |
 | Release or maintenance command | C8-C9 | Prepare artifacts offline; mutate only under separate approval. |
 
 C7 is shared library code used in different processes, not a new data service.
