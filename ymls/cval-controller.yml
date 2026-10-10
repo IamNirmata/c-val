@@ -48,6 +48,7 @@ spec:
         allowPrivilegeEscalation: false
         capabilities:
           drop: ["ALL"]
+          add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"]
       readinessProbe:
         exec:
           command: ["python", "-c", "import os; assert os.path.ismount('/data')"]
