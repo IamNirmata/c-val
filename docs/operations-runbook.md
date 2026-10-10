@@ -171,6 +171,27 @@ inactive directories. No automatic log pruning is enabled. Canonical PVC results
 raw databases and existing backups are outside this cleanup scope. A directory
 rename or configuration change is not permission to restart or repoint a controller.
 
+### Controller CPU Staging Pod
+
+The [controller pod manifest](../ymls/cval-controller.yml) creates an idle,
+CPU-only `cval-controller` pod in `gcr-admin`, mounting `pvc-vast-gcr-admin` at
+`/data`. Reserve eight CPU cores and 8 GiB memory. There is no CPU limit, so
+CPU quota throttling is avoided; node contention still applies. The 8 GiB memory
+limit can cause an OOM restart if exceeded. Ephemeral storage is limited to 8 GiB.
+
+Keep the reviewed Git clone under `/data/cval-controller/repo`. The existing
+validation data and secrets remain in their original PVC locations. Do not copy
+host credentials or linked Git worktrees. `restartPolicy: Always` restarts the
+container after exit; a standalone Pod is not recreated automatically after Pod
+deletion or node loss. PVC files survive container and replacement Pod restarts.
+
+This pod does not start the live loop. Before activation, stop the host loop,
+reconcile its outstanding Jobs, verify PVC locking and API permissions, and use
+supported session turnover for the new host/API identity and persistent paths.
+Do not edit the old journal's bound identity or run two controllers. Supply the
+existing PVC kubeconfig through `KUBECONFIG` only after verifying its exact path;
+never embed tokens in manifests, source, logs or command output.
+
 ### Exact Evidence and Release
 
 Ordinary active/resumed/targeted tracking shares one bounded Job/pod/log observer.

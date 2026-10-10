@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cval-controller
+  namespace: gcr-admin
+  labels:
+    app: cval-controller
+spec:
+  restartPolicy: Always
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 60
+  nodeSelector:
+    k8s.lambda.ai/node-type: cpu
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: controller
+      image: python:3.12@sha256:7ad6d21a25a94b2c00e685e82c2fd298de814353d9ee0e3f7f2cd4fca063df60
+      imagePullPolicy: IfNotPresent
+      workingDir: /data
+      command: ["python", "-u", "-c"]
+      args:
+        - |
+          import signal
+          import threading
+
+          stopping = threading.Event()
+          signal.signal(signal.SIGTERM, lambda *_arguments: stopping.set())
+          signal.signal(signal.SIGINT, lambda *_arguments: stopping.set())
+          print("Controller staging pod ready; live loop not started", flush=True)
+          stopping.wait()
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+      resources:
+        requests:
+          cpu: "8"
+          memory: 8Gi
+          ephemeral-storage: 2Gi
+        limits:
+          memory: 8Gi
+          ephemeral-storage: 8Gi
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      readinessProbe:
+        exec:
+          command: ["python", "-c", "import os; assert os.path.ismount('/data')"]
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        timeoutSeconds: 5
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: pvc-vast-gcr-admin
