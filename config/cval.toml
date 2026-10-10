@@ -45,14 +45,14 @@ verification_max_files = 5000
 
 [live]
 session_name = "cval-live"
-log_dir = "/home/v-srsreenath/hari/claw/c-val/.cval-state/cval-live"
-status_dir = "/home/v-srsreenath/hari/claw/c-val/run-logs"
+log_dir = "/data/continuous_validation/cval-controller/state"
+status_dir = "/data/continuous_validation/cval-controller/reports"
 status_refresh_seconds = 300
-runner_worktree = "/tmp/cval-live-worktree"
+runner_worktree = "/data/continuous_validation/cval-controller/runner"
 loop_sleep_seconds = 300
 plan_limit = "all"
 git_branch = "main"
-control_host = "GCRAZGDL1506"
+control_host = "cval-controller"
 cluster_server = "https://msr02.gw.lambda.ai"
 
 [maintenance]

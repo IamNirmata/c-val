@@ -21,20 +21,12 @@ spec:
       image: python:3.12@sha256:7ad6d21a25a94b2c00e685e82c2fd298de814353d9ee0e3f7f2cd4fca063df60
       imagePullPolicy: IfNotPresent
       workingDir: /data
-      command: ["python", "-u", "-c"]
-      args:
-        - |
-          import signal
-          import threading
-
-          stopping = threading.Event()
-          signal.signal(signal.SIGTERM, lambda *_arguments: stopping.set())
-          signal.signal(signal.SIGINT, lambda *_arguments: stopping.set())
-          print("Controller staging pod ready; live loop not started", flush=True)
-          stopping.wait()
+      command: ["/bin/bash", "/bootstrap/env.sh"]
       env:
         - name: PYTHONDONTWRITEBYTECODE
           value: "1"
+        - name: KUBECONFIG
+          value: /data/continuous_validation/secrets/config
         - name: GH_TOKEN
           valueFrom:
             secretKeyRef:
@@ -56,14 +48,21 @@ spec:
           add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"]
       readinessProbe:
         exec:
-          command: ["python", "-c", "import os; assert os.path.ismount('/data')"]
+          command: ["tmux", "has-session", "-t", "cval-live"]
         initialDelaySeconds: 5
         periodSeconds: 30
         timeoutSeconds: 5
       volumeMounts:
         - name: data
           mountPath: /data
+        - name: bootstrap
+          mountPath: /bootstrap
+          readOnly: true
   volumes:
     - name: data
       persistentVolumeClaim:
         claimName: pvc-vast-gcr-admin
+    - name: bootstrap
+      configMap:
+        name: cval-controller-env
+        defaultMode: 0444

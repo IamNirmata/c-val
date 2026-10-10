@@ -171,26 +171,48 @@ inactive directories. No automatic log pruning is enabled. Canonical PVC results
 raw databases and existing backups are outside this cleanup scope. A directory
 rename or configuration change is not permission to restart or repoint a controller.
 
-### Controller CPU Staging Pod
+### Controller Pod Bootstrap
 
-The [controller pod manifest](../ymls/cval-controller.yml) creates an idle,
+The [controller pod manifest](../ymls/cval-controller.yml) creates a restartable,
 CPU-only `cval-controller` pod in `gcr-admin`, mounting `pvc-vast-gcr-admin` at
 `/data`. Reserve eight CPU cores and 8 GiB memory. There is no CPU limit, so
 CPU quota throttling is avoided; node contention still applies. The 8 GiB memory
 limit can cause an OOM restart if exceeded. Ephemeral storage is limited to 8 GiB.
 
-Keep the reviewed Git clone under `/data/cval-controller/repo`. The existing
+Keep the reviewed Git clone under `/data/continuous_validation/c-val`. The existing
 validation data and secrets remain in their original PVC locations. Do not copy
 host credentials or linked Git worktrees. `restartPolicy: Always` restarts the
 container after exit; a standalone Pod is not recreated automatically after Pod
 deletion or node loss. PVC files survive container and replacement Pod restarts.
 
-This pod does not start the live loop. Before activation, stop the host loop,
-reconcile its outstanding Jobs, verify PVC locking and API permissions, and use
-supported session turnover for the new host/API identity and persistent paths.
-Do not edit the old journal's bound identity or run two controllers. Supply the
-existing PVC kubeconfig through `KUBECONFIG` only after verifying its exact path;
-never embed tokens in manifests, source, logs or command output.
+The [bootstrap](../scripts/env.sh) is mounted at `/bootstrap/env.sh` from
+ConfigMap `cval-controller-env`. It selects the existing PVC kubeconfig, requires
+the `GH_TOKEN` Secret reference, installs Git, gh, kubectl, tmux and util-linux,
+configures Git authentication and installs the c-val CLI. It clones a missing
+checkout or fetches and fast-forwards a clean, nondivergent checkout to official
+`main`; it never resets local development changes. Each container recreation
+reinstalls system dependencies, so package-network availability is required.
+
+Before activation, stop the host loop, reconcile its outstanding Jobs, preserve
+its journal and cooldowns, verify PVC locking and API permissions, and use
+supported session turnover. Main TOML controller paths now use
+`/data/continuous_validation/cval-controller/{state,reports,runner}` and hostname
+`cval-controller`. Do not edit the old journal's bound identity or run two
+controllers. No raw database or historical run migration is performed.
+
+`bash scripts/env.sh --check` checks prerequisites without installation, source
+updates or submission. Bootstrap requires a migrated current-session pointer,
+matching exact source and final TOMLs. A new remote commit requires reviewed
+source/ConfigMap/session turnover, not automatic reuse of an old snapshot.
+After checks pass it starts the existing `run-loop` in tmux session `cval-live`;
+attach with `tmux attach -t cval-live`. PID 1 waits for the tmux session and stops
+the controller on termination. An exited loop causes container failure rather
+than leaving a misleading idle shell. Kubernetes readiness checks the tmux
+session; it does not establish node coverage or accepted results.
+
+Never embed tokens in manifests, source, logs or command output. The script does
+not initialize an empty session, migrate host state, create source ConfigMaps,
+cancel Jobs or enable pruning at restart.
 
 ### Exact Evidence and Release
 

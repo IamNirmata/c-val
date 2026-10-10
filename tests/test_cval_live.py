@@ -13,9 +13,37 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/cval-live.sh"
+BOOTSTRAP = REPO_ROOT / "scripts/env.sh"
 ORIGIN_SHA = "a" * 40
 EXPLICIT_SHA = "b" * 40
 NODE = "slc01-cl02-hgx-0001"
+
+
+class ControllerBootstrapTests(unittest.TestCase):
+    def test_bootstrap_shell_syntax(self):
+        subprocess.run(["bash", "-n", str(BOOTSTRAP)], check=True)
+
+    def test_bootstrap_missing_prerequisites_never_starts(self):
+        environment = dict(os.environ)
+        environment.pop("GH_TOKEN", None)
+        result = subprocess.run(["bash", str(BOOTSTRAP), "--check"],
+                                env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue("kubeconfig" in result.stderr or "GH_TOKEN" in result.stderr)
+        self.assertNotIn("Controller started", result.stdout)
+
+    def test_manifest_uses_bootstrap_and_secret_reference(self):
+        import yaml
+
+        pod = yaml.safe_load((REPO_ROOT / "ymls/cval-controller.yml").read_text())
+        container = pod["spec"]["containers"][0]
+        self.assertEqual(container["command"], ["/bin/bash", "/bootstrap/env.sh"])
+        environment = {item["name"]: item for item in container["env"]}
+        self.assertEqual(environment["GH_TOKEN"]["valueFrom"]["secretKeyRef"],
+                         {"name": "cval-controller", "key": "github_pat"})
+        self.assertEqual(environment["KUBECONFIG"]["value"],
+                         "/data/continuous_validation/secrets/config")
+        self.assertEqual(pod["spec"]["restartPolicy"], "Always")
 
 
 FAKE_GIT = r'''#!/usr/bin/env bash
