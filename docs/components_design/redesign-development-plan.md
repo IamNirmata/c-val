@@ -377,11 +377,13 @@ setting, service, script, test file or runtime feature was needed.
   records current owners; unknown external usage means keep, not retire.
 - [x] **6.2 Leftovers.** Reviewed the replaced control, reservation and writer paths,
   dynamic helpers and nearby tests. Old private paths were already removed; no
-  further safe deletion was demonstrated. See the [candidate decisions](../cleanup-review.md#phase-6-closeout-review).
-- [x] **6.3 Documentation.** Reconciled the architecture, improvement table and all
-  nine component pages. Config, schema and runbook already match the relevant
-  current contracts. Repeated proposals became implementation/defer decisions;
-  historical records remain dated. Links, help and source-claim checks passed.
+  further safe deletion was demonstrated. Public compatibility interfaces with
+  unknown external callers remain retained, as recorded in the
+  [operator inventory](operator-interface-major-component.md#phase-0-compatibility-inventory).
+- [x] **6.3 Documentation.** Reconciled the architecture, README and component
+  pages. Config, schema and runbook match the relevant current contracts. Dated
+  progress, backlog and cleanup summaries have been retired; implemented phases
+  and deferred gates are recorded here. Links, help and source-claim checks passed.
 - [x] **6.4 Measurements.** Reproduced the baseline count method and separated source,
   config, tests, docs and archive size. Counts below do not claim a runtime speedup
   or credit earlier deletions twice.

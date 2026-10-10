@@ -115,8 +115,10 @@ writers' immutable-result authorization remain safety/data contracts.
 
 ## Phase 0 Compatibility Inventory
 
-This dated inventory predates the approved C2-C8 retirements in
-[the current cleanup review](../cleanup-review.md#c2-c9-source-cleanup).
+This Phase 0 inventory predates later source retirements summarized in the
+[development plan](redesign-development-plan.md#phase-6-final-cleanup-and-reconciliation).
+It is a baseline, not a current list of every supported interface; use the
+current inventory below and the CLI help for present behavior.
 
 Source/caller review at `b79a5e0`; not usage telemetry. Scope: tracked runtime,
 scripts, descriptors/templates, runbook and workspace operational collectors.

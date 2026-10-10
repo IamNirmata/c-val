@@ -99,7 +99,7 @@ rationale and label deferred proposals rather than repeating operating steps.
 | [Operator interface](components_design/operator-interface-major-component.md#mode-inventory) | Current modes, retained compatibility and output limits |
 | [Major components](components_design/major-components-overview.md) | Responsibility map, baseline measurements and component designs |
 | [Redesign contracts](components_design/Redesign.md) | Implemented design decisions, evidence contracts and deferred work |
-| [Cleanup review](cleanup-review.md) | Approved cleanup, recorded acceptance and remaining scope |
+| [Development plan](components_design/redesign-development-plan.md) | Completed source phases, implementation evidence and deferred gates |
 
 Code and effective configuration define behavior. Dated acceptance and rollout
 records describe the observed revision, not an assertion of present live state.
@@ -445,7 +445,9 @@ append primitive, process cleanup, write authorization, retries, locking and
 final completion publication. Existing core writer imports forward to test-owned
 implementations so historical callers remain supported. Backup, layout and SQLite journal tools belong to
 evidence recovery, not post-test analysis. See the
-[cleanup review](cleanup-review.md) for approval-only retirement candidates.
+[operator-interface inventory](components_design/operator-interface-major-component.md#phase-0-compatibility-inventory)
+for compatibility decisions and the [operations runbook](operations-runbook.md)
+for mutation and maintenance approval boundaries.
 
 ## Raw databases
 

@@ -234,11 +234,16 @@ Preserve historical databases and artifacts. They are not automatically migrated
 or pruned. SQLite audits use `mode=ro` and `query_only=ON`; unavailable,
 forbidden, stale, empty and incomplete evidence are distinct conditions.
 
-## Progress and Roadmap
+## Status and Proposals
 
-See [docs/cval-progress.md](docs/cval-progress.md) for progress, reliability
-context and next steps within raw validation. Downstream analysis and automatic
-remediation are outside this repository's scope.
+Current behavior and operating contracts are documented in the
+[architecture](docs/architecture.md), [technical overview](docs/cval-technical-overview.md)
+and [operations runbook](docs/operations-runbook.md). Release status is specific
+to a commit and session; dated acceptance records are not current deployment
+claims. Completed phases and deferred gates are recorded in the
+[development plan](docs/components_design/redesign-development-plan.md).
+Downstream analysis and automatic remediation are outside this repository's
+scope.
 
 ## Development
 
@@ -256,23 +261,21 @@ execution, artifacts and optional raw-export adapters. Start with
 
 ### Repository Maintenance
 
-The [cleanup review](docs/cleanup-review.md) separates obsolete prototypes and
-historical planning material from live dependencies, compatibility interfaces
-and recovery tools. Evaluator code, deployment assets and test-owned baseline/
-classification scripts have been removed. Existing PVC data and live resources
-are not deleted by a source change. Keep raw evidence, logs and rollback assets.
+The [operator interface inventory](docs/components_design/operator-interface-major-component.md#phase-0-compatibility-inventory)
+and [recovery component](docs/components_design/recovery-maintenance-major-component.md)
+document compatibility and retention boundaries. Existing PVC data and live
+resources are not deleted by a source change. Keep raw evidence, logs and rollback
+assets.
 
 ## Documentation
 
 | Topic | Document |
 | --- | --- |
 | Technical overview and research | [docs/cval-technical-overview.md](docs/cval-technical-overview.md) |
-| Progress and future work | [docs/cval-progress.md](docs/cval-progress.md) |
 | Framework architecture | [docs/architecture.md](docs/architecture.md) |
 | Major components and measured codebase | [docs/components_design/major-components-overview.md](docs/components_design/major-components-overview.md) |
 | Proposed architecture and redesign strategy | [docs/components_design/Redesign.md](docs/components_design/Redesign.md) |
 | Configuration reference | [docs/configuration.md](docs/configuration.md) |
 | Operations and backups | [docs/operations-runbook.md](docs/operations-runbook.md) |
 | Results, progress and ingestion contracts | [docs/result-schema.md](docs/result-schema.md) |
-| Cleanup candidates and retention decisions | [docs/cleanup-review.md](docs/cleanup-review.md) |
-| Prioritized framework improvements | [docs/cval-improvement-plan.md](docs/cval-improvement-plan.md) |
+| Completed phases and deferred work | [docs/components_design/redesign-development-plan.md](docs/components_design/redesign-development-plan.md) |

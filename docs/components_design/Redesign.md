@@ -416,7 +416,7 @@ authorized by this policy; use the exact approval and rollback gates each time.
 | Individual component pages | Source ownership, baseline counts, implementation evidence and deferred work. |
 | [Current architecture](../architecture.md) | Implemented runtime, not future promises. |
 | [Configuration](../configuration.md), [runbook](../operations-runbook.md), [result schema](../result-schema.md) | Current settings, operating commands and data formats. |
-| [Cleanup review](../cleanup-review.md) | Dated accepted work and preserved historical evidence. |
+| [Development plan](redesign-development-plan.md) | Completed phases, implementation evidence and deferred gates. |
 
 Carry useful current contracts into replacement pages before deleting superseded
 notes. Repair all incoming links. Keep historical observations explicitly dated;

@@ -301,8 +301,10 @@ Sources: [status projection](../cval/storage/status.py),
 
 Keep forbidden, unavailable, empty, stale and incomplete evidence distinct.
 Busy nodes can remain untested; single-node short-duration tests do not qualify
-every multi-node workload. See [progress](cval-progress.md) for dated verification
-and the [improvement plan](cval-improvement-plan.md) for raw-framework proposals.
+every multi-node workload. Operational procedures live in the
+[runbook](operations-runbook.md); completed implementation phases and deferred
+source work are recorded in the
+[development plan](components_design/redesign-development-plan.md).
 
 Coverage has an explicit legacy age-only path and does not establish full
 cross-environment compatibility. Discovery is based on Kubernetes requests, not
