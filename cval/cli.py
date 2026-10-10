@@ -192,7 +192,7 @@ def build_parser(config: CvalConfig | None = None) -> argparse.ArgumentParser:
 
     status = subparsers.add_parser(
         "status",
-        help="Read latest validation status from the PVC access pod",
+        help="Read latest status from the mounted PVC or configured access-pod fallback",
     )
     status.add_argument("--output", choices=["table", "json"], default="table")
     status.add_argument("--coverage", action="store_true", help="Read successful-run scheduling coverage and provenance limits")
@@ -785,7 +785,7 @@ def _add_plan_inputs(parser: argparse.ArgumentParser, config: CvalConfig) -> Non
     parser.add_argument(
         "--live-status",
         action="store_true",
-        help="Read latest status from the PVC access pod in read-only mode",
+        help="Read latest status from the mounted PVC or configured access-pod fallback in read-only mode",
     )
     parser.add_argument("--git-ref", default=config.job.git_ref)
 
