@@ -35,6 +35,11 @@ spec:
       env:
         - name: PYTHONDONTWRITEBYTECODE
           value: "1"
+        - name: GH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: cval-controller
+              key: github_pat
       resources:
         requests:
           cpu: "8"
