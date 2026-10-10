@@ -302,6 +302,12 @@ delete partial raw rows, or use a generic transaction abstraction across stores.
 
 ## Phase 5: Harden Delivery
 
+**Current transport update (2026-10-10):** The ConfigMap source transport described
+in this historical phase is retired for new Jobs. The controller maintains the
+shared PVC checkout, and each Job extracts its exact pinned commit from that Git
+object database. The phase checklist below records its original implementation
+and acceptance gates; do not create new source ConfigMaps.
+
 **What it does:** Trim the source bundle without breaking the existing delivery path.
 **Changes:** One archive-selection exclusion with measured savings;
 reuse the current source renderer, bootstrap, release checks and recovery tools.
@@ -440,10 +446,11 @@ content/link checks and publication, not GPU jobs.
 1. Review only task changes; use focused checks and publish an isolated exact
   commit. After all source phases, runtime acceptance uses the final combined
   exact commit on real nodes, not an earlier phase's source or historical results.
-2. Render the exact source ConfigMap offline; verify archive identity/hash and
-   source/config/manifest references against trusted expectations. Retain previous artifacts.
-3. Obtain exact create/rollback approval; create and read back the immutable source
-   object. Creation is not activation or permission to update an active session.
+2. Fast-forward the shared PVC Git checkout to the published exact commit and
+  verify the clean checkout contains that commit. Preserve prior checkout state.
+  Jobs extract their pinned commit from the PVC into private workspaces.
+3. Reconcile the existing session and submitted Jobs before session turnover.
+  Do not rewrite old identities or activate a second controller.
 4. Obtain validation approval; recheck one fully free Ready node, required resources,
    exact source and known workload state immediately before submission.
 5. Require terminal Job phase, canonical results, passing required tests, exact-run

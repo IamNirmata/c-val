@@ -22,6 +22,7 @@ image_name = "pytorch:26.05-py3"
 git_repo = "https://github.com/msr-central/c-val.git"
 # Fail closed. Supply an exact published 40-hex commit to cluster validation.
 git_ref = "0000000000000000000000000000000000000000"
+# Retained empty for historical snapshot decoding; new Jobs read commits from the PVC checkout.
 source_configmap = ""
 source_sha256 = ""
 

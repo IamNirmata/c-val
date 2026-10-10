@@ -1,34 +1,31 @@
 set -euo pipefail
-if [[ -n "${CVAL_SOURCE_SHA256:-}" ]]; then
-  python3 - <<'PY'
-import hashlib
-import io
-import os
-from pathlib import Path
-import re
-import tarfile
-
-revision = os.environ["CVAL_GIT_REF"]
-expected = os.environ["CVAL_SOURCE_SHA256"]
-if not re.fullmatch(r"[0-9a-f]{40}", revision) or revision == "0" * 40 or not re.fullmatch(r"[0-9a-f]{64}", expected):
-    raise ValueError("exact source revision and SHA-256 required")
-payload = Path("/cval-source/source.tar.gz").read_bytes()
-if hashlib.sha256(payload).hexdigest() != expected:
-    raise ValueError("offline source SHA-256 mismatch")
-with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
-    if archive.pax_headers.get("comment") != revision:
-        raise ValueError("offline archive commit mismatch")
-    destination = Path(os.environ["CVAL_REPO_DIR"])
-    destination.mkdir(parents=True, exist_ok=False)
-    archive.extractall(destination, filter="data")
-PY
-else
-  git init "$CVAL_REPO_DIR"
-  git -C "$CVAL_REPO_DIR" remote add origin "$CVAL_GIT_REPO"
-  git -C "$CVAL_REPO_DIR" fetch --depth=1 origin "$CVAL_GIT_REF"
-  git -C "$CVAL_REPO_DIR" checkout --detach FETCH_HEAD
-  test "$(git -C "$CVAL_REPO_DIR" rev-parse HEAD)" = "$CVAL_GIT_REF"
+revision="${CVAL_GIT_REF:?}"
+source_checkout="${CVAL_SOURCE_CHECKOUT:-/data/continuous_validation/c-val}"
+destination="${CVAL_REPO_DIR:?}"
+if [[ ! "$revision" =~ ^[0-9a-f]{40}$ || "$revision" == 0000000000000000000000000000000000000000 ]]; then
+  echo "An exact nonzero Git commit is required" >&2
+  exit 2
 fi
+if [[ "$destination" != /* || "$destination" == / || -e "$destination" || -L "$destination" ]]; then
+  echo "Repository destination must be a new absolute path" >&2
+  exit 2
+fi
+resolved_revision="$(git -C "$source_checkout" rev-parse --verify "${revision}^{commit}")"
+if [[ "$resolved_revision" != "$revision" ]]; then
+  echo "PVC checkout does not contain the exact requested commit" >&2
+  exit 2
+fi
+destination_parent="$(dirname -- "$destination")"
+if [[ ! -d "$destination_parent" ]]; then
+  echo "Repository workspace parent is missing" >&2
+  exit 2
+fi
+staging="$(mktemp -d "${destination_parent}/.cval-source.XXXXXXXX")"
+trap '[[ -z "${staging:-}" ]] || rm -rf -- "$staging"' EXIT
+git -C "$source_checkout" archive --format=tar "$revision" | tar -xf - -C "$staging"
+mv -- "$staging" "$destination"
+staging=""
+trap - EXIT
 cd "$CVAL_REPO_DIR"
 printf '%s' "$CVAL_RUNTIME_ENV_B64" | base64 -d > /tmp/cval-runtime.env
 source /tmp/cval-runtime.env

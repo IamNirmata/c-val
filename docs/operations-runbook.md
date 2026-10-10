@@ -185,8 +185,8 @@ host credentials or linked Git worktrees. `restartPolicy: Always` restarts the
 container after exit; a standalone Pod is not recreated automatically after Pod
 deletion or node loss. PVC files survive container and replacement Pod restarts.
 
-The [bootstrap](../scripts/env.sh) is mounted at `/bootstrap/env.sh` from
-ConfigMap `cval-controller-env`. It selects the existing PVC kubeconfig, requires
+The [bootstrap](../scripts/env.sh) lives in the persistent Git checkout. It selects
+the existing PVC kubeconfig, requires
 the `GH_TOKEN` Secret reference, installs Git, gh, kubectl, tmux and util-linux,
 configures Git authentication and installs the c-val CLI. It clones a missing
 checkout or fetches and fast-forwards a clean, nondivergent checkout to official
@@ -203,7 +203,7 @@ controllers. No raw database or historical run migration is performed.
 `bash scripts/env.sh --check` checks prerequisites without installation, source
 updates or submission. Bootstrap requires a migrated current-session pointer,
 matching exact source and final TOMLs. A new remote commit requires reviewed
-source/ConfigMap/session turnover, not automatic reuse of an old snapshot.
+PVC-checkout/session turnover, not automatic reuse of an old snapshot.
 After checks pass it starts the existing `run-loop` in tmux session `cval-live`;
 attach with `tmux attach -t cval-live`. PID 1 waits for the tmux session and stops
 the controller on termination. An exited loop causes container failure rather
@@ -327,30 +327,23 @@ canonical logs, summaries, JSON and raw databases remain on the PVC. Existing
 downloaded archives are not deleted. Older retained runbooks describe their
 pinned revisions; do not replay their removed flags against the new CLI.
 
-The configured source is the internal `msr-central/c-val` repository. Jobs without
-repository credentials can use an approved immutable source ConfigMap rendered
-from the published commit by [scripts/cval-source.py](../scripts/cval-source.py):
+The controller maintains the source checkout at
+`/data/continuous_validation/c-val`. Before starting a new session, fast-forward
+that clean checkout to the exact published commit. Each validation Job verifies
+that its requested `CVAL_GIT_REF` exists in the PVC Git object database, then
+extracts `git archive` for that commit into a private workspace before launching
+the descriptor-anchored supervisor. Jobs need no GitHub credential or source
+ConfigMap. Keep the shared checkout's Git objects available while Jobs may need
+their pinned commits. The legacy `job.source_configmap` and `job.source_sha256`
+snapshot fields remain blank for compatibility; new sessions must not bind source
+ConfigMaps. Existing immutable ConfigMaps remain for already-created Jobs and are
+not deleted by this source-transport change.
 
-```bash
-python3 scripts/cval-source.py --revision "${CVAL_GIT_REF:?Set an exact published commit}" --namespace gcr-admin --output-dir "${CVAL_SOURCE_DIR:?Set a new local output directory}"
-```
-
-The tool writes only `source-configmap.yaml`, named `cval-source-<commit-prefix>`,
-and reports its archive hash. It needs no dependency wheel or separate service
-manifest. This is local preparation, not a cluster mutation. In the
-operator's effective `[job]` configuration, set `source_configmap` to that
-ConfigMap name and `source_sha256` to the SHA-256 of its `source.tar.gz` bytes.
-Both fields must be supplied together with the exact commit. The runtime checks
-the archive hash and Git archive commit header before extracting into a fresh
-checkout directory. It then runs the same descriptor-anchored supervisor.
-Publishing the ConfigMap and submitting the Job remain separate gated operations.
-Do not put personal Git credentials in a ConfigMap, Pod environment, or manifest.
-
-Phase 5 excludes only the repository's top-level test suite from the source archive;
-tests stay in Git. Runtime code, full workload directories, scripts, descriptors,
-templates and bootstrap remain. Isolated local import/render checks passed; actual
-container startup and ingestion remain deferred until all phases are implemented.
-See [packaging verification](components_design/source-delivery-major-component.md#phase-5-packaging).
+The previous source-ConfigMap packaging flow excluded the repository's top-level
+test suite. Current PVC `git archive` extraction follows the requested commit's
+tracked tree and does not create or mount a source bundle. Runtime code, workload
+directories, scripts, descriptors and templates remain available. See the
+[historical packaging record](components_design/source-delivery-major-component.md#phase-5-packaging).
 
 ### Standalone Runner Evidence
 
@@ -528,8 +521,8 @@ Do not change the main loop's configured node-specific template.
 
 Review the rendered namespace, queue, resources, mounts, source identity and lack
 of node pinning. Require an unused Job name/timestamp and a responsive evidence
-reader. If using a source ConfigMap, its creation and hash/embedded-commit
-verification are separate prerequisites; rendering does not create it.
+reader. Confirm the exact source commit exists in the PVC checkout; rendering does
+not fetch or mutate source.
 
 Inspect the existing loop and active Jobs before proposing live operations.
 Record the literal manifest path, Job name, namespace and exact commit in a
@@ -604,8 +597,8 @@ replaces `runtime-bootstrap-placeholder` with the packaged
 The generated YAML is self-contained; the raw template is not directly deployable.
 Use the [quick test preparation](#quick-test-workflow) to set the exact published
 commit, reviewed config, fresh timestamp and local evidence directory. Configure
-`job.source_configmap` and `job.source_sha256` when using the internal repository
-without in-pod credentials. This step only writes local files for review:
+the PVC checkout to contain that commit before rendering. This step only writes
+local files for review:
 
 ```bash
 python3 - <<'PY'
@@ -643,8 +636,6 @@ identity = {
 	"namespace": config.cluster.namespace,
 	"timestamp": job.timestamp,
 	"git_ref": job.git_ref,
-	"source_configmap": config.job.source_configmap,
-	"source_sha256": config.job.source_sha256,
 	"submitted": False,
 }
 with (directory / "job.yaml").open("x", encoding="utf-8") as handle:

@@ -35,9 +35,11 @@ Python dataclasses and shell launchers no longer supply setting defaults. Start 
 alternate configuration from the complete checked-in TOML, not a partial override.
 
 An absent optional plugin means no plugin, not a default adapter. A declared plugin
-must explicitly list `support_files` (use `[]` when empty). Blank source ConfigMap/hash
-values explicitly select Git transport; blank NCCL device-range endpoints explicitly
-select all detected ports. Omission is not equivalent to either choice.
+must explicitly list `support_files` (use `[]` when empty). The legacy
+`job.source_configmap` and `job.source_sha256` fields remain blank for historical
+snapshot compatibility; new Jobs read the exact commit from the shared PVC Git
+checkout. Blank NCCL device-range endpoints explicitly select all detected ports.
+Omission is not equivalent to either choice.
 
 The main-file location, schema/format names, canonical derived paths, safety limits
 and arithmetic remain program rules. Assigned node, timestamp and observed software

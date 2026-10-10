@@ -62,10 +62,11 @@ revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).stri
 pinned = load_config_snapshot(state['config_snapshot_b64'], repo_root=Path.cwd())
 if state['git_ref'] != revision or pinned.job.git_ref != revision:
     raise SystemExit('Latest checkout requires reviewed session/source turnover before activation')
+if pinned.job.source_configmap or pinned.job.source_sha256:
+    raise SystemExit('Session uses retired source ConfigMap transport; initialize a PVC-source session')
 if state['admission_scope'] != admission_scope(config):
     raise SystemExit('Session admission identity differs from controller configuration')
-bound = replace(config, job=replace(config.job, git_ref=pinned.job.git_ref,
-                source_configmap=pinned.job.source_configmap, source_sha256=pinned.job.source_sha256))
+bound = replace(config, job=replace(config.job, git_ref=pinned.job.git_ref))
 if effective_config_digest(bound) != effective_config_digest(pinned):
     raise SystemExit('Session settings differ from final TOMLs; reviewed turnover required')
 for key, value in {'CVAL_SESSION_DIR': str(session), 'CVAL_GIT_REF': revision,

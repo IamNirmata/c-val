@@ -50,7 +50,7 @@ without building fake-cluster or synthetic-test infrastructure.
 | C5 | [Validation runtime](validation-runtime-major-component.md) | Reserve evidence safely and supervise registry-driven execution. | [Supervisor](../../cval/validation/supervisor.py) |
 | C6 | [Test workloads](test-workloads-major-component.md) | Own storage, NCCL and DL execution, settings and measurements. | [Test descriptors](../../config/cval.toml) |
 | C7 | [Raw evidence](raw-evidence-major-component.md) | Authorize test-owned writes; read history and report exact-run evidence completeness. | [Ingestion](../../cval/storage/run_ingest.py) |
-| C8 | [Source delivery](source-delivery-major-component.md) | Build verified, exact-commit source and self-contained Job startup. | [Source renderer](../../scripts/cval-source.py) |
+| C8 | [Source delivery](source-delivery-major-component.md) | Extract a verified exact commit from the shared PVC checkout into an isolated Job workspace. | [Shared bootstrap](../../cval/jobs/bootstrap.sh) |
 | C9 | [Recovery and maintenance](recovery-maintenance-major-component.md) | Inspect, back up and restore evidence under separate approval. | [Backup](../../scripts/cval-backup.py) |
 
 ## Phase 0 Ownership Contract
@@ -142,7 +142,7 @@ the component table above therefore remains the valid source-size baseline.
 
 | Measure | Baseline | Evidence / Limit |
 | --- | --- | --- |
-| Source bundle | 276,294 compressed bytes | Exact `git archive` paths from the checked-in source renderer; matches its retained immutable manifest. |
+| Historical source bundle | 276,294 compressed bytes | Measured for the retired ConfigMap transport; current Jobs archive the exact commit from the shared PVC checkout. |
 | Bundle SHA-256 | `183165e8876d174d39b15d1385591d5d352ccbfebdfd8bc4ed21336e6050c5ae` | Embedded Git identity matches the full baseline SHA. |
 | Live-loop CLI call sites | 11 | Static source sites across five commands; not calls per executed cycle. |
 | Executed subprocess/API counts | Unavailable | No instrumented real cycle at this exact revision; no synthetic substitute. |

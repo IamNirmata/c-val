@@ -54,7 +54,7 @@ services. It is not comprehensive hardware certification or a workload diagnosis
 | Effective-config inspection | Print the resolved settings and inspect each registered test without running a GPU workload |
 | Frozen transport | A deterministic snapshot carries the reviewed inputs into sessions and pods; packaged descriptors must still match |
 | Explicit source identity | Submissions require a nonzero, lowercase 40-hex commit, not a moving branch name |
-| Two source transports | Load a checksum-verified immutable ConfigMap archive or fetch/check out the exact Git commit |
+| PVC-pinned Job source | Extract the exact requested Git commit from the shared PVC checkout into a private Job workspace |
 | Shared bootstrap | Both placement templates use the same embedded, validated startup payload |
 | Experiment identity | Results retain node, run ID, timestamp, source, image label, reported PyTorch/CUDA versions and config/test checksums |
 
@@ -323,7 +323,7 @@ to apply a plan, and a previously approved test does not authorize maintenance.
 
 | Tool / capability | Inspection or preparation | Mutating operation and boundary |
 | --- | --- | --- |
-| [Source packaging](../scripts/cval-source.py) | Render one exact-commit immutable source ConfigMap manifest locally | Creating it and activating a session are separate approved operations; old objects are preserved |
+| [Job source bootstrap](../cval/jobs/bootstrap.sh) | Extract an exact commit from the shared PVC Git checkout | Commit must already exist in the checkout; old ConfigMaps remain for historical Jobs |
 | [Whole-root backup](../scripts/cval-backup.py) | Inventory source, check destination capacity and verify an existing manifest-backed backup | Apply requires explicit backup and writers-stopped confirmations, sufficient capacity and coherent source evidence |
 | [PVC layout](../scripts/cval-pvc-layout.py) | Bounded inventory, receipt references, archive/consolidation plans | Apply/rollback require exact plan or transaction identity and idle-source confirmation; consolidation checks backup evidence |
 | [SQLite journal maintenance](../scripts/cval-sqlite-journal.py) | Inspect four DL journal modes and probe backup-read suitability | Approved migration to DELETE journaling uses backup and quiescence gates; it is not an automatic runtime migration |

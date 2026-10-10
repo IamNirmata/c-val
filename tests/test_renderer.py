@@ -2,16 +2,12 @@ from __future__ import annotations
 
 import unittest
 import base64
-import hashlib
-import importlib.util
-import io
 import json
 import os
 import re
 import select
 import subprocess
 import sys
-import tarfile
 import textwrap
 from dataclasses import replace
 from pathlib import Path
@@ -61,27 +57,19 @@ class RendererTests(unittest.TestCase):
                     cval_config=replace(config, job_template=replace(config.job_template, failure_events=rejected)),
                 )
 
-    def test_shared_bootstrap_is_embedded_in_both_source_transports(self) -> None:
-        base = load_config()
-        for offline in (False, True):
-            config = replace(
-                base,
-                job=replace(
-                    base.job,
-                    source_configmap="cval-exact-source" if offline else "",
-                    source_sha256="b" * 64 if offline else "",
-                ),
-            )
-            for template, node in ((TEMPLATE, "node-a"), (SCHEDULER_TEMPLATE, None)):
-                with self.subTest(offline=offline, node=node):
-                    rendered = render_validation_job(
-                        template, node, timestamp=12345, git_ref=COMMIT, cval_config=config
-                    )
-                    pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
-                    self.assertEqual(pod["containers"][0]["args"], [_RUNTIME_BOOTSTRAP])
-                    self.assertEqual(pod["containers"][0]["ports"][0]["protocol"], "TCP")
-                    self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
-                    subprocess.run(["bash", "-n"], input=_RUNTIME_BOOTSTRAP, text=True, check=True)
+    def test_shared_bootstrap_uses_pvc_git_source_without_configmap(self) -> None:
+        config = load_config()
+        for template, node in ((TEMPLATE, "node-a"), (SCHEDULER_TEMPLATE, None)):
+            with self.subTest(node=node):
+                rendered = render_validation_job(
+                    template, node, timestamp=12345, git_ref=COMMIT, cval_config=config
+                )
+                pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
+                self.assertEqual(pod["containers"][0]["args"], [_RUNTIME_BOOTSTRAP])
+                self.assertEqual(pod["containers"][0]["ports"][0]["protocol"], "TCP")
+                self.assertFalse(any("configMap" in volume for volume in pod["volumes"]))
+                self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
+                subprocess.run(["bash", "-n"], input=_RUNTIME_BOOTSTRAP, text=True, check=True)
 
     def test_shared_bootstrap_rejects_mixed_misplaced_or_duplicate_markers(self) -> None:
         marker = "runtime-bootstrap-placeholder"
@@ -130,7 +118,6 @@ class RendererTests(unittest.TestCase):
 
     def test_scheduler_selected_template_uses_assigned_node_and_standard_runner(self) -> None:
         config = load_config()
-        config = replace(config, job=replace(config.job, source_configmap="cval-exact-source", source_sha256="b" * 64))
         rendered = render_validation_job(SCHEDULER_TEMPLATE, None, timestamp=12345, git_ref=COMMIT, cval_config=config)
         manifest = yaml.safe_load(rendered.yaml_text)
         pod = manifest["spec"]["tasks"][0]["template"]["spec"]
@@ -144,7 +131,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(environment["GCRNODE"]["valueFrom"]["fieldRef"]["fieldPath"], "spec.nodeName")
         self.assertEqual(environment["CVAL_RUN_ID"]["value"], "$(GCRNODE)-12345")
         self.assertEqual(environment["CVAL_GIT_REF"]["value"], COMMIT)
-        self.assertEqual(pod["volumes"][-1]["configMap"]["name"], "cval-exact-source")
+        self.assertFalse(any("configMap" in volume for volume in pod["volumes"]))
         pinned = yaml.safe_load(render_validation_job(TEMPLATE, "node-a", timestamp=12345, git_ref=COMMIT, cval_config=config).yaml_text)["spec"]["tasks"][0]["template"]["spec"]["containers"][0]
         self.assertEqual(container["resources"], pinned["resources"])
         self.assertEqual(environment["CVAL_RUNTIME_ENV_B64"]["value"], next(entry["value"] for entry in pinned["env"] if entry["name"] == "CVAL_RUNTIME_ENV_B64"))
@@ -164,41 +151,11 @@ class RendererTests(unittest.TestCase):
             with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, "Scheduler-selected test"):
                 render_validation_job(SCHEDULER_TEMPLATE.replace(original, replacement), None, git_ref=COMMIT)
 
-    def test_offline_source_requires_complete_exact_identity(self) -> None:
+    def test_source_configmap_transport_is_rejected(self) -> None:
         config = load_config()
-        for source_name, source_digest, revision in (("", "b" * 64, COMMIT), ("source", "", COMMIT), ("source", "b" * 64, "main"), ("invalid/name", "b" * 64, COMMIT)):
-            with self.subTest(source=source_name, revision=revision), self.assertRaisesRegex(ValueError, "offline source requires"):
-                render_validation_job(TEMPLATE, "node-a", git_ref=revision, cval_config=replace(config, job=replace(config.job, source_configmap=source_name, source_sha256=source_digest)))
-
-    def test_offline_bootstrap_verifies_digest_and_archive_commit(self) -> None:
-        config = load_config()
-        config = replace(config, job=replace(config.job, source_configmap="cval-exact-source", source_sha256="b" * 64))
-        rendered = render_validation_job(TEMPLATE, "node-a", git_ref=COMMIT, cval_config=config)
-        pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
-        container = pod["containers"][0]
-        self.assertEqual(pod["volumes"][-1]["configMap"]["name"], "cval-exact-source")
-        self.assertTrue(container["volumeMounts"][-1]["readOnly"])
-        script = container["args"][0].split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            payload = io.BytesIO()
-            with tarfile.open(fileobj=payload, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": COMMIT}) as archive:
-                entry = tarfile.TarInfo("marker.txt")
-                entry.size = 5
-                archive.addfile(entry, io.BytesIO(b"exact"))
-            source = root / "source.tar.gz"
-            source.write_bytes(payload.getvalue())
-            digest = hashlib.sha256(payload.getvalue()).hexdigest()
-            script = script.replace('Path("/cval-source/source.tar.gz")', f"Path({str(source)!r})")
-            for condition, revision, checksum in (("valid", COMMIT, digest), ("wrong-commit", "c" * 40, digest), ("wrong-digest", COMMIT, "0" * 64)):
-                with self.subTest(condition=condition):
-                    destination = root / condition
-                    result = subprocess.run([sys.executable, "-c", script], env=os.environ | {"CVAL_GIT_REF": revision, "CVAL_SOURCE_SHA256": checksum, "CVAL_REPO_DIR": str(destination)}, capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode == 0, condition == "valid", result.stderr)
-                    if condition == "valid":
-                        self.assertEqual((destination / "marker.txt").read_bytes(), b"exact")
-                    else:
-                        self.assertFalse(destination.exists())
+        for source_name, source_digest in (("source", "b" * 64), ("", "b" * 64), ("source", "")):
+            with self.subTest(source=source_name), self.assertRaisesRegex(ValueError, "Source ConfigMaps are retired"):
+                render_validation_job(TEMPLATE, "node-a", git_ref=COMMIT, cval_config=replace(config, job=replace(config.job, source_configmap=source_name, source_sha256=source_digest)))
 
     def test_renders_specific_node_job(self) -> None:
         rendered = render_validation_job(
@@ -219,8 +176,8 @@ class RendererTests(unittest.TestCase):
         self.assertIn('kubernetes.io/hostname: "slc01-cl02-hgx-0001"', rendered.yaml_text)
         self.assertIn('value: "12345"', rendered.yaml_text)
         self.assertIn(f'value: "{COMMIT}"', rendered.yaml_text)
-        self.assertIn('git -C "$CVAL_REPO_DIR" checkout --detach FETCH_HEAD', rendered.yaml_text)
-        self.assertIn('test "$(git -C "$CVAL_REPO_DIR" rev-parse HEAD)" = "$CVAL_GIT_REF"', rendered.yaml_text)
+        self.assertIn('git -C "$source_checkout" archive --format=tar "$revision"', rendered.yaml_text)
+        self.assertIn('resolved_revision="$(git -C "$source_checkout" rev-parse --verify', rendered.yaml_text)
         self.assertNotRegex(rendered.yaml_text, r"[a-z0-9-]+-placeholder")
 
     def test_rejects_volcano_pod_name_overflow(self) -> None:
@@ -430,6 +387,7 @@ class RendererTests(unittest.TestCase):
 
     def test_repository_template_renders_configured_runtime_env(self) -> None:
         config = load_config()
+        config = replace(config, job=replace(config.job, git_ref=COMMIT))
         rendered = render_validation_job_from_file(
             default_template_path(),
             "slc01-cl02-hgx-0001",
@@ -635,145 +593,56 @@ class PvcAccessDeploymentTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, error)
 
 
-class SourceConfigMapTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        path = Path(__file__).resolve().parents[1] / "scripts/cval-source.py"
-        spec = importlib.util.spec_from_file_location("cval_source", path)
-        cls.source = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.source)
-
-    def test_committed_runtime_bundle_is_self_contained(self) -> None:
-        repo = self.source.REPO
-        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
-                                  capture_output=True, text=True, timeout=15).stdout.strip()
-        archives = {}
-        bundles = {}
-        for label, paths in (("runtime", self.source.SOURCE_PATHS),
-                             ("with_tests", (*self.source.SOURCE_PATHS, "tests"))):
-            bundles[label] = subprocess.run(
-                ["git", "archive", "--format=tar.gz", revision, *paths], cwd=repo,
-                check=True, capture_output=True, timeout=30,
-            ).stdout
-            with tarfile.open(fileobj=io.BytesIO(bundles[label]), mode="r:gz") as archive:
-                self.assertEqual(archive.pax_headers["comment"], revision)
-                archives[label] = {item.name: archive.extractfile(item).read()
-                                   for item in archive.getmembers() if item.isfile()}
-        removed = set(archives["with_tests"]) - set(archives["runtime"])
-        self.assertTrue(removed)
-        self.assertTrue(all(name.startswith("tests/") for name in removed))
-        self.assertFalse(any(name.startswith("tests/") for name in archives["runtime"]))
-        self.assertTrue(all(content == archives["with_tests"][name]
-                            for name, content in archives["runtime"].items()))
-        self.assertLess(len(bundles["runtime"]), len(bundles["with_tests"]))
-        manifest = self.source.source_manifest(revision, bundles["runtime"], "gcr-admin")
-        self.assertTrue(manifest["immutable"])
-        self.assertEqual(base64.b64decode(manifest["binaryData"]["source.tar.gz"]), bundles["runtime"])
-        with self.assertRaisesRegex(ValueError, "exact nonzero"):
-            self.source.source_manifest("main", bundles["runtime"], "gcr-admin")
-        check = textwrap.dedent("""
-            import importlib, json, runpy, subprocess, sys
-            from dataclasses import replace
-            from pathlib import Path
-            root = Path(sys.argv[1])
-            sys.path.insert(0, str(root))
-            from cval.config import load_config, encode_config_snapshot, load_config_snapshot
-            from cval.cli import build_parser
-            from cval.jobs.renderer import render_validation_job_from_file, _RUNTIME_BOOTSTRAP
-            import yaml
-            config = load_config(root / 'config/cval.toml')
-            build_parser(config)
-            for path in (root / 'cval').rglob('*.py'):
-                relative = path.relative_to(root).with_suffix('')
-                parts = relative.parts[:-1] if path.name == '__init__.py' else relative.parts
-                module = importlib.import_module('.'.join(parts))
-                assert Path(module.__file__).is_relative_to(root)
-            for helper in ('dl-metric-lock.py', 'cval-node-cooldown.py'):
-                runpy.run_path(str(root / 'scripts' / helper), run_name='bundle_check')
-            assert not (root / 'tests').exists()
-            count = 0
-            for offline in (False, True):
-                selected = replace(config, job=replace(config.job, git_ref=sys.argv[2],
-                    source_configmap=sys.argv[3] if offline else '', source_sha256=sys.argv[4] if offline else ''))
-                for template, node in (('specific-node-job.yml', 'slc01-cl02-hgx-0359'), ('test-job.yml', None)):
-                    rendered = render_validation_job_from_file(root / 'ymls' / template,
-                        node_name=node, timestamp=1790277187, git_ref=sys.argv[2], cval_config=selected)
-                    pod = yaml.safe_load(rendered.yaml_text)['spec']['tasks'][0]['template']['spec']
-                    assert pod['containers'][0]['args'] == [_RUNTIME_BOOTSTRAP]
-                    assert ('nodeSelector' in pod) == (node is not None)
-                    snapshot = encode_config_snapshot(selected)
-                    assert encode_config_snapshot(load_config_snapshot(snapshot, repo_root=root)) == snapshot
-                    count += 1
-            subprocess.run(['bash', '-n'], input=_RUNTIME_BOOTSTRAP, text=True, check=True, timeout=10)
-            print(json.dumps({'renders': count, 'dynamic_helpers': 2}))
-        """)
+class PvcSourceBootstrapTests(unittest.TestCase):
+    def test_bootstrap_extracts_the_exact_commit_from_pvc_checkout(self) -> None:
+        bootstrap = Path(__file__).resolve().parents[1] / "cval/jobs/bootstrap.sh"
         with TemporaryDirectory() as directory:
-            with tarfile.open(fileobj=io.BytesIO(bundles["runtime"]), mode="r:gz") as archive:
-                archive.extractall(directory, filter="data")
-            environment = {name: value for name, value in os.environ.items()
-                           if not name.startswith(("CVAL_", "PYTHON"))}
-            result = subprocess.run(
-                [sys.executable, "-I", "-B", "-c", check, directory, revision,
-                 manifest["metadata"]["name"], hashlib.sha256(bundles["runtime"]).hexdigest()],
-                cwd=directory, env=environment, text=True, capture_output=True, timeout=60,
+            root = Path(directory)
+            source = root / "source"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            marker = source / "marker.txt"
+            marker.write_text("pinned version\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "marker.txt"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-m", "pinned"], check=True, capture_output=True)
+            pinned = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            marker.write_text("later version\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "commit", "-am", "later"], check=True, capture_output=True)
+
+            stub_bin = root / "bin"
+            stub_bin.mkdir()
+            stub_python = stub_bin / "python3"
+            stub_python.write_text(
+                "#!/bin/sh\n"
+                "test \"$1\" = -m && test \"$2\" = cval.validation.supervisor\n"
+                "test \"$(cat marker.txt)\" = 'pinned version'\n"
+                "test \"$CVAL_TEST_VALUE\" = loaded\n",
+                encoding="utf-8",
             )
+            stub_python.chmod(0o755)
+            destination = workspace / "c-val"
+            environment = os.environ | {
+                "PATH": f"{stub_bin}:{os.environ['PATH']}",
+                "CVAL_SOURCE_CHECKOUT": str(source),
+                "CVAL_GIT_REF": pinned,
+                "CVAL_REPO_DIR": str(destination),
+                "CVAL_RUNTIME_ENV_B64": base64.b64encode(b"export CVAL_TEST_VALUE=loaded\n").decode(),
+            }
+            result = subprocess.run(["bash", str(bootstrap)], cwd=root, env=environment,
+                                    text=True, capture_output=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(json.loads(result.stdout), {"renders": 4, "dynamic_helpers": 2})
+            self.assertEqual((destination / "marker.txt").read_text(encoding="utf-8"), "pinned version\n")
+            self.assertFalse((destination / ".git").exists())
 
-    @staticmethod
-    def bundle(revision: str) -> bytes:
-        output = io.BytesIO()
-        with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": revision}) as archive:
-            entry = tarfile.TarInfo("cval/jobs/bootstrap.sh")
-            entry.size = 4
-            archive.addfile(entry, io.BytesIO(b"true"))
-        return output.getvalue()
-
-    def test_source_only_manifest_matches_validation_transport(self) -> None:
-        bundle = self.bundle(COMMIT)
-        source = self.source.source_manifest(COMMIT, bundle, "gcr-admin")
-        self.assertTrue(source["immutable"])
-        self.assertEqual(source["metadata"]["name"], "cval-source-" + COMMIT[:16])
-        self.assertEqual(source["metadata"]["namespace"], "gcr-admin")
-        self.assertEqual(source["metadata"]["annotations"]["cval/source-commit"], COMMIT)
-        digest = hashlib.sha256(bundle).hexdigest()
-        self.assertEqual(source["metadata"]["annotations"]["cval/source-sha256"], digest)
-        self.assertEqual(base64.b64decode(source["binaryData"]["source.tar.gz"], validate=True), bundle)
-        self.assertNotIn("data", source)
-        base = load_config()
-        config = replace(base, job=replace(base.job, source_configmap=source["metadata"]["name"], source_sha256=digest))
-        rendered = render_validation_job(TEMPLATE, "node-a", timestamp=12345, git_ref=COMMIT, cval_config=config)
-        pod = yaml.safe_load(rendered.yaml_text)["spec"]["tasks"][0]["template"]["spec"]
-        self.assertEqual(pod["volumes"][-1]["configMap"]["items"], [{"key": "source.tar.gz", "path": "source.tar.gz"}])
-
-    def test_rejects_invalid_source_identity_namespace_and_size(self) -> None:
-        bundle = self.bundle(COMMIT)
-        for revision in ("main", "a" * 7, "0" * 40, "A" * 40):
-            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "exact nonzero"):
-                self.source.source_manifest(revision, bundle, "gcr-admin")
-        with self.assertRaisesRegex(ValueError, "commit mismatch"):
-            self.source.source_manifest("b" * 40, bundle, "gcr-admin")
-        with self.assertRaisesRegex(ValueError, "ConfigMap limit"):
-            self.source.source_manifest(COMMIT, b"x" * 900001, "gcr-admin")
-        for namespace in ("", "other/namespace", "UPPER", "x" * 64):
-            with self.subTest(namespace=namespace), self.assertRaisesRegex(ValueError, "DNS label"):
-                self.source.source_manifest(COMMIT, bundle, namespace)
-
-    def test_cli_writes_only_source_and_never_overwrites(self) -> None:
-        bundle = self.bundle(COMMIT)
-        with TemporaryDirectory() as directory:
-            arguments = ["cval-source.py", "--revision", COMMIT, "--namespace", "gcr-admin", "--output-dir", directory]
-            responses = [subprocess.CompletedProcess([], 0, COMMIT + "\n", ""), subprocess.CompletedProcess([], 0, bundle, b"")]
-            with patch.object(sys, "argv", arguments), patch.object(self.source.subprocess, "run", side_effect=responses) as commands:
-                self.source.main()
-                self.assertTrue(all(call.kwargs["timeout"] == 30 for call in commands.call_args_list))
-                self.assertNotIn("evaluation_engine", commands.call_args.args[0])
-            output = Path(directory) / "source-configmap.yaml"
-            original = output.read_bytes()
-            self.assertEqual([path.name for path in Path(directory).iterdir()], [output.name])
-            with patch.object(sys, "argv", arguments), patch.object(self.source.subprocess, "run", side_effect=responses), self.assertRaises(FileExistsError):
-                self.source.main()
-            self.assertEqual(output.read_bytes(), original)
+            missing_destination = workspace / "missing"
+            missing_env = environment | {"CVAL_GIT_REF": "b" * 40, "CVAL_REPO_DIR": str(missing_destination)}
+            missing = subprocess.run(["bash", str(bootstrap)], cwd=root, env=missing_env,
+                                     text=True, capture_output=True, timeout=15)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertFalse(missing_destination.exists())
 
 
 if __name__ == "__main__":

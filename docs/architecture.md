@@ -233,10 +233,11 @@ Sources: [submission owner](../cval/jobs/manager.py),
 
 ### 5. Execute and Preserve the Run
 
-The bootstrap loads source in one of two ways: a mounted ConfigMap archive with
-a verified SHA-256 checksum and embedded commit, or a Git fetch followed by an
-exact-commit checkout check. It restores the rendered runtime environment and
-starts the supervisor. The bootstrap itself is embedded in the Job.
+The bootstrap verifies the requested commit in the shared PVC Git checkout and
+extracts that commit with `git archive` into a private per-Job workspace. Jobs do
+not fetch code over the network or mount source ConfigMaps. It restores the
+rendered runtime environment and starts the supervisor. The bootstrap itself is
+embedded in the Job.
 
 The supervisor creates a new, protected evidence layout for the run. It retains
 open directory/file handles so symlinks, reused run directories or changed parent
@@ -436,8 +437,8 @@ Both the pinned and scheduler-selected templates use one packaged
 runtime contract. Each generated Job contains its full startup script; no
 additional in-pod file or download is needed to obtain the bootstrap itself.
 
-The [source renderer](../scripts/cval-source.py) produces only the immutable
-code ConfigMap used by validation Jobs. Test directories own setup, benchmark,
+The controller fast-forwards the shared PVC checkout before session turnover;
+each Job extracts its pinned commit from that checkout. Test directories own setup, benchmark,
 log formatting, summary validation, raw parsers and SQL mapping. Their plugins
 provide configuration validation, runtime/evidence projections, ingestion hooks
 and read-only raw exports. The framework retains secure reservation, the safe

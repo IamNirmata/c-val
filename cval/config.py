@@ -59,7 +59,11 @@ class SchedulingConfig:
 
 @dataclass(frozen=True)
 class JobConfig:
-    """Configured validation Job and source identity."""
+    """Configured validation Job and exact source identity.
+
+    Empty legacy bundle fields remain in snapshots for historical decoding;
+    new Jobs obtain source from the shared PVC Git checkout.
+    """
 
     template_path: Path
     job_prefix: str
